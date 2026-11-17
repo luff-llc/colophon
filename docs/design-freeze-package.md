@@ -4,7 +4,8 @@ Status: design. Revision 16 of the spec stated the whole package; after the inde
 revised once. **Revision 17 cuts it to what shipping 0.5 and a later in-place upgrade need**, on the
 owner's word: "modularity can wait till 0.6, I just don't want to get blocked on shipping 0.5. also
 don't want to do another full on migration once we start to work on 0.6", and "I'm not that worried
-about the unknowns." Nothing here is built. The spec text is revision 17 of
+about the unknowns." The 0.5 parts are built, and 0.5 was frozen on 2026-11-16 at revision 18, provisionally (spec §21); the
+sections marked "Deferred to 0.6" are not built. The spec text is revision 17 of
 [`spec/colophon-0.5.md`](../spec/colophon-0.5.md), mapped in
 [`spec/colophon-0.5-changes.md`](../spec/colophon-0.5-changes.md) §A.12 (rows 159–197, the
 withdrawn ones marked) and §A.13 (rows 198–202). Base: `spec-0.5` at `25027b0`.
@@ -55,13 +56,13 @@ colophon-core --all-targets -- -D warnings`.
 | Stream | Owns exactly | Depends on | Items | Vectors and generator | Extra acceptance |
 | --- | --- | --- | --- | --- | --- |
 | **W1-P Approval** | `crates/colophon-core/src/v05/pairing.rs`, `v05/account/action.rs`, `v05/write/authority.rs`, `crates/colophon-ffi/src/v05/api/{pairing,engine,action}.rs`, `crates/colophon-ffi/src/v05/surface-names.txt`, generated bindings (`swift/Sources/ColophonKit/Generated/*`, `sdk/kotlin/src/main/kotlin/com/luff/colophon/colophon_ffi.kt`), `swift/Sources/ColophonSession/*`, `swift/Sources/ColophonSessionUI/*`, `swift/Tests/ColophonSessionTests/*`, `sdk/kotlin/src/main/kotlin/com/luff/colophon/session/*`, `js/src/session/*`, `js/src/index.ts`, `js/scripts/smoke.mjs`, `playground/src/*`, `examples/ColophonSample/*`, new `crates/colophon-core/tests/v05_freeze_approval.rs` | — | P, L2 | none in `conformance/`; tests: approve without a token refused; a token for another key refused; a token spent twice refused; the code path and the scan path each issue one | `cargo test -p colophon-core --test v05_freeze_approval`, `cargo test -p colophon-ffi`, `swift test`, `cd sdk/kotlin && ./gradlew test`, `cd js && npm test`, `cd playground && npm test` |
-| **W1-A Authority** | `crates/colophon-core/src/v05/history/state.rs`, `history/mod.rs`, `engine/checkpoint.rs`, `tests/v5_candidate/cases_freeze_authority.rs`, the `conformance/0.5/candidate/{rules,upgrade}/` cases it generates (and the regenerated `upgrade/then-v5-layout`) | — | F2 (current principal, first commit), F3 (stored layout, the door), S (the reader's stopped flag, `Verdict::stopped`), L1 | §2 vectors, §3.4 vectors | — |
+| **W1-A Authority** | `crates/colophon-core/src/v05/history/state.rs`, `history/mod.rs`, `engine/checkpoint.rs`, `tests/v5_candidate/cases_freeze_authority.rs`, the `conformance/0.5/{rules,upgrade}/` cases it generates (and the regenerated `upgrade/then-v5-layout`) | — | F2 (current principal, first commit), F3 (stored layout, the door), S (the reader's stopped flag, `Verdict::stopped`), L1 | §2 vectors, §3.4 vectors | — |
 
 **Wave 2** (after W1-A: the stopped flag and the current-principal helper)
 
 | Stream | Owns exactly | Depends on | Items | Vectors and generator | Extra acceptance |
 | --- | --- | --- | --- | --- | --- |
-| **W2-C Calls** | `crates/colophon-core/src/v05/calls.rs`, `tests/v5_candidate/cases_freeze_calls.rs`, `conformance/0.5/candidate/calls/` cases it generates | W1-A | S (a stopped reader's calls `unavailable`) | `calls/s-stopped-reader-call` | — |
+| **W2-C Calls** | `crates/colophon-core/src/v05/calls.rs`, `tests/v5_candidate/cases_freeze_calls.rs`, `conformance/0.5/calls/` cases it generates | W1-A | S (a stopped reader's calls `unavailable`) | `calls/s-stopped-reader-call` | — |
 
 **Wave 3**
 
@@ -198,7 +199,7 @@ read (§17.1). That is the residual risk of §1.7.
 
 ### 1.5 Vectors
 
-Added (all under `conformance/0.5/candidate/`, built by `cases_freeze_a.rs`, `_b.rs`, `_c.rs`):
+Added (all under `conformance/0.5/`, built by `cases_freeze_a.rs`, `_b.rs`, `_c.rs`):
 
 | Vector | Expected |
 | --- | --- |

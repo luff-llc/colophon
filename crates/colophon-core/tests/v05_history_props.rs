@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use support::Rng;
 
 fn cand() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../conformance/0.5/candidate")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../conformance/0.5")
 }
 fn files(dir: &Path) -> Vec<Vec<u8>> {
     let mut v: Vec<PathBuf> = fs::read_dir(dir)

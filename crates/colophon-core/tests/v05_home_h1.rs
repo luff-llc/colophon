@@ -17,13 +17,7 @@ fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 fn fixture(name: &str, path: &str) -> Vec<u8> {
-    fs::read(
-        root()
-            .join("conformance/0.5/candidate/rules")
-            .join(name)
-            .join(path),
-    )
-    .unwrap()
+    fs::read(root().join("conformance/0.5/rules").join(name).join(path)).unwrap()
 }
 fn body(bytes: &[u8]) -> Value {
     let env: Value = serde_json::from_slice(bytes).unwrap();

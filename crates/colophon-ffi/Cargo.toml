@@ -21,7 +21,7 @@ bindgen = ["uniffi/cli"]
 zero-on-free = []
 
 [dependencies]
-colophon-core = { path = "../colophon-core", version = "=0.4.0" }
+colophon-core = { path = "../colophon-core", version = "=0.5.0" }
 serde.workspace = true
 serde_json.workspace = true
 uniffi = { version = "=0.32.2", default-features = false }

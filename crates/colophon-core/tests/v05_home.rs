@@ -17,13 +17,7 @@ fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 fn fixture(name: &str, path: &str) -> Vec<u8> {
-    fs::read(
-        root()
-            .join("conformance/0.5/candidate/rules")
-            .join(name)
-            .join(path),
-    )
-    .unwrap()
+    fs::read(root().join("conformance/0.5/rules").join(name).join(path)).unwrap()
 }
 fn body(bytes: &[u8]) -> Value {
     let env: Value = serde_json::from_slice(bytes).unwrap();
@@ -705,7 +699,7 @@ fn a_home_signs_one_head_per_seq_unless_the_first_was_displaced_under_rule_1() {
     // §13.3 (revision 13), guard before signing. `t-activate-after-covered-entry`: an ordinary
     // grant Y at seq 3 that the primary's head covers stands over the activation X that is also
     // held at seq 3 (`branch-activate-first`): rule 1 displaces X.
-    let dir = root().join("conformance/0.5/candidate/rules/t-activate-after-covered-entry");
+    let dir = root().join("conformance/0.5/rules/t-activate-after-covered-entry");
     let read = |p: PathBuf| fs::read(p).unwrap();
     let rec = |n: usize| read(dir.join(format!("records/authority/{n:08}.json")));
     let x_env = read(dir.join("branch-activate-first/authority/00000003.json"));
@@ -785,7 +779,7 @@ fn signed_heads_are_pruned_to_what_the_guard_needs() {
     // L2: the guard keeps the latest `issued` and the digests at seqs not yet settled. In the
     // account vector the activation at seq 3 is final, so nothing at or before it can be
     // displaced and only the latest signing stays.
-    let cand = root().join("conformance/0.5/candidate/account/records/authority");
+    let cand = root().join("conformance/0.5/account/records/authority");
     let objects = Objects {
         entries: (1..=3)
             .map(|n| fs::read(cand.join(format!("{n:08}.json"))).unwrap())

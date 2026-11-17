@@ -1,14 +1,23 @@
-# Colophon 0.5 candidate vectors
+# Colophon 0.5 vectors
 
-**Status: hand-built for review; replayed by the Rust engine, not by the Swift source.** These files go with
-[spec/colophon-0.5.md](../../../spec/colophon-0.5.md), revision 17 (the cases listed under "Revision 17" in "Required for freeze" are still to be built). The Rust history verifier replays them (`crates/colophon-core/tests/v05_candidate.rs`); no
-Swift implementation has. Every `expected` outcome is the spec author's reading of the text. The bytes are
-real: `/5` bodies are canonical JSON, and every signature verifies under ordinary ES256 (raw, or
-WebAuthn over `authenticatorData ‖ SHA-256(clientData)` with the challenge checked), except
-where a case says a signature is invalid on purpose. Spec §21 says which vectors must exist
-before freeze. This directory holds those that could be built without an engine.
+**Status: the 0.5 vectors, frozen with [spec/colophon-0.5.md](../../spec/colophon-0.5.md) on
+2026-11-16.** They were built at `conformance/0.5/candidate/` and moved here at the freeze with
+their bytes unchanged. The Rust history verifier replays them
+(`crates/colophon-core/tests/v05_candidate.rs`); no Swift implementation has, and no implementation
+in a second language has. Every `expected` outcome is the spec author's reading of the text. The
+bytes are real: `/5` bodies are canonical JSON, and every signature verifies under ordinary ES256
+(raw, or WebAuthn over `authenticatorData ‖ SHA-256(clientData)` with the challenge checked), except
+where a case says a signature is invalid on purpose. Spec §21 says which vectors must exist; the
+index under "Required for freeze" says which vector or test covers each item.
 
-All keys are public test secrets (`keys.json`, `succession/keys.json`, `../../0.4/keys/keys.json`).
+**Paths inside the vectors.** Some cases name files by path (`verifier.history`, `verifier.heads`,
+`verifier.replay`), and those paths still begin `conformance/0.5/candidate/`, because the bytes are
+frozen. Read such a path with that prefix replaced by `conformance/0.5/`. Key names derive under the
+label `colophon-0.5-candidate/` (`keys.json`); that label is part of the bytes and stays.
+
+`legacy-draft-1/` is not part of the 0.5 vectors: see its README.
+
+All keys are public test secrets (`keys.json`, `succession/keys.json`, `../0.4/keys/keys.json`).
 Never use them for real data.
 
 ## Regenerate and check
@@ -70,20 +79,21 @@ the same 1,078 files.
 
 ## What was run
 
-- `v5_generator_check` (the Rust generator), revision 13: 1,454 generated files match, byte for
-  byte, including the revision 13 vector directories. The directory holds 1,457 files: those plus three sources (`README.md` and the probe's
-  `Package.swift` and `main.swift`). The Python generator it replaced matched 1,078 of them (before the fix round added two forged-`final` cases of eight files each , a seven-file chained succession, a nine-file Swift layout case and a thirteen-file cutoff case).
+- `v5_generator_check` (the Rust generator), at the freeze (2026-11-16): 2,235 generated files
+  match, byte for byte. The directory holds 2,238 files outside `legacy-draft-1/` (64 files, not
+  0.5 vectors): those plus three sources (`README.md` and the probe's `Package.swift` and
+  `main.swift`). The Python generator it replaced matched 1,078 of an earlier set.
 - The fifth reviewer's signature checker (`sigcheck5.py`): 2,203 signatures, including heads in
   `final` entries and objects embedded in recording entries and `suspend`; 7 failures, all
   intended (two invalid call signatures, two origin cases, two veto cases, one `signers` mismatch).
-- **`v05_candidate` (the 0.5 history verifier), revision 13:** 319 in scope, 319 pass, 0 fail,
-  0 not implemented (before: 301 / 301 / 0 / 1). No vector of revision 13 was replayed by the Swift
-  source.
+- **`v05_candidate` (the 0.5 history verifier), at the freeze:** 437 in scope, 437 pass, 0 fail, 0 not
+  implemented. No other implementation has replayed the vectors (spec §21 condition 2).
 - **0.4 engine** on `upgrade/*`: `newerFormat` everywhere except `foreign-signer` (`badSignature`).
 - **Swift verifier** (Marginalia `c8280332`, unmodified): every full predecessor stops at its first
   freeze with `unsupportedStorageLayout(3)`.
 - **CryptoKit DER probe** (macOS 27.0.1, 200 random keys): minimal DER and high-S accepted, every
-  other form tested refused, including `r` or `s` of zero. iOS and visionOS were not probed.
+  other form tested refused, including `r` or `s` of zero. iOS and visionOS have not been run as of 0.5.0 (spec §21 condition
+  3).
 - New-vault slots and `previousVault` seals are structurally valid synthetic bytes, not openable.
 - No valid transition approaches the 622,592-byte envelope bound, so the quorum-8 size
   composition (§2.4) is checked by arithmetic, not by a vector.
@@ -190,13 +200,67 @@ Normative for spec §21 condition 1.
     records the full set, then appoints and uses a new home
     (`crates/colophon-core/tests/v05_engine_home.rs`).
 
-## Still missing: these need an engine (implementation plan, step V1)
+## Index: what covers each required item
 
-- Every 0.4 key case as `/5`; slots and rotation with real HPKE; slot rebasing with a slot added
-  after the anchor; a vault change in an account with namespaces and its `rekey`.
-- Namespaces: rekey (including two epochs for one namespace), shares, `/5` headers, author chains,
-  revocation walks, proposals.
-- `headQuorum` 2 with three homes, receipt forwarding, finality in order and rollback of a suffix,
-  mutual removal, external-object limits, the replay states, the rate limit's byte budgets.
-- `/5` succession, the migration entry with real digests, seed transfer.
-- The Swift corpus on iOS and visionOS, and the dry run on a real library.
+Recorded at the freeze, 2026-11-16, in the order of the list above. A path is a vector directory
+under `conformance/0.5/` (replayed by `crates/colophon-core/tests/v05_candidate.rs`,
+`candidate_conformance`); a test is `file: test name`, with files under `crates/` and core tests in
+`crates/colophon-core/tests/` unless a path says otherwise. **None found** marks a required item
+for which no vector or test was found at the freeze; it is not covered.
+
+| Item | Covered by |
+| --- | --- |
+| Every 0.4 key case as `/5` | **None found.** `identifiers.json` covers only the identifiers of the 0.4 geneses, and `upgrade/*` the in-place upgrade; no 0.4 key case is restated as `/5` |
+| Authority origins for entries, transitions and vetoes | `rules/origin-*`, `rules/veto-webauthn-*`; `v05_attack_sig.rs: webauthn_origin_matrix` |
+| Controller calls from call and authority origins | `rules/veto-webauthn-call-origin`; `v05_engine.rs: controller_calls_origins_roles_and_statuses` |
+| Non-canonical JSON and base64; malleated envelopes; invalid dates | `rules/non-canonical-json`, `rules/non-canonical-base64`, `rules/malleated-envelope`, `rules/invalid-expires-date`; `v05_attack_json_diff.rs`, `v05_attack_misc.rs: base64_differential`, `dates_differential` |
+| The 0.4 upgrade with every refusal | `upgrade/*`; `v05_write_upgrade.rs: prepare_refuses_what_the_upgrade_vectors_refuse` |
+| Each §8.4 row accepted, and the same change refused as immediate | `rules/i-*` (`i-add-approve`, `i-relabel-other`, `i-tighten-policy`, `i-loosen-policy`, `i-raise-rate`, `i-removal-as-immediate`, `i-rekey-slotted-as-immediate`, `i-slot-add-*`); `v05_write_authority.rs: immediate_entries_each_verify`, `entries_the_signers_cannot_make_are_refused_at_prepare` |
+| Tightening another key's authentication refused | **None found** |
+| `layout` and `migration` as immediate refused | **None found.** `rules/f3-layout-*` and `rules/t-migration-without-predecessor` are transitions; `upgrade/then-v4-entry` is a `/4` entry |
+| Two epochs for one namespace in a `rekey` refused | **None found** |
+| The rate limit at every verifier; planted keys; revocations outside the account limit; four controllers per addition | `rules/i-rate-limit`, `rules/i-rate-planted-keys`, `rules/i-rate-revoke-outside-account-limit`, `rules/i-rate-dormant-burst`, `rules/i-add-five-approve` |
+| Headroom at 56 controllers and 224 slots | **None found** (the limits are checked in `crates/colophon-core/src/v05/history/state.rs`, with no vector or test) |
+| Composite removal with a vault change and `previousVault`; the `rekey` that follows; composite rules mixing components | `rules/t-vault-change-previous`, `rules/t-vault-change-previous-short`, `rules/t-composite-mixed-rules`; `v05_account.rs: removing_a_slotted_controller_rotates_the_vault_at_once_and_a_rekey_follows` |
+| Slot rebasing at activation | **None found** |
+| `keep`, including keys added after the anchor | `rules/t-keep-removes-unknown-key`, `rules/t-keep-needs-recovery-rule`; `v05_account.rs: review_explicit_keep_keeps_only_what_it_names` |
+| Evaluation before `activate`: anchor before the first home; receipt by a revoked home; anchor off the branch | `rules/t-anchor-before-first-home`, `rules/t-receipt-by-revoked-home`, `rules/t-anchor-off-branch`, `rules/t-issued-before-anchor` |
+| Evaluation before `activate`: an anchor at a lower past delay | **None found** |
+| Due time; the veto deadline; receipt choice | `rules/t-remove-after-delay`, `rules/t-activate-early`, `rules/t-late-veto`, `rules/t-vetoed-after-deadline`, `rules/t-vetoed-choice-right`, `rules/t-vetoed-late-receipt-skipped`; `v05_write_authority.rs: receipts_are_chosen_by_lowest_home_then_lowest_digest` |
+| `signers` not matching the envelope | `rules/t-signers-mismatch` |
+| Determined recording entries from two homes; two that differ only in receipts | `rules/t-activate-identical-bytes`, `rules/t-activate-differing-receipts` |
+| Once only; the 7-day bound | `rules/t-vetoed-duplicate`, `rules/t-activate-reappended`, `rules/t-activate-expired` |
+| An `activate` that doesn't displace covered entries | `rules/t-activate-after-covered-entry`, `rules/t-activate-after-covered-entry-invalid-final` |
+| Veto validity | count `rules/t-veto-too-few`; units `rules/t-veto-shares-a-unit`; eligibility `rules/t-veto-by-approve-only`, `rules/t-vetoed-by-target`; UV `rules/veto-webauthn-no-uv`; origin `rules/veto-webauthn-call-origin`; quorum `rules/t-quorum2-veto-beats-removal`; deadline `rules/t-vetoed-after-deadline`; `rules/t-veto-22-signers` |
+| Escalation, its reset, distinct transitions | `rules/t-escalation-alone`, `rules/t-escalation-two`, `rules/row-28-*` |
+| The full set (a) and (b) | `rules/t-full-set-b`, `rules/t-full-set-b-missing-recover`, `rules/t-full-set-needs-every-control-key`, `rules/t-full-set-due-from-receipt`, `rules/row-4-thief-has-phone`, `rules/row-9-both-recovery-keys-no-device` |
+| Suspension | `rules/t-suspend`, `rules/t-suspend-by-non-signer`, `rules/t-suspend-second-by-unit`, `rules/t-suspend-void-transition`, `rules/t-suspended-immediate-entry`, `rules/t-suspension-ends-*`, `rules/call-by-suspended`, `rules/call-suspended-history-read`, `rules/call-suspension-expired` |
+| Delta void cases | `rules/t-noop-void`, `rules/t-add-present-different-roles`, `rules/t-add-home-key-as-controller`, `rules/t-policy-unknown-field`, `rules/f3-raise-with-void-component` |
+| Mutual removal and the tie | **None found** |
+| Finality: home set, full sets, a `vetoed` after finality, rollback of a provisional activation | `rules/t-full-set-finalizes-earlier`, `rules/t-vetoed-after-final`, `rules/t-vetoed-displaces-activation-and-later-revocation`, `rules/t-final-*`, `rules/t-provisional-addition-signs` |
+| Every row of changes §H | rows 2, 3, 4, 8, 9, 10, 11, 12, 13, 17, 28: `rules/row-*`. **None found** for rows 1, 5, 6, 7, 14, 15, 16 and 18 to 27: no vector is named for them, and whether other cases cover them was not mapped |
+| Conflicts | evidence `rules/t-conflict-no-evidence`, `rules/equivocation*`; forks `rules/t-resolve-late-fork-witnessed`, `rules/t-resolve-homeless-late-fork`; `resolve` `rules/t-resolve-*`, `rules/t-three-candidate-*`; losing branch `rules/f3-raise-on-discarded-branch`; `v05_write_authority.rs: entries_evidence_*`, `heads_evidence_*` |
+| Request coverage; pairing; `serves` and import | `v05_write_calls.rs: the_agent_request_reproduces_and_refusals_return_nothing`; `v05_engine.rs: grants_requests_and_principals`; `pairing/pairing.json`; `rules/t-grant-import-*`, `rules/i-add-home-key-as-controller`, `rules/t-appoint-item-*` |
+| Renew; revoke with `kept` and up to 16 `heads`; `endSessions` | `records/renew-shares*`, `records/revoke-*` (`revoke-16-heads`, `revoke-17-heads`), `calls/ended-session`, `rules/f2-end-sessions-*` |
+| `/5` headers; proposals | `records/header-aad`, `records/author-chain`, `records/missing-key`, `records/same-id-two-bodies`, `records/one-body-two-envelopes`, `records/proposal-*` |
+| Calls: every §12.3 refusal; replay states; quorum; S | `calls/*`, `rules/replay-identical`, `rules/replay-conflict`, `rules/call-*`, `rules/removal-after-heads`; `v05_engine.rs: replay_store_crash_recovery_after_ok` (abandoned), `member_calls_links_and_reservations`; `rules/f2-head-expired-not-quorum`; `calls/s-*` |
+| Heads | `heads/valid`, `heads/stale`, `heads/not-a-home`, `heads/fork`, `rules/rollback`, `rules/equivocation`, `rules/equivocation-displaced`; `v05_head_marks.rs` |
+| Succession: `/5` and Swift | `succession/authority5-*`, `succession/swift-keyring`, `succession/swift-root-library*`, `succession/swift-webauthn*`; `v05_revision_12.rs` (`rotateRecovery` steward thresholds) |
+| The genesis receipt window | `succession/swift-keyring`, `succession/swift-late-genesis-receipt`; `v05_home_h2_succession.rs: a_genesis_receipt_by_a_window_home_counts_after_that_home_is_revoked` |
+| The veto window | `succession/swift-veto-by-*`, `succession/swift-handover-extra-key-raises-veto`, `succession/swift-succession-vetoed`, `succession/swift-root-library-kit-vetoes` |
+| A premature freeze followed by a verified attempt | `succession/swift-premature-freeze-then-owner` |
+| An entry after the final one; two attempts | `succession/swift-entry-after-final`; `v05_write_succession.rs: a_competing_successor_is_refused_when_the_head_follows_a_freezing_entry` |
+| Seed transfer: the HPKE label, wrong nonces | `v05_vault.rs: the_seed_moves_to_a_new_device_under_the_transfer_label`, `pairing_aborts_on_a_substituted_key_or_nonce`; `v05_account.rs: a_seed_cannot_be_moved_by_a_pairing_for_another_account_or_a_wrong_key` |
+| Finality: `final` entries, revoked witnesses, a full set finalizing earlier, rule-1 conflicts | `rules/t-final-*`, `rules/t-revoke-home-control-rule-needs-its-head`, `rules/t-provisional-home-revocation-keeps-home`, `rules/f2-head-revoked-at-head-seq`, `rules/t-full-set-finalizes-earlier`, `rules/t-backdated-entry-vs-provisional`, `rules/t-activate-after-covered-entry` |
+| Vault | `rules/t-removal-slotted-without-vault`, `rules/t-one-recovery-key-removes-slotted`, `rules/t-vault-rotation*`, `rules/t-self-slot`, `rules/t-rekey-by-recover-key`, `rules/t-vault-entry-*`, `rules/t-vault-by-approve-only` |
+| Exchange: the pending listing and its cursors | `v05_home.rs: receipt_window_retry_restart_signature_and_pending_pagination`; `v05_engine_home.rs: a_cursor_the_home_no_longer_honours_makes_the_engine_list_again` |
+| Revision 17: the layout door | `rules/f3-layout-3`, `rules/f3-layout-2`, `rules/f3-layout-3-no-consent`, `rules/f3-raise-final-then-entry`, `rules/f3-layout-then-entry`, `rules/f3-raise-vetoed`, `rules/f3-raise-provisional`, `rules/f3-raise-with-policy` (no home: final at once), the other `rules/f3-*`, `upgrade/then-v5-layout-3` |
+| Revision 17: a stopped reader | calls `unavailable`: `calls/s-stopped-reader-call`, `calls/s-before-stop-call`, `v05_freeze_calls.rs: a_stopped_reader_verifies_no_call_under_a_fresh_head_before_the_stop`; no new record: `v05_freeze_stopped.rs: records_that_arrive_after_the_stop_are_not_admitted`; no head accepted: **none found** (no test names a head refused by a stopped reader) |
+| Revision 17: the stopped home | `crates/colophon-core/tests/v05_freeze_home.rs`: `a_stopped_home_keeps_its_verified_prefix_and_pending_objects_across_restart`, `no_head_or_entry_or_unrelated_pending_object_is_admitted_after_stop`, `stopped_home_receipts_vetoes_and_removals_at_or_before_n_and_only_in_window`, `a_provisional_raise_is_receipted_and_a_vetoed_displaces_it_without_stopping`, `a_competing_final_recording_is_retained_when_it_stops_the_home`, `authenticated_unknown_entry_stops_at_the_held_prefix_without_storing_the_entry`; `crates/colophon-home-wasm/tests/v05_relay_stopped.rs`: `stopped_public_home_keeps_every_store_kind_and_serves_only_call_free_reads_after_restart`, `stopped_members_home_never_challenges_or_verifies_a_call_and_rejects_new_pending_kinds`, `stopped_home_receipts_only_timely_vetoes_and_removals_and_never_records_them`, `a_home_witnesses_a_provisional_raise_and_records_the_vetoed_that_displaces_it`, `existing_forwarding_sends_stopped_homes_new_removals_vetoes_and_receipts`, `missing_or_corrupt_checkpoint_cannot_unstop`, `normal_and_stopped_base_advertise_layout_2`; the stop on an authenticated entry of unknown format: `unknown_authenticated_entry_stops_home_permanently`, and its two negative cases (a bad signature, a sequence gap) `bad_signature_and_sequence_gap_unknown_entries_stop_nothing`; `relay/test/home-state.test.js`; also `calls/s-stopped-home-read` |
+
+| Revision 17: the current principal | `rules/f2-end-sessions-expired-member`, `rules/f2-end-sessions-expired-unknown-field`, `rules/f2-end-sessions-provisional-member`, `rules/f2-end-sessions-current-unknown-field` |
+| Revision 17: the confirmed pairing | `v05_freeze_approval.rs`: without a token `a_grant_component_without_a_pairing_is_refused`; another account `a_pairing_for_another_account_is_refused`; another key `a_pairing_for_another_key_is_refused`; spent once already: `ConfirmedPairing` is not `Clone` (the `compile_fail` example in `crates/colophon-core/src/v05/pairing.rs`) and `a_grant_transition_spends_a_pairing_for_exactly_its_request`; code path `the_code_ceremony_issues_a_pairing_that_approves_the_request`; scan path `the_scanned_request_issues_a_pairing_that_approves_the_request` |
+| Revision 17: the two-home tests pass | `crates/colophon-home-wasm/tests/v05_relay_h2.rs` and `crates/colophon-home-wasm/tests/v05_relay_home.rs`, every test in both files |
+| Revision 17: Swift seq 0 | **None found.** The generator file for it, `crates/colophon-core/tests/v5_candidate/cases_freeze_swift.rs`, builds nothing |
+| Dropping a home that is gone (the drop-home fix) | `rules/f2-drop-home-full-set-b`, `-full-set-a`, `-full-set-a-dual-role`, `-dual-role-not-full`, `-then-appoint`, `-one-control-one-recovery`, `-full-set-with-receipt`, `-control-rule-no-receipt`, `-recovery-rule-no-receipt`, `-one-unit`, `-full-set-backdated`, `-full-set-within-bound`; `rules/f2-drop-one-of-two-homes`, `-revoked-receipt-only`; `rules/f2-dual-role-full-a-component-not-recovery`; `v05_home.rs: a_home_revoked_by_a_full_set_stores_it_without_its_own_receipt`, `a_remaining_home_receipts_a_full_set_that_revokes_the_other_as_usual`; `v05_engine_home.rs: a_full_set_drops_a_silent_only_home_and_the_account_appoints_another` |
+

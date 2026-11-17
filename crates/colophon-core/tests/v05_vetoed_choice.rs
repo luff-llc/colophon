@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 fn vector(name: &str, skip_object: Option<&str>) -> Objects {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../conformance/0.5/candidate/rules")
+        .join("../../conformance/0.5/rules")
         .join(name);
     let mut files: Vec<_> = fs::read_dir(dir.join("records/authority"))
         .unwrap()

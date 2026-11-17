@@ -1,8 +1,9 @@
 # Colophon 0.5
 
-**Status: final candidate, revision 17, for review, 2026-11-15.** Not frozen, not
-implemented, not released, and no version number has been changed anywhere. Revision 2
-answered two reviews of revision 1 (152d991); revision 3 answered two reviews of revision 2
+**Status: frozen 0.5, revision 18, 2026-11-16.** The 0.5 formats and the rules by which a reader
+judges an account are frozen for now. The freeze is provisional: the gaps listed in §21 are closed
+in 0.5.x without changing any format, and §21.1 lists what 0.5.0 does not do. History of the
+revisions: revision 2 answered two reviews of revision 1 (152d991); revision 3 answered two reviews of revision 2
 (9e90470); revision 4 replaced every recovery special case with one mechanism, pending
 transitions with veto (§8.7); revision 5 answers two reviews of revision 4 (4032d44) by finishing
 that mechanism's state model; revision 6 answers two reviews of revision 5 (a1decc6) and the
@@ -36,8 +37,11 @@ through a confirmed pairing (§9.1), one current-principal check (§8.5), the up
 §8.2, §20) with what a reader and a home do at a stop (§1, §13.6), text-only reservations, three
 small fixes, the home rules the merged and pending home code follows (§13.1, §13.3, §14), the limits
 of 0.5 and what is open at the freeze (§20, §21). The rest of revision 16 is deferred to 0.6, behind the door (changes §A.12,
-[the design](../docs/design-freeze-package.md) "Deferred to 0.6"); the code follows.
-The mappings are in [colophon-0.5-changes.md](colophon-0.5-changes.md) §G. It becomes normative only under §21.
+[the design](../docs/design-freeze-package.md) "Deferred to 0.6"); the code follows. Revision 18 (2026-11-16, the freeze) makes the text true of 0.5.0: §18's
+reference and default name one home, notice delivery leaves 0.5 conformance and hosts show
+pending changes on every sync instead (§13.1, §17.5), and §21 records each freeze condition as met
+or open, the owner's decisions, and the one list of what 0.5.0 does not do (§21.1); changes §A.14.
+The mappings are in [colophon-0.5-changes.md](colophon-0.5-changes.md) §G. It is normative from the freeze (§21).
 The work to implement it is [colophon-0.5-implementation.md](colophon-0.5-implementation.md).
 Rationale, host wording and the review log are in the non-normative
 [colophon-0.5-guide.md](colophon-0.5-guide.md).
@@ -742,7 +746,7 @@ and its bound, is in [colophon-0.5-guide.md](colophon-0.5-guide.md) §1.
 | `grant`, `renew`, `revoke` (not homes, not `import`) | Single rule; control rule when `memberRule` is `control` |
 | `rekey` | Single rule, or one `control` or `recover` signer; control rule when `memberRule` is `control` |
 | `endSessions` | Single rule, or the member rule; control rule when `memberRule` is `control` |
-| `keyring` | `addThreshold` units holding `control`, with UV, plus possession. It may only: add at most four controllers, each with roles `["approve"]` or `["sign"]` (with slots for them in the same entry); add slots for existing non-`sign` controllers; change labels; and tighten the **signing controller's own** authentication or policy (§6.3 lowering only). **Self-slot:** an entry whose only change adds slots to the current vault naming only its signer may be signed by that one non-`sign` controller. |
+| `keyring` | `addThreshold` units holding `control`, with UV, plus possession. It may only: add at most four controllers, each with roles `["approve"]` or `["sign"]` (with slots for them in the same entry); add slots for existing non-`sign` controllers; change labels; and tighten the **signing controller's own** authentication or policy (§6.3: only lowering `headMaxAge`, `callWindow` or `linkMaxAge`, or setting `memberRule` to `control` or `history` to `members`). **Self-slot:** an entry whose only change adds slots to the current vault naming only its signer may be signed by that one non-`sign` controller. |
 | `vault` | One controller holding `control` or `recover`, current at the anchor of the removal that made the vault retire and still current, only while the vault is retiring (§8.3). An `approve`-only key never rotates a seed. |
 | `suspend` | One signer of the pending transition it carries (§8.7) |
 | Recording entries | §8.7, §15.1 |
@@ -1043,7 +1047,10 @@ holds every recovery key is treated as the owner.
 **Removal-only transitions.** A transition is **removal-only** when every component only
 removes or demotes controllers (including by `keep`), revokes homes, raises a threshold or tightens
 policy: it adds no controller, role, home, member or slot, lowers no threshold, loosens no policy
-and has no `vault`, `grant`, `layout`, `migration`, `successor` or `resolve` component. A
+and has no `vault`, `grant`, `layout`, `migration`, `successor` or `resolve` component. It
+tightens policy, which means only: lowers `headMaxAge`, `callWindow` or `linkMaxAge`, sets
+`memberRule` to `control`, or sets `history` to `members`. A component that changes
+`recoveryDelay`, `rate`, `headQuorum` or `primaryHome`, in either direction, is never removal-only. A
 transition that revokes a home and also adds anything is `malformed`.
 
 **Revoking a home.** A home's revocation is the one removal that does **not** apply at
@@ -1714,8 +1721,10 @@ sequence conflicts and malformed entries keep their ordinary results (409, §8.5
   transition it didn't receipt only if it first saw the transition, or a receipt of it forwarded by
   another current home, within 300 s after the transition's `issued`, or it was not serving for any
   part of that window, or the transition is a full set that revokes it (§8.7 validity 2).
-  Otherwise it refuses that `activate` for ever and notifies the controllers,
-  and it **still stores and serves the transition and its receipts** (§14), so the owner can veto
+  Otherwise it refuses that `activate` for ever (0.5 delivers no notice of this, §17.5; a device
+  that submits the `activate` gets `refused:late`, 422 in §14, and the transition stays among the
+  pending objects the home serves), and it **still stores and serves the transition and its
+  receipts** (§14), so the owner can veto
   it before its deadline; a late transition with a valid veto is vetoed like any other. A veto that
   reaches a home more than 300 s after its `issued` is stored and served when it comes with at
   least one receipt of it from another current home that is in window (§13.5) and that the home
@@ -1784,11 +1793,9 @@ sequence conflicts and malformed entries keep their ordinary results (409, §8.5
 - **Honest bulk work** fits the defaults: a first import is records, not authority entries;
   onboarding twenty people is twenty grants. A clean copy with more than 64 members to re-admit
   needs a second approver or a day's pause (§15.3), or a transition raising `rate`.
-- **Notices.** On receipting a transition, a veto or a `suspend`, a home MUST push a notice to
-  every delivery route registered with it, and MUST support at least one out-of-band route (for
-  example e-mail) the owner configures (§17.5). A notice has no signed body and no wire format in
-  0.5: it is home and host behaviour over the routes registered at setup, and nothing in this
-  document defines a notice object.
+- **Pending objects and notices.** A home keeps and serves every pending transition and veto it
+  has stored until it is settled (§14 `GET {base}/pending`). Delivering notices is not part of 0.5
+  conformance: a home MAY deliver them, and 0.5 defines no format or route for it (§17.5).
 - **First upload.** A genesis may be followed in one upload by the transition appointing a home
   and its `activate` (due when issued, since the state before it has no home).
 - **Exchange between homes (informative in 0.5; see "One home is supported in 0.5" above).**
@@ -2489,25 +2496,30 @@ account exists, and to 32 random bytes otherwise. Verifiers find a controller by
 
 ### 17.5 Notices
 
-A notice is not an object of this specification: it has no signed body and no wire format in 0.5.
-It is behaviour of homes and hosts over the delivery routes registered at setup (§13.1), and
-nobody should build a signed notice object. The mechanism is only as safe as people's
-knowledge of pending transitions, so:
+A notice is not an object of this specification: it has no signed body and no wire format in 0.5,
+and nobody should build a signed notice object. **Delivering notices is not part of 0.5
+conformance.** A home MAY deliver them, by any route it offers; 0.5 defines no format or route for
+it. What 0.5 requires is that people learn of pending changes from syncing:
 
-- **Routes.** At setup, hosts MUST register at least two delivery routes with every home, on
-  different devices or services (for example push to a second device, and e-mail).
-- **Polling.** Every host holding a controller key MUST list pending objects (§14) at every current
-  home at launch and at least every `recoveryDelay` / 6.
-- **Showing.** It MUST show each transition it hasn't shown, with its signers' labels, key IDs and
+- **Keeping.** A home keeps and serves every pending transition and veto it has stored until it is
+  settled (§13.1, §14).
+- **Showing on sync.** A host that syncs MUST read the pending objects (§14) at every current home
+  on every sync, and MUST show the person each pending change to their account's keys, with its due
+  time. It MUST show each transition it hasn't shown with its signers' labels, key IDs and
   first-seen seq, its veto deadline, and a one-tap **veto**. The **first-seen seq** is the verified
   authority seq at which this host first held the object. It is local memory: no verdict ever
   depends on it. The core does not persist it (it starts empty when an account is opened): a host
-  that wants a notice not repeated after a restart keeps its own map.
+  that wants a pending change not shown twice after a restart keeps its own map.
+- **Syncing often enough.** Without notices, a change waiting out the recovery delay is seen only
+  when one of the person's devices next syncs. A host holding a controller key SHOULD sync in the
+  background often enough that this is well inside the delay (for example every `recoveryDelay` /
+  6), and SHOULD tell the person when it cannot: when the device has not synced for longer than
+  `recoveryDelay` / 6.
 - **Recording.** A host that records due transitions (§8.7) records the determined `activate`
   and `vetoed` in due-time order, then by transition digest (the order §8.6 rule 1 uses), and each
   `final` after them in the order of its activation. A transition signed by a key whose removal
   falls due earlier is then not recorded ahead of that removal.
-- **Missed notices are visible afterwards.** Whenever a person uses any key with any host, the host
+- **Missed changes are visible afterwards.** Whenever a person uses any key with any host, the host
   MUST first show every activation since that host last showed the account's history that no key
   on this device signed and the person hasn't seen, with when each home receipted it. A recovery
   key is no exception: a person whose only device was stolen learns of the thief's transitions the
@@ -2520,15 +2532,20 @@ knowledge of pending transitions, so:
   that transition's anchor (not before it), that the removal didn't already remove, and offer to
   remove them in one action.
 - **What to tell people.** Hosts MUST say, when an account is set up with one device, that a
-  stolen sole device can't veto, and in every notice that the delay protects who controls the
-  account, not data a stolen key could already read (wording: guide §5).
+  stolen sole device can't veto, and with every pending change they show that the delay protects
+  who controls the account, not data a stolen key could already read (wording: guide §5).
 - **Quorum 2.** At `headQuorum` ≥ 2, a transition that gets fewer receipts than §8.7's validity
   rule 2 requires of it (`headQuorum`, or for a full set the smaller number its remaining homes
   allow) within 300 s of its `issued` is dead; hosts MUST say so and offer to sign it again.
-- **Testability.** These are host requirements with observable behaviour, tested with a simulated
-  home (§21).
 
-With two routes and missed notices shown afterwards, the default delay stays 72 hours.
+**Deferred to 0.6: delivery.** Registering at least two delivery routes with every home, on
+different devices or services (for example push to a second device, and e-mail), and delivery as
+observable behaviour tested against a simulated home, were 0.5 rules until revision 18. They come
+back in a later version, starting from the contract proposed in `relay/README.md` ("Notices").
+
+The default delay stays 72 hours. The 72-hour delay provides a veto opportunity only if a device
+syncs and shows the change before the deadline; missed changes are shown afterwards.
+
 
 ## 18. Policy fields and defaults
 
@@ -2546,9 +2563,9 @@ ranges.
 | `policy.headQuorum` | 1 | 1–8, at most the homes | transition with consent |
 | `policy.history`, `memberRule` | `members`; `single` (person), `control` (company) | §6.3 | tightening immediate; loosening by transition |
 | `policy.primaryHome` | absent | a current home | transition with consent |
-| `policy.rate` | signer 64 entries / 4 MiB, account 256 / 16 MiB, per 24 h | §6.3 | lowering immediate; raising by transition with consent |
+| `policy.rate` | signer 64 entries / 4 MiB, account 256 / 16 MiB, per 24 h | §6.3 | transition with consent, in either direction |
 | Member `expires`, `depth` | 7 days and 1 for `agent`; none and 0 otherwise | §10.1 | approver; `renew` extends |
-| Homes | **two, run by different operators (one may be the owner's own machine), before any recovery key; a host MUST create every account with at least one and MUST warn when an account has none (§13.1: without a home there is no witness of time or order and no rollback protection for a new verifier)**; each home is provisioned for its one account (§13.1) | 0–8 | transition with consent |
+| Homes | **one; two or three are optional and experimental in 0.5 and a host SHOULD NOT offer them as the default; a host MUST create every account with at least one and MUST warn when an account has none (§13.1: without a home there is no witness of time or order and no rollback protection for a new verifier)**; each home is provisioned for its one account (§13.1) | 0–8 | transition with consent |
 | Drain window | 7 days | 0–30 days | the copying host |
 
 **Reference setup for new accounts:**
@@ -2558,7 +2575,7 @@ ranges.
 | Control keys | each device's owner key, and one passkey per platform or password manager, `approve` + `control`; **at least one control key not on the phone** (for example a computer's device key) | each founder's device keys and passkeys, `holder` the founder |
 | Recovery keys | two security keys, **`recover` only**, `prf` slot where delivered, **kept apart** | two per founder |
 | Other | a kit or device key not tied to any one domain | the same per founder |
-| Homes | two, `headQuorum` 1 | three, `headQuorum` 2 |
+| Homes | one; several are optional and experimental in 0.5 (§13.1) | one; several are optional and experimental in 0.5 (§13.1) |
 | Counting | `keys`; thresholds 1, 1, 1 | `holders`; `threshold` and `recoverThreshold` 2 of 3; `memberRule` `control` |
 
 A person with only a phone can't keep a control key off it: hosts SHOULD offer one security key
@@ -2569,15 +2586,16 @@ set.
 and offer the role change as an ordinary pending transition.
 
 A paragraph a host can show the person, and what the reference protects, are in the guide §5.
-**Two homes at `headQuorum` 1 keep working with one down but don't resist a hostile home:** it can
-hide a transition until its deadline has passed (§13.1), and with one stolen key it can win. They
-are the person reference for availability only. The setup that resists one hostile home is three
-homes at `headQuorum` 2, the company reference; hosts SHOULD offer it to people too.
+**Nothing checks a single home:** a hostile one can hide a transition until its deadline has passed
+(§13.1), and with one stolen key it can win (what one home cannot detect is listed in §21.1). Two
+homes at `headQuorum` 1 would keep working with one down but would not resist a hostile home; three
+homes at `headQuorum` 2 would. Both are optional and experimental in 0.5, and a host SHOULD NOT offer
+them as the default.
 
-**Several homes are experimental in 0.5** (§13.1 "One home is supported in 0.5"). The two- and
-three-home references above are the intended setups, but they depend on exchange between homes,
-which is informative in 0.5, so an account set up that way may fail to make progress. One home is
-the supported configuration in 0.5.
+**One home is supported in 0.5; several are optional and experimental** (§13.1 "One home is
+supported in 0.5"). The reference is one home. Two homes at `headQuorum` 1 for a person and three
+at `headQuorum` 2 for a company depend on exchange between homes, which is informative in 0.5, so an
+account set up that way may fail to make progress. What 0.5.0 does not do is listed in §21.1.
 
 ## 19. Results and reasons
 
@@ -2692,21 +2710,61 @@ deferred to 0.6 is in changes §A.12 and the design's "Deferred to 0.6".
 
 ## 21. Conformance and freeze
 
-0.5 freezes only when all of these are done:
+**What the freeze means.** The 0.5 formats and the rules by which a reader judges an account are
+frozen for now. The freeze is provisional: the conditions below that are listed as open are not met
+at 0.5.0, the freeze proceeds by the owner's decision of 16 November 2026, and the gaps are closed
+in 0.5.x without changing any format. What 0.5.0 does not do is listed in §21.1.
 
-1. **Vectors.** Every required vector (below) is published under `conformance/0.5/`, with exact bytes and
-   one named outcome per case.
-2. **Two implementations.** Rust and one other language replay them all.
-3. **Swift corpus.** A differential corpus shows the §16.3 verifier matches the released Swift
-   verifier on macOS, iOS and visionOS.
-4. **Dry run.** A read-only preflight passes over a copy of the owner's real library, on his
-   device.
-5. **Security review.** An independent implementation security review is complete.
-6. **Galley.** Galley's identity contract is aligned.
-7. **Notices.** The host notice rules (§17.5) pass against a simulated home.
+**Conditions, and where each stands (16 November 2026).**
 
-`conformance/0.5/candidate/` holds the vectors built before any implementation; its README lists
-them. The rest are plan step V1.
+1. **Vectors: open.** The vectors are published under `conformance/0.5/` with exact bytes and one
+   named outcome per case (built at `conformance/0.5/candidate/` and moved at the freeze, bytes
+   unchanged), and the Rust verifier replays every case
+   (`crates/colophon-core/tests/v05_candidate.rs`, `candidate_conformance`). Its README lists them
+   and indexes what covers each required item. The final runs, 16 November 2026, at commit `b4bc915` (every later commit of the freeze changes text only), all with exit 0: on a Mac (macOS 27.2, Xcode 27.1, arm64) the home suite with its kill loop, the workspace (935 passed, 0 failed, the relay tests required) and the Swift suite (129 tests) on a framework built from that commit; on a second Mac (macOS 27, arm64) the Kotlin suite, the cross-platform journeys (16 tests, with 19 Swift tests and the Kotlin side) and the JS suite (55 tests and 8 in a browser); on a Linux x86-64 machine the home suite, the workspace (935 passed, 0 failed) and the JS suite. One stopped-home relay test that uses two homes failed once on the Linux machine on the commit before, under load, and passed on every other run including twelve repeats; it is listed as timing-sensitive.
+
+   **Required items with no vector or test (open).** The index in
+   [conformance/0.5/README.md](../conformance/0.5/README.md) finds none for:
+   - every 0.4 key case as `/5`;
+   - tightening another key's authentication refused;
+   - `layout` and `migration` as immediate entries refused;
+   - two epochs for one namespace in a `rekey` refused;
+   - headroom at 56 controllers and 224 slots;
+   - slot rebasing at activation;
+   - an anchor at a lower past delay;
+   - mutual removal and the tie;
+   - the rows of changes §H other than 2, 3, 4, 8 to 13, 17 and 28;
+   - a stopped reader accepting no head;
+   - the Swift envelope at seq 0 (§16.3);
+   - a tightening-only policy transition as removal-only, and a change to `recoveryDelay` or
+     `headQuorum` as not removal-only: no vector (0.5.x addition; changes no verdict).
+2. **Two implementations: open, deferred to v1.0 by the owner.** There is one implementation of the
+   verifier, in Rust. The Swift, Kotlin and JavaScript layers all run that same Rust core through
+   the FFI and WASM exports. No vector has been replayed by an independent implementation.
+3. **Swift corpus: open.** There is no differential corpus. The Rust verifier replays the Swift
+   predecessor vectors (`conformance/0.5/succession/swift-*`). The released Swift verifier
+   (Marginalia `c8280332`) was run on the predecessors with no platform recorded, and the CryptoKit
+   DER probe (`conformance/0.5/probes/swift-der/`) ran on macOS 27.0.1 only; iOS and visionOS were
+   not run.
+4. **Dry run: open.** The dry run on a real library has not been done. The Swift move is tested on
+   synthetic libraries only (`crates/colophon-core/tests/v05_swift_move.rs`,
+   `crates/colophon-ffi/tests/v05_swift.rs`).
+5. **Security review: met.** An independent whole-branch security review, 16 November 2026: no
+   format or signed-body hazard found; its three findings about this text are answered by revision
+   18. The packages also had independent checks before they merged (changes §G).
+6. **Galley: open.** Nothing in this repository records that Galley's identity contract is aligned
+   with the frozen text. Changes §B maps the contract's requests as they stood at Galley branch
+   `one-identity-contract`, head 172fe8f.
+
+Also open: nothing is proven on physical devices.
+
+Notices were condition 7 until revision 18. Delivering them is not part of 0.5 conformance
+(§17.5); their absence is listed in §21.1.
+
+**The owner's decisions (16 November 2026).** The freeze proceeds with the conditions above stated
+as open. An independent implementation (two complete replayers) is deferred to v1.0. The §6.4
+warnings in the reference sessions are deferred: they stay normative for hosts, with no date for
+the sessions. A journey proving a move to another home is not built.
 
 **Open at freeze.** What 0.5 does not decide, stated so nothing is left implicit:
 1. Two successors of one predecessor can each verify, for different verifiers (§15.1, the
@@ -2714,10 +2772,77 @@ them. The rest are plan step V1.
 2. The removal follow-up (§17.5) lists only what the removed key added since the transition's
    anchor; a wider list is a question for after 0.5.
 3. Everything revision 16 designed and revision 17 deferred to 0.6 (changes §A.12, the design's
-   "Deferred to 0.6"), including invites for a device that holds nothing (§13.4).
+   "Deferred to 0.6"), including invites for a device that holds nothing (§13.4), and notice
+   delivery, deferred by revision 18 (§17.5).
 
-**Required vectors.** The list in [conformance/0.5/candidate/README.md](../conformance/0.5/candidate/README.md)
+**Required vectors.** The list in [conformance/0.5/README.md](../conformance/0.5/README.md)
 "Required for freeze" is normative for condition 1.
+
+### 21.1 What 0.5.0 does not do
+
+The one list. The README, the changelog and §18 point here.
+
+1. **An account whose control and recovery controllers all sit in one unit cannot drop a home that
+   is lost or refuses** (§8.7 needs a full set, which takes two units). Its way out is a new,
+   unrelated account and an import of the records the person's devices hold. An account with two
+   units (for example one control key and one separate recovery key) can drop the home with a full
+   set, without that home's receipt, appoint another, and continue.
+2. **Moving an account to another home is not proven by a journey.** With a cooperative home it
+   works, with the device carrying everything: appoint the new home, then (if set) move
+   `primaryHome`, then revoke the old home, each a transition that waits out the recovery delay
+   (`issued` + 300 s + `recoveryDelay`, 72 hours 5 minutes by default). Away from an uncooperative
+   home it is possible with a full set (item 1): the engine test
+   `crates/colophon-core/tests/v05_engine_home.rs`,
+   `a_full_set_drops_a_silent_only_home_and_the_account_appoints_another`, drops a silent sole home
+   and appoints another, but no session journey moves an account. The
+   engine reports a home's 421 and does not follow it, and if the old home is gone nothing in 0.5
+   tells another device where the new one is.
+3. **Only one-home operation is supported; several homes are experimental.** They are optional (§13.1, §18); the open
+   issues are in [docs/multi-home-open-issues.md](../docs/multi-home-open-issues.md).
+4. **What one home can do undetected.** It can withhold the history indefinitely, and a device
+   cannot tell that from an outage. It can receipt a transition and hide it until its veto
+   deadline has passed. It can show a fresh or reinstalled device an old valid prefix (a device
+   with persisted state detects the rollback). It can keep two devices on split views until
+   contradictory signed evidence meets. It learns the account's structure, paths, sizes and timing.
+   It cannot forge a controller's or member's signature, read records or blobs, or make an invalid
+   history verify.
+5. **No notices.** Delivering notices is not part of 0.5 (§17.5): a change waiting out the
+   recovery delay is seen when one of the person's devices next syncs.
+6. **No invite object and no multi-part QR code** (F8 was withdrawn to 0.6): the history reaches a
+   new device by a link or a paste, and the approval is by camera scan.
+7. **The reference sessions do not give the §6.4 warnings before creation.** They expose
+   `soleDevice` after the genesis is written. Until they do, an app checks the creation
+   parameters (one home, every control key on one device, exactly one recovery unit) and warns
+   before it calls create.
+8. **One verifier implementation** (§21 condition 2).
+9. **No dry run on a real library** (§21 condition 4).
+10. **Nothing proven on physical devices.**
+11. **Performance** ([docs/performance.md](../docs/performance.md), an M3 Max under load, median of
+    five runs). Sync is serial, one request per record: catch-up of the 10% a device lacks took
+    17.4 s at 2,000 records and 89.7 s at 10,000 (1,807 and 9,023 requests), and a new device over
+    a real network takes longer. At 100,000 records opens take tens of seconds (47.4 s cold),
+    catch-up takes 13 to 15 minutes, a write takes about 180 ms and memory reaches 7.19 GB: such a
+    library is not usable. Phones, the wasm build and the FFI boundary are not measured.
+12. **Before an account opts in to a later version, a 0.5 device may refuse something newer**
+    rather than ask to be updated (§20 "Limits of 0.5").
+13. **Nothing is published** to npm, Maven or a Swift registry.
+14. **Not every required vector exists.** The required items with no vector or test are listed in
+    §21 condition 1.
+15. **No Swift differential corpus** (§21 condition 3): the §16.3 verifier is not shown to match the
+    released Swift verifier on macOS, iOS and visionOS.
+16. **Galley alignment is not recorded** (§21 condition 6).
+17. **No guaranteed background sync.** Nothing makes a device sync in the background, so a pending
+    change may not be seen inside the delay (§17.5), and nothing is proven about background
+    execution on phones.
+18. **Competing successors.** Two successors of one predecessor can each verify, for different
+    verifiers (§15.1, the implementation notes' open item 2); the host rule keeps honest hosts from
+    making it.
+19. **A limited removal follow-up.** The removal follow-up (§17.5) lists only what the removed key
+    added since the transition's anchor; a wider list is a question for after 0.5.
+20. **The revision-16 features deferred to 0.6:** F1 (unknown content, one rule), F4 (raisable
+    limits and `witnessWindow`), F5 (namespaces after genesis, a live-rule registry), F6 (opaque
+    members), F7 (location statements) and F8 (invites); see changes §A.12 and the design's
+    "Deferred to 0.6".
 
 ## 22. Review log
 

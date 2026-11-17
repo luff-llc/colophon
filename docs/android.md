@@ -76,8 +76,9 @@ session.state.collect { render(it.phase, it.notices) }                    // pen
 * **Blobs**: `putBlob(bytes | file, ...)`, `blobAvailability`, `blobData`, `prefetchBlob`, `downloadRequiredBlobs`,
   `setBlobReference`. A required blob arrives with the exchange, an optional one when asked.
 * **What a person must see**: `notices.pending` (with `vetoable`), `veto(digest)`, `proposeTransition(json)`,
-  `notices.unseenActivations` and `acknowledgeActivation(seq)`, `notices.noHome`, `duties` (sole device, delivery
-  routes, submissions, dead transitions, the removal follow-up with `removeFollowUp` / `keepFollowUp`).
+  `notices.unseenActivations` and `acknowledgeActivation(seq)`, `notices.noHome`, `duties` (sole device,
+  submissions, dead transitions, the removal follow-up with `removeFollowUp` / `keepFollowUp`). `duties` also exposes
+  optional route-registration state for host extensions; routes are not a 0.5 requirement.
 * **Lock** on `onStop` (`lock()`), `unlock()` on `onStart`. `shutdown()` locks the engine and stops the loops.
 * Background exchange polls every `duties.pollIntervalMs`; `requestSync()` wakes it, `stopSync()` stops it.
 
@@ -109,6 +110,7 @@ home module and runs every JVM test in `sdk/kotlin` (the 0.4 wrappers too), then
 * Delivery-route registration is a host callback (the relay offers none). No ingress inbox, no Swift-move session
   steps, no typed domain kits in Kotlin.
 * A Kotlin `FolderMedium` assumes one process per folder (Android app-private storage); it takes no file lock.
+* **Known gap: the spec §6.4 warnings before creation.** This session does not yet give the §6.4 warnings before the genesis is written: it exposes `soleDevice` after creation. The warnings stay normative for a host (a person must see them before an account is created). Until the session gives them, an app checks the three conditions from the creation parameters (one home, every control key on one device, exactly one recovery unit) and warns before it calls create. Spec §21.1 lists this among what 0.5.0 does not do.
 
 ## The 0.4 session (`org.luff.colophon`, still in the AAR)
 

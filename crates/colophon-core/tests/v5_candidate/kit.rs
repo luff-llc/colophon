@@ -617,7 +617,7 @@ pub fn conformance() -> PathBuf {
     repo().join("conformance")
 }
 pub fn candidate() -> PathBuf {
-    conformance().join("0.5/candidate")
+    conformance().join("0.5")
 }
 pub fn v4() -> PathBuf {
     conformance().join("0.4")

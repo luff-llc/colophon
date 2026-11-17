@@ -11,11 +11,19 @@ signed, encrypted operations, and every client folds the admitted operations int
 state. Storage and transport never grant access: a folder, iCloud Drive or a relay only
 moves bytes it can't read. There is no vendor account.
 
-This repository holds the Colophon 0.4 Rust core and JavaScript package, the
-playground demo, plus the 0.1 specification, conformance vectors and shipped
-Swift reference implementation in `reference/swift/`. The root Swift package is **ColophonSDK**,
+This repository holds the Colophon 0.5 Rust core (with the 0.4 engine beside it), the
+JavaScript package, the reference relay, the Swift and Kotlin SDKs, the playground demo,
+plus the 0.1 specification, conformance vectors and shipped Swift reference implementation in `reference/swift/`. The root Swift package is **ColophonSDK**,
 with the Rust-backed products under `swift/`. In LUFF's Marginalia repository,
 "Colophon 0.2" names the Swift layout-2 step whose design 0.3 absorbs.
+
+**0.5 is frozen, revision 18 (2026-11-16).** The formats and reader rules are frozen for now; the
+gaps listed in spec §21 are closed in 0.5.x without changing any format, and
+[spec §21.1](spec/colophon-0.5.md#211-what-050-does-not-do) lists what 0.5.0 does not do. An account is a keyring of controllers whose identifier is the
+digest of its first authority record; members act under grants, sessions act for members through
+links and calls, and a home keeps and vouches for the history. See
+the [0.5 spec](spec/colophon-0.5.md), its [guide](spec/colophon-0.5-guide.md), the
+[0.5 conformance vectors](conformance/0.5/) and the [changelog](CHANGELOG.md).
 
 **0.4 replaces the single root key with a keyring.** Authority belongs to a keyring of
 controllers: passkeys, security keys, device owner keys and recovery kits, with roles and
@@ -62,7 +70,7 @@ makes access explicit instead:
 - **Honest.** Missing history, keys or files remain visible, retryable states. Nothing
   is reported as an empty library because a member lacks permission.
 
-## Rust core and JavaScript package (0.4)
+## Rust core and JavaScript package (the 0.4 engine)
 
 The pure Rust core implements records, raw and WebAuthn key steps, the controller keyring and
 vault slots, HPKE, grants, admission, epoch rotation, recovery, four domain folds, the ledger and generated agent tools. It performs no
@@ -173,7 +181,7 @@ they don't interpret. Conflicts are recorded, never silently resolved (spec §9)
 ## Tests and conformance
 
 ```sh
-COLOPHON_SOFTWARE_KEYS=1 swift test        # root 0.4 SDK
+COLOPHON_SOFTWARE_KEYS=1 swift test        # root SDK (0.5.0)
 COLOPHON_SOFTWARE_KEYS=1 swift test --package-path reference/swift  # 0.1, migration adapter, clean copy
 COLOPHON_SOFTWARE_KEYS=1 COLOPHON_WRITE_VECTORS=1 swift test --package-path reference/swift --filter writeVectors
 ```

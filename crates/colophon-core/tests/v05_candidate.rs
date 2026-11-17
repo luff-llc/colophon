@@ -1,4 +1,4 @@
-//! Conformance runner for the Colophon 0.5 candidate vectors (`conformance/0.5/candidate/`).
+//! Conformance runner for the Colophon 0.5 vectors (`conformance/0.5/`).
 //!
 //! Each case is PASS, FAIL or NOT-IMPLEMENTED. Only results actually checked by the engine
 //! pass. Authority histories use `verify_history`; event rows check each signed object
@@ -26,7 +26,16 @@ fn repo() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 fn cand() -> PathBuf {
-    repo().join("conformance/0.5/candidate")
+    repo().join("conformance/0.5")
+}
+/// A path a vector names (`verifier.history`, `heads`, `replay`). The vectors were built at
+/// `conformance/0.5/candidate/` and their bytes are frozen, so a path under that old prefix is
+/// read under `conformance/0.5/`.
+fn vector_path(named: &str) -> PathBuf {
+    match named.strip_prefix("conformance/0.5/candidate/") {
+        Some(rest) => cand().join(rest),
+        None => repo().join(named),
+    }
 }
 fn json(path: &Path) -> Value {
     serde_json::from_slice(&fs::read(path).unwrap_or_else(|e| panic!("{}: {e}", path.display())))
@@ -98,8 +107,8 @@ fn files_in(dir: &Path) -> Vec<Vec<u8>> {
 /// except the call as pending objects.
 fn objects_for(dir: &Path, ver: &Value) -> Objects {
     let record_dirs: Vec<PathBuf> = match &ver["history"] {
-        Value::String(s) => vec![repo().join(s)],
-        Value::Array(a) => a.iter().map(|s| repo().join(s.as_str().unwrap())).collect(),
+        Value::String(s) => vec![vector_path(s)],
+        Value::Array(a) => a.iter().map(|s| vector_path(s.as_str().unwrap())).collect(),
         _ => vec![dir.join("records")],
     };
     let mut o = Objects::default();
@@ -122,7 +131,7 @@ fn objects_for(dir: &Path, ver: &Value) -> Objects {
     }
     for h in ver["heads"].as_array().into_iter().flatten() {
         o.heads
-            .push(fs::read(repo().join(h.as_str().unwrap())).unwrap());
+            .push(fs::read(vector_path(h.as_str().unwrap())).unwrap());
     }
     o
 }
@@ -495,8 +504,8 @@ fn expected_of(case: &Value, key: &str) -> String {
 fn run_call(dir: &Path, case: &Value) -> Outcome {
     let ver = &case["verifier"];
     let record_dirs: Vec<PathBuf> = match &ver["history"] {
-        Value::String(s) => vec![repo().join(s)],
-        Value::Array(a) => a.iter().map(|s| repo().join(s.as_str().unwrap())).collect(),
+        Value::String(s) => vec![vector_path(s)],
+        Value::Array(a) => a.iter().map(|s| vector_path(s.as_str().unwrap())).collect(),
         _ => vec![dir.join("records")],
     };
     let _ = record_dirs;
@@ -549,7 +558,7 @@ fn run_call(dir: &Path, case: &Value) -> Outcome {
     let mut store = MemoryReplayStore::new();
     for prior in ver["replay"].as_array().into_iter().flatten() {
         if let Err(e) = verify_call(
-            &fs::read(repo().join(prior.as_str().unwrap())).unwrap(),
+            &fs::read(vector_path(prior.as_str().unwrap())).unwrap(),
             &view,
             &cfg,
             &mut store,

@@ -1,6 +1,8 @@
 # Colophon 0.5: changes from 0.4, upgrade paths, review answers and deferred items
 
-**Status:** companion to [colophon-0.5.md](colophon-0.5.md), revision 17, 2026-11-15. Section
+**Status:** companion to [colophon-0.5.md](colophon-0.5.md), frozen 0.5, revision 18,
+2026-11-16 (provisional: the formats and reader rules are frozen for now; the gaps spec §21 lists are
+closed in 0.5.x without changing any format). Section
 numbers without a prefix are 0.5's. "0.4" means [colophon-0.4-keys.md](colophon-0.4-keys.md).
 "Galley draft" is Galley's `docs/spec/colophon-0.5-draft.md` (draft 2). "The contract" is
 Galley's `contracts/identity/one-identity.md` on branch `one-identity-contract` (head 172fe8f).
@@ -42,6 +44,10 @@ This was checked in code, not only in documents.
     account and no new passkey.
 
 ## A. Changes from 0.4
+
+The per-revision tables below (§A.1 to §A.13) record each revision as it was made; revision 18
+(§A.14) moved notice delivery to 0.6 and made one home the reference, so earlier rows about notices,
+routes or two and three homes are historical.
 
 "Breaking" means a 0.4 reader can't read what a 0.5 writer produces. At an upgraded library's
 `upgrade` entry, a 0.4 reader stops with `newerFormat`. This was run on the released engine.
@@ -358,7 +364,7 @@ revision 15's text and behaviour there. Rows **code follows in the freeze packag
 | 211 | §13.1 "Transitions", §13.3: a home forwards to every other current home the entries of its history after the latest head of that home it holds, by `POST {peer}/authority` with no call (as a host publishes, §13.4), so every home holds each recording entry another appended and its `final` never waits for a head covering only an entry it does not hold; before producing any head a home appends the recording entries that are due; a forwarded head's entries go ahead of it. **Code in PR 28** | the revision 17 check, High 2; the home builder's fix |
 | 212 | §1, §8.2, §8.5, §8.7, §13.6, §20: a layout raise stops a reader or home only once final; before then it is any transition, and a `vetoed` displaces it. §20: a later-format implementation writes nothing of the later format to an account until the raise is final | the revision 17 check, High 1 |
 | 213 | §2.3: the blanket "unknown is `newerFormat`" replaced by what the 0.5 verifier does, case by case (accepted and ignored, `malformed`, `invalidPayload`, admitted and not folded, `newerFormat`); §20 states the unfortunate cases as limits. No behaviour change | the revision 17 check, High 3 |
-| 214 | §21 by reference: `conformance/0.5/candidate/README.md` "Required for freeze" gains the revision 17 cases (the door, stops, the stopped home, the current principal, the confirmed pairing, quorum-2 convergence, Swift seq 0); its status names revision 17 | the revision 17 check, Medium 4 |
+| 214 | §21 by reference: `conformance/0.5/README.md` (then `conformance/0.5/candidate/README.md`) "Required for freeze" gains the revision 17 cases (the door, stops, the stopped home, the current principal, the confirmed pairing, quorum-2 convergence, Swift seq 0); its status names revision 17 | the revision 17 check, Medium 4 |
 | 215 | §8.2: at most 64 genesis namespaces for a writer as for a verifier (the writer's 256 is a code defect being fixed) | the revision 17 check, Medium 5 |
 | 216 | §9.1: the scan path of a confirmed pairing scans exactly the canonical request envelope, whose `member.signing` is the key | the revision 17 check, Low 6 |
 | 217 | §20: the preservation sentence reads "including, without limitation" and names every category a later verifier keeps | the revision 17 check, Low 8 |
@@ -373,6 +379,32 @@ revision 15's text and behaviour there. Rows **code follows in the freeze packag
 | 226 | §20 "Limits of 0.5": an account whose `control` and `recover` controllers form one unit can't form a full set, so it can't drop a lost home; its way out is a new, unrelated account and an import of its records (a succession needs the old home too). One control and one recovery unit can (`rules/f2-drop-home-one-control-one-recovery`). §H row 14 updated | consequence of row 224 |
 | 227 | §8.7 "Full set": either definition makes a transition a full set, whichever rule it is otherwise judged under, (a) only where the recovery rule may make its components and (b) only where the control rule may. The verifier had judged a full set only by the rule it selected first (control), so every recovery controller in two units, one of them also holding `control`, was no full set and needed the receipt of the home it revoked. Which rule a non-full transition is judged under is unchanged. Vectors `rules/f2-drop-home-full-set-a-dual-role`, `-dual-role-not-full`, `rules/f2-dual-role-full-a-component-not-recovery` | the independent check of PR 47, High 1 |
 | 228 | §8.7: "a transition whose only receipting homes are revoked before activation is dead" excepts a full set that revokes those homes itself; a home's receipts are accepted until its revocation is final, and required for that span except by a full set that revokes it | the independent check of PR 47, High 2 |
+
+### A.14 Revision 18: the freeze, made true of 0.5.0
+
+Text only: no format, vector or reader rule changes. The owner (16 November 2026): "let's
+temporarily freeze them, and start working on closing those gaps with stuff that we would need
+anyways / but for independent implementation, we should wait till v1.0 for that. / wanring also can
+wait". Sources: an independent whole-branch security review of 16 November 2026 (no format or
+signed-body hazard; three findings about this text, answered here) and the checker's verdict on
+moving an account to another home.
+
+| # | Change | Why |
+| --- | --- | --- |
+| 229 | Status: frozen 0.5, revision 18. The formats and the rules by which a reader judges an account are frozen for now; the freeze is provisional, and the gaps listed in §21 are closed in 0.5.x without changing any format | the owner's decision |
+| 230 | §21: "0.5 freezes only when all of these are done" replaced by what the freeze means; each condition recorded as met or open with its evidence: vectors open (the required items with no vector or test listed), two implementations open and deferred to v1.0 by the owner, the Swift corpus open, the dry run open, the security review met, Galley open, nothing proven on physical devices. The owner's decisions recorded: the §6.4 warnings in the reference sessions deferred (normative for hosts; no date), no journey proving a move to another home | the review's first finding: the text stated conditions as if met |
+| 231 | §13.1, §17.5: delivering notices is not part of 0.5 conformance; a home MAY deliver them, and 0.5 defines no format or route. Normative instead, because built and tested: a home keeps and serves every pending transition and veto until it is settled; a host that syncs MUST read the pending objects on every sync and show each pending change to the account's keys with its due time. "Polling" (MUST, at launch and every `recoveryDelay` / 6) becomes a SHOULD to sync in the background often enough, and to tell the person when it cannot. The two-route requirement and delivery as observable behaviour move to 0.6, starting from `relay/README.md` "Notices". Notices leave §21's conditions | the review's second finding: the reference home delivers no notices |
+| 232 | §17.5 and guide §5: the default delay's argument now leans on syncing, not notices. The 72-hour default stays. The 72-hour delay provides a veto opportunity only if a device syncs and shows the change before the deadline. The guide's paragraph for the person says to let the app sync every few days, and that the history is kept by one home | row 231 |
+| 233 | §18: the "Homes" default is one home (it was two, run by different operators, before any recovery key); two or three homes are optional and experimental in 0.5 and a host SHOULD NOT offer them as the default. The paragraph that called two homes the person reference and three the company reference, with "hosts SHOULD offer it to people too", now says what one home cannot resist and that the larger setups are experimental. Revision 17's freeze edit had already set the reference table to one home | §13.1 "One home is supported in 0.5" |
+| 234 | §21.1: one list of what 0.5.0 does not do, which the README, the changelog and §18 point to. It starts with the lock-in limit, by units: an account whose control and recovery controllers all sit in one unit cannot drop a home that is lost or refuses (a full set takes two units), and its way out is a new, unrelated account and an import of the records its devices hold; an account with two units drops the home with a full set and appoints another (rows 224–228). It then states moving between homes (works with a cooperative home, each step waiting out the delay, and away from an uncooperative one with a full set; no session journey; the engine does not follow a 421), one home per account, what one home can do undetected, no notices, invites by link or paste, the §6.4 warnings missing from the reference sessions, one verifier implementation, no dry run, nothing proven on physical devices, performance, refusal before opt-in, nothing published | the review's "Limits to state"; the moving-out verdict |
+| 235 | §6.4 unchanged and still normative for hosts. The changelog, `docs/session.md`, `docs/android.md` and `docs/js-session.md` record that the reference sessions do not yet give the warnings before the genesis is written (they expose `soleDevice` afterwards), and what an app does until they do | the review's third finding |
+| 236 | `conformance/0.5/README.md`: the file count (2,238 outside `legacy-draft-1/`), the freeze run (437 in scope, 437 pass), and the lines that were no longer current made current or removed | the review's first finding |
+| 237 | After the checker's read of revision 18: §17.5 and row 232 say the 72-hour delay provides a veto opportunity only if a device syncs and shows the change before the deadline; §21.1 adds the missing required vectors, no Swift corpus, Galley not recorded, no guaranteed background sync, competing successors, the limited removal follow-up and the features deferred to 0.6, and item 3 reads "Only one-home operation is supported"; §B, §G and §H rows about notices, routes or two and three homes are marked historical; `relay/README.md` "Notices" and the session docs no longer state routes as a 0.5 rule | the checker's read |
+| 238 | §8.7 "Removal-only transitions": tightening policy means only lowering `headMaxAge`, `callWindow` or `linkMaxAge`, setting `memberRule` to `control` or `history` to `members`; a component changing `recoveryDelay`, `rate`, `headQuorum` or `primaryHome`, in either direction, is never removal-only. §8.4 `keyring`: the immediate policy tightening is the same list (it read "§6.3 lowering only"). §18: `policy.rate` is a transition with consent in either direction (it read "lowering immediate"). §21 condition 1 lists the missing vectors for this. Text matched to the verifier (`policy_tightens`, `classify` and the immediate keyring check in `history/state.rs`); no verdict changes | the spec owner's correction |
+| 239 | §13.1 late-activation rule: "refuses that `activate` for ever and notifies the controllers" now says what the reference home does: it refuses it for ever, 0.5 delivers no notice (§17.5), a device that submits the `activate` gets `refused:late` (422, §14), and the transition stays among the pending objects the home serves (`check_activation` in `history/home.rs`). §21.1's numbered list no longer has a blank line between items 2 and 3 | the freeze check; no home notifies anyone in 0.5 |
+
+No vector's expected verdict depends on notices or on §21.
+
 
 ## B. Galley's requirements
 
@@ -400,7 +432,7 @@ revision 15's text and behaviour there. Rows **code follows in the freeze packag
 | --- | --- | --- |
 | R-A1 added key co-signs | Yes: `additions` possession proofs, from an authority origin. Exempt: the `upgrade` entry, and keys carried over by a verified succession | §4.1, §8.4 |
 | R-A2 audience limits, sign-only role | Yes: role `sign` with `audiences`; never signs authority, never counts, no slot; added under the add rule at any threshold; its possession proof may come from its own `rp` | §6.1, §8.4, §12.3 |
-| R-A3 anti-weakening and delay as authority rules | Yes: recovery-set rule; the control rule counts the larger threshold; delay plus cancel. **Range decided:** `recoveryDelay` is 0–2,592,000 s and **at least 3,600 s while the account has any home**; 0 only without a home; default 259,200 s (72 h, the contract's figure). Without a home nothing can attest the time a recovery arrived, so a non-zero delay would be a promise nobody keeps. With a home, an hour is the least time an owner needs to see a notice and cancel. The contract's "never zero" is the right rule for every account that has a home | §6.3, §8.4, §13.5, §18 |
+| R-A3 anti-weakening and delay as authority rules | Yes: recovery-set rule; the control rule counts the larger threshold; delay plus cancel. **Range decided:** `recoveryDelay` is 0–2,592,000 s and **at least 3,600 s while the account has any home**; 0 only without a home; default 259,200 s (72 h, the contract's figure). Without a home nothing can attest the time a recovery arrived, so a non-zero delay would be a promise nobody keeps. With a home, an hour is the least delay that gives an owner a chance to cancel. The delay is an opportunity for a syncing device to discover and veto a change; 0.5 does not guarantee notice delivery. The contract's "never zero" is the right rule for every account that has a home | §6.3, §8.4, §13.5, §18 |
 | R-A4 agents never controllers, across time | Yes, explicit in §3.3 rule 2; vectors `member-key-as-controller` and `former-controller-as-member` | §3.3, §9.7 |
 | R-A5 per-entry signers in the output | Yes: primary, cosigners, possession, handover, the rule met, receipt | §17.2 |
 | R-A6 date grammar for `expires` | Yes: §2.2 applies everywhere; invalid dates are `malformed` | §2.2, §10.1 |
@@ -436,7 +468,7 @@ The contract puts authority ceremonies and PRF on `keys.id.luff.works`, calls on
 | --- | --- | --- | --- |
 | 1 | §0.1, R-A3: delay "1 h – 30 d, never 0" | 0.5 allows 0 only without a home | Keep "never 0" as Galley's reference default, but say that 0.5 accounts without a home have no delay (§8.4) and that the reference setup appoints a home first (§18) |
 | 2 | §8.3: only `control` additions delayed; approve-only immediate; "any existing controller" cancels | 0.5 delays every signature by a recovery-added key, and only a pre-existing, not recovery-added `control` key cancels; attempt 2 needs a counter-recovery | §8.4 delay, cancel and attempt 2 |
-| 3 | §2 step 6: home allows 300 s ahead; no primary ordering, receipts or notices | 0.5: 60 s ahead; ±300 s for recovery and cancel entries; primary ordering (421); per-home receipts; notices | §13.1, §13.5, §14 |
+| 3 | §2 step 6: home allows 300 s ahead; no primary ordering, receipts or notices | 0.5: 60 s ahead; ±300 s for recovery and cancel entries; primary ordering (421); per-home receipts; pending objects served until settled (notice delivery is not part of 0.5, §17.5) | §13.1, §13.5, §14 |
 | 4 | §3.2–§3.3: a diverging home "stops counting" | 0.5 classifies the conflict (§8.6): equivocation evidence; recovery at a non-primary home; a vouched fork (`refused:fork` until `resolve`); or no-home priority | §8.6, and handle `resolve` |
 | 5 | §4.6: accepts bare `https://<rp>` and `origins` for calls | 0.5 accepts only configured call-ceremony origins | §12.3 step 5 |
 | 6 | §4.4 consent omits `additions` | Possession proofs make every non-carried controller consenting; carried-over Swift keys are exempt and must be treated as consented by the verified succession | §8.4 possession |
@@ -462,7 +494,7 @@ Revision 5 adds:
 | # | Contract | 0.5 revision 5 |
 | --- | --- | --- |
 | 18 | Approval card and sign-in for a person whose devices are gone | A `recover`-only key may call `colophon.history.read`; Galley's home must accept it |
-| 19 | Galley's home | Store only `ok` objects; enforce the rate limits; store `activate` only for transitions it receipted or saw a delay earlier; push notices to registered devices; serve `transitions/` |
+| 19 | Galley's home | Store only `ok` objects; enforce the rate limits; store `activate` only for transitions it receipted or saw a delay earlier; push notices to registered devices (revision 18: notice delivery is deferred to 0.6, spec §17.5); serve `transitions/` |
 | 20 | Using a newly added controller | Wait for finality (every current home's head covers its activation) before accepting its calls |
 | 21 | §11.2 | Handover by the current root alone (root library); the successor's homes receipt the genesis within 300 s of their own appointment; vetoes become `vetoed` entries in the successor |
 | 22 | Reference deployment | Two homes for people (different operators); the identity service may be one of them |
@@ -485,7 +517,7 @@ Revision 7 adds:
 | 29 | Galley's home | Append `final` once it holds every witness head (forward heads to the other homes); store and serve a late transition even when refusing its `activate`; refuse immediate entries and full sets more than 300 s behind its clock; serve `GET/POST {base}/pending` (§14) with cursors; persist its first-seen and serving facts per object |
 | 30 | Treating a key, home or member as added | Only after a `final` entry (or a later full set), never from heads the client happened to see |
 | 31 | Removal of a stolen key | One recovery key starts it; no vault change; rotate the vault with a `vault` entry from the first device holding the seed; self-slots for the others |
-| 32 | Notices | Two delivery routes at setup; show missed activations at next use; submit transitions and vetoes to every home |
+| 32 | Notices | (Revision 18: delivery and the two routes are deferred to 0.6, spec §17.5.) Two delivery routes at setup; show missed activations at next use; submit transitions and vetoes to every home |
 | 33 | Replay store | Retain 7,260 s, inclusive |
 
 Revision 8 adds:
@@ -598,6 +630,10 @@ The decisions in force at revision 6. Superseded forks (cancel, attempt 2, provi
 | Root library hand-over | The root alone; the veto window protects the owner | Root and kit together: friction without stopping either thief. |
 
 ## G. Changes after review
+
+Each row records how a review was answered in the revision named. Later revisions may change the
+answer: revision 18 moved notice delivery and the two-route rule to 0.6 and made one home the
+reference (§A.14), so rows that cite notices, routes or two and three homes are historical.
 
 ### G.1 Codex (Daybreak Blue)
 
@@ -1136,7 +1172,10 @@ verdict (row 171); revision 17 withdrew the rows (166, 172) that would have chan
 
 ## H. Theft and loss, worked through
 
-**Reference person:** a Mac device key M (with the vault slot), a phone device key Ph and a synced
+**Historical revision-8 two-home worked example, not the 0.5.0 reference** (the 0.5.0 reference is
+one home, spec §18); its bounds assume polling that 0.5.0 does not guarantee (§17.5).
+
+**Reference person (revision 8):** a Mac device key M (with the vault slot), a phone device key Ph and a synced
 passkey P (all `approve` + `control`), two security keys K1 and K2 (`recover` only, kept apart),
 thresholds 1, `recoverThreshold` 1, two homes at `headQuorum` 1, D = 72 h.
 - A "unit" is a key. A pending transition is due D + 300 s after its `issued`; vetoes count until D.

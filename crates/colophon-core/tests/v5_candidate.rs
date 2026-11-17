@@ -1,4 +1,4 @@
-//! The generator for every 0.5 candidate vector under `conformance/0.5/candidate/`.
+//! The generator for every 0.5 vector under `conformance/0.5/` (built as the candidate vectors).
 //!
 //! One Rust generator owns all the files (it replaces the Python `generate.py`, `rules.py` and
 //! `rules_v8.py`). It builds 0.5 bytes from the published test keys and records the outcome the
@@ -145,7 +145,11 @@ fn strays(out: &Out, dir: &Path) -> Vec<String> {
     let mut found = Vec::new();
     walk(dir, dir, &mut found);
     found.retain(|rel| {
-        rel != "README.md" && !rel.starts_with("probes/swift-der/") && !out.contains_key(rel)
+        rel != "README.md"
+            && !rel.starts_with("probes/swift-der/")
+            // The draft-1 fixtures share the directory; another test owns them.
+            && !rel.starts_with("legacy-draft-1/")
+            && !out.contains_key(rel)
     });
     found.sort();
     found

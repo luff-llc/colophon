@@ -9,7 +9,7 @@ use std::{
     path::{Path, PathBuf},
 };
 fn root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../conformance/0.5/candidate")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../conformance/0.5")
 }
 fn files(p: &Path) -> Vec<Vec<u8>> {
     let mut paths: Vec<_> = fs::read_dir(p)

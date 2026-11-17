@@ -905,7 +905,7 @@ mod tests {
     /// The entries of a candidate vector's `rules/<name>/records/authority/`.
     fn vector(name: &str) -> Objects {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../conformance/0.5/candidate/rules")
+            .join("../../conformance/0.5/rules")
             .join(name)
             .join("records/authority");
         let mut files: Vec<_> = std::fs::read_dir(dir)
@@ -964,7 +964,7 @@ mod tests {
     /// (`objects/head*.json` as heads, the rest as pending), as the conformance runner loads them.
     fn case(name: &str) -> Objects {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../conformance/0.5/candidate/rules")
+            .join("../../conformance/0.5/rules")
             .join(name);
         let files = |d: std::path::PathBuf| -> Vec<Vec<u8>> {
             let mut p: Vec<_> = std::fs::read_dir(d)
@@ -1012,8 +1012,8 @@ mod tests {
     /// permutation per vector), with the heads and pending objects reordered too.
     #[test]
     fn f2_and_f3_verdicts_do_not_depend_on_object_order() {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../conformance/0.5/candidate/rules");
+        let dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../conformance/0.5/rules");
         let mut names: Vec<String> = std::fs::read_dir(dir)
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().to_string())

@@ -35,7 +35,7 @@ const EMPTY_SHA: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991
 
 fn case_dir(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../conformance/0.5/candidate/calls")
+        .join("../../conformance/0.5/calls")
         .join(name)
 }
 

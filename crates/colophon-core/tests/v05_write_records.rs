@@ -2247,8 +2247,8 @@ fn l4_owed_shares_lists_members_missing_an_epoch() {
 /// records vector, so the two cannot drift.
 #[test]
 fn rebuilt_epochs_equal_the_verifiers_folded_epochs_on_every_vector() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../conformance/0.5/candidate/records");
+    let root =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../conformance/0.5/records");
     let mut n = 0;
     for e in std::fs::read_dir(&root).unwrap() {
         let dir = e.unwrap().path();
@@ -2340,8 +2340,8 @@ fn the_verifier_refuses_an_epoch_introduced_while_the_vault_is_retiring() {
 /// `rekey` is checked against them, and a revoke whose epoch skips a number is malformed.
 #[test]
 fn a_revokes_epochs_are_folded_and_checked_as_consecutive() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../conformance/0.5/candidate/records");
+    let root =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../conformance/0.5/records");
     let load = |name: &str| -> Objects {
         let dir = root.join(name).join("records/authority");
         let mut files: Vec<_> = std::fs::read_dir(dir)

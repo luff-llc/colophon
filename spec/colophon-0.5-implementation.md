@@ -1,6 +1,7 @@
 # Colophon 0.5: implementation plan
 
-**Status:** plan for [colophon-0.5.md](colophon-0.5.md), revision 14, 2026-11-14. Steps 0, 1 and 4
+**Status:** plan for [colophon-0.5.md](colophon-0.5.md), revision 14, 2026-11-14. 0.5 was
+frozen on 2026-11-16 at revision 18, provisionally (spec §21); the plan stays as history, dated as written. Steps 0, 1 and 4
 are merged into `spec-0.5` (luff-llc/colophon#4); revision 7's effect on them is listed under
 each step. The §8.7 state machine (step 2's transition part and step 3's conflict rules) is the
 state table of §8.7, over the persisted state of §17.2. No engine code has
@@ -32,7 +33,7 @@ verifier.
 
 - **Files.** New `crates/colophon-core/tests/v5_candidate.rs`, which writes to
   `conformance/0.5/`, is opt-in, and is deterministic from published seeds. Port the cases in
-  `conformance/0.5/candidate/` (then built by the Python `generate.py` and `rules.py`) into it, so one generator
+  `conformance/0.5/candidate/` (now `conformance/0.5/`; then built by the Python `generate.py` and `rules.py`) into it, so one generator
   owns them all. The ported files must come out byte-identical, or the difference becomes a
   spec question. **Status: done.** The port is `v5_candidate.rs` with helpers in
   `tests/v5_candidate/`. Its check mode reproduces all 1,078 files byte for byte, and
@@ -151,7 +152,7 @@ Files: `authority.rs`, `model.rs`, `protocol.rs`, `library.rs`; new `swift_prede
 - `upgrade` (§16.1) and the conversion of 0.4 grants to terms.
 - Succession (§15.1). For `/5` predecessors, use the core's own verifier.
 - **Swift predecessor verifier in Rust** (§16.3), a pure function of stored bytes, so the WASM
-  build and every binding carry it. Its vectors are `conformance/0.5/candidate/succession/*`,
+  build and every binding carry it. Its vectors are `conformance/0.5/succession/*`,
   already replayed by the Swift source. A TypeScript port for Galley must pass the same files.
 - Receipts (§13.5) as inputs to replay.
 

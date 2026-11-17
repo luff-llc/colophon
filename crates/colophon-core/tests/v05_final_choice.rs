@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 fn vector(name: &str, skip: &[&str]) -> Objects {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../conformance/0.5/candidate/rules")
+        .join("../../conformance/0.5/rules")
         .join(name);
     let mut files: Vec<_> = fs::read_dir(dir.join("records/authority"))
         .unwrap()
@@ -45,7 +45,7 @@ fn now_of(name: &str) -> String {
     let c: serde_json::Value = serde_json::from_slice(
         &fs::read(
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("../../conformance/0.5/candidate/rules")
+                .join("../../conformance/0.5/rules")
                 .join(name)
                 .join("case.json"),
         )
