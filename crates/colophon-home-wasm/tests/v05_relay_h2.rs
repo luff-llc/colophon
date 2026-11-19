@@ -34,29 +34,6 @@ const NS: &str = "listening.podcasts";
 fn untimed(keys: &HomeKeys, account: &str, base: &str, dir: &std::path::Path, clock_ms: i64, resolve: &[(&str, u16)], port: u16) -> Relay {
     Relay::start_with(keys, account, base, dir, clock_ms, resolve, port, json!({"tickMs": 0}))
 }
-/// One scheduler pass at each of `relays`, then `done`, at most `max` times; no waiting. For
-/// what a home's own passes produce (recording entries, heads), not for forwarding between homes.
-fn ticks_until(what: &str, max: usize, relays: &[&Relay], mut done: impl FnMut() -> bool) {
-    for _ in 0..max {
-        for r in relays {
-            r.tick();
-        }
-        if done() {
-            return;
-        }
-    }
-    panic!("{what}: not after {max} scheduler passes");
-}
-/// Forwarding between homes: each poll runs one pass at each of `relays` (which starts their
-/// forwarding and does not wait for it); the wait is only for that I/O to finish.
-fn forwarded(what: &str, relays: &[&Relay], mut done: impl FnMut() -> bool) {
-    eventually(what, 30, || {
-        for r in relays {
-            r.tick();
-        }
-        done()
-    });
-}
 
 struct World {
     f: Fixture,
@@ -117,12 +94,9 @@ impl World {
     }
     /// Each running home holds the other's head: what the timer's first passes used to forward
     /// before anything else (a home at `headQuorum` 2 answers calls only with both heads).
-    fn heads_exchanged(&self) {
+    fn heads_exchanged(&self, at: i64) {
         if let Some(b) = &self.b {
-            forwarded("each home holds the other's head", &self.homes(), || {
-                self.a.get(&format!("/records/heads/{}.json", self.hb)).0 == 200
-                    && b.get(&format!("/records/heads/{}.json", self.ha)).0 == 200
-            });
+            heads_exchanged(&self.a, &self.ha, b, &self.hb, at);
         }
     }
     fn clocks(&self, ms: i64) {
@@ -627,7 +601,7 @@ fn a_late_veto_is_stored_with_another_homes_in_window_receipt_and_signs_none() {
     let (ka, kb) = (HomeKeys::new(0x77), HomeKeys::new(0x78));
     let t = NOW;
     w.clocks(t);
-    w.heads_exchanged();
+    w.heads_exchanged(t);
     let mut ctl = w.controller(t);
     let tr = propose_by(&w, &mut ctl, 600, &[w.f.d.clone()]);
     w.pass_all(&mut ctl, t + 1_000);
@@ -922,7 +896,7 @@ fn a_home_that_recorded_final_first_gives_its_peer_the_entry() {
     let ka = HomeKeys::new(0x77);
     let t = NOW;
     w.clocks(t);
-    w.heads_exchanged();
+    w.heads_exchanged(t);
     let mut ctl = w.controller(t);
     propose_by(&w, &mut ctl, 600, &[w.f.d.clone()]);
     w.pass_all(&mut ctl, t + 1_000);
