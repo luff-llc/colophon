@@ -44,7 +44,7 @@ Operation and request markers stay `/3`, and authority bodies use `colophon/auth
 ## Freeze record
 
 - **Specification:** two independent review rounds (Codex, agy) with every finding resolved
-  (`colophon-0.4-keys-review-*.md`).
+  (summarized in the keys spec's review log).
 - **Conformance:** 98 key cases plus a complete library fixture, covering every §10 bullet with
   named outcomes and cryptographic intermediates.
 - **Implementation review:** an independent read-only Codex security review. Its two

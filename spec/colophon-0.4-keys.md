@@ -531,6 +531,6 @@ byte oracle.
 | 2026-11-08 | Codex round 2 | 2 of 34 round-1 items still open (historical vault freshness; error codes); 8 new findings | All adopted: per-principal key uniqueness, slot preservation, `null` scope, closed field sets with authorized `newerFormat`, import expiry semantics, PRF construction from an assertion, multiset comparison, vectors before freeze |
 | 2026-11-08 | agy round 2 | 11 new findings | All adopted. Threshold ordering is resolved the other way from Swift: `recoverThreshold > threshold` is explicitly allowed. A deterministic PRF salt was declined in favor of the assertion-based construction. |
 
-The reviews are kept beside this file as `colophon-0.4-keys-review-*.md`. Both round-2 reviews
+The review texts were kept beside this file while it was drafted; they are not in this repository. Both round-2 reviews
 say the spec is ready to freeze once their findings are fixed and the §10 vectors are
 published. The vectors come from implementation work package W4.

@@ -1,4 +1,4 @@
-//! The two journeys of `docs/handoff-engine-05-write.md` E6, end to end through the engine, an
+//! The two journeys of the 0.5 write package (E6), end to end through the engine, an
 //! in-memory record source per device and a simulated home built on `history::home`.
 //!
 //! 1. A listening app (Taupe): two devices of one person, follows and a queue as operations, a

@@ -4,8 +4,10 @@ cd "$(dirname "$0")/.."
 export PATH="/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:$PATH"
 # Prerequisites: JDK 17, Android command-line SDK + NDK, cargo-ndk, and these Rust targets.
 # ANDROID_HOME / ANDROID_NDK_HOME default to the machine's installed SDK when present.
-if [[ -z "${ANDROID_HOME:-}" && -d /Users/mikelxc/.local/share/luff/android-sdk ]]; then
-  export ANDROID_HOME=/Users/mikelxc/.local/share/luff/android-sdk
+if [[ -z "${ANDROID_HOME:-}" ]]; then
+  for sdk in "$HOME/Library/Android/sdk" "$HOME/Android/Sdk"; do
+    if [[ -d "$sdk" ]]; then export ANDROID_HOME="$sdk"; break; fi
+  done
 fi
 : "${ANDROID_HOME:?Set ANDROID_HOME to the installed Android SDK}"
 if [[ -z "${ANDROID_NDK_HOME:-}" ]]; then

@@ -4,55 +4,92 @@
 
 Your library lives on your devices. Your keys decide who gets access.
 
-Colophon is a data standard for the things a person reads, hears and writes: saved
-articles, books, podcasts and notebooks. Each app or agent that uses a library joins it as
-a *member*, with its own key and a grant scoped to the parts it needs. Members write
-signed, encrypted operations, and every client folds the admitted operations into the same
-state. Storage and transport never grant access: a folder, iCloud Drive or a relay only
-moves bytes it can't read. There is no vendor account.
+Colophon is a sync and identity protocol for the things a person reads, hears and writes: saved
+articles, books, podcasts and notebooks. A library belongs to an **account**, a keyring of
+controllers (passkeys, security keys, device owner keys, recovery kits) whose identifier is the
+digest of its first authority record. Each app, device or agent joins as a **member**, with its own
+key and a grant scoped to the namespaces it needs. Members write signed, encrypted operations, and
+every client folds the admitted operations into the same state. A **home** keeps the history and
+vouches for its head, but storage and transport never grant access: a home, a folder or iCloud
+Drive only moves bytes it cannot read. There is no vendor account.
 
-This repository holds the Colophon 0.5 Rust core (with the 0.4 engine beside it), the
-JavaScript package, the reference relay, the Swift and Kotlin SDKs, the playground demo,
-plus the 0.1 specification, conformance vectors and shipped Swift reference implementation in `reference/swift/`. The root Swift package is **ColophonSDK**,
-with the Rust-backed products under `swift/`. In LUFF's Marginalia repository,
-"Colophon 0.2" names the Swift layout-2 step whose design 0.3 absorbs.
+## Status: 0.5.0
 
-**0.5 is frozen, revision 18 (2026-11-16).** The formats and reader rules are frozen for now; the
-gaps listed in spec §21 are closed in 0.5.x without changing any format, and
-[spec §21.1](spec/colophon-0.5.md#211-what-050-does-not-do) lists what 0.5.0 does not do. An account is a keyring of controllers whose identifier is the
-digest of its first authority record; members act under grants, sessions act for members through
-links and calls, and a home keeps and vouches for the history. See
-the [0.5 spec](spec/colophon-0.5.md), its [guide](spec/colophon-0.5-guide.md), the
-[0.5 conformance vectors](conformance/0.5/) and the [changelog](CHANGELOG.md).
+**0.5 ("one portable identity: an account") is released as 0.5.0, spec revision 18.** Its formats
+and reader rules are frozen, provisionally: some freeze conditions are still open (missing
+vectors, the Swift differential corpus, a dry run on a real library, Galley alignment, physical
+devices), and they are closed in 0.5.x without changing any format.
 
-**0.4 replaces the single root key with a keyring.** Authority belongs to a keyring of
-controllers: passkeys, security keys, device owner keys and recovery kits, with roles and
-thresholds. Passkeys sign authority as WebAuthn assertions and can unlock data through PRF.
-Device and member keys do the everyday work without prompts. Every epoch is sealed to a vault
-that opens through slots. See the [0.4 spec](spec/colophon-0.4.md), the
-[keys and keyring spec](spec/colophon-0.4-keys.md), and the [changelog](CHANGELOG.md).
+Read [spec §21.1, what 0.5.0 does not do](spec/colophon-0.5.md#211-what-050-does-not-do) before
+building on it. The short version: one home per account (several are experimental), no notices,
+no guaranteed background sync, one verifier implementation, nothing proven on physical phones,
+sync is one request per record, and nothing is published to a package registry.
 
-0.3 separated immutable intent from replaceable playback state, scoped operation listings by
-namespace, and added an authenticated layout barrier and explicit session readiness. See the
-[0.3 handoff](docs/handoff-v03.md) and [performance results](docs/performance.md).
+| Read | For |
+| --- | --- |
+| [Specification](spec/colophon-0.5.md) | The normative text: records, the account and its keyring, members and grants, homes, succession, conformance (§21) |
+| [Guide](spec/colophon-0.5-guide.md) | What 0.5 is for and how the pieces fit, without the normative detail |
+| [Changes from 0.4](spec/colophon-0.5-changes.md) | Upgrade paths, review answers and deferred items |
+| [Conformance vectors](conformance/0.5/README.md) | 437 cases with exact bytes and one named outcome each, and what covers each required item |
+| [Changelog](CHANGELOG.md) | What changed in each release |
+| [Known issues](docs/known-issues.md) | Open implementation gaps beside §21.1 |
 
-## Try it
+## Use it
 
-The fastest way to see Colophon: the playground runs the real 0.3 Rust core as
-WebAssembly in one browser tab, where an AI agent knocks, gets narrow access,
-does useful work, and is shown the door.
+Nothing is published to npm, Maven or a Swift registry. Each GitHub release carries four
+packages built from the tagged commit, with checksums and a `manifest.json` that records how they
+were built ([release packaging](docs/release-packaging.md)); they are unsigned.
+
+| Package | File | Start with |
+| --- | --- | --- |
+| Apple XCFramework (macOS, iOS, visionOS) | `ColophonFFI-<version>.xcframework.zip` | [A new Apple app](docs/new-app.md), [the Apple session](docs/session.md), [native bindings](docs/native-bindings.md) |
+| Android AAR (Kotlin) | `colophon-android-<version>.aar` | [Android and Kotlin](docs/android.md) |
+| JavaScript package | `colophon-core-<version>.tgz` | [The JavaScript session](docs/js-session.md), [JS API](docs/js-api.md) |
+| Home bundle (Bun or Node) | `colophon-home-<version>.tar.gz` | [Reference relay and home](relay/README.md), [sync through a relay](docs/sync.md) |
+
+The root Swift package is **ColophonSDK**. It expects the framework at
+`sdk/apple/ColophonFFI.xcframework`: unzip the release's framework there, or build it with
+`bash scripts/build-apple.sh`. Its products are `ColophonSession`, `ColophonSessionUI`,
+`ColophonKeys`, `ColophonKit`, `ColophonKitStorage`, `ColophonMigration` and one kit per domain
+(`ColophonSavedKit`, `ColophonBooksKit`, `ColophonListeningKit`, `ColophonNotesKit`).
+
+The four domains are specified in [docs/domains](docs/domains/README.md):
+[`reading.saved`](docs/domains/reading.saved.md), [`reading.books`](docs/domains/reading.books.md),
+[`listening.podcasts`](docs/domains/listening.podcasts.md) and [`notes`](docs/domains/notes.md).
+Apps moving from the shipped Swift libraries follow [migration](docs/migration.md) and
+[app migration](docs/app-migration.md).
+
+## Build and test from source
+
+Rust 1.99.1, Bun, Node 24 with npm, wasm-bindgen CLI 0.2.130; Xcode for the Apple parts; JDK 17,
+the Android SDK and NDK `30.0.16248370` for Android.
 
 ```sh
-# Rust stable; on Homebrew installations:
-export PATH="/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:$PATH"
-npm ci --prefix js && npm --prefix js run build   # @colophon/core + wasm
-cd playground && npm install && npm run dev       # http://localhost:5173
+cargo test --workspace --locked          # the Rust core, FFI, WASM and relay-backed tests
+bash scripts/test-home.sh                # the home, with its kill loop
+bash scripts/test-swift.sh               # the Apple SDK (builds the home module; needs the framework)
+bash scripts/test-kotlin.sh              # the Kotlin SDK, with journeys against the real relay
+bash scripts/test-js.sh                  # the JS session under Bun and in headless Chrome
+bash scripts/package-release.sh --verify # the four packages, each built twice and compared
 ```
 
-Open `http://localhost:5173/?demo` and click Next through knock → grant → act →
-end → recover. Without a key the scripted stand-in performs the agent's tool
-calls; with `MUSE_API_KEY` in `playground/.env.local`, the live Muse model
-answers instead (the key stays on the server; see `playground/README.md`).
+The scripts say what each needs and fail rather than skip. [Architecture](docs/architecture.md)
+covers the crates and dependency pins, [the engine](docs/engine.md) the Rust API, and
+[performance](docs/performance.md) the measurements behind §21.1 item 11.
+
+### Layout
+
+| Path | What it is |
+| --- | --- |
+| `crates/colophon-core` | The sans-IO Rust core: records, the 0.5 verifier and engine, the 0.4 engine, the domain folds |
+| `crates/colophon-ffi`, `crates/colophon-wasm` | UniFFI (Swift, Kotlin) and WASM exports of the core |
+| `crates/colophon-home-wasm`, `relay/` | The home as a WASM module and the Bun/Node relay that serves it |
+| `swift/`, `Package.swift` | The Apple SDK (ColophonSDK) |
+| `sdk/kotlin`, `sdk/android` | The Kotlin session and the Android library |
+| `js/` | `@colophon/core`, the JavaScript session |
+| `conformance/` | Vectors for 0.3, 0.4 and 0.5; the keys in it are test keys, never for a real library |
+| `apps/`, `examples/`, `playground/` | Test apps, a sample app and the browser playground |
+| `reference/swift` | The independent Swift reference implementation of 0.1, kept for migration |
 
 ## Why
 
@@ -61,170 +98,23 @@ whichever app owns your data, and an agent either scrapes it or doesn't get in. 
 makes access explicit instead:
 
 - **Scoped.** An agent can read your listening without seeing your reading.
-- **Revocable.** Ending access stops future reads and writes immediately. It doesn't
-  rewrite the past: what a member already wrote stays, still attributed to it.
-- **Attributed.** Who wrote something comes from their key, never from a field they fill
-  in. AI-written notes carry `origin: ai`, so they can't pass for the person's words.
-- **Portable.** Every client folds the same operations into the same meaning, so a person
-  can change apps without losing what their history means.
-- **Honest.** Missing history, keys or files remain visible, retryable states. Nothing
-  is reported as an empty library because a member lacks permission.
+- **Revocable.** Ending access stops future reads and writes. It doesn't rewrite the past: what
+  a member already wrote stays, still attributed to it.
+- **Attributed.** Who wrote something comes from their key, never from a field they fill in.
+  AI-written notes carry `origin: ai`, so they can't pass for the person's words.
+- **Portable.** Every client folds the same operations into the same meaning, so a person can
+  change apps without losing what their history means.
+- **Honest.** Missing history, keys or files remain visible, retryable states. Nothing is
+  reported as an empty library because a member lacks permission.
 
-## Rust core and JavaScript package (the 0.4 engine)
+## Earlier versions
 
-The pure Rust core implements records, raw and WebAuthn key steps, the controller keyring and
-vault slots, HPKE, grants, admission, epoch rotation, recovery, four domain folds, the ledger and generated agent tools. It performs no
-I/O and takes time and entropy explicitly. `colophon-wasm` and `@colophon/core` run the same
-implementation with non-extractable WebCrypto keys.
-
-The Rust domains coexist under `crates/colophon-core/src/domains/`:
-
-- [`reading.books`](docs/handoff-dom-reading.books.md): books, plans, rereads, progress,
-  book notes and loan receipts.
-- [`reading.saved`](docs/handoff-dom-reading.saved.md): saved items, reading state, sources,
-  annotations, feeds and browser checkpoints.
-- [`notes`](docs/handoff-dom-notes.md): notebooks, cells, entries, recorded outputs,
-  attachments and proposals.
-- [`listening.podcasts`](docs/handoff-dom-listening.podcasts.md): shows, episodes, playback,
-  queues, playlists, notes, chapters and transcript descriptors.
-
-Each supplies reducers, query/tool specifications, synthetic conformance vectors and pure
-verified-source import transforms. The linked handoffs describe the remaining authenticated-role,
-blob, historical-evidence and migration integration requirements.
-
-```sh
-# Rust stable; on Homebrew installations:
-export PATH="/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:$PATH"
-cargo test
-cargo clippy -- -D warnings
-cargo build -p colophon-core --target wasm32-unknown-unknown
-
-# Install wasm32 target and wasm-bindgen-cli 0.2.130 if not already available.
-# Node 24+, npm; TypeScript is the only npm build dependency.
-npm ci --prefix js
-npm --prefix js run build       # cargo release + wasm-bindgen --target web + tsc
-npm --prefix js test            # WebCrypto smoke and Rust/WASM fixture parity
-```
-
-`js/dist/` is the distributable `@colophon/core` package output; serve its wasm alongside its
-ES modules. Build artifacts and local dependency caches are not committed. No package has been
-published by this worktree.
-
-See the [0.4 spec](spec/colophon-0.4.md), [JavaScript contract](docs/js-api.md),
-[architecture and dependency pins](docs/architecture.md), and the [0.4 conformance vectors](conformance/0.4/).
-`conformance/0.3/` is kept as history; 0.4 deliberately refuses its authority records.
-Regenerate the 0.4 vectors with
-`COLOPHON_WRITE_VECTORS=1 cargo test -p colophon-core --test keys_conformance`.
-
-The root Apple package exports `ColophonFFI`, `ColophonKit`, `ColophonKitStorage`,
-`ColophonSession`, `ColophonSessionUI`, `ColophonBooksKit`, `ColophonListeningKit`,
-`ColophonSavedKit`, `ColophonNotesKit`, `ColophonMigration`, and `ColophonKeys` (passkeys,
-security keys and Secure Enclave owner keys). Start with
-[new app](docs/new-app.md), [native bindings and package identity](docs/native-bindings.md),
-and [scoped migration](docs/migration.md). Build the local XCFramework before resolving SwiftPM.
-Apps retaining a local `Colophon` package should check out this SDK as `packages/ColophonSDK`.
-
-The sections below describe the independent historical Swift package in `reference/swift/`.
-Its optional `ColophonLegacyAdapter` connects that reference to the root migration protocol;
-apps with their own 0.1 stack implement the protocol themselves.
-
-## Swift 0.1 reference modules
-
-| Module | What it is | Depends on |
-| --- | --- | --- |
-| `ColophonCore` | Records, canonical encoding, identities (Secure Enclave, software), sealed keys, recovery kit | CryptoKit |
-| `ColophonStore` | `RecordStore` (folder, memory), `StoreSync`, HTTP relay profile | Core |
-| `ColophonAuthority` | Authority history, grants and caveats, revocation, handover, keyring controllers | Core, Store |
-| `ColophonReplica` | Operations, admission, `DomainModule`, operation and query specs | Core, Store, Authority |
-| `ColophonSaved` | `reading.saved`: read-later links, reading state, metadata | Replica |
-| `ColophonBooks` | `reading.books`: reading plans, rereads, progress, book notes | Replica |
-| `ColophonListening` | `listening.podcasts`: follows, positions, queue, playlists, chapters, transcripts, notes | Replica |
-| `ColophonNotes` | `notes`: notebooks with Markdown, LaTeX, code and recorded outputs | Replica, Listening |
-| `ColophonMCP` | An MCP server generated from domain modules | Replica |
-| `colophon` (executable) | Join a library as an agent; status, verify; serve MCP on stdio | all |
-
-Cryptography is P-256 ECDSA and ECDH, HKDF-SHA256 and AES-GCM: the primitives built into
-CryptoKit, WebCrypto and Android Keystore, so other implementations need no third-party
-crypto. The reference modules have no third-party dependencies; its optional migration adapter depends
-on the root SDK.
-
-## Connect an agent
-
-```sh
-cd reference/swift
-swift build --product colophon
-.build/debug/colophon "<library folder>" join --label "Muse on MacBook" --namespaces listening.podcasts,notes
-# compare the six-digit code with the app that can approve access, and approve there
-.build/debug/colophon "<library folder>" mcp      # MCP over stdio
-```
-
-The agent gets a `<namespace>__read` tool per module and one tool per operation, generated
-from each module's operation specs. Every write goes through the replica, so admission,
-grants and attribution apply unchanged.
-
-## Write a domain module
-
-A module names a namespace, its operation kinds and a deterministic fold:
-
-```swift
-public enum SavedLinks: DomainModule {
-  public static let namespace = "reading.saved"
-  public static let version = 1
-  public static let kinds = ["capture.link", "item.setState", "item.editMetadata"]
-  public static func fold(_ view: ReplicaView) -> SavedShelf { SavedShelf(view) }
-}
-```
-
-Folds must be deterministic, must skip kinds they don't know, and must keep payload fields
-they don't interpret. Conflicts are recorded, never silently resolved (spec §9).
-
-## Tests and conformance
-
-```sh
-COLOPHON_SOFTWARE_KEYS=1 swift test        # root SDK (0.5.0)
-COLOPHON_SOFTWARE_KEYS=1 swift test --package-path reference/swift  # 0.1, migration adapter, clean copy
-COLOPHON_SOFTWARE_KEYS=1 COLOPHON_WRITE_VECTORS=1 swift test --package-path reference/swift --filter writeVectors
-```
-
-Restricted builders use `bash scripts/test-swift.sh` and
-`bash scripts/test-swift.sh --package-path reference/swift`. Hardware acceptance is separate.
-
-`conformance/` stays at the repository root and holds a library, the keys that wrote it and `expected.json`. Another
-implementation conforms if it reproduces `expected.json` from the records and keys
-(spec §11). `conformance/keyring/` is a separate vector for keyring controllers. The keys in
-`conformance/` are test keys, published so anyone can check the vectors; never use them for
-a real library.
-
-## Swift 0.1 status and limits
-
-Colophon 0.1 is the protocol baseline, and this is its reference implementation, the one inside
-LUFF's apps. It is a preview, not yet a stable SDK:
-
-- **Apple platforms only** for now (macOS 14, iOS 17, visionOS 26). The kernel uses only
-  primitives other platforms provide. The 0.3 Rust/wasm implementation above is separate.
-- **`ColophonSaved` is a subset of `reading.saved`.** It folds capture, state and metadata.
-  Deletion and the reading extensions (content, feeds, annotations, browser checkpoints) are
-  kept in history but not folded yet, so a shelf here can still list a deleted item.
-- **Open protocol questions** (spec §13): compaction for long histories, an online
-  sequencer profile, and capability negotiation between module versions.
-- **Wire constants.** Some digest seeds and purposes, such as `org.marginalia.reader` and
-  `org.luff.taupe.playback-progress`, name the apps that first wrote them. They are part of
-  the wire format and must not change.
-
-## Findings that shaped 0.1
-
-1. Recovering the root must also recover the data keys: every epoch key is sealed to the
-   recovery identity.
-2. Revocation must not punish the past: a revoke lists the operations already seen, and
-   they stay.
-3. A bridge publishes against what it last saw, or replicas silently diverge.
-4. A signature can't date anything: backdated writes from a revoked member are held for a
-   person to decide.
-5. Root handover must re-share keys before the handover entry; afterwards only the new
-   root signs.
-6. A presence-protected root must sign a whole action after one Face ID check, and must
-   degrade on devices without a passcode.
-7. Display order must come from the agreed operation order, never from author timestamps.
+[0.4](spec/colophon-0.4.md) replaced the single root key with a keyring
+([keys](spec/colophon-0.4-keys.md)); 0.4 libraries upgrade to 0.5 in place.
+[0.3](spec/colophon-0.3.md) separated immutable intent from replaceable playback state.
+[0.1](spec/colophon-0.1.md) is the baseline inside LUFF's shipped Swift apps, whose libraries
+move to 0.5 by a verified succession. In LUFF's Marginalia repository, "Colophon 0.2"
+([note](spec/colophon-0.2.md)) names the Swift layout-2 step that 0.3 absorbed.
 
 ## License
 

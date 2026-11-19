@@ -128,7 +128,7 @@ inspection (size, indexing, iteration or equality). Reading a large ledger can b
 thread and is outside the fast launch path. Kotlin publishes lazy snapshot identities without
 forcing List equality during StateFlow updates. A retained, not-yet-inspected Kotlin ledger reads
 engine history when first inspected; it is not a frozen historical snapshot. Use named queries
-for app screens. See [design, checks and limitations](handoff-engine-sessions.md).
+for app screens. See [the engine](engine.md) and [performance](performance.md) for the design, checks and limits.
 
 Storage providers may supply complete change deltas. Built-in memory stores do; folder providers
 continue to enumerate metadata and compare versions. Providers without a synchronous Swift
@@ -145,7 +145,7 @@ Build the AAR once:
 ```sh
 export PATH="/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:$PATH"
 export JAVA_HOME=/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home
-export ANDROID_HOME=/Users/mikelxc/.local/share/luff/android-sdk
+export ANDROID_HOME="$HOME/Library/Android/sdk"   # Android Studio's default on a Mac
 export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/30.0.16248370"
 bash scripts/build-android.sh
 ```

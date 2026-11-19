@@ -5,8 +5,10 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 export PATH="/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:$PATH"
-if [[ -z "${ANDROID_HOME:-}" && -d /Users/mikelxc/.local/share/luff/android-sdk ]]; then
-  export ANDROID_HOME=/Users/mikelxc/.local/share/luff/android-sdk
+if [[ -z "${ANDROID_HOME:-}" ]]; then
+  for sdk in "$HOME/Library/Android/sdk" "$HOME/Android/Sdk"; do
+    if [[ -d "$sdk" ]]; then export ANDROID_HOME="$sdk"; break; fi
+  done
 fi
 if [[ -z "${JAVA_HOME:-}" && -d /opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home ]]; then
   export JAVA_HOME=/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home

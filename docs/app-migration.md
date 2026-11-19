@@ -135,14 +135,13 @@ All five arm64 Apple slices build, including nightly-built visionOS, and the hos
 passes. The `android` worktree turns that AAR script into a Gradle library
 (`org.luff.colophon:colophon-android`) with both JNI ABIs, `ColophonSession`, Keystore keys,
 and a private file store. See [Android session](android.md).
-See [native bindings](native-bindings.md), [FFI measurements](performance.md#ffi), and the
-[bindings handoff](handoff-ffi.md) for the exact build gates and sandbox limitations.
+See [native bindings](native-bindings.md), [FFI measurements](performance.md#ffi), and [the Apple build](native-bindings.md) for the exact build gates.
 
 ### App SDK implementation status (November 6, 2026)
 
 The `ffi` worktree adds `ColophonKitStorage`, `ColophonSession`, revision-keyed typed query
 stores, destination-bound extension ingress and the macOS/iOS `examples/ColophonSample`.
-See [new app](new-app.md), [session contracts](session.md), and [session handoff](handoff-session.md).
+See [new app](new-app.md), [session contracts](session.md).
 The internal `SessionCore` protocol isolates the current binding API for the incoming engine.
 Checkpoint byte storage is present; verified-prefix use waits for that engine and bindings.
 These are SDK/sample and synthetic multi-session checks, not migration acceptance for the
@@ -158,7 +157,7 @@ key and scope-specific marker URL. Marginalia implements the protocol over its e
 
 See [migration.md](migration.md) for the complete verification, evaluation, catch-up and
 persistence contract, including migrating books from a mixed suite library and importing a later
-scope into an explicitly identified shared destination. See [native bindings](native-bindings.md#package-identity-and-coexistence-with-01)
+scope into an explicitly identified shared destination. See [native bindings](native-bindings.md)
 for the `packages/ColophonSDK` dependency path needed to coexist with `packages/Colophon`.
 
 `run(batchSize:)` checkpoints complete source units and supports restart and appended catch-up.

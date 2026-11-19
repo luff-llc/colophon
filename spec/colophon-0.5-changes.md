@@ -35,7 +35,7 @@ This was checked in code, not only in documents.
   - Its slots use the labels `colophon/vault-prf/1`, `colophon/sealed-key/1` and others.
   - §16.3 now specifies this format normatively. The candidate's Swift vectors were replayed by
     that exact source, unmodified.
-- The clean copy of Mike's library to 0.4 was never done (`docs/handoff-keys-04.md`). I could not
+- The clean copy of Mike's library to 0.4 was never done (recorded in an internal handoff note). I could not
   inspect his devices, so whether his library has adopted a keyring, and which keys it holds, is
   unverified.
 - That leaves two paths:
@@ -564,12 +564,12 @@ Two further points the contract needs:
 | Custody and presence as signed fields | 0.4 §11 | Left; `custody` is display. |
 | D-F2-1 cold replay | `docs/performance.md` | Incremental verification (§13.3); not re-measured. |
 | PRF from registration output | 0.4 §10 | Unchanged rule. |
-| Keep sets grow | `docs/handoff-engine.md` | Author chains with up to 16 heads. |
-| No global freshness or anti-rollback | `docs/handoff-engine.md`; 0.3 §7.1 | Heads, high-water marks, primary home, quorum; local-cache rollback by an attacker who controls local storage is out of scope. |
-| Relocation, recovery and leave protocols | `docs/handoff-blobs.md` | Homes, succession, migration entry. |
-| Android packaging, blob GC and other host gaps | `docs/followups.md`, `docs/handoff-blobs.md` | Host work; unchanged. |
+| Keep sets grow | Engine stage 2 notes (internal) | Author chains with up to 16 heads. |
+| No global freshness or anti-rollback | Engine stage 2 notes (internal); 0.3 §7.1 | Heads, high-water marks, primary home, quorum; local-cache rollback by an attacker who controls local storage is out of scope. |
+| Relocation, recovery and leave protocols | Blobs notes (internal) | Homes, succession, migration entry. |
+| Android packaging, blob GC and other host gaps | [`docs/known-issues.md`](../docs/known-issues.md) | Host work; unchanged. |
 | Domain open questions | `docs/domains/*.md` | Not formats; unchanged. |
-| W1 findings (22 rows) | `spec/colophon-0.5-findings.md` | §E. |
+| W1 findings (22 rows) | W1 slice 1 findings (internal) | §E. |
 | Galley draft §15 items 1–9; Q46–Q50 | Galley | Q46 settled (propose includes read); Q48 settled (author chains); the rest left with their features. |
 | W0 retry contradictions | Galley | For calls, §12.4; the guarded half is left with guarded state. |
 | Draft-1 vectors under `conformance/0.5/speaks-for` and `terms` | colophon `main` | Contradict 0.5 (L1). Moving them means changing the test that reads them, so it is implementation step 0, before freeze. |

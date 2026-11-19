@@ -16,7 +16,7 @@ vector of revisions 12 to 14 was replayed by the Swift source**; and the shipped
 write F (step 8). Steps are in order. The vectors come first, because §21 says the
 spec can't freeze without them, and every verifier step is then tested against them.
 
-Rules carried over from `docs/handoff-keys-04.md`:
+Rules carried over from the 0.4 keys work:
 - The core stays sans-IO with no RNG.
 - No new Rust dependency: the existing `p256`, `aes-gcm`, `hkdf`, `sha2`, `serde`, `serde_json`
   and `base64` suffice.
@@ -261,7 +261,7 @@ from Marginalia `origin/main` first: the reference copy lacks the `layout` kind)
   - write the freezing `layout` entry through the Swift `ColophonAuthority` (**blocked until a
     new Apple app version exists**: the shipped Swift code cannot write F; the list of what the
     version must add is in the guide §4 "Writing F from an Apple app", from
-    `docs/handoff-engine-05-write.md`: a `successor` member, layout 3 or more, a raw-record append
+    the 0.5 write package: a `successor` member, layout 3 or more, a raw-record append
     or explicit `issued`, a reader rule that F is final for the app that wrote it, and the
     update-required path for old versions);
   - rebuild a slot for every slotted controller, or stop;

@@ -187,7 +187,7 @@ scale with record count. File providers still enumerate metadata during refresh/
 providers implement complete change deltas. Explicit compatibility ledger/admin calls still
 materialize history. Background checkpoint serialization is excluded from write latency;
 records and pending-publication receipts are durable before `perform()` completes. See
-[the handoff](handoff-engine-sessions.md) for API behavior and remaining work.
+[the engine](engine.md) for API behavior and [known issues](known-issues.md) for what remains.
 
 Reproduce after building the native artifacts (use the environment paths from the handoff/task):
 
@@ -646,7 +646,7 @@ key availability conservatively rebuild; the <100 ms gate applies to appendable 
 unchanged authority. Administrative materialization can still allocate full history. Device-key
 storage, production record sources, FFI/provider adapters, total app-launch I/O and mobile
 hardware/power/tail latency remain host integration work. See [engine.md](engine.md) and
-[the handoff](handoff-engine.md) for the contract and next-worker details.
+[known issues](known-issues.md) for the contract and what remains.
 
 ## FFI
 
