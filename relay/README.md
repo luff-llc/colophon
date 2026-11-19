@@ -129,7 +129,7 @@ released after `unclaimedHours`, as any other.
 | `operator` | none, required with `"grant"` | `{"account": "<64-hex ID>", "slot": "<slot>"}`: the operator account, and this home's own slot for it (configured or provisioned) |
 | `audience` | none, required with `"grant"` | The door's canonical audience (§10.1), its own: for example `https://home.example/v1/provision`. Not a slot's base, nor `prefix + slot`; one per deployment, so staging's grants do not reach production |
 | `grantMaxSlots` | `20` | Slots one grant may hold (made by it, claimed or not; a released slot frees its place) |
-| `grantPerHour` | `30` | Verified calls one grant may make in a rolling hour (a new slot or the same one again), counted from the durable replay table |
+| `grantPerHour` | `30` | Verified calls one grant may make in a rolling hour (a new slot, the same one again, or one then refused with 409 or 507), counted from the durable replay table before any history work, so it survives a restart |
 | `grants` | `{}` | Per-member overrides: `{"<member ID>": {"maxSlots": N, "perHour": N}}` |
 | `grantAttemptsPerAddressPerHour` | `120` | Grant requests one address may make in an hour, charged before any verification (CI hosts share addresses, so it is separate from and higher than `perAddressPerHour`) |
 | `replayRows` | `4096` | The provisioning replay table's hard cap, besides each grant's share of it |
@@ -188,10 +188,13 @@ only a member grant whose terms carry `services` (§10.1), a call (§12.2) verif
   `audience` = `provision.audience`, `purpose` = `home.provision` exactly, and `args` = exactly the
   body `{"account","base","slot"}`. The module (op `provision_access`) checks, in order:
   parse; possession (the signature under the call's key, `badSignature`); then, before any history
-  work, the account, the audience, the purpose, `args` equal to the body, and that the signer is a
-  member and not this home itself; then the core's `verify_call` with no home endpoints and no
-  controller purposes (a controller's call is `refused:outOfScope`: a controller's key is for
-  authority, delegation is a member grant).
+  work, the account, the audience, the purpose, `args` equal to the body, that the signer is a
+  member, its grant's `grantPerHour` (429 `refused:overQuota` with `Retry-After`, from the durable
+  replay rows), and that the signer is not this home itself; then the core's `verify_call` with no
+  home endpoints and no controller purposes (a controller's call is `refused:outOfScope`: a
+  controller's key is for authority, delegation is a member grant). The checks before history work
+  run first without the operator slot's lock, so a call they refuse never waits for, or holds up,
+  an upload to that slot.
 - *Order and durability.* The door holds the operator slot's lock from the verification until the
   row is durable, and an upload to that slot waits for it (and it for an upload): a revocation the
   home has accepted is seen by every later verification, and none verified before it commits after
@@ -201,7 +204,9 @@ only a member grant whose terms carry `services` (§10.1), a call (§12.2) verif
   reservation left pending by a crash is resolved from `provisioned.json` at start-up: completed if
   a row names its digest, else abandoned; never by running it again. The same call again is
   `refused:replay`; a fresh call for an already provisioned `{slot, account}` answers the same bytes
-  and counts against its grant's rate (not its slots).
+  and counts against its grant's rate (not its slots). A verified call refused with no effect (409:
+  the slot is held or in use; 507: the home or the grant has no room) is recorded too, completed,
+  so it spends its grant's rate like an admitted one (and is then a replay).
 - *Per-address limits.* Every grant request is charged first against
   `grantAttemptsPerAddressPerHour`. A grant request refused before or by the verification (a
   malformed body, a bad call) counts against that address's own grant share of

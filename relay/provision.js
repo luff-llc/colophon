@@ -348,11 +348,14 @@ export function grantLimits(cfg, member) {
  * `grantAttemptsPerAddressPerHour`; a request refused before or by verification (a malformed
  * body, a bad call) counts against the address's own grant share of `perAddressPerHour`, which,
  * once full, refuses the address's grant requests before the module runs; an admitted one counts
- * against nothing per address. A verified call, new slot or not, is bounded by its grant:
- * `grantPerHour` calls (counted from the durable replay table) and `grantMaxSlots` slots held.
- * All paths: the home-wide `maxSlots`. `grant`, for a grant request, is the relay's side:
- * `replay` (the provisioning replay table), `heldBy(member)` (slots that grant made) and
- * `verify()` (the module's judgement of the call, under the operator slot's lock).
+ * against nothing per address. A verified call (a new slot, the same slot again, or one refused
+ * by the slot's holder or the room) is bounded by its grant: `grantPerHour` calls, counted by the
+ * module from the durable replay table before any history work, and `grantMaxSlots` slots held.
+ * A verified call that is refused carries `reserve`: the door records it, completed with no
+ * effect, before answering, so it spends the budget too. All paths: the home-wide `maxSlots`.
+ * `grant`, for a grant request, is the relay's side: `replay` (the provisioning replay table),
+ * `heldBy(member)` (slots that grant made) and `verify()` (the module's judgement of the call,
+ * under the operator slot's lock).
  */
 export function provisionGate(cfg, clock) {
   const open = hourly(); // the open and token paths: new slots, refused tokens
@@ -392,12 +395,12 @@ export function provisionGate(cfg, clock) {
       if (v.status === 403) refusals.count(address, now);
       return { status: v.status, result: v.result, retryAfter: v.retryAfter };
     }
+    // Verified: from here a refusal (the slot's holder, the room, the grant's slots held) has no
+    // effect but still spends the call, recorded completed, against the grant's `perHour`.
     const limits = grantLimits(cfg, v.member);
-    const rate = grant.replay.rate(v.reserve.signer, now, limits.perHour);
-    if (rate) return { status: 429, result: 'refused:overQuota', retryAfter: rate };
     const r = room(asked, held);
-    if (r.status) return r;
-    if (!r.existing && grant.heldBy(v.member) >= limits.maxSlots) return { status: 507, result: 'refused:overQuota' };
+    if (r.status) return { ...r, reserve: v.reserve };
+    if (!r.existing && grant.heldBy(v.member) >= limits.maxSlots) return { status: 507, result: 'refused:overQuota', reserve: v.reserve };
     return { admit: true, existing: r.existing, by: { gate: 'grant', member: v.member, key: v.key, call: v.reserve.digest }, grant: v };
   }
 
@@ -510,14 +513,6 @@ export class ProvisionReplay {
     if (this.rows.size < cap) return 0;
     const oldest = Math.min(...[...this.rows.values()].map((r) => r.at));
     return Math.max(1, Math.ceil((oldest + this.retentionMs + 1 - now) / 1000));
-  }
-
-  /** `grantPerHour`: the principal's rows within the last hour, from the durable table. Over
-   * `limit`: the seconds until the oldest of them leaves the hour; else 0. */
-  rate(signer, now, limit) {
-    const times = [...(this.bySigner.get(signer) ?? [])].map((k) => this.rows.get(k).at).filter((t) => t <= now && now - t < HOUR).sort((x, y) => x - y);
-    if (times.length < limit) return 0;
-    return Math.max(1, Math.ceil((times[times.length - limit] + HOUR - now) / 1000));
   }
 
   /** The row for a call's key, and its principal's rows, for the module. */

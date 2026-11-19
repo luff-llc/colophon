@@ -7,7 +7,7 @@ import https from 'node:https';
 import { HomeKey, HomeModule, HomeSlot, ModuleError } from './home.js';
 import {
   ProvisionReplay, ProvisionTable, REPLAY_DIR, TABLE_FILE, clientAddressConfig, tableKind, clientAddressResolver, isJsonType, memberRequest,
-  parseProvisionBody, provisionConfig, provisionGate, provisionRoute,
+  grantLimits, parseProvisionBody, provisionConfig, provisionGate, provisionRoute,
 } from './provision.js';
 import path from 'node:path';
 
@@ -624,36 +624,44 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
   }
 
   /**
-   * A grant request's judgement, under the operator slot's mutation lock. `verify()` takes the
-   * lock, settles the slot (its head fresh), and asks the module's `provision_access` over its
-   * state and the call's replay row; the lock is then held until `finish()`, after the gate's
-   * remaining checks, the reservation and the durable write. An authority upload to the operator
-   * slot (a revocation) waits for it, and it waits for an upload: a revocation the home has
-   * accepted is seen by every later verification, and none verified before it commits after it.
-   * The gate's cheap checks run before `verify()`, outside the lock. An operator slot that is not
-   * held, not set up, or stopped answers 503 unavailable.
+   * A grant request's judgement. `verify()` first asks the module's `provision_access` with no
+   * state, outside any lock: a call it refuses there (possession, account, audience, purpose,
+   * args, a controller, or a grant over its `perHour`) costs no history work and does not wait
+   * for, or hold up, the operator slot. Otherwise it takes the operator slot's mutation lock,
+   * settles the slot (its head fresh), and asks `provision_access` again over its state and the
+   * call's replay row; the lock is then held until `finish()`, after the gate's remaining checks,
+   * the reservation and the durable write. An authority upload to the operator slot (a
+   * revocation) waits for it, and it waits for an upload: a revocation the home has accepted is
+   * seen by every later verification, and none verified before it commits after it. The gate's
+   * cheap checks run before `verify()`, outside the lock. An operator slot that is not held, not
+   * set up, or stopped answers 503 unavailable. The replay table changes only under the door's
+   * own lock, so both asks see the same rows.
    */
   function grantSession(call, body) {
     let s = null; let unlock = null;
     const verify = async () => {
+      const parsed = call ? homeModule.call({ op: 'call_key', call }) : { parsed: false };
+      const rows = parsed.parsed ? provisionReplay.lookup(parsed.key, parsed.signer) : { existing: null, signerRows: [] };
+      const member = parsed.parsed && parsed.signer.startsWith('member:') ? parsed.signer.slice('member:'.length) : null;
+      const ask = (state) => homeModule.call({ op: 'provision_access', state, call: call ?? '', body: body.toString('base64'),
+        operator: provisioning.operator.account, audience: provisioning.audience, now: clock(),
+        existing: rows.existing, signerRows: rows.signerRows, replayRows: provisioning.replayRows,
+        perHour: grantLimits(provisioning, member).perHour });
+      const early = ask(null);
+      if (early.status !== 503) { await reach('grant refused'); return early; }
       const name = provisioning.operator.slot;
       let o = null;
       if (homeSlots.has(name)) o = await slot(name).catch((error) => { if (error instanceof HttpError) return null; throw error; });
       if (o && !o.closing && !o.released && o.home) {
         s = o; enter(s);
+        await reach('grant locking');
         await new Promise((locked, failed) => {
           s.home.lock(() => new Promise((release) => { unlock = release; locked(); })).catch(failed);
         });
         await s.home.keepLease();
         try { await s.home.settle(); } catch (error) { if (!(error instanceof ModuleError)) throw error; }
       }
-      // With no operator slot the module still refuses a bad call by its own checks first
-      // (possession, account, audience, purpose, args), then answers unavailable.
-      const parsed = call ? homeModule.call({ op: 'call_key', call }) : { parsed: false };
-      const rows = parsed.parsed ? provisionReplay.lookup(parsed.key, parsed.signer) : { existing: null, signerRows: [] };
-      const r = homeModule.call({ op: 'provision_access', state: s ? s.home.state : null, call: call ?? '', body: body.toString('base64'),
-        operator: provisioning.operator.account, audience: provisioning.audience, now: clock(),
-        existing: rows.existing, signerRows: rows.signerRows, replayRows: provisioning.replayRows });
+      const r = ask(s ? s.home.state : null);
       provisionReplay.dropRows(r.drop);
       await reach(r.allowed ? 'grant verified' : 'grant refused');
       return r;
@@ -687,6 +695,9 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
           held: { entry: table.get(asked.slot), occupied, count: table.size },
           grant: route === 'grant' ? { replay: provisionReplay, heldBy: (member) => table.heldBy(member), verify } : undefined });
         if (!verdict.admit) {
+          // A verified call refused with no effect (the slot's holder, the room): recorded
+          // completed, so it spends its grant's `perHour` like an admitted one.
+          if (verdict.reserve) await provisionReplay.reserve(verdict.reserve, null);
           throw new HttpError(verdict.status, verdict.error ?? 'Refused', verdict.retryAfter ? { 'retry-after': String(verdict.retryAfter) } : {},
             verdict.result ? { result: verdict.result } : undefined);
         }

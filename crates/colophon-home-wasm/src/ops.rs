@@ -2017,6 +2017,8 @@ fn member_request(req: &Value) -> R<Value> {
 /// The purpose a provisioning call names: the reference home's own, not the spec's
 /// `colophon.` prefix. The door's audience is unique to it, so no app purpose collides.
 const PROVISION_PURPOSE: &str = "home.provision";
+/// The window a grant's `perHour` counts its verified calls in (a rolling hour).
+const PROVISION_HOUR_MS: i64 = 3_600_000;
 
 /// `{"query":"audience","audience"}`: whether a configured audience is a §10.1 audience
 /// (`{"valid"}`), for the host's start-up check. `{"query":"members","state"}`: the operator
@@ -2026,12 +2028,15 @@ const PROVISION_PURPOSE: &str = "home.provision";
 /// In: `state` (the operator slot), `call` (base64 envelope), `body` (base64: the request body,
 /// already checked by the host to be exactly `{"account","base","slot"}`), `operator` (the
 /// operator account ID), `audience`, `now`, `existing` (the replay row for the call's key, or
-/// null), `signerRows` (the principal's rows, `{"key","at"}`), `replayRows` (the table's size).
+/// null), `signerRows` (the principal's rows, `{"key","at"}`), `replayRows` (the table's size),
+/// `perHour` (the grant's budget of verified calls in a rolling hour).
 ///
 /// Order, as §12.3 orders it: parse (`malformed`); possession (`badSignature`); then the cheap
 /// refusals before any history work: the account (`refused:outOfScope`), the audience
 /// (`refused:audience`), the purpose and `args` equal to the body (`refused:outOfScope`), a
-/// controller or this home's own member as signer (`refused:outOfScope`); then, with a verified
+/// controller as signer (`refused:outOfScope`), the member's `perHour` calls already in the last
+/// hour of its durable rows (`429 refused:overQuota` with `retryAfter`), this home's own member as
+/// signer (`refused:outOfScope`); then, with a verified
 /// history (else `unavailable`), the full `verify_call` with no home endpoints and no controller
 /// purposes. A refusal is `{"allowed":false,"status":403|503,"result"}`; the principal over its
 /// share of the table `429 refused:window`. Allowed: the member, the acting key's ID and the
@@ -2083,6 +2088,28 @@ fn provision_access(req: &Value) -> R<Value> {
         return refuse("refused:outOfScope".into());
     };
     let member = member.clone();
+    // The grant's hourly budget (`perHour` verified calls, counted from the principal's durable
+    // rows), before any history work: a call over it costs no history verification.
+    let now_ms = i64_of(req, "now")?;
+    let per_hour = usize::try_from(u64_of(req, "perHour")?).unwrap_or(usize::MAX);
+    let mut recent: Vec<i64> = req
+        .get("signerRows")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|row| row["at"].as_i64())
+        .filter(|at| *at <= now_ms && now_ms - at < PROVISION_HOUR_MS)
+        .collect();
+    if recent.len() >= per_hour {
+        recent.sort_unstable();
+        let wait_ms = recent
+            .get(recent.len() - per_hour)
+            .map_or(PROVISION_HOUR_MS, |at| at + PROVISION_HOUR_MS - now_ms);
+        let retry_after = ((wait_ms + 999) / 1000).max(1);
+        let over = json!({"allowed": false, "status": 429, "result": "refused:overQuota",
+                          "retryAfter": retry_after});
+        return Ok(over);
+    }
     // No operator slot set up on this home (the host passes no state): nothing to verify over.
     if req.get("state").is_none_or(Value::is_null) {
         return unavailable();
@@ -2095,7 +2122,6 @@ fn provision_access(req: &Value) -> R<Value> {
     if l.slot.account != str_of(req, "operator")? {
         return Err("the operator slot serves another account".into());
     }
-    let now_ms = i64_of(req, "now")?;
     let Some(h) = l.home.as_ref() else {
         return unavailable();
     };
