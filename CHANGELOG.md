@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+On main, not in v0.5.0.
+
+- **Provisioning by grant** (reference home, `relay/`): the new gate `grant` provisions a slot when the request carries a 0.5 call (`Authorization: Colophon <call>`, purpose `home.provision`) signed by a member of an operator account held in one of the home's own slots. No shared secret is needed.
+  - Revoking or expiring the member stops it at once.
+  - Each member is bounded by its grant's terms, by `grantMaxSlots` and by a durable `grantPerHour`.
+  - The gate may be a list, for example `["grant","token"]`.
+  - Provisioned rows record `by`, and `bun relay/server.js provisioned <config>` lists them.
+  - No format and no reader rule changes. Core gains `Call::verify_possession`, the existing possession step moved out unchanged.
+  - Settings and the issuing and revoking steps are in [relay/README.md](relay/README.md).
+
 ## 0.5.0 — 2026-11-19
 
 Frozen on 2026-11-16 (spec revision 18) and released on 2026-11-19. Nothing was published in
