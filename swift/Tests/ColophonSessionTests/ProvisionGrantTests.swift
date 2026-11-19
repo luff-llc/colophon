@@ -51,7 +51,7 @@ final class CountingKeys: AsyncKeyProvider, @unchecked Sendable {
         for _ in 0..<6 {
             clock.advance(1000)
             let ok = await device.session.syncNow()
-            try relay.tick()
+            try await relay.tick()
             if ok, device.session.homeIssues.isEmpty, device.session.homeFaults.isEmpty { return }
         }
         Issue.record("did not settle: \(describe(device))")
@@ -63,7 +63,7 @@ final class CountingKeys: AsyncKeyProvider, @unchecked Sendable {
             _ = await device.session.syncNow()
             await device.session.refresh()
             if device.session.phase == .ready { return true }
-            try relay.tick()
+            try await relay.tick()
         }
         return false
     }

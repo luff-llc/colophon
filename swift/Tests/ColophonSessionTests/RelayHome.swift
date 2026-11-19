@@ -121,7 +121,11 @@ final class RelayHome: @unchecked Sendable {
     }
     /// One scheduler pass of the relay (its test hook: a `tick` line on stdin), on its clock, finished when it answers:
     /// the deterministic way to publish heads.
-    func tick() throws {
+    func tick() async throws {
+        // The read blocks until the relay answers: off the main actor, so other tests' tasks keep running meanwhile.
+        try await Task.detached { try self.tickBlocking() }.value
+    }
+    private func tickBlocking() throws {
         touch()
         let (input, output) = lock.withLock { (self.input, self.output) }
         guard let input, let output else { throw Failure.missing("a started relay") }
