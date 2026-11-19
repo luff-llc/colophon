@@ -18,7 +18,8 @@ use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::Mutex;
 
 use crate::support::*;
 
@@ -139,6 +140,10 @@ impl HomeKeys {
 /// A running relay process. Dropped, it is killed and waited for.
 pub struct Relay {
     child: Option<Child>,
+    /// The relay's stdin and the rest of its stdout (after the listening line), for `tick`.
+    control: Option<Mutex<(ChildStdin, BufReader<ChildStdout>)>>,
+    /// The relay `limits` it was started with (kept across `restart`).
+    limits: Value,
     pub port: u16,
     pub dir: PathBuf,
     pub clock: PathBuf,
@@ -168,7 +173,9 @@ impl Relay {
     ) -> Self {
         Self::start_with(keys, account, base, dir, clock_ms, resolve, port, json!({}))
     }
-    /// The same with relay `limits` set in the config file.
+    /// The same with relay `limits` set in the config file. `tickMs` there sets the relay's timer
+    /// (default 50 ms); `"tickMs": 0` starts no timer, and the test runs each scheduler pass
+    /// itself with `tick`.
     pub fn start_with(
         keys: &HomeKeys,
         account: &str,
@@ -202,18 +209,21 @@ impl Relay {
                 "COLOPHON_RELAY_TICK_MS",
                 limits.get("tickMs").and_then(Value::as_u64).map_or("50".to_string(), |t| t.to_string()),
             )
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()
             .unwrap();
+        let stdin = child.stdin.take().unwrap();
+        let mut stdout = BufReader::new(child.stdout.take().unwrap());
         let mut line = String::new();
-        BufReader::new(child.stdout.as_mut().unwrap())
-            .read_line(&mut line)
-            .unwrap();
+        stdout.read_line(&mut line).unwrap();
         let v: Value = serde_json::from_str(&line).expect("the listening line");
         let port = v["listening"]["port"].as_u64().unwrap() as u16;
         Self {
             child: Some(child),
+            control: Some(Mutex::new((stdin, stdout))),
+            limits,
             port,
             dir: dir.to_path_buf(),
             clock,
@@ -223,6 +233,23 @@ impl Relay {
     }
     pub fn set_clock(&self, ms: i64) {
         write_clock(&self.clock, ms);
+    }
+    /// Run one scheduler pass over every home slot (recording entries, heads; forwarding is
+    /// started, not awaited) and return once it is done: the relay's `--test-clock` stdin hook,
+    /// which answers `{"ticked":true}` on stdout. Other stdout lines are skipped.
+    pub fn tick(&self) {
+        let control = self.control.as_ref().expect("a relay this test started");
+        let mut guard = control.lock().unwrap();
+        let (stdin, stdout) = &mut *guard;
+        stdin.write_all(b"tick\n").unwrap();
+        stdin.flush().unwrap();
+        loop {
+            let mut line = String::new();
+            assert!(stdout.read_line(&mut line).unwrap() > 0, "the relay exited before it ticked");
+            if serde_json::from_str::<Value>(&line).ok() == Some(json!({"ticked": true})) {
+                return;
+            }
+        }
     }
     /// Where this relay reaches other homes (base, port), read by the relay at each use.
     pub fn set_resolve(&self, resolve: &[(&str, u16)]) {
@@ -275,6 +302,8 @@ impl Relay {
     pub fn attached(port: u16, base: &str, account: &str, dir: &std::path::Path) -> Self {
         Self {
             child: None,
+            control: None,
+            limits: json!({}),
             port,
             dir: dir.to_path_buf(),
             clock: dir.join("clock"),
@@ -286,8 +315,9 @@ impl Relay {
         let mut me = self;
         me.stop();
         let (dir, base, account) = (me.dir.clone(), me.base.clone(), me.account.clone());
+        let limits = me.limits.clone();
         // A new port (port 0, the one the relay reports): the old one may be taken meanwhile.
-        Self::start_on(keys, &account, &base, &dir, clock_ms, resolve, 0)
+        Self::start_with(keys, &account, &base, &dir, clock_ms, resolve, 0, limits)
     }
 }
 impl Drop for Relay {
