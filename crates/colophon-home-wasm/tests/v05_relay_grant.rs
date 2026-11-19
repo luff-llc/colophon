@@ -863,7 +863,7 @@ fn a_grant_has_its_own_limits_a_per_member_override_the_home_wide_cap_and_a_dura
     let Some(mut w) = World::new(
         "grant-limits",
         0x64,
-        json!({"maxSlots": 5, "grantMaxSlots": 2, "grantPerHour": 3,
+        json!({"maxSlots": 5, "grantMaxSlots": 2, "grantPerHour": 4,
         "perAddressPerHour": 100, "grants": {}}),
     ) else {
         return;
@@ -889,8 +889,8 @@ fn a_grant_has_its_own_limits_a_per_member_override_the_home_wide_cap_and_a_dura
         (507, "refused:overQuota".into()),
         "maxSlots caps every grant together"
     );
-    // M's rate: every verified call counts (an idempotent one too); the third admitted call is the
-    // last this hour.
+    // M's rate: every verified call counts (the refused third and an idempotent one too); the
+    // fourth verified call is the last this hour.
     assert_eq!(w.grant(&m, "ci-a1", &acct).0, 200, "idempotent, counted");
     let call = grant_call(&w.op.f, &m, "ci-a1", &acct, w.now);
     let (s, hs, b) = w.ask("ci-a1", &acct, Some(&colophon(&call)));
@@ -1023,6 +1023,144 @@ fn a_revocation_uploaded_during_an_admitted_provision_waits_for_it_under_the_loc
     assert_eq!(w.grant(&m, "ci-r2", &acct), (403, "refused:revoked".into()));
     assert!(table(w.dir()).get("ci-r1").is_some());
     assert!(table(w.dir()).get("ci-r2").is_none());
+}
+
+/// The rows (reservations) of the provisioning replay table's log.
+fn replay_rows(dir: &std::path::Path) -> usize {
+    std::fs::read_to_string(dir.join("data/provision-replay/replay.log"))
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| l.contains("\"r\":"))
+        .count()
+}
+
+#[test]
+fn verified_calls_the_room_refuses_count_and_calls_over_the_rate_cost_no_history_work() {
+    // Traced (the pause point is never reached), so the markers show what each request did.
+    let trace = Trace {
+        pause_at: Some("never reached".into()),
+        ..Default::default()
+    };
+    let Some(mut w) = World::traced(
+        "grant-spent",
+        0x68,
+        json!({"grantMaxSlots": 1, "grantPerHour": 3, "perAddressPerHour": 100}),
+        trace,
+    ) else {
+        return;
+    };
+    let m = w.op.m.clone();
+    let rx = w.home.as_mut().unwrap().rx.take().unwrap();
+    let (a, b) = ("ab".repeat(32), "cd".repeat(32));
+    // Three verified calls: one makes a slot, one is refused by the slot's holder (409), one by
+    // the grant's slots held (507). Each is recorded, the refused two completed with no effect.
+    assert_eq!(w.grant(&m, "ci-s1", &a).0, 200);
+    marker(&rx, "grant verified");
+    assert_eq!(w.grant(&m, "ci-s1", &b).0, 409);
+    marker(&rx, "grant verified");
+    assert_eq!(w.grant(&m, "ci-s2", &a), (507, "refused:overQuota".into()));
+    marker(&rx, "grant verified");
+    assert_eq!(replay_rows(w.dir()), 3);
+    assert_eq!(table(w.dir()).as_object().unwrap().len(), 1);
+    // Over the rate, again and again: refused before the operator slot's lock and any history
+    // work, and recorded nowhere.
+    for _ in 0..2 {
+        let call = grant_call(&w.op.f, &m, "ci-s1", &a, w.now);
+        let (s, hs, body) = w.ask("ci-s1", &a, Some(&colophon(&call)));
+        assert_eq!((s, result(&body).as_str()), (429, "refused:overQuota"));
+        assert_eq!(header(&hs, "retry-after").as_deref(), Some("3600"));
+        let seen = marker(&rx, "grant refused");
+        assert!(
+            !seen.iter().any(|l| l == "trace grant locking"),
+            "an over-rate call took the operator slot's lock: {seen:?}"
+        );
+    }
+    assert_eq!(replay_rows(w.dir()), 3, "an over-rate call is not recorded");
+    // A restart inside the hour keeps the count, the refused calls' rows included.
+    w.clock(w.now + 30 * 60_000);
+    w.restart(&Trace::default());
+    assert_eq!(replay_rows(w.dir()), 3);
+    let call = grant_call(&w.op.f, &m, "ci-s1", &a, w.now);
+    let (s, hs, body) = w.ask("ci-s1", &a, Some(&colophon(&call)));
+    assert_eq!(
+        (s, result(&body).as_str()),
+        (429, "refused:overQuota"),
+        "the refused calls still count after a restart"
+    );
+    assert_eq!(header(&hs, "retry-after").as_deref(), Some("1800"));
+    // An hour after them: admitted again (the same slot, idempotent).
+    w.clock(w.now + 30 * 60_000);
+    assert_eq!(w.grant(&m, "ci-s1", &a).0, 200);
+}
+
+#[test]
+fn a_provision_arriving_while_a_revocation_holds_the_lock_waits_for_it_and_is_refused() {
+    let Some(mut w) = World::new("grant-lock-rev", 0x69, json!({})) else {
+        return;
+    };
+    // Restarted traced: the upload of the revocation pauses once it holds the operator slot's
+    // lock (the set-up upload above was before the pause was armed).
+    w.restart(&Trace {
+        pause_at: Some("authority locked".into()),
+        ..Default::default()
+    });
+    let m = w.op.m.clone();
+    let acct = "ab".repeat(32);
+    let rx = w.home.as_mut().unwrap().rx.take().unwrap();
+    let port = w.port();
+    // M's call, made over the history the home holds now (before the revocation).
+    let call = grant_call(&w.op.f, &m, "ci-q1", &acct, w.now);
+    // The revocation of M is uploaded and pauses holding the lock.
+    let now = w.now;
+    w.op.f.account.advance(now).unwrap();
+    let from = latest_seq(&w.op.f) + 1;
+    let action =
+        w.op.f
+            .account
+            .begin_revoke(&m, &RevokeKeep::Nothing, &[w.op.f.d.clone()], [9; 32])
+            .unwrap();
+    run(&mut w.op.f.account, &w.op.f.host, action);
+    let entry = entries_json(&w.op.f)
+        .into_iter()
+        .find(|(s, _)| *s == from)
+        .unwrap()
+        .1;
+    let body = json!({"from": from, "entries": [entry], "receipts": []}).to_string();
+    let revoke = std::thread::spawn(move || {
+        http(
+            port,
+            "POST",
+            &format!("/v1/libraries/{OP_SLOT}/authority"),
+            &[("Content-Type".into(), "application/json".into())],
+            body.as_bytes(),
+        )
+    });
+    marker(&rx, "authority locked");
+    // The provision passes its checks that need no history and waits for the lock.
+    let provision = std::thread::spawn({
+        let (acct, auth) = (acct.clone(), colophon(&call));
+        move || door(port, "ci-q1", &acct, Some(&auth))
+    });
+    let before = marker(&rx, "grant locking");
+    assert!(
+        !before.iter().any(|l| l.starts_with("trace grant ")),
+        "the provision was judged before it waited for the lock: {before:?}"
+    );
+    // Released: the revocation commits, then the provision verifies over it.
+    std::fs::write(w.dir().join("resume"), b"").unwrap();
+    let (s, _, b) = revoke.join().unwrap();
+    assert_eq!(s, 200, "{}", String::from_utf8_lossy(&b));
+    let (s, _, b) = provision.join().unwrap().expect("an answer");
+    assert_eq!(
+        (s, result(&b).as_str()),
+        (403, "refused:revoked"),
+        "{}",
+        String::from_utf8_lossy(&b)
+    );
+    // No slot, and no replay effect.
+    assert!(table(w.dir()).get("ci-q1").is_none());
+    assert_eq!(table(w.dir()), json!({}));
+    assert_eq!(replay_rows(w.dir()), 0, "nothing reserved");
 }
 
 #[test]
