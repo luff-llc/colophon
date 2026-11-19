@@ -187,7 +187,10 @@ purposes:)]` in `SessionConfiguration`. Its member request then carries them (`r
 empty; a rig that only signs calls passes `namespaces: []`). An approver sees them as `AccessRequest.services` and grants
 them with `approve(_:pairing:services:grant:)` and a `ServiceGrant`: the services granted (each an audience the request
 names, with purposes it asks; nil: as requested), `expires`, and `conditionsJSON` (a JSON array of §10.4 predicates).
-A grant wider than the request is `SessionError.invalidCommand`, and the pairing is not spent.
+A grant wider than the request is `SessionError.invalidCommand`, and the pairing is not spent. The `GrantOptions`
+given with it are checked against the request as signed first: an expiry later than a requested one, or a write budget
+larger than a requested one, is refused the same way (the core does not compare these with the request: the approver
+sets them).
 
 `signCall(audience:purpose:argsJSON:)` returns a call (§12.2) signed by this device's member key, base64url, for
 `Authorization: Colophon <call>`. The signer's own check runs first: a service the session did not ask for is

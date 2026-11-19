@@ -281,7 +281,10 @@ comes from a file (or the environment) and is imported as a non-extractable WebC
 checking that its `x`, `y` are the public half of its `d`: it is never logged, served or written
 to the data directory. `COLOPHON_RELAY_CLOCK_FILE` replaces the clock with the milliseconds in a
 file. It is a test hook: it works only when the relay is started with `--test-clock`, and the
-relay refuses to start with it otherwise.
+relay refuses to start with it otherwise. With `--test-clock` a line `tick` on the relay's stdin runs one
+scheduler pass over every home slot and answers `{"ticked":true}` on stdout when it is done; with
+`COLOPHON_RELAY_TICK_MS=0` (no timer) a test publishes heads only when it asks, and never waits on
+real time. Without `--test-clock` stdin is not read.
 
 Production use is over TLS (directly, or behind Caddy/nginx or Tailscale, as for the 0.3 relay:
 pass `Authorization`, `If-None-Match`, `If-Match` and `Content-Length`, do not buffer bodies).
