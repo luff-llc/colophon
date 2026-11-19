@@ -55,7 +55,7 @@ export class Device {
   private config?: Record<string, unknown>;
   signer?: Device;
   constructor(readonly platform: Platform, readonly root: string, private world: World) {}
-  async start(extra?: unknown) {
+  async start(extra?: unknown, more: Record<string, unknown> = {}) {
     const swift = process.env.COLOPHON_CROSS_SWIFT;
     const target = process.env.CARGO_TARGET_DIR;
     if (!swift || !target) throw new Error("run scripts/test-cross.sh (driver and native library required)");
@@ -92,7 +92,7 @@ export class Device {
         this.pending?.reject(new Error(`${this.platform}: ${e}\n${this.stderr}`)); this.pending = undefined;
       }
     })();
-    this.config = { op: "init", root: this.root, homes: this.world.homes, history: this.world.history, ...(extra ? { extra } : {}) };
+    this.config = { op: "init", root: this.root, homes: this.world.homes, history: this.world.history, ...(extra ? { extra } : {}), ...more };
     return this.call("init", this.config);
   }
   private async send(value: unknown) {
@@ -131,7 +131,11 @@ export class World {
   private provisioning?: Promise<void>;
   private root = "";
   private closing?: Promise<void>;
-  constructor(readonly history: "members" | "public", readonly count: number) {}
+  /** `grant`: the first relay's door provisions by a grant (gate "grant", relay/README.md) for the account's slot as its
+   *  operator slot, with this audience and slot prefix. */
+  constructor(readonly history: "members" | "public", readonly count: number, readonly grant?: { audience: string; prefix: string }) {}
+  /** The first relay's door (`POST /v1/provision`) on loopback. */
+  get door(): string { return this.homes[0]!.local.replace(/\/v1\/libraries\/home$/, "/v1/provision"); }
   async init() {
     this.root = await mkdtemp(join(process.env.COLOPHON_CROSS_RUN_DIR ?? tmpdir(), `colophon-cross-relay-${process.env.COLOPHON_CROSS_TAG ?? process.pid}-`));
     activeWorlds.add(this);
@@ -160,8 +164,10 @@ export class World {
   private async startRelays(account: string) {
     for (const [n, home] of this.homes.entries()) {
       const config = join(this.root, `config-${n}.json`);
+      const provision = this.grant && n === 0
+        ? { provision: { enabled: true, prefix: this.grant.prefix, gate: ["grant"], operator: { account, slot: "home" }, audience: this.grant.audience } } : {};
       await writeFile(config, JSON.stringify({ resolve: Object.fromEntries(this.homes.filter(h => h !== home).map(h => [h.base, h.local])),
-        limits: { requestsPerMinute: 100_000 } }));
+        limits: { requestsPerMinute: 100_000 }, ...provision }));
       const child = Bun.spawn([process.execPath, join(repo, "relay/server.js"), "--config", config], { cwd: repo,
         env: { ...process.env, COLOPHON_RELAY_PORT: new URL(home.local).port, COLOPHON_RELAY_DATA: join(this.root, `home-${n}`),
           COLOPHON_RELAY_HOME_SLOTS: `home=${account}@${home.base}`, COLOPHON_HOME_KEY_FILE: join(this.root, `key-${n}.json`),

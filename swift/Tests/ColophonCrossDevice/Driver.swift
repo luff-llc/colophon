@@ -137,7 +137,9 @@ private struct Transport: HomeTransport {
             if let extra = c["extra"] as? [String: String] {
                 additional = [AdditionalController(provider: RemoteOwner(signing: bytes(extra["signing"]!), agreement: bytes(extra["agreement"]!)), label: "Other platform owner")]
             }
-            session = ColophonSession(configuration: .init(memberLabel: "Swift cross device", namespaces: ["reading.saved"],
+            // A member that also asks for services (a rig provisioning by grant): [{audience, purposes}].
+            let services = (c["services"] as? [[String: Any]] ?? []).map { ServiceTerms(audience: $0["audience"] as! String, purposes: $0["purposes"] as! [String]) }
+            session = ColophonSession(configuration: .init(memberLabel: "Swift cross device", namespaces: ["reading.saved"], services: services,
                 location: .medium(FolderMedium(folder: root.appendingPathComponent("records"), coordinated: false)), privateContainer: privateDir,
                 keys: member, ownerController: owner, homes: configs, additionalControllers: additional,
                 deviceSecrets: FileSecrets(directory: privateDir), history: text("history") == "members" ? .members : .everyone,
@@ -209,9 +211,15 @@ private struct Transport: HomeTransport {
         case "approve":
             guard let raw = approvalRequest, let pairing = approval else { throw DriverError.invalid("no paired request to approve") }
             let info = try accountRequestInfo(raw: raw)
-            try await s.approve(AccessRequest(id: info.member, label: info.label, kind: info.kind, termsJSON: info.termsJson, record: info.raw),
-                                pairing: pairing)
+            let request = AccessRequest(id: info.member, label: info.label, kind: info.kind, termsJSON: info.termsJson, record: info.raw)
+            // With `grant` ({expires, conditions}): the request's services, narrowed by an expiry and conditions.
+            if let grant = c["grant"] as? [String: Any] {
+                try await s.approve(request, pairing: pairing, services: ServiceGrant(expires: grant["expires"] as? String, conditionsJSON: grant["conditions"] as? String))
+            } else {
+                try await s.approve(request, pairing: pairing)
+            }
             approval = nil; approvalRequest = nil
+        case "signCall": return try await s.signCall(audience: text("audience"), purpose: text("purpose"), argsJSON: text("args"))
         case "revoke": try await s.revoke(memberID: text("member"))
         case "write":
             try await s.perform(DomainCommand(namespace: "reading.saved", kind: "capture", payloadJSON: data("payload")), observed: s.observedRevision)

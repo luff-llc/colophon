@@ -115,7 +115,9 @@ private class CrossDriver {
             val extra = (c["extra"] as? Map<String, String>)?.let {
                 listOf(AdditionalController(RemoteOwner(PublicKeys(decode(it.getValue("signing")), decode(it.getValue("agreement")))), "Other platform owner"))
             } ?: listOf()
-            session = ColophonSession(SessionConfiguration(memberLabel = "Kotlin cross device", namespaces = listOf("reading.saved"),
+            // A member that also asks for services (a rig provisioning by grant): [{audience, purposes}].
+            val services = (c["services"] as? List<Map<String, Any?>> ?: listOf()).map { ServiceTerms(it["audience"] as String, it["purposes"] as List<String>) }
+            session = ColophonSession(SessionConfiguration(memberLabel = "Kotlin cross device", namespaces = listOf("reading.saved"), services = services,
                 medium = FolderMedium(File(root, "records")), privateDirectory = directory, keys = member, ownerController = owner,
                 homes = configs, additionalControllers = extra, deviceSecrets = FileSecrets(directory),
                 history = if (text("history") == "members") HistoryAccess.MEMBERS else HistoryAccess.EVERYONE, headQuorum = configs.size))
@@ -194,9 +196,14 @@ private class CrossDriver {
                 val raw = approvalRequest ?: error("no paired request to approve")
                 val pairing = approval ?: error("no paired request to approve")
                 val info = accountRequestInfo(raw)
-                s.approve(AccessRequest(info.member, info.label, info.kind, info.termsJson, info.raw), pairing)
+                val request = AccessRequest(info.member, info.label, info.kind, info.termsJson, info.raw)
+                // With `grant` ({expires, conditions}): the request's services, narrowed by an expiry and conditions.
+                val grant = c["grant"] as? Map<String, Any?>
+                if (grant != null) s.approve(request, pairing, ServiceGrant(expires = grant["expires"] as? String, conditionsJson = grant["conditions"] as? String))
+                else s.approve(request, pairing)
                 approval = null; approvalRequest = null
             }
+            "signCall" -> return s.signCall(text("audience"), text("purpose"), text("args"))
             "revoke" -> s.revoke(text("member"))
             "write" -> s.perform(DomainCommand("reading.saved", "capture", data("payload").toString(Charsets.UTF_8)), s.observedRevision)
             "ledger" -> return Json.parse(s.ledger())
