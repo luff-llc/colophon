@@ -18,6 +18,16 @@ private func event(_ object: [String: Any]) throws -> [String: Any] {
     return reply
 }
 private enum DriverError: Error { case invalid(String) }
+/// The device's clock: real time, or, when `init` names `nowMs`, a fixed time the orchestrator moves (`clock`).
+private final class DriverClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var fixed: Int64?
+    func set(_ ms: Int64) { lock.withLock { fixed = ms } }
+    var ms: Int64 { lock.withLock { fixed } ?? Int64(Date().timeIntervalSince1970 * 1000) }
+    var date: Date { Date(timeIntervalSince1970: Double(ms) / 1000) }
+}
+private let driverClock = DriverClock()
+
 private struct RemoteOwner: AsyncKeyProvider {
     let signing: Data
     let agreement: Data
@@ -116,6 +126,7 @@ private struct Transport: HomeTransport {
         func text(_ key: String) -> String { c[key] as! String }
         func data(_ key: String) -> Data { bytes(text(key)) }
         if text("op") == "init" {
+            if let ms = c["nowMs"] as? NSNumber { driverClock.set(ms.int64Value) }
             let root = URL(fileURLWithPath: text("root"))
             let privateDir = root.appendingPathComponent("private")
             try FileManager.default.createDirectory(at: privateDir, withIntermediateDirectories: true)
@@ -128,7 +139,7 @@ private struct Transport: HomeTransport {
                     _ = try event(["event": "provision", "account": account])
                     let request = try AccountRequest.prepare(spec: RequestSpec(account: account, signing: homeKey.publicKey.x963Representation,
                         agreement: agreement, label: "Cross home", kind: .server, termsJson: "{\"serves\":[\"home\"]}",
-                        created: try accountFormatDate(ms: Int64(Date().timeIntervalSince1970 * 1000) - 5000), custody: nil, operator: nil, endpoints: [base + "/"]))
+                        created: try accountFormatDate(ms: driverClock.ms - 5000), custody: nil, operator: nil, endpoints: [base + "/"]))
                     return try request.finish(signature: Signature(signature: homeKey.signature(for: request.step().body).rawRepresentation,
                                                                   authenticatorData: nil, clientData: nil)).raw
                 }, transport: Transport(base: base, local: h["local"]!, audit: audit))
@@ -143,7 +154,7 @@ private struct Transport: HomeTransport {
                 location: .medium(FolderMedium(folder: root.appendingPathComponent("records"), coordinated: false)), privateContainer: privateDir,
                 keys: member, ownerController: owner, homes: configs, additionalControllers: additional,
                 deviceSecrets: FileSecrets(directory: privateDir), history: text("history") == "members" ? .members : .everyone,
-                headQuorum: configs.count))
+                headQuorum: configs.count, now: { driverClock.date }))
             let p = try await owner.publicKeys()
             return ["signing": p.signing.base64EncodedString(), "agreement": p.agreement.base64EncodedString()]
         }
@@ -219,6 +230,7 @@ private struct Transport: HomeTransport {
                 try await s.approve(request, pairing: pairing)
             }
             approval = nil; approvalRequest = nil
+        case "clock": driverClock.set((c["ms"] as! NSNumber).int64Value)
         case "signCall": return try await s.signCall(audience: text("audience"), purpose: text("purpose"), argsJSON: text("args"))
         case "revoke": try await s.revoke(memberID: text("member"))
         case "write":

@@ -60,6 +60,10 @@ private class FileSecrets(private val directory: File) : DeviceSecretStore {
     }
     override fun remove(account: String) { File(directory, "device-secret-$account").delete() }
 }
+/** The device's clock: real time, or, when `init` names `nowMs`, a fixed time the orchestrator moves (`clock`). */
+private val fixedNow = java.util.concurrent.atomic.AtomicLong(0)
+private fun driverNow(): Long = fixedNow.get().takeIf { it > 0 } ?: System.currentTimeMillis()
+
 private class CrossDriver {
     var session: ColophonSession? = null
     private val refusesCalls = AtomicBoolean(false)
@@ -89,6 +93,7 @@ private class CrossDriver {
         fun text(key: String) = c.string(key) ?: error("missing $key")
         fun data(key: String) = decode(text(key))
         if (text("op") == "init") {
+            (c["nowMs"] as? Number)?.let { fixedNow.set(it.toLong()) }
             val root = File(text("root")); val directory = File(root, "private").apply { mkdirs() }
             val member = StoredKeys(directory, "member"); owner = StoredKeys(directory, "owner")
             val configs = (c["homes"] as List<Map<String, String>>).map { h ->
@@ -98,7 +103,7 @@ private class CrossDriver {
                 HomeConfiguration("$base/", request = { account ->
                     event(mapOf("event" to "provision", "account" to account))
                     AccountRequest.prepare(RequestSpec(account, decode(h.getValue("signing")), decode(h.getValue("agreement")), "Cross home",
-                        AccountMemberKind.SERVER, "{\"serves\":[\"home\"]}", accountFormatDate(System.currentTimeMillis() - 5000), null, null, listOf("$base/"))).use {
+                        AccountMemberKind.SERVER, "{\"serves\":[\"home\"]}", accountFormatDate(driverNow() - 5000), null, null, listOf("$base/"))).use {
                         it.finish(Signature(P256.sign(signing, it.step().body), null, null)).raw
                     }
                 }, transport = HomeTransport { request ->
@@ -120,7 +125,7 @@ private class CrossDriver {
             session = ColophonSession(SessionConfiguration(memberLabel = "Kotlin cross device", namespaces = listOf("reading.saved"), services = services,
                 medium = FolderMedium(File(root, "records")), privateDirectory = directory, keys = member, ownerController = owner,
                 homes = configs, additionalControllers = extra, deviceSecrets = FileSecrets(directory),
-                history = if (text("history") == "members") HistoryAccess.MEMBERS else HistoryAccess.EVERYONE, headQuorum = configs.size))
+                history = if (text("history") == "members") HistoryAccess.MEMBERS else HistoryAccess.EVERYONE, headQuorum = configs.size, now = ::driverNow))
             val p = owner.publicKeys()
             return mapOf("signing" to encode(p.signing), "agreement" to encode(p.agreement))
         }
@@ -203,6 +208,7 @@ private class CrossDriver {
                 else s.approve(request, pairing)
                 approval = null; approvalRequest = null
             }
+            "clock" -> fixedNow.set((c["ms"] as Number).toLong())
             "signCall" -> return s.signCall(text("audience"), text("purpose"), text("args"))
             "revoke" -> s.revoke(text("member"))
             "write" -> s.perform(DomainCommand("reading.saved", "capture", data("payload").toString(Charsets.UTF_8)), s.observedRevision)
