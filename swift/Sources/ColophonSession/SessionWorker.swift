@@ -697,7 +697,7 @@ actor SessionWorker {
         let entries = try storage().listing()
         let key = try configuration.deviceSecrets.key(for: account)
         let owner = try await ColophonEngine.open(label: "org.luff.colophon.owner", source: MediumSource(try storage()), listing: listed(entries),
-            identity: AccountIdentity(kind: .controller, id: ownerID), account: account, namespaces: configuration.libraryNamespaces,
+            identity: AccountIdentity(kind: .controller, id: ownerID), account: account, namespaces: [],
             saved: nil, deviceKey: key, nowMs: nowMs)
         do {
             guard try await owner.run({ try $0.controllers() }).contains(where: { $0.id == ownerID }) else { throw SessionError.ownerRequired }
@@ -839,7 +839,7 @@ actor SessionWorker {
             let secret = try configuration.deviceSecrets.key(for: account)
             let owner = try await ColophonEngine.open(label: "org.luff.colophon.owner", source: MediumSource(try storage()),
                 listing: listed(try storage().listing()), identity: AccountIdentity(kind: .controller, id: ownerID), account: account,
-                namespaces: configuration.libraryNamespaces, saved: nil, deviceKey: secret, nowMs: nowMs)
+                namespaces: [], saved: nil, deviceKey: secret, nowMs: nowMs)
             do {
                 _ = try await owner.run { try $0.acceptSeedTransfer(key: key, pairing: pairing, sealed: sealed) }
                 _ = try await owner.run { try $0.load() }

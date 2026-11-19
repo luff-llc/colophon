@@ -3,7 +3,7 @@
 // Before 0.5.0's final commit it came out denied. Each case runs without a home and with the real relay as its home.
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { init, type HomeConfiguration } from '../src/session/index.js';
-import { Device, RelayHome } from './support.ts';
+import { admitted, approveByScan, Device, note, RelayHome } from './support.ts';
 import { BunRelayHost } from './relay-bun.ts';
 
 const host = new BunRelayHost();
@@ -38,3 +38,26 @@ describe('a library wider than its member', () => {
     }
   }
 });
+
+// The owner's engine sees every namespace of the account, whatever the app's own libraryNamespaces: a revoke made from an
+// app whose library is narrower keeps what the revoked member wrote in the other namespaces. Before 0.5.0's final commit
+// the owner engine was scoped to the app's library, and the revoked member's notes were dropped.
+test('a revoke from a narrower app keeps what the member wrote elsewhere', async () => {
+  const all = ['notes', 'reading.saved'];
+  const writer = await Device.make({ namespaces: ['notes'], libraryNamespaces: all });
+  const saved = await Device.make({ medium: writer.medium, owner: writer.owner, namespaces: ['reading.saved'], createWithoutHome: true });
+  const reader = await Device.make({ medium: writer.medium, owner: writer.owner, namespaces: ['notes'], libraryNamespaces: all, createWithoutHome: true });
+  try {
+    await writer.session.create();
+    await note(writer.session, 'kept');
+    await saved.session.restore(); await approveByScan(saved.session, writer.session); await saved.session.refresh();
+    if (saved.session.state.phase.kind !== 'ready') throw new Error(saved.describe());
+    await reader.session.restore(); await approveByScan(reader.session, writer.session); await reader.session.refresh();
+    if (reader.session.state.phase.kind !== 'ready') throw new Error(reader.describe());
+    expect(await admitted(reader.session)).toBe(1);
+    await saved.session.revoke(writer.session.memberId!);
+    await reader.session.refresh();
+    if (reader.session.state.phase.kind !== 'ready') throw new Error(reader.describe());
+    expect(await admitted(reader.session)).toBe(1);
+  } finally { reader.close(); saved.close(); writer.close(); }
+}, 120_000);

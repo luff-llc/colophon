@@ -33,3 +33,33 @@ class LibraryNamespacesTest {
     @Test fun equalListsAreReady() = createdIsReady(listOf("notes", "reading.saved"), listOf("notes", "reading.saved"), withHome = false)
     @Test fun equalListsAreReadyWithAHome() = createdIsReady(listOf("notes", "reading.saved"), listOf("notes", "reading.saved"), withHome = true)
 }
+
+/**
+ * The owner's engine sees every namespace of the account, whatever the app's own `libraryNamespaces`: a revoke made from
+ * an app whose library is narrower keeps what the revoked member wrote in the other namespaces. Before 0.5.0's final
+ * commit the owner engine was scoped to the app's library, so "keep everything" named no heads outside it and the
+ * revoked member's notes were dropped.
+ */
+class OwnerScopeTest {
+    @Test fun aRevokeFromANarrowerAppKeepsWhatTheMemberWroteElsewhere() = runBlocking<Unit> {
+        val all = listOf("notes", "reading.saved")
+        val writer = Device(namespaces = listOf("notes"), libraryNamespaces = all)
+        val saved = Device(medium = writer.medium, owner = writer.owner, namespaces = listOf("reading.saved"))
+        val reader = Device(medium = writer.medium, owner = writer.owner, namespaces = listOf("notes"), libraryNamespaces = all)
+        try {
+            writer.session.create()
+            assertEquals(SessionPhase.Ready, writer.session.phase, writer.describe())
+            note(writer.session, "kept")
+            saved.session.restore(); approveByScan(saved.session, writer.session); saved.session.refresh()
+            assertEquals(SessionPhase.Ready, saved.session.phase, saved.describe())
+            reader.session.restore(); approveByScan(reader.session, writer.session); reader.session.refresh()
+            assertEquals(SessionPhase.Ready, reader.session.phase, reader.describe())
+            assertEquals(1, admitted(reader.session))
+            // The reading.saved app, whose library is only reading.saved, revokes the writer.
+            saved.session.revoke(checkNotNull(writer.session.memberId))
+            reader.session.refresh()
+            assertEquals(SessionPhase.Ready, reader.session.phase, reader.describe())
+            assertEquals(1, admitted(reader.session), "the revoked member's note is kept")
+        } finally { reader.close(); saved.close(); writer.close() }
+    }
+}

@@ -230,14 +230,22 @@ export class SessionWorker {
     await this.unlockIfPossible(signal);
   }
 
+  /** The member engines whose records are loaded (by a finished unlock, or by `load` when there was nothing to unlock). */
+  private readonly memberOpened = new WeakSet<ColophonEngine>();
   /** A member opens its epoch shares with its own agreement key: at first, and whenever new epochs were sealed to it. */
   private async unlockIfPossible(signal?: AbortSignal): Promise<void> {
     const engine = this.engine; const custody = this.memberCustody;
     if (!engine || !custody) return;
     if (plain<Standing>(engine.run(e => e.me())).kind !== glue.StandingKind.Member) return;
     const agreements = plain<EpochAgreement[]>(engine.run(e => e.begin_unlock_epochs()));
-    if (agreements.length === 0) return;
+    if (agreements.length === 0) {
+      // A revoked member (or a member with no readable namespaces) has no shares. The core still requires load before
+      // notices and the exchange; no finish-unlock will do it (as in the Swift and Kotlin sessions).
+      if (!this.memberOpened.has(engine)) { plain(engine.run(e => e.load())); this.memberOpened.add(engine); }
+      return;
+    }
     engine.finishUnlockEpochs(await custody.answerEpochs(agreements, this.waiting(signal)));
+    this.memberOpened.add(engine);
   }
 
   /** Seals and stores the engine's saved state (inside the gate). A stopped account's saved state carries the stop as a floor. */
@@ -661,7 +669,7 @@ export class SessionWorker {
 
   private openOwnerEngine(account: string, ownerId: string, deviceKey: import('./secrets.js').SecretBytes): ColophonEngine {
     return ColophonEngine.open({ medium: this.storage, listing: this.storage.listing(), identity: { kind: 'controller', id: ownerId }, account,
-      namespaces: this.libraryNamespaces, deviceKey, nowMs: this.nowMs });
+      namespaces: [], deviceKey, nowMs: this.nowMs });
   }
 
   /** Opens a controller engine for the owner, unlocks it by the owner's slot, runs `body`, locks it. */

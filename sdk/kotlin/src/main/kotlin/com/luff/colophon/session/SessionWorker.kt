@@ -650,7 +650,7 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
         val owner = tracked(configuration.deviceSecrets.key(account).use { key ->
             ColophonEngine.open(label = "colophon-owner", source = MediumSource(storage()), listing = listed(entries),
                 identity = AccountIdentity(AccountIdentityKind.CONTROLLER, ownerId), account = account,
-                namespaces = configuration.libraryNamespaces, saved = null, deviceKey = key, nowMs = nowMs)
+                namespaces = listOf(), saved = null, deviceKey = key, nowMs = nowMs)
         })
         try {
             if (owner.run { it.controllers() }.none { it.id == ownerId }) throw SessionError.OwnerRequired()
@@ -753,7 +753,7 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
         val owner = tracked(configuration.deviceSecrets.key(account).use { secret ->
             ColophonEngine.open(label = "colophon-owner", source = MediumSource(storage()), listing = listed(storage().listing()),
                 identity = AccountIdentity(AccountIdentityKind.CONTROLLER, ownerId), account = account,
-                namespaces = configuration.libraryNamespaces, saved = null, deviceKey = secret, nowMs = nowMs)
+                namespaces = listOf(), saved = null, deviceKey = secret, nowMs = nowMs)
         })
         try {
             owner.run { it.acceptSeedTransfer(key, pairing, sealed) }

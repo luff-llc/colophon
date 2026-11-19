@@ -148,13 +148,14 @@ import Observation
     /// `pairing`: confirmed on this device for exactly this request's key (spec §9.1), by the six-digit code
     /// (`beginApproval`, `approvalCode`, then `pairing.confirm()` once the person saw the same digits on both
     /// devices) or by `scanRequest`. Any other pairing is refused; a pairing is spent whatever the answer.
+    /// In `grant`, a field left nil inherits the request; a field given must narrow it.
     public func approve(_ request: AccessRequest, pairing: AccountPairing, grant: GrantOptions? = nil) async throws {
         await restore()
         let lease = context
         do {
             let terms = grant.map { options in
-                SessionWorker.terms(namespaces: options.namespaces ?? worker.configuration.namespaces,
-                                    access: options.access ?? [.read, .write], expires: options.expires, budget: options.writeBudget)
+                SessionWorker.terms(namespaces: options.namespaces ?? request.namespaces,
+                                    access: options.access ?? request.access, expires: options.expires, budget: options.writeBudget)
             }
             let snapshot = try await worker.approve(request, pairing: pairing, terms: terms)
             if lease == context { apply(snapshot) }
