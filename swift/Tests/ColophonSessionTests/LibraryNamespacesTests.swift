@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 import ColophonKeys
+import ColophonSavedKit
 import ColophonSession
 
 /// A session whose library declares more namespaces than its own member was granted (`libraryNamespaces` wider than
@@ -42,6 +43,32 @@ import ColophonSession
         #expect(second.session.namespaceRevisions.isEmpty)
     }
 
+
+    /// A device that asks for two namespaces of the library and is granted one (the approver narrows the terms) is
+    /// `ready`, publishes only the granted namespace, and is refused a write to the other.
+    @Test func aNarrowedApprovalIsReadyAndRefusesTheUngrantedNamespace() async throws {
+        let library = ["reading.saved", "notes", "reading.books"]
+        let first = Device(namespaces: ["reading.books"], libraryNamespaces: library)
+        await first.session.create()
+        try #require(first.session.phase == .ready)
+        let second = Device(medium: first.medium, namespaces: ["reading.saved", "notes"], libraryNamespaces: library)
+        await second.session.restore()
+        try await approveByScan(joining: second.session, approving: first.session,
+                                grant: GrantOptions(namespaces: ["notes"], access: [.read, .write], expires: nil, writeBudget: nil))
+        await second.session.refresh()
+        #expect(second.session.phase == .ready, "\(second.session.phase) \(second.session.lastError ?? "")")
+        #expect(published(second.session) == ["notes"], "\(second.session.namespaceRevisions)")
+        let before = first.medium.snapshot().count
+        do {
+            try await second.session.perform(try .saveLink(url: URL(string: "https://example.org/x")!, title: "X"), observed: second.session.observedRevision)
+            Issue.record("a write to a namespace that was not granted was stored")
+        } catch let error as ColophonError {
+            guard case .denied(_, let reason, _, _) = error else { Issue.record("expected denied, got \(error)"); return }
+            #expect(reason == .notGranted)
+        }
+        #expect(first.medium.snapshot().count == before, "a refused write stores nothing")
+        #expect(second.session.phase == .ready, "\(second.session.phase)")
+    }
 
     /// A member of a wider library whose grant has expired is still `denied`. Driven by the injected clock, no sleeping.
     @Test func anExpiredMemberOfAWiderLibraryIsDenied() async throws {

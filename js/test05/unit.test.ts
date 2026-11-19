@@ -838,6 +838,25 @@ describe('a member of a wider library', () => {
     second.close(); first.close();
   });
 
+  // The approver narrows the terms: the device asks for two namespaces of the library and is granted one.
+  test('approved for fewer namespaces than it asked is ready, publishes only those, and is refused a write to the others', async () => {
+    const libraryNamespaces = ['reading.saved', 'notes', 'reading.books'];
+    const first = await Device.make({ namespaces: ['reading.books'], libraryNamespaces });
+    await first.session.create();
+    expect(first.session.phase.kind).toBe('ready');
+    const second = await Device.make({ medium: first.medium, namespaces: ['reading.saved', 'notes'], libraryNamespaces });
+    await second.session.restore();
+    await approveByScan(second.session, first.session, '{"records":[{"namespace":"reading.saved","access":"write"}]}');
+    await second.session.refresh();
+    equal(second.session.phase.kind, 'ready', second.describe());
+    expect(published(second)).toEqual(['reading.saved']);
+    const before = (first.medium as MemoryMedium).listing().length;
+    await expect(note(second.session, 'x')).rejects.toMatchObject({ kind: 'Denied', reason: 'notGranted' });
+    expect((first.medium as MemoryMedium).listing().length).toBe(before);
+    equal(second.session.phase.kind, 'ready', second.describe());
+    second.close(); first.close();
+  });
+
   // Driven by the injected clock, no sleeping.
   test('whose grant has expired is denied', async () => {
     const libraryNamespaces = ['reading.saved', 'notes'];

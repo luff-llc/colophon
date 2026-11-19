@@ -6,6 +6,7 @@ import java.time.Instant
 import java.time.temporal.ChronoUnit
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
@@ -52,6 +53,31 @@ class LibraryNamespacesTest {
             second.session.refresh()
             assertEquals(SessionPhase.Denied, second.session.phase, second.describe())
             assertTrue(second.session.state.value.namespaceRevisions.isEmpty())
+        } finally { second.close(); first.close() }
+    }
+
+    /**
+     * A device that asks for two namespaces of the library and is granted one (the approver narrows the terms) is `Ready`,
+     * publishes only the granted namespace, and is refused a write to the other.
+     */
+    @Test fun aNarrowedApprovalIsReadyAndRefusesTheUngrantedNamespace() = runBlocking<Unit> {
+        val library = listOf("reading.saved", "notes", "reading.books")
+        val first = Device(namespaces = listOf("reading.books"), libraryNamespaces = library)
+        val second = Device(medium = first.medium, namespaces = listOf("reading.saved", "notes"), libraryNamespaces = library)
+        try {
+            first.session.create()
+            assertEquals(SessionPhase.Ready, first.session.phase, first.describe())
+            second.session.restore()
+            approveByScan(second.session, first.session, """{"records":[{"namespace":"reading.saved","access":"write"}]}""")
+            second.session.refresh()
+            assertEquals(SessionPhase.Ready, second.session.phase, second.describe())
+            assertEquals(setOf("reading.saved"), published(second.session))
+            val before = first.medium.snapshot().size
+            val refused = assertFailsWith<com.luff.colophon.AccountException.Denied> { note(second.session, "x") }
+            assertEquals(com.luff.colophon.AccountDenialReason.NOT_GRANTED, refused.reason)
+            assertEquals(before, first.medium.snapshot().size, "a refused write stores nothing")
+            second.session.refresh()
+            assertEquals(SessionPhase.Ready, second.session.phase, second.describe())
         } finally { second.close(); first.close() }
     }
 
