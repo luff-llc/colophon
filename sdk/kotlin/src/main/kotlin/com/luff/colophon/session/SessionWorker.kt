@@ -1122,6 +1122,9 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
             throw AccountException.Refused("refused:outOfScope", "outOfScope", "this session asked for no service $purpose at $audience")
         }
         val signing = custody.provider(id).publicKeys().signing
+        // Judged at the session's clock, not the time of the engine's last refresh.
+        val at = nowMs
+        engine.run { it.advance(at) }
         val target = CallTarget(listOf(audience), listOf(), listOf(), listOf())
         val written = engine.execute(custody) { e -> withEntropy(32) { e.beginCall(signing, listOf(), audience, purpose, argsJson, target, it) } }
         written.artifact ?: throw AccountException.Internal("internal", "a call returned no envelope")
