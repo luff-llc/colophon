@@ -23,6 +23,16 @@ retryAfterSeconds)` for any `refused:` name a home gives, validated by `HomeRefu
 home's `503 {"result":"unavailable"}`; `HomeProblem.WaitingForApproval` for a joining device's `refused:revoked`. Tests:
 `StoppedAndRefusalTest` (`sdk/kotlin`, JVM, against the real relay).
 
+**A namespace this member was never granted.** A session is `denied` only when its own member has lost access it was
+granted, never because the library declares namespaces this member was never granted (`libraryNamespaces` wider than
+`namespaces`). For each namespace in `libraryNamespaces` the session asks the engine's `access`: no denial, the namespace
+is readable; `notReadable` or `unavailable`, the phase is `unavailable(reason)`; `notGranted` for a namespace that the
+member's verified grant (`me().member.grant.namespaces`) does not name, while the member is not provisional, is not this
+member's namespace and is skipped (neither denied nor published); anything else (`revoked`, `expired`, `budgetSpent`,
+`notGranted` while provisional or on a granted namespace) is `denied`. Revisions are published only for the library
+namespaces whose `access` has no denial. Tests: `LibraryNamespacesTests` and `GrantedNamespacesTests` (Swift), `LibraryNamespacesTest` and
+`GrantedNamespacesTest` (Kotlin), `library-namespaces.test.ts` and `granted-namespaces.test.ts` (JS).
+
 ## Adopting it in an Android app
 
 Build the AAR (`bash scripts/build-android.sh`: the release library for `arm64-v8a` and `x86_64` with cargo-ndk, the

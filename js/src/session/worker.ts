@@ -288,7 +288,7 @@ export class SessionWorker {
     const revisions: Record<string, bigint> = {};
     if (standing.kind === glue.StandingKind.Member && standing.member?.revokedAt === undefined) {
       for (const r of plain<NamespaceRevision[]>(engine.run(e => e.revisions()))) {
-        if (this.configuration.namespaces.includes(r.namespace) && plain<AccountDenial | undefined>(engine.run(e => e.access(r.namespace))) === undefined) revisions[r.namespace] = r.revision;
+        if (this.libraryNamespaces.includes(r.namespace) && plain<AccountDenial | undefined>(engine.run(e => e.access(r.namespace))) === undefined) revisions[r.namespace] = r.revision;
       }
       if (Object.keys(revisions).length > 0) revisions['colophon.authority'] = engine.run(e => e.head_seq());
     }
@@ -307,6 +307,7 @@ export class SessionWorker {
     const requests = this.pendingRequests(members);
     const homes = plain<Home[]>(engine.run(e => e.homes()));
     let phase: SessionPhase;
+    const readable: string[] = [];
     if (this.journal.setupPending) {
       // This device made the account and its first setup did not finish: nothing waits for an approval nobody can give.
       return this.snapshot({ kind: 'failed', failure: { kind: 'other', detail: 'Setting up this library was interrupted. Retry to finish it.' } }, { members, requests, homes });
@@ -319,10 +320,16 @@ export class SessionWorker {
     } else if (standing.member?.revokedAt !== undefined) {
       phase = { kind: 'denied' };
     } else {
+      // Denied only when this member lost access it was granted, never for a library namespace it was never granted
+      // (`libraryNamespaces` wider than its grant, or an approval that narrowed its request): `notGranted` on a namespace
+      // its verified grant does not name, while it is not provisional, is skipped (neither denied nor published).
       phase = { kind: 'ready' };
-      for (const namespace of this.configuration.namespaces) {
+      const granted = standing.member?.grant?.namespaces ?? [];
+      const provisional = standing.member?.provisional ?? false;
+      for (const namespace of this.libraryNamespaces) {
         const denial = plain<AccountDenial | undefined>(engine.run(e => e.access(namespace)));
-        if (!denial) continue;
+        if (!denial) { readable.push(namespace); continue; }
+        if (denial.reason === glue.AccountDenialReason.NotGranted && !provisional && !granted.includes(namespace)) continue;
         phase = denial.reason === glue.AccountDenialReason.NotReadable || denial.reason === glue.AccountDenialReason.Unavailable
           ? { kind: 'unavailable', reason: denial.detail } : { kind: 'denied' };
         break;
@@ -331,7 +338,7 @@ export class SessionWorker {
     const ready = phase.kind === 'ready';
     const revisions: Record<string, bigint> = {};
     if (ready) {
-      for (const r of plain<NamespaceRevision[]>(engine.run(e => e.revisions()))) if (this.configuration.namespaces.includes(r.namespace)) revisions[r.namespace] = r.revision;
+      for (const r of plain<NamespaceRevision[]>(engine.run(e => e.revisions()))) if (readable.includes(r.namespace)) revisions[r.namespace] = r.revision;
       revisions['colophon.authority'] = engine.run(e => e.head_seq());
     }
     const notices = await this.currentNotices();
