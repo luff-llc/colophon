@@ -58,11 +58,15 @@ export interface RelayHost {
   freePort(): Promise<number>;
   /** Starts `bun relay/server.js --test-clock` on `port` for `account` at `base`, with the home key `jwk`; `config` is
    *  added to its config file (such as `provision`). */
-  start(spec: { port: number; account: string; base: string; jwk: JsonWebKey; peers: { base: string; port: number }[]; config?: Record<string, unknown> }): Promise<void>;
+  start(spec: { port: number; account: string; base: string; jwk: JsonWebKey; peers: { base: string; port: number }[]; config?: Record<string, unknown>; tickMs?: number; nowMs?: number }): Promise<void>;
   /** The URL that reaches the relay's slot (`/v1/libraries/home`) on `port` from this runtime. */
   local(port: number): string;
   /** Sets the relay's test clock to now. */
   touchClock(port: number): Promise<void>;
+  /** Sets the relay's test clock to `ms` (a host with an injected clock). */
+  setClock?(port: number, ms: number): Promise<void>;
+  /** Runs one scheduler pass of the relay (heads, recording entries) and waits for it: the relay's test hook. */
+  tick?(port: number): Promise<void>;
   stopAll(): Promise<void>;
 }
 
@@ -74,24 +78,39 @@ const b64url = (bytes: Uint8Array): string => btoa(String.fromCharCode(...bytes)
  */
 export class RelayHome {
   private started = false;
-  private constructor(readonly host: RelayHost, readonly base: string, readonly port: number, private readonly signing: CryptoKeyPair, private readonly point: Uint8Array, private readonly agreement: Uint8Array) {}
-  static async make(host: RelayHost, base: string): Promise<RelayHome> {
+  private constructor(readonly host: RelayHost, readonly base: string, readonly port: number, private readonly signing: CryptoKeyPair, private readonly point: Uint8Array, private readonly agreement: Uint8Array,
+    private readonly clock?: () => number) {}
+  /**
+   * With `clock`, the relay runs on that clock (set before every request and pass) with no scheduler timer: heads are
+   * published only by `tick()`, so nothing waits on real time.
+   */
+  static async make(host: RelayHost, base: string, clock?: () => number): Promise<RelayHome> {
     const signing = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
     const agreement = await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits']);
     return new RelayHome(host, base, await host.freePort(), signing,
-      new Uint8Array(await crypto.subtle.exportKey('raw', signing.publicKey)), new Uint8Array(await crypto.subtle.exportKey('raw', agreement.publicKey)));
+      new Uint8Array(await crypto.subtle.exportKey('raw', signing.publicKey)), new Uint8Array(await crypto.subtle.exportKey('raw', agreement.publicKey)), clock);
+  }
+  private async touch(): Promise<void> {
+    if (this.clock && this.host.setClock) await this.host.setClock(this.port, this.clock()); else await this.host.touchClock(this.port);
+  }
+  /** One scheduler pass of the relay, on its clock, finished: the deterministic way to publish heads. */
+  async tick(): Promise<void> {
+    if (!this.host.tick) throw new Error('this relay host has no tick hook');
+    await this.touch();
+    await this.host.tick(this.port);
   }
   get id(): string { return glue.account_key_id(this.point); }
   async start(account: string, peers: RelayHome[], config?: Record<string, unknown>): Promise<void> {
     if (this.started) return;
     const jwk = await crypto.subtle.exportKey('jwk', this.signing.privateKey);
-    await this.host.start({ port: this.port, account, base: this.base, jwk: { kty: 'EC', crv: 'P-256', x: jwk.x, y: jwk.y, d: jwk.d }, peers: peers.map(p => ({ base: p.base, port: p.port })), config });
+    await this.host.start({ port: this.port, account, base: this.base, jwk: { kty: 'EC', crv: 'P-256', x: jwk.x, y: jwk.y, d: jwk.d }, peers: peers.map(p => ({ base: p.base, port: p.port })), config,
+      ...(this.clock ? { tickMs: 0, nowMs: this.clock() } : {}) });
     this.started = true;
   }
   /** The home's signed member request (§9.1) naming `account`, as a home service answers it. */
   async memberRequest(account: string): Promise<Uint8Array> {
     const spec = new glue.RequestSpec(account, this.point, this.agreement, 'Relay home', glue.AccountMemberKind.Server, '{"serves":["home"]}',
-      glue.account_format_date(BigInt(Date.now() - 5000)), undefined, undefined, [`${this.base}/`]);
+      glue.account_format_date(BigInt((this.clock?.() ?? Date.now()) - 5000)), undefined, undefined, [`${this.base}/`]);
     const request = glue.AccountRequest.prepare(spec);
     const step = plain<SigningStep>(request.step());
     const signature = new Uint8Array(await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, this.signing.privateKey, new Uint8Array(step.body)));
@@ -108,7 +127,7 @@ export class RelayHome {
     const inner = new FetchHomeTransport({ allowingLoopbackHttp: true });
     return {
       send: async (request, signal) => {
-        await this.host.touchClock(this.port);
+        await this.touch();
         assert(request.url.startsWith(this.base), `a request for another host: ${request.url}`);
         const answer = await inner.send({ ...request, url: this.host.local(this.port) + request.url.slice(this.base.length) }, signal);
         if (answer.status === 403 && refusals) {
@@ -125,7 +144,7 @@ export class RelayHome {
   /** A transport to the door that sets the relay's clock to now first. */
   doorTransport(): HomeTransport {
     const inner = new FetchHomeTransport({ allowingLoopbackHttp: true });
-    return { send: async (request, signal) => { await this.host.touchClock(this.port); return inner.send(request, signal); } };
+    return { send: async (request, signal) => { await this.touch(); return inner.send(request, signal); } };
   }
   /** The transport to a slot this relay provisioned: `base` (its `https://` name) goes to `/v1/libraries/<slot>` on loopback. */
   slotTransport(base: string, slot: string): HomeTransport {
@@ -133,7 +152,7 @@ export class RelayHome {
     const local = this.host.local(this.port).replace(/\/home$/, `/${slot}`);
     return {
       send: async (request, signal) => {
-        await this.host.touchClock(this.port);
+        await this.touch();
         assert(request.url.startsWith(base), `a request for another host: ${request.url}`);
         return inner.send({ ...request, url: local + request.url.slice(base.length) }, signal);
       },

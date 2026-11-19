@@ -1228,6 +1228,8 @@ export class SessionWorker {
         throw makeFault('Refused', 'refused:outOfScope', `this session asked for no service ${JSON.stringify(purpose)} at ${JSON.stringify(audience)}`);
       }
       const signing = (await custody.provider(id).publicKeys()).signing;
+      // Judged at the session's clock, not the time of the engine's last refresh.
+      plain(engine.run(e => e.advance(BigInt(this.nowMs))));
       const written = await engine.execute(custody, e => withEntropy(32, entropy => e.begin_call(signing, [], audience, purpose, argsJson,
         new glue.CallTarget([audience], [], [], []), entropy)), undefined, this.waiting(signal));
       if (!written.artifact) throw makeFault('Internal', 'internal', 'a call returned no envelope');

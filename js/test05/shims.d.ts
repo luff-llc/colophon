@@ -20,7 +20,7 @@ declare module 'node:fs' {
   export function readFileSync(path: string, encoding: 'utf8'): string;
   export function readdirSync(path: string): string[];
 }
-interface BunSubprocess { exited: Promise<number>; kill(signal?: string | number): void; stdout: ReadableStream<Uint8Array>; exitCode: number | null }
+interface BunSubprocess { exited: Promise<number>; kill(signal?: string | number): void; stdout: ReadableStream<Uint8Array>; exitCode: number | null; stdin?: unknown }
 interface BunServer { port: number | undefined; stop(force?: boolean): Promise<void> }
 declare const Bun: {
   spawn(command: string[], options?: Record<string, unknown>): BunSubprocess;
