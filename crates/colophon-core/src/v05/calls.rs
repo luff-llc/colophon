@@ -797,6 +797,25 @@ impl Call {
             client_data: c,
         })
     }
+    /// §12.3 step 2: possession, the signature over the body under `key` (and, for a WebAuthn
+    /// controller's call, its assertion), before anything is looked up. [`verify_call`] runs
+    /// exactly this as its step 2; a service may run it first to refuse a call cheaply only
+    /// after possession, as §12.3 orders it.
+    pub fn verify_possession(&self) -> Result<()> {
+        match self.assertion_bytes() {
+            None => verify_raw(&self.key, &self.body, &self.signature)
+                .map_err(|e| bad_signature(format!("possession: {e}")))?,
+            Some(a) => {
+                verify_assertion_possession(&self.key, &self.body, &self.signature, a).map_err(
+                    |e| match e {
+                        SigFailure::ClientDataBound => malformed("clientData exceeds 8,192 bytes"),
+                        e => bad_signature(format!("possession: {e}")),
+                    },
+                )?;
+            }
+        }
+        Ok(())
+    }
     /// The reservation key.
     pub fn replay_key(&self) -> ReplayKey {
         ReplayKey {
@@ -1364,18 +1383,7 @@ fn verify(
     // 1. Parse.
     let call = Call::parse(envelope)?;
     // 2. Possession, under `key`, before anything is looked up.
-    match call.assertion_bytes() {
-        None => verify_raw(&call.key, &call.body, &call.signature)
-            .map_err(|e| bad_signature(format!("possession: {e}")))?,
-        Some(a) => {
-            verify_assertion_possession(&call.key, &call.body, &call.signature, a).map_err(
-                |e| match e {
-                    SigFailure::ClientDataBound => malformed("clientData exceeds 8,192 bytes"),
-                    e => bad_signature(format!("possession: {e}")),
-                },
-            )?;
-        }
-    }
+    call.verify_possession()?;
     // 3. Audience, window, read-only replay look-up.
     require_refused(
         cfg.audiences.iter().any(|a| a == &call.audience),

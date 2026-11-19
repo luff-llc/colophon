@@ -4,10 +4,10 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { constants as fsc, promises as fsp, writeSync } from 'node:fs';
 import http from 'node:http';
 import https from 'node:https';
-import { HomeKey, HomeModule, HomeSlot } from './home.js';
+import { HomeKey, HomeModule, HomeSlot, ModuleError } from './home.js';
 import {
-  ProvisionTable, TABLE_FILE, clientAddressConfig, tableKind, clientAddressResolver, isJsonType, memberRequest, parseProvisionBody,
-  provisionConfig, provisionGate,
+  ProvisionReplay, ProvisionTable, REPLAY_DIR, TABLE_FILE, clientAddressConfig, tableKind, clientAddressResolver, isJsonType, memberRequest,
+  grantLimits, parseProvisionBody, provisionConfig, provisionGate, provisionRoute,
 } from './provision.js';
 import path from 'node:path';
 
@@ -496,6 +496,23 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
   }
   for (const [name, e] of table.rows) if (!homeSlots.has(name)) homeSlots.set(name, { base: e.base, account: e.account });
   const configured = new Set(Object.keys(libraries ?? {}));
+  // Gate "grant": the operator account is one of this home's own slots, and the door's audience
+  // is its own. A slot named but not set up yet is not a start-up failure (every grant request is
+  // then 503 unavailable); a slot for another account, or a bad audience, is.
+  const granting = provisioning.enabled && provisioning.gates.has('grant');
+  let provisionReplay = null;
+  if (provisioning.gates.has('grant')) {
+    const op = provisioning.operator;
+    const held = homeSlots.get(op.slot);
+    if (configured.has(op.slot) && !held) throw new Error(`provision.operator.slot ${op.slot} is a 0.3 slot, not a home slot of this home`);
+    if (held && held.account !== op.account) throw new Error(`provision.operator.slot ${op.slot} serves account ${held.account}, not provision.operator.account ${op.account}`);
+    if (configured.has(REPLAY_DIR) || table.get(REPLAY_DIR)) throw new Error(`${REPLAY_DIR} is the provisioning replay table, not a slot name, while gate "grant" is on`);
+    if (homeModule && !homeModule.call({ op: 'provision_access', query: 'audience', audience: provisioning.audience }).valid) {
+      throw new Error(`provision.audience ${JSON.stringify(provisioning.audience)} is not an audience (§10.1: an https URL with no port, query or fragment, or a urn:)`);
+    }
+    for (const [name, h] of homeSlots) if (h.base === provisioning.audience.replace(/\/+$/, '')) throw new Error(`provision.audience is the base of slot ${name}: the door's audience must be its own`);
+    if (granting) provisionReplay = await ProvisionReplay.open(path.resolve(dataDir), { wasm: homeModule, clock, table });
+  }
   const slots = new Map();
   const opening = new Map();
   const notProvisioned = () => new HttpError(404, 'Not provisioned', {}, { result: 'refused:notProvisioned' });
@@ -606,6 +623,53 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
     }
   }
 
+  /**
+   * A grant request's judgement. `verify()` first asks the module's `provision_access` with no
+   * state, outside any lock: a call it refuses there (possession, account, audience, purpose,
+   * args, a controller, or a grant over its `perHour`) costs no history work and does not wait
+   * for, or hold up, the operator slot. Otherwise it takes the operator slot's mutation lock,
+   * settles the slot (its head fresh), and asks `provision_access` again over its state and the
+   * call's replay row; the lock is then held until `finish()`, after the gate's remaining checks,
+   * the reservation and the durable write. An authority upload to the operator slot (a
+   * revocation) waits for it, and it waits for an upload: a revocation the home has accepted is
+   * seen by every later verification, and none verified before it commits after it. The gate's
+   * cheap checks run before `verify()`, outside the lock. An operator slot that is not held, not
+   * set up, or stopped answers 503 unavailable. The replay table changes only under the door's
+   * own lock, so both asks see the same rows.
+   */
+  function grantSession(call, body) {
+    let s = null; let unlock = null;
+    const verify = async () => {
+      const parsed = call ? homeModule.call({ op: 'call_key', call }) : { parsed: false };
+      const rows = parsed.parsed ? provisionReplay.lookup(parsed.key, parsed.signer) : { existing: null, signerRows: [] };
+      const member = parsed.parsed && parsed.signer.startsWith('member:') ? parsed.signer.slice('member:'.length) : null;
+      const ask = (state) => homeModule.call({ op: 'provision_access', state, call: call ?? '', body: body.toString('base64'),
+        operator: provisioning.operator.account, audience: provisioning.audience, now: clock(),
+        existing: rows.existing, signerRows: rows.signerRows, replayRows: provisioning.replayRows,
+        perHour: grantLimits(provisioning, member).perHour });
+      const early = ask(null);
+      if (early.status !== 503) { await reach('grant refused'); return early; }
+      const name = provisioning.operator.slot;
+      let o = null;
+      if (homeSlots.has(name)) o = await slot(name).catch((error) => { if (error instanceof HttpError) return null; throw error; });
+      if (o && !o.closing && !o.released && o.home) {
+        s = o; enter(s);
+        await reach('grant locking');
+        await new Promise((locked, failed) => {
+          s.home.lock(() => new Promise((release) => { unlock = release; locked(); })).catch(failed);
+        });
+        await s.home.keepLease();
+        try { await s.home.settle(); } catch (error) { if (!(error instanceof ModuleError)) throw error; }
+      }
+      const r = ask(s ? s.home.state : null);
+      provisionReplay.dropRows(r.drop);
+      await reach(r.allowed ? 'grant verified' : 'grant refused');
+      return r;
+    };
+    const finish = () => { if (unlock) unlock(); if (s) leave(s); };
+    return { verify, finish };
+  }
+
   async function door(req, res) {
     if (req.method !== 'POST') throw new HttpError(405, 'Method not allowed', { allow: 'POST' });
     // Checked before the body is read. A page on an origin not listed is refused here; any page
@@ -616,25 +680,47 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
     const body = await readBody(req, 4096);
     const asked = parseProvisionBody(body) ?? {};
     const address = clientAddress(req);
+    const authorization = req.headers.authorization;
+    const route = provisionRoute(provisioning, authorization);
+    const m = /^Colophon ([A-Za-z0-9_-]+)$/.exec(authorization ?? '');
+    const call = m ? Buffer.from(m[1], 'base64url').toString('base64') : null;
     const answer = await provisionLock(async () => {
       await releaseUnclaimed();
       const valid = typeof asked.slot === 'string' && SLOT.test(asked.slot);
       const occupied = valid && (configured.has(asked.slot)
         || (!table.get(asked.slot) && await fsp.lstat(path.join(path.resolve(dataDir), asked.slot)).then(() => true, () => false)));
-      const verdict = admitProvision({ ...asked, address, authorization: req.headers.authorization,
-        held: { entry: table.get(asked.slot), occupied, count: table.size } });
-      if (!verdict.admit) {
-        throw new HttpError(verdict.status, verdict.error ?? 'Refused', verdict.retryAfter ? { 'retry-after': String(verdict.retryAfter) } : {},
-          verdict.result ? { result: verdict.result } : undefined);
-      }
-      if (verdict.existing) return Buffer.from(verdict.existing.request, 'base64');
-      const request = await memberRequest({ wasm: homeModule, key: homeKey, account: asked.account, base: asked.base, now: clock() });
-      // Durable before answered: a crash after this write leaves a row the same request completes.
-      await table.write(asked.slot, { account: asked.account, base: asked.base, at: clock(), request: request.toString('base64') });
-      await reach('provision written');
-      homeSlots.set(asked.slot, { base: asked.base, account: asked.account });
-      await slot(asked.slot);
-      return request;
+      const session = route === 'grant' && provisioning.enabled ? grantSession(call, body) : null;
+      const decide = async (verify) => {
+        const verdict = await admitProvision({ ...asked, address, authorization,
+          held: { entry: table.get(asked.slot), occupied, count: table.size },
+          grant: route === 'grant' ? { replay: provisionReplay, heldBy: (member) => table.heldBy(member), verify } : undefined });
+        if (!verdict.admit) {
+          // A verified call refused with no effect (the slot's holder, the room): recorded
+          // completed, so it spends its grant's `perHour` like an admitted one.
+          if (verdict.reserve) await provisionReplay.reserve(verdict.reserve, null);
+          throw new HttpError(verdict.status, verdict.error ?? 'Refused', verdict.retryAfter ? { 'retry-after': String(verdict.retryAfter) } : {},
+            verdict.result ? { result: verdict.result } : undefined);
+        }
+        const reserve = verdict.grant?.reserve;
+        if (verdict.existing) {
+          // An idempotent answer: the call is recorded (it counts against its grant's rate) and
+          // has no effect.
+          if (reserve) await provisionReplay.reserve(reserve, null);
+          return Buffer.from(verdict.existing.request, 'base64');
+        }
+        // Verify, reserve, make the slot (the durable write names the call's digest), complete.
+        if (reserve) { await provisionReplay.reserve(reserve, { slot: asked.slot }); await reach('grant reserved'); }
+        const request = await memberRequest({ wasm: homeModule, key: homeKey, account: asked.account, base: asked.base, now: clock() });
+        // Durable before answered: a crash after this write leaves a row the same request completes.
+        await table.write(asked.slot, { account: asked.account, base: asked.base, at: clock(), request: request.toString('base64'), by: verdict.by });
+        await reach('provision written');
+        if (reserve) await provisionReplay.complete(reserve.key, 'completed');
+        homeSlots.set(asked.slot, { base: asked.base, account: asked.account });
+        await slot(asked.slot);
+        return request;
+      };
+      if (!session) return decide(undefined);
+      try { return await decide(session.verify); } finally { session.finish(); }
     });
     res.writeHead(200, { 'content-type': 'application/json', 'content-length': answer.length });
     res.end(answer);

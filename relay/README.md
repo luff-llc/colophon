@@ -73,12 +73,12 @@ account, or one whose stored state belongs to another account or another home ke
 made in one of two ways:
 
 - The operator configures it (`COLOPHON_RELAY_HOME_SLOTS` or `libraries`), and restarts.
-- An app creates it, with no restart, at the door `POST /v1/provision` when `provision.enabled`
-  is true. The body is `{"slot","base","account"}` with `Content-Type: application/json` and a
+- An app (or an agent the operator has granted, see "Provisioning by a grant" below) creates it,
+  with no restart, at the door `POST /v1/provision` when `provision.enabled` is true. The body is `{"slot","base","account"}` with `Content-Type: application/json` and a
   `Content-Length`, as the test apps send it. The answer is 200 with the home's signed member
   request (§9.1), JSON bytes: the account appoints the home with it. The home module builds and
   verifies the request and the home key signs it. The same `{slot, account}` again answers the
-  same bytes. The row (`slot` to `{account, base, at, request}`) is written to
+  same bytes. The row (`slot` to `{account, base, at, request, by}`) is written to
   `<dataDir>/provisioned.json` (staged, fsynced, renamed) before the answer, and read at
   start-up with the configured slots; a slot both configured and provisioned with different
   accounts refuses start-up. Provisioned slots are scheduled like configured ones.
@@ -90,9 +90,13 @@ provisioning on with it there refuses start-up until that slot is renamed). When
 on and is turned off (`enabled: false`) the table file stays: its slots stay served and the door
 answers 404; keep `provision.prefix` set, since every row is checked against it. While
 provisioning is or has been on, `provisioned.json` (and its staging files, `.provisioned.json.*`,
-which the slot grammar already excludes) cannot be slot names. The table is never repaired: at
-start-up it is read up to a bound (32 KiB of request per row, `max(maxSlots, 200)` rows), it
-must be exactly as the relay writes it (no duplicate key, no other field), and every row must
+which the slot grammar already excludes) cannot be slot names; with gate `"grant"`,
+`provision-replay` (the provisioning replay table's directory) cannot either. Each row's `by` says
+who made it: `{"gate":"open"}`, `{"gate":"token"}`, or `{"gate":"grant","member","key","call"}`
+(the grant's member ID, the acting key's ID, and the call's digest); a row written before `by`
+existed has none and reads as unknown. The table is never repaired: at start-up it is read up to
+a bound (32 KiB of request per row, `max(maxSlots, 200)` rows), it must be exactly as the relay
+writes it (no duplicate key, no other field, `by` one of the three shapes), and every row must
 have a slot that matches `slotPattern`, `base === prefix + slot`, and a member request that the
 module finds well formed, signed by this home's key, and naming the row's account and endpoint.
 A bad table refuses start-up with a message naming the row.
@@ -108,38 +112,145 @@ revocation is final, whatever the grant's expiry or the state of a subscription:
 entitlement lapses, the gate may stop new slots and the home may stop serving records, but it keeps
 signing heads and receipting authority changes until the account revokes it, or it would block that
 account's key changes. (Entitlements are not built in 0.5; gate `"token"` is the smallest one.)
+The same holds for a grant: revoking a member that provisioned slots, or its expiry, stops its new
+slots and leaves its slots alone. An appointed one keeps being witnessed; one never appointed is
+released after `unclaimedHours`, as any other.
 
 | `provision` field | Default | Meaning |
 | --- | --- | --- |
 | `enabled` | `false` | The door answers 404 when off, and every other answer is as without the setting |
 | `prefix` | none, required when on (and while a table file exists) | The public `https://` URL prefix, ending in `/`: `base` must equal `prefix + slot`. Plain `http://` only to a loopback host, for tests; anything else refuses start-up |
 | `maxSlots` | `200` | Provisioned slots this home holds |
-| `perAddressPerHour` | `10` | New slots, and refused tokens, one client address may spend in an hour |
+| `perAddressPerHour` | `10` | New slots (open path), refused tokens and requests no listed path takes, one client address may spend in an hour; separately, the grant requests from one address that may be refused in an hour (see below) |
 | `unclaimedHours` | `24` | A provisioned slot holding no genesis this long after it was made is released (its directory, then its row, removed) at the next provision or start-up, on the relay's clock |
 | `slotPattern` | `^[a-z0-9][a-z0-9._-]{7,63}$` | Names an app may pick, besides the slot grammar |
-| `gate` | `"open"` | Who may provision: `"open"` (anyone within the bounds) or `"token"` (`Authorization: Bearer <token>` whose SHA-256 is `tokenSha256`; `bun relay/server.js token` prints one). Anything else refuses start-up |
+| `gate` | `"open"` | Who may provision: `"open"` (anyone within the bounds), `"token"` (`Authorization: Bearer <token>` whose SHA-256 is `tokenSha256`; `bun relay/server.js token` prints one), `"grant"` (a call by a member of the operator account, below), or a list of them, such as `["grant", "open"]`. No value twice, and not `"open"` with `"token"` (open admits everything token would). Anything else refuses start-up |
 | `tokenSha256` | none | 64 hex; required with gate `"token"`, compared in constant time |
+| `operator` | none, required with `"grant"` | `{"account": "<64-hex ID>", "slot": "<slot>"}`: the operator account, and this home's own slot for it (configured or provisioned) |
+| `audience` | none, required with `"grant"` | The door's canonical audience (§10.1), its own: for example `https://home.example/v1/provision`. Not a slot's base, nor `prefix + slot`; one per deployment, so staging's grants do not reach production |
+| `grantMaxSlots` | `20` | Slots one grant may hold (made by it, claimed or not; a released slot frees its place) |
+| `grantPerHour` | `30` | Verified calls one grant may make in a rolling hour (a new slot, the same one again, or one then refused with 409 or 507), counted from the durable replay table before any history work, so it survives a restart |
+| `grants` | `{}` | Per-member overrides: `{"<member ID>": {"maxSlots": N, "perHour": N}}` |
+| `grantAttemptsPerAddressPerHour` | `120` | Grant requests one address may make in an hour, charged before any verification (CI hosts share addresses, so it is separate from and higher than `perAddressPerHour`) |
+| `replayRows` | `4096` | The provisioning replay table's hard cap, besides each grant's share of it |
 
 | The door answers | When |
 | --- | --- |
 | 200 the member request | Admitted, or the same `{slot, account}` again |
 | 400 `{"result":"malformed"}` | The body is not exactly `{"slot","base","account"}`, the slot breaks the grammar or `slotPattern`, `base` is not `prefix + slot`, or `account` is not 64 lower-case hex |
-| 403 `{"result":"refused:noEntitlement"}` | Gate `"token"` and the token is missing or wrong (counted against the address's hourly share) |
+| 403 `{"result":"refused:noEntitlement"}` | Gate `"token"` and the token is missing or wrong, or no listed path takes the request (counted against the address's hourly share) |
+| 403 `{"result":"<code>"}` | A grant's call is refused, with the core's code: `malformed`, `badSignature`, `refused:audience`, `refused:outOfScope`, `refused:revoked`, `refused:expired`, `refused:ended`, `refused:notNarrower`, `refused:window`, `refused:replay`, `refused:conflict`, `refused:fork`. Final: it never falls back to another path |
 | 403 | The request carries an `Origin` not on the CORS list (checked before the body is read) |
 | 405 | Not `POST` |
 | 409 | The slot is held by another account, configured by the operator, or a directory of that name is in the data directory |
 | 411, 413 | No `Content-Length`, or a body over 4 KiB |
 | 415 | The media type is not `application/json` (checked before the body is read; a browser must preflight such a request, and only a listed origin's preflight succeeds) |
-| 429 `{"result":"refused:overQuota"}` | The address is over `perAddressPerHour`, with `Retry-After` (checked first: a guesser over its share learns nothing about its token) |
-| 507 `{"result":"refused:overQuota"}` | `maxSlots` are held |
+| 429 `{"result":"refused:overQuota"}` | The address is over `perAddressPerHour`, with `Retry-After` (checked first: a guesser over its share learns nothing about its token); for a grant request, the address is over its attempts or its refusals, the replay table is full, or the grant is over `grantPerHour`, each with `Retry-After` |
+| 429 `{"result":"refused:window"}` | A grant over its share of the replay table, with `Retry-After` |
+| 503 `{"result":"unavailable"}` | A grant request while the operator slot is not set up (not held, no genesis, not appointed, stopped), or its account's heads cannot be judged here |
+| 507 `{"result":"refused:overQuota"}` | `maxSlots` are held, or the grant holds `grantMaxSlots` |
 
 The gate is one function, `admitProvision` in `relay/provision.js`: every check goes through it,
-and an entitlement presented in `Authorization` is added there. `refused:closed` is reserved and
+and an entitlement presented in `Authorization` is added there, as one more path. `refused:closed` is reserved and
 not produced. With provisioning on, a request to a slot this home does not hold answers 404
 `{"result":"refused:notProvisioned"}` instead of the 0.3 answer, 401 `WWW-Authenticate: Bearer`.
 So the answers tell the kinds of slot apart: an unknown name is 404, a configured token slot asked
 without its token is 401, and a home slot answers `GET {base}` with 200. That is intended: slot
 names are not secrets, and access is by call (or, at a 0.3 slot, by token), never by knowing a name.
+
+**Provisioning by a grant.** Gate `"grant"` lets a key the operator's own Colophon account has
+delegated provision, within bounds, revocable alone: a test rig or agent is granted once and then
+runs unattended, with no shared secret. It is operator behaviour of this home, not protocol: it uses
+only a member grant whose terms carry `services` (§10.1), a call (§12.2) verified by §12.3 with a
+§12.4 replay table, and a revocation (§9.5).
+
+- *The operator account* is one of this home's own slots (`provision.operator.slot`), whose
+  account is `provision.operator.account`; this home is its home. So the home holds its verified
+  history and signs its heads, and judges a call over that slot's state with no fetching and no
+  new trust path. Keep this home the account's one home (the 0.5 default): with more homes and
+  `headQuorum` above 1, this home lacks their fresh heads and every grant request is 503. Start-up
+  refuses gate `"grant"` without `operator` or `audience`, an operator slot configured or
+  provisioned for another account (or a 0.3 slot), and an audience that is not a §10.1 audience or
+  is a slot's base. An operator slot named but not set up yet is not a start-up failure: grant
+  requests answer 503 until it is.
+- *A grant* is an ordinary member of the operator account, one per agent or rig (so each is revoked
+  alone), admitted by §9.2 with terms such as
+  `{"services":[{"audience":"https://home.example/v1/provision","purposes":["home.provision"]}],
+  "expires":"2026-12-19T00:00:00Z","depth":1,"conditions":[{"prefix":["args.slot","ci-"]}]}` and a
+  label naming it ("later CI on omarchy"). The terms bound it: this home only (the audience), this
+  door only (the purpose), until `expires` (and each link's), slot names (`conditions` on
+  `args.slot`, `args.account`), and further delegation (`depth`; a link's key counts against its
+  member). How many slots and how often are this home's settings (`grantMaxSlots`,
+  `grantPerHour`, `grants`), per member ID, so a grant's links share its limits. The home-wide
+  `maxSlots` still caps them all.
+- *The request* is the door's usual body with `Authorization: Colophon <base64url call>`. The call
+  names the operator account, a member signer (its own key, or one to four links under it),
+  `audience` = `provision.audience`, `purpose` = `home.provision` exactly, and `args` = exactly the
+  body `{"account","base","slot"}`. The module (op `provision_access`) checks, in order:
+  parse; possession (the signature under the call's key, `badSignature`); then, before any history
+  work, the account, the audience, the purpose, `args` equal to the body, that the signer is a
+  member, its grant's `grantPerHour` (429 `refused:overQuota` with `Retry-After`, from the durable
+  replay rows), and that the signer is not this home itself; then the core's `verify_call` with no
+  home endpoints and no controller purposes (a controller's call is `refused:outOfScope`: a
+  controller's key is for authority, delegation is a member grant). The checks before history work
+  run first without the operator slot's lock, so a call they refuse never waits for, or holds up,
+  an upload to that slot.
+- *Order and durability.* The door holds the operator slot's lock from the verification until the
+  row is durable, and an upload to that slot waits for it (and it for an upload): a revocation the
+  home has accepted is seen by every later verification, and none verified before it commits after
+  it. Then: reserve the call in the provisioning replay table (`<dataDir>/provision-replay`, its
+  own, in the same durable format as a slot's, so syncing the operator account and provisioning
+  never share rows or shares), write the slot's row naming the call's digest, complete. A
+  reservation left pending by a crash is resolved from `provisioned.json` at start-up: completed if
+  a row names its digest, else abandoned; never by running it again. The same call again is
+  `refused:replay`; a fresh call for an already provisioned `{slot, account}` answers the same bytes
+  and counts against its grant's rate (not its slots). A verified call refused with no effect (409:
+  the slot is held or in use; 507: the home or the grant has no room) is recorded too, completed,
+  so it spends its grant's rate like an admitted one (and is then a replay).
+- *Per-address limits.* Every grant request is charged first against
+  `grantAttemptsPerAddressPerHour`. A grant request refused before or by the verification (a
+  malformed body, a bad call) counts against that address's own grant share of
+  `perAddressPerHour`; once that is spent, its grant requests are refused before the module runs.
+  An admitted one counts against nothing per address (CI agents share addresses; an admitted
+  request is bounded by its grant). A 503 counts against nothing.
+- *Gate lists.* With `["grant", "open"]` or `["grant", "token"]`, a request with
+  `Authorization: Colophon …` takes the grant path, and its refusal is final (no fallback); a
+  `Bearer` takes the token path when `"token"` is listed; anything else takes the open path when
+  `"open"` is listed, else 403 `refused:noEntitlement`. Each path keeps its own bounds: grant
+  requests their grant and the limits above, open requests `perAddressPerHour`, all `maxSlots`.
+
+*Issuing a grant.* Whoever may admit members to the operator account (a controller with
+`approve`, under the account's member rule) approves the agent's own member request with services
+terms like those above; nothing new in the account. The agent keeps its member key (Keychain, or a
+0600 file on a CI host), syncs the operator account from this home like any member, and signs a
+fresh call per slot. A suggested setup: the operator account's `control` and `recover` keys are the
+person's; one `approve`-only controller (added by an ordinary keyring entry, which cannot change
+controllers) is held by the agent that issues and revokes test grants.
+
+*Revoking a grant* is revoking that member in the operator account, from any of the operator's
+devices, and uploading the entry to this home: it takes effect here at once (§12.3 step 5), so a
+grant outlives its revocation here by no more than the time between signing the revocation and
+uploading it. `endSessions` of the member ends its links (`refused:ended`). The grant's slots are
+left alone (the lapsed-entitlement rule above). Accepted and documented: a stolen grant can hold up
+to its `grantMaxSlots` permanently by claiming them at once, since appointed slots are kept; keep
+the defaults small.
+
+*Seeing what was provisioned.* `bun relay/server.js provisioned <config>` reads the table and the
+slots without changing them (the relay may be running) and prints, per slot: the account, when it
+was made, `by` (for a grant, the member ID, the label the operator account gives it, and whether it
+is revoked now), and whether it is claimed (appointed or holding a first upload). It needs the home
+module (`COLOPHON_HOME_WASM` or `home.wasm`).
+
+*Self-hosting.* A person with no operator account uses `"open"` (bounded by `maxSlots`,
+`perAddressPerHour` and the release of slots nobody claimed) or the single `"token"`, which is for
+an operator's own tools and one-person homes only. There is no list of tokens: labelled tokens
+would be a second credential scheme beside the keyring. No app ships a provisioning secret: a
+token built into an app is everyone's. A person's own app has two honest paths: a home whose gate
+is `"open"`, or a home that checks an entitlement in `admitProvision` (`refused:noEntitlement` is
+reserved for it; not built yet). The grant gate is for agents and rigs the operator chooses, not
+for the public. On an `"open"` home only the bounds stop one script from taking every slot: slots
+nobody claimed free themselves, appointed ones are real accounts and stay. That is acceptable for a
+wipeable staging home, not for a production one.
 
 **The client address.** The per-address request limit and `perAddressPerHour` count against one
 address, from one function. By default it is the socket address. Behind a proxy (behind a tunnel,

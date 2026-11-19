@@ -3,10 +3,13 @@
 //   node relay/server.js                     start with env/config settings
 //   node relay/server.js --config file.json  start with a JSON config file
 //   node relay/server.js token               print a new bearer token and its SHA-256
+//   node relay/server.js provisioned <config> list the provisioned slots: account, when, by
+//                                            which gate or grant, claimed or not
 import { existsSync, readFileSync } from 'node:fs';
+import { HomeModule } from './home.js';
 import { webcrypto } from 'node:crypto';
 import path from 'node:path';
-import { TABLE_FILE, clientAddressConfig, provisionConfig } from './provision.js';
+import { ProvisionTable, TABLE_FILE, clientAddressConfig, provisionConfig } from './provision.js';
 import { corsOrigins, newToken, startRelay } from './relay.js';
 
 /** A test hook: wait at `point` the first time it is reached, until `file` exists. */
@@ -107,7 +110,55 @@ function loadConfig(argv, env) {
   };
 }
 
-if (process.argv[2] === 'home-key') {
+/**
+ * The operator's view of the provisioning table, read-only (the relay may be running): each slot
+ * with its account, when it was made, by which gate (for a grant, the member ID and the label the
+ * operator account gives it, and whether that member is revoked now), and whether the slot is
+ * claimed (appointed, or holding a first upload). Removing a grant is revoking that member in the
+ * operator account; its slots are left alone (an appointed one keeps being witnessed, an
+ * unclaimed one is released after unclaimedHours).
+ */
+async function listProvisioned(argv, env) {
+  const file = argv.find((a) => !a.startsWith('--')) ?? env.COLOPHON_RELAY_CONFIG;
+  const config = file ? JSON.parse(readFileSync(file, 'utf8')) : {};
+  const provision = provisionConfig(config.provision);
+  const dataDir = path.resolve(env.COLOPHON_RELAY_DATA ?? config.dataDir ?? './relay-data');
+  const wasm = env.COLOPHON_HOME_WASM ?? config.home?.wasm;
+  if (!wasm) throw new Error('the listing needs the home module: COLOPHON_HOME_WASM or home.wasm');
+  const clockFile = env.COLOPHON_RELAY_CLOCK_FILE;
+  if (clockFile && !argv.includes('--test-clock')) throw new Error('COLOPHON_RELAY_CLOCK_FILE is a test hook: pass --test-clock to use it, or unset it');
+  const now = clockFile ? Number(readFileSync(clockFile, 'utf8').trim()) : Date.now();
+  const module = await HomeModule.load(wasm);
+  const table = existsSync(path.join(dataDir, TABLE_FILE)) ? await ProvisionTable.load(dataDir, provision) : ProvisionTable.empty(dataDir);
+  const stateOf = (slot) => {
+    try { return JSON.parse(readFileSync(path.join(dataDir, slot, 'home-state.json'), 'utf8')); } catch { return null; }
+  };
+  const members = new Map();
+  const operatorState = provision.operator ? stateOf(provision.operator.slot) : null;
+  if (operatorState) {
+    try { for (const m of module.call({ op: 'provision_access', query: 'members', state: operatorState, now }).members) members.set(m.id, m); }
+    catch (error) { process.stderr.write(`the operator slot's members cannot be read: ${error.message}\n`); }
+  }
+  const out = [];
+  for (const slot of [...table.keys()].sort()) {
+    const e = table.get(slot);
+    const state = stateOf(slot);
+    let claimed = false;
+    if (state) { try { const st = module.call({ op: 'status', state, now }); claimed = Boolean(st.appointed || st.held > 0); } catch { claimed = false; } }
+    const by = e.by ?? { gate: 'unknown' };
+    const grant = by.gate === 'grant' ? members.get(by.member) : undefined;
+    out.push({ slot, account: e.account, at: new Date(e.at).toISOString(), by,
+      ...(by.gate === 'grant' ? { label: grant?.label ?? null, revoked: grant ? grant.revoked : null } : {}), claimed });
+  }
+  return out;
+}
+
+if (process.argv[2] === 'provisioned') {
+  try { process.stdout.write(JSON.stringify(await listProvisioned(process.argv.slice(3), process.env), null, 2) + '\n'); } catch (error) {
+    console.error(error.message);
+    process.exit(2);
+  }
+} else if (process.argv[2] === 'home-key') {
   // A new home key as a private JWK. Keep it secret: it signs this home's receipts and heads.
   const pair = await webcrypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
   process.stdout.write(JSON.stringify(await webcrypto.subtle.exportKey('jwk', pair.privateKey)) + '\n');
