@@ -24,6 +24,7 @@ import com.luff.colophon.ExchangeStep
 import com.luff.colophon.ExchangeStepKind
 import com.luff.colophon.Home
 import com.luff.colophon.HttpAnswer
+import com.luff.colophon.CallTarget
 import com.luff.colophon.HttpMethod
 import com.luff.colophon.KeepMode
 import com.luff.colophon.ListedPath
@@ -500,7 +501,7 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
         if (memberId == null) throw SessionError.NotReady()
         val keys = memberKeys.publicKeys()
         val spec = RequestSpec(account, keys.signing, keys.agreement, configuration.memberLabel, configuration.memberKind,
-            terms(configuration.namespaces, configuration.access, null, null), accountFormatDate(nowMs - 1000), null, null, listOf())
+            terms(configuration.namespaces, configuration.access, null, null, configuration.services), accountFormatDate(nowMs - 1000), null, null, listOf())
         return AccountRequest.prepare(spec).use { request ->
             val signature = memberKeys.sign(request.step().body)
             request.finish(Signature(signature, null, null)).raw
@@ -846,7 +847,7 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
             val at = nowMs
             owner.run { it.advance(at) }
             val own = AccountPairing.scanRequest(account, memberRaw, PairingFailureLimiter.fresh(), at)
-            val terms = terms(configuration.namespaces, configuration.access, null, null)
+            val terms = terms(configuration.namespaces, configuration.access, null, null, configuration.services)
             val signers = signers(owner, ownerId, SignerNeed.MEMBER)
             owner.execute(custody, persistOn(owner)) { e -> withEntropy(32) { e.beginApprove(memberRaw, terms, signers, own, it) } }
         } finally {
@@ -1105,6 +1106,27 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
         gated { engine.run { it.exchangeProvideCall(need.home, need.ticket, artifact) } }
     }
 
+    /**
+     * A call (spec §12.2) for `audience` and `purpose` with `argsJson` (a JSON object), signed by this device's member key
+     * with no links, as the envelope's bytes. The signer's own check comes first: a service this session did not ask for
+     * (`SessionConfiguration.services`) is `refused:outOfScope` before the key is asked; then the core judges the signed
+     * call by §12.3 over the history this device holds (its grant's services, expiry and conditions, a revocation it
+     * holds, fresh heads) and returns the bytes only when that judgement is `ok`. Each call has a fresh request ID.
+     */
+    suspend fun signCall(audience: String, purpose: String, argsJson: String): ByteArray = gated {
+        if (engine == null) reconcile()
+        val engine = engine; val custody = memberCustody; val id = memberId
+        if (engine == null || custody == null || id == null) throw SessionError.NotReady()
+        if (Json.obj(argsJson) == null) throw SessionError.InvalidCommand()
+        if (!servicesCover(configuration.services, audience, purpose)) {
+            throw AccountException.Refused("refused:outOfScope", "outOfScope", "this session asked for no service $purpose at $audience")
+        }
+        val signing = custody.provider(id).publicKeys().signing
+        val target = CallTarget(listOf(audience), listOf(), listOf(), listOf())
+        val written = engine.execute(custody) { e -> withEntropy(32) { e.beginCall(signing, listOf(), audience, purpose, argsJson, target, it) } }
+        written.artifact ?: throw AccountException.Internal("internal", "a call returned no envelope")
+    }
+
     /** Records transitions that came due (§8.7). A schedule calls it; refresh calls it too. */
     suspend fun recordDue(): SessionSnapshot = gated {
         val engine = engine ?: return@gated reconcile()
@@ -1133,11 +1155,63 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
     suspend fun currentSnapshot(): SessionSnapshot = gated { build() }
 
     companion object {
-        fun terms(namespaces: List<String>, access: Set<AccessKind>, expires: String?, budget: ULong?): String {
+        /** A member's terms (§9.1, §10.1): `records` for `namespaces` (sorted; absent when there are none) and `services` when asked, keys sorted. */
+        fun terms(namespaces: List<String>, access: Set<AccessKind>, expires: String?, budget: ULong?, services: List<ServiceTerms> = listOf()): String {
             val terms = LinkedHashMap<String, Any?>()
-            terms["records"] = namespaces.sorted().map { mapOf("namespace" to it, "access" to if (AccessKind.WRITE in access) "write" else "read") }
+            if (namespaces.isNotEmpty()) terms["records"] = namespaces.sorted().map { mapOf("namespace" to it, "access" to if (AccessKind.WRITE in access) "write" else "read") }
+            if (services.isNotEmpty()) terms["services"] = servicesValue(services)
             expires?.let { terms["expires"] = it }
             budget?.let { terms["writes"] = it }
+            return Json.write(terms)
+        }
+        private fun servicesValue(services: List<ServiceTerms>): List<Map<String, Any?>> =
+            services.sortedBy { it.audience }.map { mapOf("audience" to it.audience, "purposes" to it.purposes.sorted()) }
+        /** The `services` a member's terms ask for (spec §10.1); anything not of that shape is left out. */
+        fun requestedServices(termsJson: String): List<ServiceTerms> =
+            Json.obj(termsJson)?.list("services")?.mapNotNull { e ->
+                @Suppress("UNCHECKED_CAST") val m = e as? Map<String, Any?> ?: return@mapNotNull null
+                val audience = m.string("audience") ?: return@mapNotNull null
+                val purposes = m.list("purposes")?.map { it as? String ?: return@mapNotNull null } ?: return@mapNotNull null
+                ServiceTerms(audience, purposes)
+            } ?: listOf()
+        /** Whether `asked` purposes cover `granted` ones (§10.3: `["*"]` covers all; a granted `["*"]` needs an asked one). */
+        private fun purposesCover(asked: List<String>, granted: List<String>): Boolean {
+            if (granted.isEmpty()) return false
+            if ("*" in asked) return true
+            return "*" !in granted && granted.all { it in asked }
+        }
+        /** Whether `services` name `purpose` at exactly `audience`. */
+        fun servicesCover(services: List<ServiceTerms>, audience: String, purpose: String): Boolean =
+            services.any { it.audience == audience && purposesCover(it.purposes, listOf(purpose)) }
+        /**
+         * The request's terms narrowed by `grant` (`ServiceGrant`): each granted service names an audience the request asks
+         * for with purposes it asks; `expires` is no later than a requested one; conditions are added to any the request
+         * carries. Everything else is kept. A grant wider than the request, or one that leaves no `records`, `services` or
+         * `serves`, is `InvalidCommand`.
+         */
+        fun narrowed(requestTerms: String, grant: ServiceGrant): String {
+            val terms = LinkedHashMap(Json.obj(requestTerms) ?: throw SessionError.InvalidCommand())
+            grant.services?.let { granted ->
+                val asked = requestedServices(requestTerms)
+                for (g in granted) {
+                    val a = asked.firstOrNull { it.audience == g.audience }
+                    if (a == null || !purposesCover(a.purposes, g.purposes)) throw SessionError.InvalidCommand()
+                }
+                if (granted.isEmpty()) terms.remove("services") else terms["services"] = servicesValue(granted)
+            }
+            grant.expires?.let { expires ->
+                val held = terms["expires"] as? String
+                if (held != null && expires > held) throw SessionError.InvalidCommand()
+                terms["expires"] = expires
+            }
+            grant.conditionsJson?.let { text ->
+                val added = (try { Json.parse(text) } catch (_: Json.ParseException) { null }) as? List<*> ?: throw SessionError.InvalidCommand()
+                val held = (terms["conditions"] as? List<*>)?.toMutableList() ?: mutableListOf()
+                val seen = held.map { Json.write(it) }.toMutableSet()
+                for (c in added) if (seen.add(Json.write(c))) held.add(c)
+                if (held.isNotEmpty()) terms["conditions"] = held
+            }
+            if (terms["records"] == null && terms["services"] == null && terms["serves"] == null) throw SessionError.InvalidCommand()
             return Json.write(terms)
         }
         /** The digest an object's store path names (`transitions/<digest>.json`). */

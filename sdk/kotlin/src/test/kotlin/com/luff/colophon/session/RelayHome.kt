@@ -63,12 +63,15 @@ class RelayHome(val base: String, val port: Int = freePort()) {
             return Json.write(mapOf("kty" to "EC", "crv" to "P-256", "x" to b64(point.copyOfRange(1, 33)), "y" to b64(point.copyOfRange(33, 65)), "d" to b64(d)))
         }
 
-    /** Starts the relay for `account`; `peers` are the account's other homes (it forwards to them). */
-    fun start(account: String, peers: List<RelayHome> = listOf()) {
+    /** Starts the relay for `account`; `peers` are the account's other homes (it forwards to them). `provision` is the
+     *  config file's `provision` object (the door), as JSON. */
+    fun start(account: String, peers: List<RelayHome> = listOf(), provision: String? = null) {
         val bun = bun(); val module = module()
         clock.writeText(System.currentTimeMillis().toString())
         val config = File(dir, "config.json")
-        config.writeText(Json.write(mapOf("resolve" to peers.associate { it.base to "http://127.0.0.1:${it.port}/v1/libraries/home" })))
+        val settings = linkedMapOf<String, Any?>("resolve" to peers.associate { it.base to "http://127.0.0.1:${it.port}/v1/libraries/home" })
+        if (provision != null) settings["provision"] = Json.parse(provision)
+        config.writeText(Json.write(settings))
         val builder = ProcessBuilder(bun, File(repository, "relay/server.js").path, "--test-clock", "--config", config.path)
         builder.environment().apply {
             put("COLOPHON_RELAY_PORT", port.toString())
@@ -107,6 +110,23 @@ class RelayHome(val base: String, val port: Int = freePort()) {
             AccountMemberKind.SERVER, "{\"serves\":[\"home\"]}", accountFormatDate(System.currentTimeMillis() - 5_000), null, null, listOf("$base/"))
         return AccountRequest.prepare(spec).use { r ->
             r.finish(Signature(P256.sign(key.private, r.step().body), null, null)).raw
+        }
+    }
+
+    /** This relay's door (`POST /v1/provision`) on loopback. */
+    val door: String get() = "http://127.0.0.1:$port/v1/provision"
+    /** A transport to the door that sets the relay's clock first. */
+    fun doorTransport(): HomeTransport {
+        val inner = HttpHomeTransport(allowingLoopbackHttp = true)
+        return HomeTransport { request -> setClock(System.currentTimeMillis()); inner.send(request) }
+    }
+    /** The transport to a slot this relay provisioned: `slotBase` (its `https://` name) goes to `/v1/libraries/<slot>`. */
+    fun slotTransport(slotBase: String, slot: String): HomeTransport {
+        val inner = HttpHomeTransport(allowingLoopbackHttp = true)
+        return HomeTransport { request ->
+            setClock(System.currentTimeMillis())
+            check(request.url.startsWith(slotBase)) { "a request for another host: ${request.url}" }
+            inner.send(HttpRequest(request.ticket, request.home, request.method, "http://127.0.0.1:$port/v1/libraries/$slot" + request.url.substring(slotBase.length), request.headers, request.body))
         }
     }
 

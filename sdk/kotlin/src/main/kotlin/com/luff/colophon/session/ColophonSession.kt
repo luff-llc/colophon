@@ -194,6 +194,53 @@ class ColophonSession(configuration: SessionConfiguration) : AutoCloseable {
      * whatever the answer. `termsJson` overrides the requested terms.
      */
     suspend fun approve(request: AccessRequest, pairing: AccountPairing, termsJson: String? = null) = owner { worker.approve(request, pairing, termsJson) }
+    /**
+     * Approves a request that asks for services (spec §10.1), narrowed by `grant`: the services granted, an expiry,
+     * conditions. A grant wider than the request is `SessionError.InvalidCommand`, and the pairing is not spent.
+     */
+    suspend fun approve(request: AccessRequest, pairing: AccountPairing, grant: ServiceGrant) {
+        val terms = SessionWorker.narrowed(request.termsJson, grant)
+        owner { worker.approve(request, pairing, terms) }
+    }
+
+    // Calls for services (§12)
+
+    /**
+     * Signs a call (spec §12.2) for `audience` and `purpose` with `argsJson` (a JSON object) by this device's member key
+     * and returns its bytes base64url-encoded, ready for `Authorization: Colophon <call>`. Refused locally, with nothing
+     * sent: a service this session did not ask for (`refused:outOfScope`, before the key is asked), and any call the
+     * core's own §12.3 check refuses over what this device holds (its grant's services, expiry or conditions, a
+     * revocation it holds). Sign a fresh call for each request: a home refuses a replay.
+     */
+    suspend fun signCall(audience: String, purpose: String, argsJson: String): String = facade {
+        restore()
+        java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(worker.signCall(audience, purpose, argsJson))
+    }
+
+    /**
+     * Provisions a slot at a home's door by this member's grant (the reference home's gate `"grant"`, relay/README.md):
+     * signs a fresh call for `audience` with purpose `home.provision` and args exactly the body
+     * `{"account","base","slot"}`, POSTs the body to `door` with `Content-Type: application/json`, its `Content-Length`
+     * and `Authorization: Colophon <call>`, and returns the home's signed member request (§9.1). So it plugs into
+     * `HomeConfiguration.request`: `request = { account -> rig.provisionRequest(door, audience, slot, base, account) }`.
+     * A refusal is a `ProvisionRefusal` with the door's status and code; the signer's own refusal is the engine's
+     * `AccountException` and sends nothing. `transport` defaults to `HttpHomeTransport` (`allowsLoopbackHttp` for a test
+     * door on loopback).
+     */
+    suspend fun provisionRequest(door: String, audience: String, slot: String, base: String, account: String,
+                                 transport: HomeTransport? = null, allowsLoopbackHttp: Boolean = false): ByteArray {
+        val body = Json.write(mapOf("account" to account, "base" to base, "slot" to slot))
+        val call = signCall(audience, "home.provision", body)
+        val bytes = body.toByteArray(Charsets.UTF_8)
+        val sender = transport ?: HttpHomeTransport(allowingLoopbackHttp = allowsLoopbackHttp)
+        val answer = sender.send(com.luff.colophon.HttpRequest(0uL, "", com.luff.colophon.HttpMethod.POST, door, listOf(
+            com.luff.colophon.Header("Content-Type", "application/json"), com.luff.colophon.Header("Content-Length", bytes.size.toString()),
+            com.luff.colophon.Header("Authorization", "Colophon $call"),
+        ), bytes))
+        if (answer.status.toInt() == 200) return answer.body
+        val refusal = HomeRefusal.of(answer.status.toInt(), answer.headers, answer.body)
+        throw ProvisionRefusal(answer.status.toInt(), refusal?.code, refusal?.retryAfterSeconds)
+    }
 
     // Pairing before approval (§7.3)
 
