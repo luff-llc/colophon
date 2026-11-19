@@ -22,9 +22,9 @@ digest over every exported source file), `SOURCE_DATE_EPOCH`, the number of pass
 artefact its name, size, sha256, whether it reproduced, how many payload files still contain a
 path of the build machine, and the tools used with the sha256 of their binaries.
 
-**The 0.5 exports change once more before the tag** (a security fix on another branch). Every
-checksum from the rehearsal runs on the `pkg-0.5` branch is a rehearsal. The release run is
-repeated at the tag.
+Each GitHub release carries the four artefacts of a `--verify` run at its tag, with `SHA256SUMS`,
+the `.contents.sha256` files and `manifest.json`. Nothing is signed and nothing is published to a
+registry.
 
 ## Build from a tag
 
@@ -110,13 +110,9 @@ different order on each run (the same five entries). The script sorts that array
 Not changed: the release profile has no `strip` setting, and the script does not add one (the
 static libraries keep their symbols, as app links need them).
 
-Rehearsal results, 2026-11-16. On the MacBook (macOS 27, Xcode 27.2, rustc 1.99.1, nightly
-1.101.0 of 2026-11-05), the earlier version of the script (two passes in one working tree, with
-separate target directories only) reproduced all four bit for bit once the plist was sorted; the
-five static libraries (visionOS too) and the headers matched from the first run. The hermetic
-version is checked on the Mac mini for the home bundle (see the pull request); the full
-four-artefact `--verify` with it is still to be run on a quiet Mac. Two machines have not been
-compared.
+Before 0.5.0 the script was rehearsed on two Macs: all four artefacts reproduced bit for bit once
+the plist was sorted, and the hermetic version reproduced the home bundle. The 0.5.0 release run
+is recorded in that release's `manifest.json`. Two machines' builds have not been compared.
 
 ## Toolchains
 
