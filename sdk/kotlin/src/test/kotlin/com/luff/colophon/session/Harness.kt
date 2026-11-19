@@ -17,6 +17,7 @@ class Device(
     createWithoutHome: Boolean = true,
     additional: List<AdditionalController> = listOf(),
     namespaces: List<String> = listOf("notes"),
+    libraryNamespaces: List<String>? = null,
     history: HistoryAccess? = null,
     headQuorum: Int? = null,
     val secrets: DeviceSecretStore = MemoryDeviceSecrets(),
@@ -24,7 +25,7 @@ class Device(
     storage: RecordMedium = medium,
 ) {
     val session = ColophonSession(SessionConfiguration(
-        memberLabel = "Test device", namespaces = namespaces, medium = storage, privateDirectory = dir, keys = member,
+        memberLabel = "Test device", namespaces = namespaces, libraryNamespaces = libraryNamespaces, medium = storage, privateDirectory = dir, keys = member,
         ownerController = owner, homes = homes, createWithoutHome = createWithoutHome, additionalControllers = additional,
         deviceSecrets = secrets, history = history, headQuorum = headQuorum))
 

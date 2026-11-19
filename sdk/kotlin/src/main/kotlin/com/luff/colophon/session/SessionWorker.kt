@@ -298,7 +298,7 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
         val revisions = LinkedHashMap<String, ULong>()
         if (standing.kind == StandingKind.MEMBER && standing.member?.revokedAt == null) {
             for (r in engine.run { it.revisions() }) {
-                if (r.namespace in configuration.libraryNamespaces && engine.run { it.access(r.namespace) } == null) revisions[r.namespace] = r.revision
+                if (r.namespace in configuration.namespaces && engine.run { it.access(r.namespace) } == null) revisions[r.namespace] = r.revision
             }
             if (revisions.isNotEmpty()) revisions["colophon.authority"] = engine.run { it.headSeq() }
         }
@@ -325,7 +325,7 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
                 if (standing.member?.revokedAt != null) phase = SessionPhase.Denied
                 else {
                     phase = SessionPhase.Ready
-                    for (namespace in configuration.libraryNamespaces) {
+                    for (namespace in configuration.namespaces) {
                         val denial = engine.run { it.access(namespace) } ?: continue
                         phase = if (denial.reason == AccountDenialReason.NOT_READABLE || denial.reason == AccountDenialReason.UNAVAILABLE)
                             SessionPhase.Unavailable(denial.detail) else SessionPhase.Denied
@@ -335,7 +335,7 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
             }
         }
         val revisions = HashMap<String, ULong>()
-        if (phase == SessionPhase.Ready) for (r in engine.run { it.revisions() }) if (r.namespace in configuration.libraryNamespaces) revisions[r.namespace] = r.revision
+        if (phase == SessionPhase.Ready) for (r in engine.run { it.revisions() }) if (r.namespace in configuration.namespaces) revisions[r.namespace] = r.revision
         val notices = currentNotices()
         val head = engine.run { it.headSeq() }
         if (phase == SessionPhase.Ready) revisions["colophon.authority"] = head

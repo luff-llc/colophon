@@ -280,7 +280,7 @@ export class SessionWorker {
     const revisions: Record<string, bigint> = {};
     if (standing.kind === glue.StandingKind.Member && standing.member?.revokedAt === undefined) {
       for (const r of plain<NamespaceRevision[]>(engine.run(e => e.revisions()))) {
-        if (this.libraryNamespaces.includes(r.namespace) && plain<AccountDenial | undefined>(engine.run(e => e.access(r.namespace))) === undefined) revisions[r.namespace] = r.revision;
+        if (this.configuration.namespaces.includes(r.namespace) && plain<AccountDenial | undefined>(engine.run(e => e.access(r.namespace))) === undefined) revisions[r.namespace] = r.revision;
       }
       if (Object.keys(revisions).length > 0) revisions['colophon.authority'] = engine.run(e => e.head_seq());
     }
@@ -312,7 +312,7 @@ export class SessionWorker {
       phase = { kind: 'denied' };
     } else {
       phase = { kind: 'ready' };
-      for (const namespace of this.libraryNamespaces) {
+      for (const namespace of this.configuration.namespaces) {
         const denial = plain<AccountDenial | undefined>(engine.run(e => e.access(namespace)));
         if (!denial) continue;
         phase = denial.reason === glue.AccountDenialReason.NotReadable || denial.reason === glue.AccountDenialReason.Unavailable
@@ -323,7 +323,7 @@ export class SessionWorker {
     const ready = phase.kind === 'ready';
     const revisions: Record<string, bigint> = {};
     if (ready) {
-      for (const r of plain<NamespaceRevision[]>(engine.run(e => e.revisions()))) if (this.libraryNamespaces.includes(r.namespace)) revisions[r.namespace] = r.revision;
+      for (const r of plain<NamespaceRevision[]>(engine.run(e => e.revisions()))) if (this.configuration.namespaces.includes(r.namespace)) revisions[r.namespace] = r.revision;
       revisions['colophon.authority'] = engine.run(e => e.head_seq());
     }
     const notices = await this.currentNotices();
