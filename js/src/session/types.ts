@@ -86,6 +86,17 @@ export class ConfiguredHome {
   get isAllowed(): boolean { return HomeLimits.isAllowed(this.endpoint, this.allowsLoopbackHttp); }
 }
 
+/** One `services` entry of a member's terms (spec §10.1): an audience and the purposes (or `["*"]`) it may call there. */
+export interface ServiceTerms { audience: string; purposes: string[] }
+
+/**
+ * What an approver grants of a request that asks for `services`, narrowing it (spec §10.1, §10.3): `services` keeps
+ * entries for audiences the request names with purposes it asks (absent: as requested); `expires` (a §2.2 date) and
+ * `conditions` (§10.4 predicates, such as `{"prefix":["args.slot","ci-"]}`) are added. Everything else in the request
+ * (its `records`) is kept as asked. `narrowedTerms` makes the terms; a grant wider than the request is `invalidCommand`.
+ */
+export interface ServiceGrant { services?: ServiceTerms[]; expires?: string; conditions?: unknown[] }
+
 /** Who may read an account's history at its homes (`policy.history`, spec §13.4). */
 export type HistoryAccess = 'public' | 'members';
 
@@ -100,6 +111,12 @@ export interface SessionConfiguration {
   namespaces: string[];
   /** Default: read and write. */
   access?: ('read' | 'write')[];
+  /**
+   * Services this member asks for (spec §10.1 `services`): each an audience and the purposes it may call there. Its
+   * request's terms then carry them, beside `records` when `namespaces` is not empty (a member that only signs calls,
+   * such as a test rig, asks for no namespace). `signCall` signs only for what is asked here. Default: none.
+   */
+  services?: ServiceTerms[];
   /** The namespaces the account is created with and the engine reads. Default: `namespaces`. */
   libraryNamespaces?: string[];
   /** The account's record store: `IndexedDBMedium` in a browser, `FileMedium` under Node or Bun, `MemoryMedium` in tests. */
@@ -143,6 +160,8 @@ export interface AccessRequest {
   record: Uint8Array;
   namespaces: string[];
   access: ('read' | 'write')[];
+  /** The services the request asks for (spec §10.1), read from its terms. The session always fills it; absent: none. */
+  services?: ServiceTerms[];
 }
 /** The approving device's half of the six-digit code (§7.3): the session it opened when the commitment arrived, and the nonce to send back. */
 export interface ApprovalStart { pairing: glue.AccountPairing; nonce: Uint8Array }

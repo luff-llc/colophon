@@ -2,7 +2,7 @@
 import {
   ColophonSession, FetchHomeTransport, glue, MemoryDeviceSecrets, MemoryMedium, MemoryPrivateStore, plain, WebCryptoKeyProvider,
   type AdditionalController, type AsyncKeyProvider, type DeviceSecretStore, type HistoryAccess, type HomeConfiguration, type HomeTransport,
-  type AccessRequest, type PrivateStore, type RecordMedium, type RequestInfo, type SigningStep, type WriteReceipt,
+  type AccessRequest, type PrivateStore, type ServiceTerms, type RecordMedium, type RequestInfo, type SigningStep, type WriteReceipt,
 } from '../src/session/index.js';
 
 export function assert(condition: unknown, message: string | (() => string)): asserts condition {
@@ -20,14 +20,14 @@ export class Device {
   private constructor(readonly medium: RecordMedium, readonly member: AsyncKeyProvider, readonly owner: AsyncKeyProvider, session: ColophonSession) { this.session = session; }
   static async make(options: {
     medium?: RecordMedium; member?: AsyncKeyProvider; owner?: AsyncKeyProvider; homes?: HomeConfiguration[]; createWithoutHome?: boolean;
-    additional?: AdditionalController[]; namespaces?: string[]; libraryNamespaces?: string[]; now?: () => number; history?: HistoryAccess; headQuorum?: number; secrets?: DeviceSecretStore;
+    additional?: AdditionalController[]; namespaces?: string[]; services?: ServiceTerms[]; libraryNamespaces?: string[]; now?: () => number; history?: HistoryAccess; headQuorum?: number; secrets?: DeviceSecretStore;
     privateStore?: PrivateStore; exchangeTimeMs?: number;
   } = {}): Promise<Device> {
     const medium = options.medium ?? new MemoryMedium();
     const member = options.member ?? await WebCryptoKeyProvider.generate();
     const owner = options.owner ?? await WebCryptoKeyProvider.generate();
     const session = new ColophonSession({
-      memberLabel: 'Test device', namespaces: options.namespaces ?? ['notes'], libraryNamespaces: options.libraryNamespaces, now: options.now, medium, privateStore: options.privateStore ?? new MemoryPrivateStore(),
+      memberLabel: 'Test device', namespaces: options.namespaces ?? ['notes'], services: options.services, libraryNamespaces: options.libraryNamespaces, now: options.now, medium, privateStore: options.privateStore ?? new MemoryPrivateStore(),
       keys: member, ownerController: owner, homes: options.homes ?? [], createWithoutHome: options.createWithoutHome ?? (options.homes === undefined),
       additionalControllers: options.additional ?? [], deviceSecrets: options.secrets ?? new MemoryDeviceSecrets(), history: options.history,
       headQuorum: options.headQuorum, exchangeTimeMs: options.exchangeTimeMs,
@@ -56,8 +56,9 @@ export function note(session: ColophonSession, id: string): Promise<WriteReceipt
 /** Where the relays run: a Bun process spawns them; a browser asks the test server to. */
 export interface RelayHost {
   freePort(): Promise<number>;
-  /** Starts `bun relay/server.js --test-clock` on `port` for `account` at `base`, with the home key `jwk`. */
-  start(spec: { port: number; account: string; base: string; jwk: JsonWebKey; peers: { base: string; port: number }[] }): Promise<void>;
+  /** Starts `bun relay/server.js --test-clock` on `port` for `account` at `base`, with the home key `jwk`; `config` is
+   *  added to its config file (such as `provision`). */
+  start(spec: { port: number; account: string; base: string; jwk: JsonWebKey; peers: { base: string; port: number }[]; config?: Record<string, unknown> }): Promise<void>;
   /** The URL that reaches the relay's slot (`/v1/libraries/home`) on `port` from this runtime. */
   local(port: number): string;
   /** Sets the relay's test clock to now. */
@@ -81,10 +82,10 @@ export class RelayHome {
       new Uint8Array(await crypto.subtle.exportKey('raw', signing.publicKey)), new Uint8Array(await crypto.subtle.exportKey('raw', agreement.publicKey)));
   }
   get id(): string { return glue.account_key_id(this.point); }
-  async start(account: string, peers: RelayHome[]): Promise<void> {
+  async start(account: string, peers: RelayHome[], config?: Record<string, unknown>): Promise<void> {
     if (this.started) return;
     const jwk = await crypto.subtle.exportKey('jwk', this.signing.privateKey);
-    await this.host.start({ port: this.port, account, base: this.base, jwk: { kty: 'EC', crv: 'P-256', x: jwk.x, y: jwk.y, d: jwk.d }, peers: peers.map(p => ({ base: p.base, port: p.port })) });
+    await this.host.start({ port: this.port, account, base: this.base, jwk: { kty: 'EC', crv: 'P-256', x: jwk.x, y: jwk.y, d: jwk.d }, peers: peers.map(p => ({ base: p.base, port: p.port })), config });
     this.started = true;
   }
   /** The home's signed member request (§9.1) naming `account`, as a home service answers it. */
@@ -116,6 +117,25 @@ export class RelayHome {
           refusals.push(result);
         }
         return answer;
+      },
+    };
+  }
+  /** This relay's door (`POST /v1/provision`) as this runtime reaches it. */
+  get door(): string { return this.host.local(this.port).replace(/\/v1\/libraries\/home$/, '/v1/provision'); }
+  /** A transport to the door that sets the relay's clock to now first. */
+  doorTransport(): HomeTransport {
+    const inner = new FetchHomeTransport({ allowingLoopbackHttp: true });
+    return { send: async (request, signal) => { await this.host.touchClock(this.port); return inner.send(request, signal); } };
+  }
+  /** The transport to a slot this relay provisioned: `base` (its `https://` name) goes to `/v1/libraries/<slot>` on loopback. */
+  slotTransport(base: string, slot: string): HomeTransport {
+    const inner = new FetchHomeTransport({ allowingLoopbackHttp: true });
+    const local = this.host.local(this.port).replace(/\/home$/, `/${slot}`);
+    return {
+      send: async (request, signal) => {
+        await this.host.touchClock(this.port);
+        assert(request.url.startsWith(base), `a request for another host: ${request.url}`);
+        return inner.send({ ...request, url: local + request.url.slice(base.length) }, signal);
       },
     };
   }

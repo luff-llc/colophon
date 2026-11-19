@@ -16,11 +16,11 @@ import {
 } from '../src/session/index.js';
 import { admitted, approveByCode, approveByScan, assert, Device, equal, note, RelayHome, sameBytes, sleep, type RelayHost } from './support.js';
 
-const authorityOnly = (medium: MemoryMedium): MemoryMedium => medium.copy(path => path.startsWith('authority/'));
+export const authorityOnly = (medium: MemoryMedium): MemoryMedium => medium.copy(path => path.startsWith('authority/'));
 const callRefused = (device: Device): string[] => device.session.homeIssues.flatMap(i => i.problem.kind === 'callRefused' ? [i.problem.code] : []);
 
 /** Sync until the session says nothing is wrong (a home records entries and forwards heads on its own schedule). */
-async function settle(device: Device, tries = 40): Promise<boolean> {
+export async function settle(device: Device, tries = 40): Promise<boolean> {
   for (let n = 0; n < tries; n++) {
     const ok = await device.session.syncNow();
     if (ok && device.session.homeIssues.length === 0 && device.session.homeFaults.length === 0) return true;
@@ -35,7 +35,7 @@ async function settle(device: Device, tries = 40): Promise<boolean> {
  * need says `refused:revoked` (it is not a member at what it holds) and nothing is sent. Any other issue or fault
  * fails. Returns the number of passes it took.
  */
-async function untilApproved(device: Device, tries = 20): Promise<number> {
+export async function untilApproved(device: Device, tries = 20): Promise<number> {
   for (let n = 1; n <= tries; n++) {
     await device.session.syncNow();
     await device.session.refresh();

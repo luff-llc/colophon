@@ -18,3 +18,4 @@ export { blobAvailability, blobData, downloadRequiredBlobs, prefetchBlob, putBlo
 export { attachPageLifecycle, gateContent, performGateAction, StoppedWords, type GateAction, type GateContent, type PageLifecycleOptions } from './gate.js';
 export { ColophonEngine } from './engine.js';
 export type { ExchangeResult } from './worker.js';
+export { narrowedTerms } from './worker.js';

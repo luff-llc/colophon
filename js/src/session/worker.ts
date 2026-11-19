@@ -13,6 +13,7 @@ import {
   ConfiguredHome, emptyNotices, noDuties, noticesFrom, phaseUsable, samePhase, SessionRefusal,
   type AccessRequest, type ApprovalStart, type DeadTransition, type DomainCommand, type HomeFault, type HostDuties, type RemovalCard, type RouteState,
   type SessionConfiguration, type SessionNotices, type ScannedRequest, type SessionPhase, type SessionSnapshot, type WriteReceipt,
+  type ServiceGrant, type ServiceTerms,
 } from './types.js';
 import { glue, isAccountFault, makeFault, plain } from './wasm.js';
 
@@ -502,7 +503,7 @@ export class SessionWorker {
     if (account === undefined || this.memberId === undefined) throw new SessionError('notReady');
     const keys = await this.memberKeys.publicKeys();
     const spec = new glue.RequestSpec(account, keys.signing, keys.agreement, this.configuration.memberLabel, this.configuration.memberKind ?? glue.AccountMemberKind.App,
-      terms(this.configuration.namespaces, this.access), glue.account_format_date(BigInt(this.nowMs - 1000)), undefined, undefined, []);
+      terms(this.configuration.namespaces, this.access, undefined, undefined, this.configuration.services), glue.account_format_date(BigInt(this.nowMs - 1000)), undefined, undefined, []);
     const request = glue.AccountRequest.prepare(spec);
     try {
       const step = plain<SigningStep>(request.step());
@@ -919,7 +920,7 @@ export class SessionWorker {
       const fresh = glue.PairingFailureLimiter.fresh();
       const own = glue.AccountPairing.scan_request(account, memberRaw, fresh, at);
       fresh.free();
-      const memberTerms = terms(this.configuration.namespaces, this.access);
+      const memberTerms = terms(this.configuration.namespaces, this.access, undefined, undefined, this.configuration.services);
       const signers = this.signers(owner, ownerId, glue.SignerNeed.Member);
       await owner.execute(custody, e => withEntropy(32, entropy => e.begin_approve(memberRaw, memberTerms, signers, own, entropy)), this.persistOn(owner), waiting);
     }
@@ -1209,6 +1210,31 @@ export class SessionWorker {
     await this.gated(async () => engine.run(e => e.exchange_provide_call(need.home, need.ticket, artifact)));
   }
 
+  /**
+   * A call (spec §12.2) for `audience` and `purpose` with `argsJson` (a JSON object), signed by this device's member key
+   * with no links, as the envelope's bytes. The signer's own check comes first: a service this session did
+   * not ask for (`SessionConfiguration.services`) is `refused:outOfScope` before the key is asked; then the core judges
+   * the signed call by §12.3 over the history this device holds (its grant's services, expiry and conditions, a
+   * revocation it holds, fresh heads) and returns the bytes only when that judgement is `ok`, so a call the grant does not
+   * cover never leaves the device. Each call has a fresh request ID: sign one per request.
+   */
+  signCall(audience: string, purpose: string, argsJson: string, signal?: AbortSignal): Promise<Uint8Array> {
+    return this.gated(async () => {
+      if (!this.engine) await this.reconcile(signal);
+      const engine = this.engine; const custody = this.memberCustody; const id = this.memberId;
+      if (!engine || !custody || id === undefined) throw new SessionError('notReady');
+      if (!isJsonObject(argsJson)) throw new SessionError('invalidCommand');
+      if (!servicesCover(this.configuration.services ?? [], audience, purpose)) {
+        throw makeFault('Refused', 'refused:outOfScope', `this session asked for no service ${JSON.stringify(purpose)} at ${JSON.stringify(audience)}`);
+      }
+      const signing = (await custody.provider(id).publicKeys()).signing;
+      const written = await engine.execute(custody, e => withEntropy(32, entropy => e.begin_call(signing, [], audience, purpose, argsJson,
+        new glue.CallTarget([audience], [], [], []), entropy)), undefined, this.waiting(signal));
+      if (!written.artifact) throw makeFault('Internal', 'internal', 'a call returned no envelope');
+      return written.artifact;
+    });
+  }
+
   /** Records transitions that came due (§8.7). A schedule calls it; refresh calls it too. */
   recordDue(): Promise<SessionSnapshot> {
     return this.gated(async () => {
@@ -1272,14 +1298,85 @@ function requestedRecords(termsJson: string): { namespace: string; access: strin
   } catch { return []; }
 }
 
-/** A member's terms (§9.1): `{"records":[{"access","namespace"}...]}`, namespaces sorted. */
-export function terms(namespaces: readonly string[], access: readonly ('read' | 'write')[], expires?: string, budget?: bigint): string {
-  const records = [...namespaces].sort().map(namespace => `{"access":${JSON.stringify(access.includes('write') ? 'write' : 'read')},"namespace":${JSON.stringify(namespace)}}`);
-  let out = '{';
-  if (expires !== undefined) out += `"expires":${JSON.stringify(expires)},`;
-  out += `"records":[${records.join(',')}]`;
-  if (budget !== undefined) out += `,"writes":${budget.toString()}`;
-  return out + '}';
+/**
+ * A member's terms (§9.1, §10.1): `records` for `namespaces` (sorted; absent when there are none) and `services` when
+ * asked, as canonical JSON (keys sorted).
+ */
+export function terms(namespaces: readonly string[], access: readonly ('read' | 'write')[], expires?: string, budget?: bigint, services?: readonly ServiceTerms[]): string {
+  const out: Record<string, unknown> = {};
+  if (expires !== undefined) out.expires = expires;
+  if (namespaces.length > 0) out.records = [...namespaces].sort().map(namespace => ({ access: access.includes('write') ? 'write' : 'read', namespace }));
+  if (services !== undefined && services.length > 0) out.services = sortedServices(services);
+  if (budget !== undefined) out.writes = budget;
+  return canonicalJson(out);
+}
+const sortedServices = (services: readonly ServiceTerms[]): ServiceTerms[] =>
+  [...services].map(s => ({ audience: s.audience, purposes: [...s.purposes].sort() })).sort((a, b) => a.audience < b.audience ? -1 : a.audience > b.audience ? 1 : 0);
+/** JSON with every object's keys sorted. Numbers and strings as `JSON.stringify` writes them, a `bigint` as its digits; the core re-reads what it signs. */
+export function canonicalJson(value: unknown): string {
+  if (typeof value === 'bigint') return value.toString();
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (value !== null && typeof value === 'object') {
+    const o = value as Record<string, unknown>;
+    return `{${Object.keys(o).filter(k => o[k] !== undefined).sort().map(k => `${JSON.stringify(k)}:${canonicalJson(o[k])}`).join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+/** The `services` a member's terms ask for (spec §10.1); anything not of that shape is left out. */
+export function requestedServices(termsJson: string): ServiceTerms[] {
+  try {
+    const parsed = JSON.parse(termsJson) as { services?: unknown };
+    if (!Array.isArray(parsed.services)) return [];
+    return parsed.services.flatMap((s: unknown) => {
+      if (typeof s !== 'object' || s === null) return [];
+      const { audience, purposes } = s as { audience?: unknown; purposes?: unknown };
+      if (typeof audience !== 'string' || !Array.isArray(purposes) || !purposes.every(p => typeof p === 'string')) return [];
+      return [{ audience, purposes: purposes as string[] }];
+    });
+  } catch { return []; }
+}
+/** Whether `asked` purposes cover `granted` ones (§10.3: `["*"]` covers all; a granted `["*"]` needs an asked `["*"]`). */
+function purposesCover(asked: readonly string[], granted: readonly string[]): boolean {
+  if (granted.length === 0) return false;
+  if (asked.includes('*')) return true;
+  return !granted.includes('*') && granted.every(p => asked.includes(p));
+}
+/** Whether `services` name `purpose` at exactly `audience`. */
+export function servicesCover(services: readonly ServiceTerms[], audience: string, purpose: string): boolean {
+  return services.some(s => s.audience === audience && purposesCover(s.purposes, [purpose]));
+}
+/**
+ * The terms an approver grants for a request (its terms `requestTermsJson`), narrowed by `grant` (`ServiceGrant`): each
+ * granted service names an audience the request asks for with purposes it asks; `expires` is no later than a requested
+ * one; `conditions` are added to any the request carries. Everything else is kept as asked. A grant wider than the
+ * request, or one that would leave no `records`, `services` or `serves`, is `invalidCommand`.
+ */
+export function narrowedTerms(requestTermsJson: string, grant: ServiceGrant): string {
+  let terms: Record<string, unknown>;
+  try {
+    const parsed: unknown = JSON.parse(requestTermsJson);
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) throw new Error('not an object');
+    terms = { ...(parsed as Record<string, unknown>) };
+  } catch { throw new SessionError('invalidCommand'); }
+  if (grant.services !== undefined) {
+    const asked = requestedServices(requestTermsJson);
+    for (const g of grant.services) {
+      const a = asked.find(x => x.audience === g.audience);
+      if (!a || !purposesCover(a.purposes, g.purposes)) throw new SessionError('invalidCommand');
+    }
+    if (grant.services.length > 0) terms.services = sortedServices(grant.services); else delete terms.services;
+  }
+  if (grant.expires !== undefined) {
+    if (typeof terms.expires === 'string' && grant.expires > terms.expires) throw new SessionError('invalidCommand');
+    terms.expires = grant.expires;
+  }
+  if (grant.conditions !== undefined && grant.conditions.length > 0) {
+    const held = Array.isArray(terms.conditions) ? terms.conditions as unknown[] : [];
+    const seen = new Set(held.map(canonicalJson));
+    terms.conditions = [...held, ...grant.conditions.filter(c => !seen.has(canonicalJson(c)))];
+  }
+  if (terms.records === undefined && terms.services === undefined && terms.serves === undefined) throw new SessionError('invalidCommand');
+  return canonicalJson(terms);
 }
 /** The digest an object's store path names (`transitions/<digest>.json`). */
 export function objectDigest(stores: readonly Store[], prefix: string): string | undefined {
@@ -1320,7 +1417,8 @@ export function queryResult(text: string): string {
 function accessRequest(info: RequestInfo): AccessRequest {
   const records = requestedRecords(info.termsJson);
   return { id: info.member, label: info.label, kind: info.kind, termsJson: info.termsJson, record: info.raw,
-    namespaces: records.map(r => r.namespace), access: records.some(r => r.access === 'write') ? ['read', 'write'] : ['read'] };
+    namespaces: records.map(r => r.namespace), access: records.some(r => r.access === 'write') ? ['read', 'write'] : ['read'],
+    services: requestedServices(info.termsJson) };
 }
 
 /**

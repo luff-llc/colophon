@@ -28,12 +28,12 @@ export class BunRelayHost implements RelayHost {
     if (port === undefined) throw new Error('no free port');
     return port;
   }
-  async start(spec: { port: number; account: string; base: string; jwk: JsonWebKey; peers: { base: string; port: number }[] }): Promise<void> {
+  async start(spec: { port: number; account: string; base: string; jwk: JsonWebKey; peers: { base: string; port: number }[]; config?: Record<string, unknown> }): Promise<void> {
     const directory = mkdtempSync(join(tmpdir(), `colophon-js-relay-${process.pid}-`));
     const clock = join(directory, 'clock');
     writeFileSync(clock, String(Date.now()));
     const config = join(directory, 'config.json');
-    writeFileSync(config, JSON.stringify({ resolve: Object.fromEntries(spec.peers.map(p => [p.base, `http://127.0.0.1:${p.port}/v1/libraries/home`])) }));
+    writeFileSync(config, JSON.stringify({ ...spec.config, resolve: Object.fromEntries(spec.peers.map(p => [p.base, `http://127.0.0.1:${p.port}/v1/libraries/home`])) }));
     const child = Bun.spawn([process.execPath, join(repository, 'relay/server.js'), '--test-clock', '--config', config], {
       env: { ...process.env, COLOPHON_RELAY_PORT: String(spec.port), COLOPHON_RELAY_DATA: join(directory, 'data'),
         COLOPHON_RELAY_HOME_SLOTS: `home=${spec.account}@${spec.base}`, COLOPHON_HOME_KEY: JSON.stringify(spec.jwk),

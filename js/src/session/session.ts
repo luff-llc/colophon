@@ -1,15 +1,20 @@
-import { KeyCustodyError, HomeTransportError, SessionError, StorageError } from './errors.js';
+import { KeyCustodyError, HomeTransportError, ProvisionRefusal, SessionError, StorageError } from './errors.js';
 import { keyDescriptorOf, type AsyncKeyProvider } from './keys.js';
 import type { AccountMember, Home, SealedSeed } from './records.js';
-import { HomeWords, type HomeIssue } from './transport.js';
+import { FetchHomeTransport, homeRefusal, HomeWords, type HomeIssue, type HomeTransport } from './transport.js';
 import {
   emptyNotices, failureMessage, noDuties, phaseUsable, samePhase, SessionRefusal,
   type AccessRequest, type ApprovalStart, type DomainCommand, type HomeFault, type HostDuties, type ObservedRevision, type ScannedRequest, type SessionConfiguration, type SessionNotices,
-  type SessionPhase, type SessionSnapshot, type SessionState, type Submission, type WriteReceipt,
+  type SessionPhase, type SessionSnapshot, type SessionState, type Submission, type WriteReceipt, type ServiceGrant,
 } from './types.js';
 import { glue, isAccountFault } from './wasm.js';
-import { SessionWorker } from './worker.js';
+import { canonicalJson, narrowedTerms, SessionWorker } from './worker.js';
 
+const base64url = (bytes: Uint8Array): string => {
+  let s = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+};
 const describe = (error: unknown): string => error instanceof Error ? error.message : String(error);
 const sleep = (ms: number, signal: AbortSignal): Promise<void> => new Promise(resolve => {
   if (signal.aborted) { resolve(); return; }
@@ -188,9 +193,53 @@ export class ColophonSession {
    * Approves a member's request with the owner controller, spending `pairing`: confirmed on this device for exactly this
    * request's key (spec §9.1), by the six-digit code (`beginApproval`, `approvalCode`, then `pairing.confirm()` once the
    * person saw the same digits on both devices) or by `scanRequest`. Any other pairing is refused; a pairing is spent
-   * whatever the answer. `termsJson` overrides the requested terms.
+   * whatever the answer. `terms` overrides the requested terms: their JSON as given, or a `ServiceGrant` that narrows the
+   * request (its services, an expiry, conditions; `narrowedTerms`), refused as `invalidCommand` if it would widen it.
    */
-  approve(request: AccessRequest, pairing: glue.AccountPairing, termsJson?: string): Promise<void> { return this.owner(signal => this.worker.approve(request, pairing, termsJson, signal)); }
+  approve(request: AccessRequest, pairing: glue.AccountPairing, terms?: string | ServiceGrant): Promise<void> {
+    let termsJson: string | undefined;
+    try { termsJson = typeof terms === 'object' ? narrowedTerms(request.termsJson, terms) : terms; } catch (error) { return Promise.reject(error); }
+    return this.owner(signal => this.worker.approve(request, pairing, termsJson, signal));
+  }
+
+  // Calls for services (§12)
+
+  /**
+   * Signs a call (spec §12.2) for `audience` and `purpose` with `args` (a JSON object, as its JSON text or a value) by
+   * this device's member key, and returns the call's bytes base64url-encoded, ready for `Authorization: Colophon <call>`.
+   * Refused locally, with nothing sent anywhere: a service this session did not ask for (`refused:outOfScope`, before the
+   * key is asked), and any call the core's own §12.3 check refuses over what this device holds (its grant's services,
+   * expiry or conditions, a revocation it holds). Sign a fresh call for each request: a home refuses a replay.
+   */
+  async signCall(audience: string, purpose: string, args: string | Record<string, unknown>): Promise<string> {
+    await this.restore();
+    const argsJson = typeof args === 'string' ? args : canonicalJson(args);
+    return base64url(await this.worker.signCall(audience, purpose, argsJson, this.life.signal));
+  }
+
+  /**
+   * Provisions a slot at a home's door by this member's grant (the reference home's gate `"grant"`, relay/README.md):
+   * signs a fresh call for `audience` with purpose `home.provision` and args exactly the body `{"account","base","slot"}`,
+   * POSTs the body to `door` with `Content-Type: application/json`, its `Content-Length` and `Authorization: Colophon
+   * <call>`, and returns the home's signed member request (§9.1). So it plugs into `HomeConfiguration.request`:
+   * `request: account => rig.provisionRequest(door, audience, slot, base, account)`. A refusal is a `ProvisionRefusal`
+   * with the door's status and code; the signer's own refusal is the engine's fault and sends nothing. `transport`
+   * defaults to `FetchHomeTransport` (`allowsLoopbackHttp` for a test door on loopback).
+   */
+  async provisionRequest(door: string, audience: string, slot: string, base: string, account: string,
+    options: { transport?: HomeTransport; allowsLoopbackHttp?: boolean } = {}): Promise<Uint8Array> {
+    const body = canonicalJson({ account, base, slot });
+    const call = await this.signCall(audience, 'home.provision', body);
+    const bytes = new TextEncoder().encode(body);
+    const transport = options.transport ?? new FetchHomeTransport({ allowingLoopbackHttp: options.allowsLoopbackHttp ?? false });
+    const answer = await transport.send({ method: 'POST', url: door, body: bytes, headers: [
+      { name: 'Content-Type', value: 'application/json' }, { name: 'Content-Length', value: String(bytes.length) },
+      { name: 'Authorization', value: `Colophon ${call}` },
+    ] }, this.life.signal);
+    if (answer.status === 200) return answer.body;
+    const refusal = homeRefusal(answer);
+    throw new ProvisionRefusal(answer.status, refusal?.code, refusal?.retryAfterSeconds);
+  }
 
   // Pairing before approval (§7.3)
 

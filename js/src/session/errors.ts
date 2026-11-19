@@ -36,6 +36,17 @@ export class HomeTransportError extends Error {
   }
 }
 
+/**
+ * A home's door refused a provisioning request (`ColophonSession.provisionRequest`): `status` is the HTTP status and
+ * `code` the `result` it gave when valid (for a refused grant call, the core's code, such as `refused:revoked` or
+ * `refused:outOfScope`; 403 is final, never retried on another path). `retryAfterSeconds` is its `Retry-After`.
+ */
+export class ProvisionRefusal extends Error {
+  constructor(readonly status: number, readonly code: string | undefined, readonly retryAfterSeconds?: number) {
+    super(`the home refused to provision: ${status}${code ? ` ${code}` : ''}`); this.name = 'ProvisionRefusal';
+  }
+}
+
 export type KeyOutcome = 'cancelled' | 'presenceFailed' | 'unsupportedHere' | 'credentialMissing' | 'hardwareUnavailable' | 'noKey' | 'missingChallenge';
 /** A host key failure, classified at its origin. Protocol verification errors still come from the core. */
 export class KeyCustodyError extends Error {
