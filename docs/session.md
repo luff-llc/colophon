@@ -56,6 +56,16 @@ let session = ColophonSession(configuration: .init(
 `updateRequired` is the engine's `newerFormat`: nothing is lost and nothing is changed. A revoked member is `denied`. A storage
 error is `retry` or `waitingForDownload`, never an empty library.
 
+**A namespace this member was never granted.** A session is `denied` only when its own member has lost access it was
+granted, never because the library declares namespaces this member was never granted (`libraryNamespaces` wider than
+`namespaces`). For each namespace in `libraryNamespaces` the session asks the engine's `access`: no denial, the namespace
+is readable; `notReadable` or `unavailable`, the phase is `unavailable(reason)`; `notGranted` for a namespace that the
+member's verified grant (`me().member.grant.namespaces`) does not name, while the member is not provisional, is not this
+member's namespace and is skipped (neither denied nor published); anything else (`revoked`, `expired`, `budgetSpent`,
+`notGranted` while provisional or on a granted namespace) is `denied`. Revisions are published only for the library
+namespaces whose `access` has no denial. Tests: `LibraryNamespacesTests` (Swift), `LibraryNamespacesTest` (Kotlin), "a
+member of a wider library" (JS).
+
 ### A stopped account, a home's refusals, waiting for approval (freeze package)
 
 **Stopped.** When a layout raise (spec §20) becomes final in the history this device verified, or it judges an authority
