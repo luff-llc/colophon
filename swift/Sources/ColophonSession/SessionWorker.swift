@@ -296,6 +296,7 @@ actor SessionWorker {
         let pending = try await pendingRequests(members: members)
         let homes = try await engine.run { try $0.homes() }
         var phase: SessionPhase
+        var readable: [String] = []
         switch standing.kind {
         case .unknown:
             try await ensureOwnRequest()
@@ -305,17 +306,23 @@ actor SessionWorker {
         case .member:
             if standing.member?.revokedAt != nil { phase = .denied }
             else {
+                // Denied only when this member lost access it was granted, never for a library namespace it was never
+                // granted (`libraryNamespaces` wider than its grant, or an approval that narrowed its request):
+                // `notGranted` on a namespace its verified grant does not name, while it is not provisional, is skipped
+                // (neither denied nor published).
                 phase = .ready
-                for namespace in configuration.namespaces {
-                    if let denial = try await engine.run({ try $0.access(namespace: namespace) }) {
-                        phase = [.notReadable, .unavailable].contains(denial.reason) ? .unavailable(reason: denial.detail) : .denied
-                        break
-                    }
+                let granted = standing.member?.grant?.namespaces ?? []
+                let provisional = standing.member?.provisional ?? false
+                for namespace in configuration.libraryNamespaces {
+                    guard let denial = try await engine.run({ try $0.access(namespace: namespace) }) else { readable.append(namespace); continue }
+                    if denial.reason == .notGranted, !provisional, !granted.contains(namespace) { continue }
+                    phase = [.notReadable, .unavailable].contains(denial.reason) ? .unavailable(reason: denial.detail) : .denied
+                    break
                 }
             }
         }
         var revisions: [String: UInt64] = [:]
-        if phase == .ready { for r in try await engine.run({ try $0.revisions() }) where configuration.namespaces.contains(r.namespace) { revisions[r.namespace] = r.revision } }
+        if phase == .ready { for r in try await engine.run({ try $0.revisions() }) where readable.contains(r.namespace) { revisions[r.namespace] = r.revision } }
         let notices = try await currentNotices()
         let head = try await engine.run { try $0.headSeq() }
         lastHead = head
@@ -337,7 +344,7 @@ actor SessionWorker {
         let homes = try await engine.run { try $0.homes() }
         var revisions: [String: UInt64] = [:]
         if standing.kind == .member, standing.member?.revokedAt == nil {
-            for r in try await engine.run({ try $0.revisions() }) where configuration.namespaces.contains(r.namespace) {
+            for r in try await engine.run({ try $0.revisions() }) where configuration.libraryNamespaces.contains(r.namespace) {
                 if try await engine.run({ try $0.access(namespace: r.namespace) }) == nil { revisions[r.namespace] = r.revision }
             }
             if !revisions.isEmpty { revisions["colophon.authority"] = try await engine.run { try $0.headSeq() } }

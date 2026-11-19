@@ -13,18 +13,22 @@ in 0.5.x or in a host.
   without one unless `createWithoutHome` is set. That collides with libraries that today sync
   only through a shared folder; whether an import account may start without a home is an open
   host-rule question for 0.5.x, not a format question.
+- The Kotlin session's refresh after a refused command can leave the phase at `refreshing`
+  until the next refresh; the Swift and JS sessions do not show this.
 - **A revoke keeps only what this device holds.** Keeping everything a revoked member wrote
   names that member's heads in each namespace the revoking device holds. An app syncs only its
   `libraryNamespaces`, so a revoke made from an app with a narrower library, on its own storage,
   drops what the member wrote in the namespaces it does not hold. Revoke from an app or device
   that holds every namespace the member wrote in when keeping matters; making the revoking engine
   fetch every namespace first is a 0.5.x change (no format changes).
-- A member whose own `namespaces` is empty (a service or identity-only member) is reported
-  `ready` without its grant's expiry or provisional state being checked: the sessions judge
-  readiness by asking for each of the member's namespaces.
+- A member whose grant names no namespaces (a service or identity-only member) may be reported
+  `ready` without its grant's expiry being checked: the sessions judge readiness by asking for
+  each library namespace, and skip the ones the member was never granted.
 - **Fixed in 0.5.0** (in its final commit, before any package was published):
-  - a session whose `libraryNamespaces` was wider than its own `namespaces` came out `denied`
-    right after `create()` (Swift, Kotlin, JS); readiness now follows the member's own namespaces;
+  - a session whose `libraryNamespaces` was wider than its member's grant came out `denied`, right
+    after `create()` or after an approval that granted fewer namespaces than requested (Swift,
+    Kotlin, JS). A session is now `denied` only for access its member lost; a namespace the member
+    was never granted is skipped, and revisions are published only for what it can read;
   - the owner's engine was scoped to the app's `libraryNamespaces`, so a revoke made from an app
     with a narrower library dropped what the revoked member wrote in the other namespaces even when
     this device held them (Swift, Kotlin, JS); the owner's engine now reads every namespace this
@@ -73,5 +77,10 @@ in 0.5.x or in a host.
   runner on 19 November 2026 with code unchanged since the freeze, whose check passed, and it
   passes on the Macs (in the release workspace run and five repeats). Several homes are
   experimental (§21.1 item 3).
+- `scripts/test-js.sh` fails a run whose tests all passed when it finds a relay or browser
+  process left behind; on 19 November 2026 two of four runs on a Mac were failed that way and
+  the next was clean. The leftovers looked like the headless browser's helpers outliving the run.
+- Not yet covered by a test: a granted namespace whose epoch key is not held staying
+  `unavailable`, and a provisional member being `denied`.
 - Several homes per account are experimental; their open issues are in
   [multi-home-open-issues.md](multi-home-open-issues.md).

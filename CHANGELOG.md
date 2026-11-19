@@ -69,9 +69,10 @@ see §21); [changes from 0.4](spec/colophon-0.5-changes.md);
 
 ### Fixed before release
 
-- **Sessions (Swift, Kotlin, JS):** a session whose `libraryNamespaces` is wider than its own
-  `namespaces` is ready after `create()`; it came out `denied`. Readiness and published revisions
-  follow the member's own namespaces.
+- **Sessions (Swift, Kotlin, JS):** a session whose `libraryNamespaces` is wider than its member's
+  grant is ready, after `create()` and after an approval that granted fewer namespaces than it
+  asked for; it came out `denied`. A session is `denied` only for access its member lost, and
+  publishes revisions only for the namespaces it can read.
 - **Sessions (Swift, Kotlin, JS):** the owner's engine reads every namespace the device holds, not
   only the app's `libraryNamespaces`, so a revoke from an app with a narrower library keeps what
   the revoked member wrote in the other namespaces held there.

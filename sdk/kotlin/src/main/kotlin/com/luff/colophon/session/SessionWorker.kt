@@ -298,7 +298,7 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
         val revisions = LinkedHashMap<String, ULong>()
         if (standing.kind == StandingKind.MEMBER && standing.member?.revokedAt == null) {
             for (r in engine.run { it.revisions() }) {
-                if (r.namespace in configuration.namespaces && engine.run { it.access(r.namespace) } == null) revisions[r.namespace] = r.revision
+                if (r.namespace in configuration.libraryNamespaces && engine.run { it.access(r.namespace) } == null) revisions[r.namespace] = r.revision
             }
             if (revisions.isNotEmpty()) revisions["colophon.authority"] = engine.run { it.headSeq() }
         }
@@ -315,6 +315,7 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
         val pending = pendingRequests(members)
         val homes = engine.run { it.homes() }
         var phase: SessionPhase
+        val readable = ArrayList<String>()
         when (standing.kind) {
             StandingKind.UNKNOWN -> {
                 ensureOwnRequest()
@@ -324,9 +325,16 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
             StandingKind.MEMBER -> {
                 if (standing.member?.revokedAt != null) phase = SessionPhase.Denied
                 else {
+                    // Denied only when this member lost access it was granted, never for a library namespace it was never
+                    // granted (`libraryNamespaces` wider than its grant, or an approval that narrowed its request):
+                    // `notGranted` on a namespace its verified grant does not name, while it is not provisional, is skipped.
                     phase = SessionPhase.Ready
-                    for (namespace in configuration.namespaces) {
-                        val denial = engine.run { it.access(namespace) } ?: continue
+                    val granted = standing.member?.grant?.namespaces ?: listOf()
+                    val provisional = standing.member?.provisional ?: false
+                    for (namespace in configuration.libraryNamespaces) {
+                        val denial = engine.run { it.access(namespace) }
+                        if (denial == null) { readable.add(namespace); continue }
+                        if (denial.reason == AccountDenialReason.NOT_GRANTED && !provisional && namespace !in granted) continue
                         phase = if (denial.reason == AccountDenialReason.NOT_READABLE || denial.reason == AccountDenialReason.UNAVAILABLE)
                             SessionPhase.Unavailable(denial.detail) else SessionPhase.Denied
                         break
@@ -335,7 +343,7 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
             }
         }
         val revisions = HashMap<String, ULong>()
-        if (phase == SessionPhase.Ready) for (r in engine.run { it.revisions() }) if (r.namespace in configuration.namespaces) revisions[r.namespace] = r.revision
+        if (phase == SessionPhase.Ready) for (r in engine.run { it.revisions() }) if (r.namespace in readable) revisions[r.namespace] = r.revision
         val notices = currentNotices()
         val head = engine.run { it.headSeq() }
         if (phase == SessionPhase.Ready) revisions["colophon.authority"] = head
