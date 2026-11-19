@@ -180,6 +180,46 @@ serial queue, so the medium's synchronous record I/O never occupies the main act
 `MainActorTests` moves a 200 MiB blob in and out with a 5 ms main-actor timer running (worst lateness about 6 ms, footprint
 growth about 35 MiB), and the blob executor stops on `dispatchPrecondition` if it is ever called on the main thread.
 
+## Services and calls: provisioning a test rig by grant
+
+A session may ask for **services** (spec §10.1) beside or instead of namespaces: `services: [ServiceTerms(audience:
+purposes:)]` in `SessionConfiguration`. Its member request then carries them (`records` too when `namespaces` is not
+empty; a rig that only signs calls passes `namespaces: []`). An approver sees them as `AccessRequest.services` and grants
+them with `approve(_:pairing:services:grant:)` and a `ServiceGrant`: the services granted (each an audience the request
+names, with purposes it asks; nil: as requested), `expires`, and `conditionsJSON` (a JSON array of §10.4 predicates).
+A grant wider than the request is `SessionError.invalidCommand`, and the pairing is not spent. The `GrantOptions`
+given with it are checked against the request as signed first: an expiry later than a requested one, or a write budget
+larger than a requested one, is refused the same way (the core does not compare these with the request: the approver
+sets them).
+
+`signCall(audience:purpose:argsJSON:)` returns a call (§12.2) signed by this device's member key, base64url, for
+`Authorization: Colophon <call>`. The signer's own check runs first: a service the session did not ask for is
+`refused:outOfScope` before the key is asked, and the core then judges the signed call by §12.3 over the history the
+device holds (the grant's services, expiry and conditions, a revocation it holds) and returns it only when that is
+`ok`; a refused call never leaves the device. Sign one per request: a home refuses a replay.
+
+`provisionRequest(door:audience:slot:base:account:transport:)` provisions a slot at a reference home whose gate is
+`"grant"` (relay/README.md, "Provisioning by a grant"): it signs a fresh call with purpose `home.provision` and args
+exactly the body `{"account","base","slot"}`, POSTs the body with `Content-Type: application/json`, its
+`Content-Length` and the call, and returns the home's signed member request. A refusal is a `ProvisionRefusal` with
+the door's `status` and `code` (403 is final). It plugs into `HomeConfiguration.request`:
+
+```swift
+let app = HomeConfiguration(endpoint: URL(string: base + "/")!, request: { account in
+    try await rig.provisionRequest(door: door, audience: audience, slot: slot, base: base, account: account)
+})
+```
+
+The slot condition holds where there is no slot: a grant's `conditions` bind **every** call its member signs (spec
+§12.3 step 7), its reads of the operator account's history at the home too, whose args name no slot, and a missing path
+makes `prefix` false (§10.4). A bare `{"prefix":["args.slot","ci-"]}` would leave the rig unable to sync the operator
+account from the home. Write it as "the slot starts with `ci-`, or the call names none":
+`{"any":[{"prefix":["args.slot","ci-"]},{"not":{"prefix":["args.slot",""]}}]}`.
+
+Revoking the rig's member in the operator account (uploaded to the home) stops it: its next call is `403
+refused:revoked` at the door, or refused by its own check once it has synced the revocation. Proven in
+`ProvisionGrantTests` against the real relay.
+
 ## What a person must see (spec §17.5, §18)
 
 `session.notices` (`SessionNotices`):

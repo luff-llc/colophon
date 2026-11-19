@@ -27,8 +27,15 @@ final class RelayHome: @unchecked Sendable {
     private let dir: URL
     private let clock: URL
 
-    init(base: String, port: Int) {
-        self.base = base; self.port = port
+    /// With `clock`, the relay runs on that clock (set before every request and pass) with no scheduler timer: heads are
+    /// published only by `tick()`, so nothing waits on real time.
+    let clockSource: (@Sendable () -> Int64)?
+    private var input: FileHandle?
+    private var output: FileHandle?
+    private var buffered = Data()
+
+    init(base: String, port: Int, clock source: (@Sendable () -> Int64)? = nil) {
+        self.base = base; self.port = port; self.clockSource = source
         dir = FileManager.default.temporaryDirectory.appendingPathComponent("colophon-swift-relay-\(UUID().uuidString)")
         clock = dir.appendingPathComponent("clock")
     }
@@ -70,14 +77,17 @@ final class RelayHome: @unchecked Sendable {
         return "{\"kty\":\"EC\",\"crv\":\"P-256\",\"x\":\"\(b64(point[1..<33]))\",\"y\":\"\(b64(point[33..<65]))\",\"d\":\"\(b64(key.rawRepresentation))\"}"
     }
 
-    /// Start the relay for `account`; `peers` are the other homes of the account (forwarding).
-    func start(account: String, peers: [RelayHome] = []) throws {
+    /// Start the relay for `account`; `peers` are the other homes of the account (forwarding). `provision` is the
+    /// config file's `provision` object (the door), as JSON.
+    func start(account: String, peers: [RelayHome] = [], provision: String? = nil) throws {
         let bun = try Self.bun(), module = try Self.module()
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        try String(Self.nowMs()).write(to: clock, atomically: true, encoding: .utf8)
+        try String(clockSource?() ?? Self.nowMs()).write(to: clock, atomically: true, encoding: .utf8)
         let resolve = Dictionary(uniqueKeysWithValues: peers.map { ($0.base, "http://127.0.0.1:\($0.port)/v1/libraries/home") })
         let config = dir.appendingPathComponent("config.json")
-        try JSONSerialization.data(withJSONObject: ["resolve": resolve]).write(to: config)
+        var settings: [String: Any] = ["resolve": resolve]
+        if let provision { settings["provision"] = try JSONSerialization.jsonObject(with: Data(provision.utf8)) }
+        try JSONSerialization.data(withJSONObject: settings).write(to: config)
         let p = Process()
         p.executableURL = bun
         p.arguments = [Self.repository.appendingPathComponent("relay/server.js").path, "--test-clock", "--config", config.path]
@@ -88,10 +98,11 @@ final class RelayHome: @unchecked Sendable {
         env["COLOPHON_HOME_KEY"] = jwk
         env["COLOPHON_HOME_WASM"] = module.path
         env["COLOPHON_RELAY_CLOCK_FILE"] = clock.path
-        env["COLOPHON_RELAY_TICK_MS"] = "50"
+        env["COLOPHON_RELAY_TICK_MS"] = clockSource == nil ? "50" : "0"
         p.environment = env
-        let out = Pipe()
+        let out = Pipe(), inPipe = Pipe()
         p.standardOutput = out
+        p.standardInput = inPipe
         p.standardError = FileHandle.nullDevice
         try p.run()
         lock.withLock { process = p }
@@ -103,7 +114,35 @@ final class RelayHome: @unchecked Sendable {
             line.append(chunk)
         }
         guard String(decoding: line, as: UTF8.self).contains("\"listening\"") else { throw Failure.noListeningLine(String(decoding: line, as: UTF8.self)) }
+        lock.withLock {
+            input = inPipe.fileHandleForWriting; output = out.fileHandleForReading
+            buffered = line.suffix(from: line.firstIndex(of: 0x0a)! + 1)
+        }
     }
+    /// One scheduler pass of the relay (its test hook: a `tick` line on stdin), on its clock, finished when it answers:
+    /// the deterministic way to publish heads.
+    func tick() async throws {
+        // The read blocks until the relay answers: off the main actor, so other tests' tasks keep running meanwhile.
+        try await Task.detached { try self.tickBlocking() }.value
+    }
+    private func tickBlocking() throws {
+        touch()
+        let (input, output) = lock.withLock { (self.input, self.output) }
+        guard let input, let output else { throw Failure.missing("a started relay") }
+        try input.write(contentsOf: Data("tick\n".utf8))
+        while true {
+            let line: Data? = lock.withLock {
+                guard let end = buffered.firstIndex(of: 0x0a) else { return nil }
+                let l = buffered.prefix(upTo: end); buffered = Data(buffered.suffix(from: end + 1)); return Data(l)
+            }
+            if let line { if String(decoding: line, as: UTF8.self).contains("\"ticked\"") { return } else { continue } }
+            let chunk = output.availableData
+            if chunk.isEmpty { throw Failure.noListeningLine("the relay closed its output") }
+            lock.withLock { buffered.append(chunk) }
+        }
+    }
+    /// Sets the relay's clock: to the injected clock when there is one, else to now.
+    func touch() { setClock(clockSource?() ?? Self.nowMs()) }
     func stop() {
         let p = lock.withLock { () -> Process? in let p = process; process = nil; return p }
         if let p, p.isRunning { p.terminate(); p.waitUntilExit() }
@@ -116,7 +155,7 @@ final class RelayHome: @unchecked Sendable {
     /// The home's signed member request (§9.1) naming `account`, as a home service answers it.
     func memberRequest(account: String) throws -> Data {
         let spec = RequestSpec(account: account, signing: key.publicKey.x963Representation, agreement: agreement.publicKey.x963Representation,
-            label: "Relay home", kind: .server, termsJson: "{\"serves\":[\"home\"]}", created: try accountFormatDate(ms: Self.nowMs() - 5_000),
+            label: "Relay home", kind: .server, termsJson: "{\"serves\":[\"home\"]}", created: try accountFormatDate(ms: (clockSource?() ?? Self.nowMs()) - 5_000),
             custody: nil, operator: nil, endpoints: [base + "/"])
         let request = try AccountRequest.prepare(spec: spec)
         let signature = try key.signature(for: try request.step().body).rawRepresentation
@@ -133,7 +172,7 @@ final class RelayHome: @unchecked Sendable {
         let refusals: Refusals?
         let inner = URLSessionHomeTransport(allowingLoopbackHTTP: true)
         func send(_ request: HttpRequest) async throws -> HttpAnswer {
-            relay.setClock(RelayHome.nowMs())
+            relay.touch()
             guard request.url.hasPrefix(relay.base) else { throw URLError(.unsupportedURL) }
             let local = "http://127.0.0.1:\(relay.port)/v1/libraries/home" + request.url.dropFirst(relay.base.count)
             let answer = try await inner.send(HttpRequest(ticket: request.ticket, home: request.home, method: request.method, url: local,
@@ -143,6 +182,26 @@ final class RelayHome: @unchecked Sendable {
                 refusals?.append(result ?? "-")
             }
             return answer
+        }
+    }
+
+    /// This relay's door (`POST /v1/provision`) on loopback.
+    var door: URL { URL(string: "http://127.0.0.1:\(port)/v1/provision")! }
+    /// A transport to the door that sets the relay's clock first.
+    func doorTransport() -> any HomeTransport { Slot(relay: self, base: nil, local: "") }
+    /// The transport to a slot this relay provisioned: `base` (its `https://` name) goes to `/v1/libraries/<slot>`.
+    func slotTransport(base: String, slot: String) -> any HomeTransport { Slot(relay: self, base: base, local: "http://127.0.0.1:\(port)/v1/libraries/\(slot)") }
+    private struct Slot: HomeTransport {
+        let relay: RelayHome
+        let base: String?
+        let local: String
+        let inner = URLSessionHomeTransport(allowingLoopbackHTTP: true)
+        func send(_ request: HttpRequest) async throws -> HttpAnswer {
+            relay.touch()
+            guard let base else { return try await inner.send(request) }
+            guard request.url.hasPrefix(base) else { throw URLError(.unsupportedURL) }
+            return try await inner.send(HttpRequest(ticket: request.ticket, home: request.home, method: request.method, url: local + request.url.dropFirst(base.count),
+                                                    headers: request.headers, body: request.body))
         }
     }
 

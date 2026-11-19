@@ -246,6 +246,48 @@ transition.
 
 **Known gap: the spec §6.4 warnings before creation.** This session does not yet give the §6.4 warnings before the genesis is written: it exposes `soleDevice` after creation. The warnings stay normative for a host (a person must see them before an account is created). Until the session gives them, an app checks the three conditions from the creation parameters (one home, every control key on one device, exactly one recovery unit) and warns before it calls create. Spec §21.1 lists this among what 0.5.0 does not do.
 
+## Services and calls: provisioning a test rig by grant
+
+A session may ask for **services** (spec §10.1) beside or instead of namespaces: `services: [{ audience, purposes }]` in
+the configuration. Its member request then carries them (`records` too when `namespaces` is not empty; a rig that only
+signs calls passes `namespaces: []`). An approver sees them as `AccessRequest.services` and grants them by passing a
+`ServiceGrant` to `approve(request, pairing, grant)`: the services granted (each an audience the request names, with
+purposes it asks; absent: as requested), an `expires`, and `conditions`. A grant wider than the request is
+`SessionError('invalidCommand')` before anything is signed (`narrowedTerms` makes the terms, for a host that shows them).
+
+`signCall(audience, purpose, args)` returns a call (§12.2) signed by this device's member key, base64url, for
+`Authorization: Colophon <call>`. The signer's own check runs first: a service the session did not ask for is
+`refused:outOfScope` before the key is asked, and the core then judges the signed call by §12.3 over the history the
+device holds (the grant's services, expiry and conditions, a revocation it holds) and returns it only when that is
+`ok`; a refused call never leaves the device. Sign one per request: a home refuses a replay.
+
+`provisionRequest(door, audience, slot, base, account, { transport })` provisions a slot at a reference home whose gate is
+`"grant"` (relay/README.md, "Provisioning by a grant"): it signs a fresh call with purpose `home.provision` and args
+exactly the body `{"account","base","slot"}`, POSTs the body with `Content-Type: application/json`, its
+`Content-Length` and the call, and returns the home's signed member request. A refusal is a `ProvisionRefusal` with
+the door's `status` and `code` (403 is final). It plugs into a home configuration as is:
+
+```ts
+const rig = new ColophonSession({ ...config, namespaces: [], services: [{ audience: 'https://home.example/v1/provision', purposes: ['home.provision'] }] });
+// once: the rig joins the operator account and its operator approves it
+await operator.approve(request, pairing, { expires: '2026-12-19T00:00:00Z',
+  conditions: [{ any: [{ prefix: ['args.slot', 'ci-'] }, { not: { prefix: ['args.slot', ''] } }] }] });
+// each run, unattended
+const door = 'https://home.example/v1/provision'; // the door's URL, here also its audience
+const app = new ColophonSession({ ...appConfig, homes: [{ endpoint: `${base}/`,
+  request: account => rig.provisionRequest(door, door, slot, base, account) }] });
+```
+
+The slot condition holds where there is no slot: a grant's `conditions` bind **every** call its member signs (spec
+§12.3 step 7), its reads of the operator account's history at the home too, whose args name no slot, and a missing path
+makes `prefix` false (§10.4). A bare `{"prefix":["args.slot","ci-"]}` would leave the rig unable to sync the operator
+account from the home. Write it as "the slot starts with `ci-`, or the call names none":
+`{"any":[{"prefix":["args.slot","ci-"]},{"not":{"prefix":["args.slot",""]}}]}`.
+
+Revoking the rig's member in the operator account (uploaded to the home) stops it: its next call is `403
+refused:revoked` at the door, or refused by its own check once it has synced the revocation. Proven in
+`js/test05/provision-grant.test.ts` against the real relay.
+
 ## Differences from the Swift and Kotlin sessions
 
 * Records are plain objects with camelCase names; `u64` and `i64` are `bigint`; enums are the glue's numeric enums

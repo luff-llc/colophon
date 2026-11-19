@@ -176,8 +176,12 @@ only a member grant whose terms carry `services` (§10.1), a call (§12.2) verif
 - *A grant* is an ordinary member of the operator account, one per agent or rig (so each is revoked
   alone), admitted by §9.2 with terms such as
   `{"services":[{"audience":"https://home.example/v1/provision","purposes":["home.provision"]}],
-  "expires":"2026-12-19T00:00:00Z","depth":1,"conditions":[{"prefix":["args.slot","ci-"]}]}` and a
-  label naming it ("later CI on omarchy"). The terms bound it: this home only (the audience), this
+  "expires":"2026-12-19T00:00:00Z","depth":1,
+  "conditions":[{"any":[{"prefix":["args.slot","ci-"]},{"not":{"prefix":["args.slot",""]}}]}]}`
+  and a label naming it ("later CI on omarchy"). A grant's conditions bind every call its member
+  signs, including its reads of the operator account at this home (§12.3 step 7), which name no
+  slot; so the condition says "the slot starts with `ci-`, or the call names no slot". A bare
+  `{"prefix":["args.slot","ci-"]}` is false for those reads and leaves the rig unable to sync. The terms bound it: this home only (the audience), this
   door only (the purpose), until `expires` (and each link's), slot names (`conditions` on
   `args.slot`, `args.account`), and further delegation (`depth`; a link's key counts against its
   member). How many slots and how often are this home's settings (`grantMaxSlots`,
@@ -277,7 +281,10 @@ comes from a file (or the environment) and is imported as a non-extractable WebC
 checking that its `x`, `y` are the public half of its `d`: it is never logged, served or written
 to the data directory. `COLOPHON_RELAY_CLOCK_FILE` replaces the clock with the milliseconds in a
 file. It is a test hook: it works only when the relay is started with `--test-clock`, and the
-relay refuses to start with it otherwise.
+relay refuses to start with it otherwise. With `--test-clock` a line `tick` on the relay's stdin runs one
+scheduler pass over every home slot and answers `{"ticked":true}` on stdout when it is done; with
+`COLOPHON_RELAY_TICK_MS=0` (no timer) a test publishes heads only when it asks, and never waits on
+real time. Without `--test-clock` stdin is not read.
 
 Production use is over TLS (directly, or behind Caddy/nginx or Tailscale, as for the 0.3 relay:
 pass `Authorization`, `If-None-Match`, `If-Match` and `Content-Length`, do not buffer bodies).

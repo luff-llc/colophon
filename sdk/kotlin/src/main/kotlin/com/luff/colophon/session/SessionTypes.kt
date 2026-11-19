@@ -116,6 +116,25 @@ class HomeConfiguration(
 /** Who may read an account's history at its homes (`policy.history`, spec §13.4). */
 enum class HistoryAccess(val wire: String) { EVERYONE("public"), MEMBERS("members") }
 
+/** One `services` entry of a member's terms (spec §10.1): an audience and the purposes (or `["*"]`) it may call there. */
+data class ServiceTerms(val audience: String, val purposes: List<String>)
+
+/**
+ * What an approver grants of a request that asks for `services`, narrowing it (spec §10.1, §10.3): `services` keeps
+ * entries for audiences the request names with purposes it asks (null: as requested); `expires` (a §2.2 date) and
+ * `conditionsJson` (a JSON array of §10.4 predicates) are added. Everything else in the request is kept. A grant wider
+ * than the request is `SessionError.InvalidCommand`, and nothing is signed.
+ */
+data class ServiceGrant(val services: List<ServiceTerms>? = null, val expires: String? = null, val conditionsJson: String? = null)
+
+/**
+ * A home's door refused a provisioning request (`ColophonSession.provisionRequest`): `status` is the HTTP status and
+ * `code` the `result` it gave when valid (for a refused grant call, the core's code, such as `refused:revoked`; a 403 is
+ * final, never retried on another path). `retryAfterSeconds` is its `Retry-After`.
+ */
+class ProvisionRefusal(val status: Int, val code: String?, val retryAfterSeconds: Int?) :
+    Exception("the home refused to provision: $status${code?.let { " $it" } ?: ""}")
+
 /** A further controller the account is created with (spec §18). It signs its own possession proof at creation. */
 class AdditionalController(val provider: AsyncKeyProvider, val label: String, val roles: List<ControllerRole> = listOf(ControllerRole.APPROVE, ControllerRole.CONTROL))
 
@@ -125,6 +144,12 @@ class SessionConfiguration(
     val memberKind: AccountMemberKind = AccountMemberKind.APP,
     val namespaces: List<String>,
     val access: Set<AccessKind> = setOf(AccessKind.READ, AccessKind.WRITE),
+    /**
+     * Services this member asks for (spec §10.1 `services`): each an audience and the purposes it may call there. Its
+     * request's terms then carry them, beside `records` when `namespaces` is not empty (a member that only signs calls,
+     * such as a test rig, asks for no namespace). `ColophonSession.signCall` signs only for what is asked here.
+     */
+    val services: List<ServiceTerms> = listOf(),
     libraryNamespaces: List<String>? = null,
     /** The account's record store: `FolderMedium` (app-private storage) or `MemoryMedium` (tests). */
     val medium: RecordMedium,
@@ -171,6 +196,8 @@ data class AccessRequest(
 ) {
     val namespaces: List<String> get() = records.map { it.first }
     val access: Set<AccessKind> get() = if (records.any { it.second == "write" }) setOf(AccessKind.READ, AccessKind.WRITE) else setOf(AccessKind.READ)
+    /** The services the request asks for (spec §10.1), read from its terms. */
+    val services: List<ServiceTerms> get() = SessionWorker.requestedServices(termsJson)
     private val records: List<Pair<String, String>>
         get() = Json.obj(termsJson)?.list("records")?.mapNotNull { e ->
             @Suppress("UNCHECKED_CAST") val m = e as? Map<String, Any?> ?: return@mapNotNull null

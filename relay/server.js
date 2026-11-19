@@ -178,6 +178,27 @@ if (process.argv[2] === 'provisioned') {
   const running = await startRelay(config);
   // The first stdout line is machine-readable, so tests and supervisors can use port 0.
   process.stdout.write(JSON.stringify({ listening: { host: running.host, port: running.port, tls: Boolean(config.tls) } }) + '\n');
+  // Test builds only (--test-clock): each line `tick` on stdin runs one scheduler pass over every
+  // home slot (recording entries, heads) and answers {"ticked":true} on stdout once it is done, so
+  // a test publishes heads when it asks instead of waiting for the timer (start the relay with
+  // COLOPHON_RELAY_TICK_MS=0 for no timer at all). Without --test-clock stdin is never read.
+  if (process.argv.includes('--test-clock')) {
+    let queue = Promise.resolve();
+    let pending = '';
+    process.stdin.setEncoding('utf8');
+    process.stdin.on('data', (chunk) => {
+      pending += chunk;
+      let at;
+      while ((at = pending.indexOf('\n')) >= 0) {
+        const line = pending.slice(0, at).trim();
+        pending = pending.slice(at + 1);
+        if (line !== 'tick') continue;
+        queue = queue.then(() => running.relay.tickAll()).catch((error) => console.error(`test tick failed: ${error.message}`))
+          .then(() => { process.stdout.write('{"ticked":true}\n'); });
+      }
+    });
+    process.stdin.on('error', () => {});
+  }
   const stop = () => running.close().then(() => process.exit(0));
   process.on('SIGINT', stop);
   process.on('SIGTERM', stop);

@@ -26,7 +26,11 @@ import java.util.concurrent.TimeUnit
  * killed by [stop], and by a shutdown hook if a test dies first; its data directory names
  * `colophon-kotlin-relay` so `scripts/test-kotlin.sh` can check that none is left behind.
  */
-class RelayHome(val base: String, val port: Int = freePort()) {
+class RelayHome(val base: String, val port: Int = freePort(),
+                /** With a clock, the relay runs on it (set before every request and pass) with no scheduler timer: heads
+                 *  are published only by [tick], so nothing waits on real time. */
+                private val clockSource: (() -> Long)? = null) {
+    private val ticks = java.util.concurrent.LinkedBlockingQueue<Unit>()
     private val key = P256.generate()
     private val agreement = P256.generate()
     private val dir: File = Files.createTempDirectory("colophon-kotlin-relay-${ProcessHandle.current().pid()}-").toFile()
@@ -63,12 +67,15 @@ class RelayHome(val base: String, val port: Int = freePort()) {
             return Json.write(mapOf("kty" to "EC", "crv" to "P-256", "x" to b64(point.copyOfRange(1, 33)), "y" to b64(point.copyOfRange(33, 65)), "d" to b64(d)))
         }
 
-    /** Starts the relay for `account`; `peers` are the account's other homes (it forwards to them). */
-    fun start(account: String, peers: List<RelayHome> = listOf()) {
+    /** Starts the relay for `account`; `peers` are the account's other homes (it forwards to them). `provision` is the
+     *  config file's `provision` object (the door), as JSON. */
+    fun start(account: String, peers: List<RelayHome> = listOf(), provision: String? = null) {
         val bun = bun(); val module = module()
-        clock.writeText(System.currentTimeMillis().toString())
+        clock.writeText((clockSource?.invoke() ?: System.currentTimeMillis()).toString())
         val config = File(dir, "config.json")
-        config.writeText(Json.write(mapOf("resolve" to peers.associate { it.base to "http://127.0.0.1:${it.port}/v1/libraries/home" })))
+        val settings = linkedMapOf<String, Any?>("resolve" to peers.associate { it.base to "http://127.0.0.1:${it.port}/v1/libraries/home" })
+        if (provision != null) settings["provision"] = Json.parse(provision)
+        config.writeText(Json.write(settings))
         val builder = ProcessBuilder(bun, File(repository, "relay/server.js").path, "--test-clock", "--config", config.path)
         builder.environment().apply {
             put("COLOPHON_RELAY_PORT", port.toString())
@@ -77,16 +84,17 @@ class RelayHome(val base: String, val port: Int = freePort()) {
             put("COLOPHON_HOME_KEY", jwk)
             put("COLOPHON_HOME_WASM", module.path)
             put("COLOPHON_RELAY_CLOCK_FILE", clock.path)
-            put("COLOPHON_RELAY_TICK_MS", "50")
+            put("COLOPHON_RELAY_TICK_MS", if (clockSource == null) "50" else "0")
         }
         builder.redirectError(ProcessBuilder.Redirect.DISCARD)
         val p = builder.start()
         process = p; running.add(p)
         // The first stdout line is machine-readable: {"listening":{...}}.
-        val line = BufferedReader(InputStreamReader(p.inputStream)).readLine() ?: ""
+        val reader = BufferedReader(InputStreamReader(p.inputStream))
+        val line = reader.readLine() ?: ""
         check(line.contains("\"listening\"")) { "the relay did not start: $line" }
-        // Keep draining stdout so the relay never blocks on a full pipe.
-        Thread { try { p.inputStream.copyTo(java.io.OutputStream.nullOutputStream()) } catch (_: Exception) {} }.apply { isDaemon = true }.start()
+        // Keep draining stdout so the relay never blocks on a full pipe; each {"ticked":true} answers a [tick].
+        Thread { try { while (true) { val l = reader.readLine() ?: break; if (l.contains("\"ticked\"")) ticks.put(Unit) } } catch (_: Exception) {} }.apply { isDaemon = true }.start()
     }
 
     fun stop() {
@@ -100,13 +108,40 @@ class RelayHome(val base: String, val port: Int = freePort()) {
     }
 
     fun setClock(ms: Long) { clock.writeText(ms.toString()) }
+    /** Sets the relay's clock: to the injected clock when there is one, else to now. */
+    fun touch() = setClock(clockSource?.invoke() ?: System.currentTimeMillis())
+    /** One scheduler pass of the relay (its test hook: a `tick` line on stdin), on its clock, finished when it answers. */
+    fun tick() {
+        touch()
+        val p = checkNotNull(process) { "the relay is not running" }
+        p.outputStream.write("tick\n".toByteArray()); p.outputStream.flush()
+        // A bound for a dead relay only: the pass answers when it is done, whatever the time.
+        checkNotNull(ticks.poll(60, TimeUnit.SECONDS)) { "the relay did not answer its tick" }
+    }
 
     /** The home's signed member request (§9.1) naming `account`, as a home service answers it. */
     fun memberRequest(account: String): ByteArray {
         val spec = RequestSpec(account, P256.point(key.public as ECPublicKey), P256.point(agreement.public as ECPublicKey), "Relay home",
-            AccountMemberKind.SERVER, "{\"serves\":[\"home\"]}", accountFormatDate(System.currentTimeMillis() - 5_000), null, null, listOf("$base/"))
+            AccountMemberKind.SERVER, "{\"serves\":[\"home\"]}", accountFormatDate((clockSource?.invoke() ?: System.currentTimeMillis()) - 5_000), null, null, listOf("$base/"))
         return AccountRequest.prepare(spec).use { r ->
             r.finish(Signature(P256.sign(key.private, r.step().body), null, null)).raw
+        }
+    }
+
+    /** This relay's door (`POST /v1/provision`) on loopback. */
+    val door: String get() = "http://127.0.0.1:$port/v1/provision"
+    /** A transport to the door that sets the relay's clock first. */
+    fun doorTransport(): HomeTransport {
+        val inner = HttpHomeTransport(allowingLoopbackHttp = true)
+        return HomeTransport { request -> touch(); inner.send(request) }
+    }
+    /** The transport to a slot this relay provisioned: `slotBase` (its `https://` name) goes to `/v1/libraries/<slot>`. */
+    fun slotTransport(slotBase: String, slot: String): HomeTransport {
+        val inner = HttpHomeTransport(allowingLoopbackHttp = true)
+        return HomeTransport { request ->
+            touch()
+            check(request.url.startsWith(slotBase)) { "a request for another host: ${request.url}" }
+            inner.send(HttpRequest(request.ticket, request.home, request.method, "http://127.0.0.1:$port/v1/libraries/$slot" + request.url.substring(slotBase.length), request.headers, request.body))
         }
     }
 
@@ -125,7 +160,7 @@ class RelayHome(val base: String, val port: Int = freePort()) {
     fun transport(refusals: Refusals? = null): HomeTransport {
         val inner = HttpHomeTransport(allowingLoopbackHttp = true)
         return HomeTransport { request ->
-            setClock(System.currentTimeMillis())
+            touch()
             check(request.url.startsWith(base)) { "a request for another host: ${request.url}" }
             val local = "http://127.0.0.1:$port/v1/libraries/home" + request.url.substring(base.length)
             val answer: HttpAnswer = inner.send(HttpRequest(request.ticket, request.home, request.method, local, request.headers, request.body))

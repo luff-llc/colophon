@@ -140,6 +140,10 @@ public struct SessionConfiguration: Sendable {
     public let memberKind: MemberKind
     public let namespaces: [String]
     public let access: [Access]
+    /// Services this member asks for (spec §10.1 `services`): each an audience and the purposes it may call there. Its
+    /// request's terms then carry them, beside `records` when `namespaces` is not empty (a member that only signs calls,
+    /// such as a test rig, asks for no namespace). `ColophonSession.signCall` signs only for what is asked here.
+    public let services: [ServiceTerms]
     public let libraryNamespaces: [String]
     public let location: StorageLocation
     public let privateContainer: URL
@@ -171,7 +175,7 @@ public struct SessionConfiguration: Sendable {
     public let headQuorum: Int?
     /// Whether the owner key alone is enough to sign the controller's own steps (no other control key).
     public init(memberLabel: String, memberKind: MemberKind = .app, namespaces: [String], access: [Access] = [.read, .write],
-                libraryNamespaces: [String]? = nil, location: StorageLocation, privateContainer: URL,
+                services: [ServiceTerms] = [], libraryNamespaces: [String]? = nil, location: StorageLocation, privateContainer: URL,
                 keys: any AsyncKeyProvider, ownerController: any AsyncKeyProvider, recoveryKeys: (any AsyncKeyProvider)? = nil,
                 enrollment: EnrollmentPolicy = .pairing, homes: [HomeConfiguration] = [], createWithoutHome: Bool = false, additionalControllers: [AdditionalController] = [],
                 deviceSecrets: any DeviceSecretStore = KeychainDeviceSecrets(), recoveryDelay: Int? = nil,
@@ -181,10 +185,39 @@ public struct SessionConfiguration: Sendable {
         self.ownerController = ownerController; self.homes = homes; self.createWithoutHome = createWithoutHome
         self.additionalControllers = additionalControllers
         self.memberLabel = memberLabel; self.memberKind = memberKind; self.namespaces = namespaces
-        self.access = access; self.libraryNamespaces = libraryNamespaces ?? namespaces
+        self.access = access; self.services = services; self.libraryNamespaces = libraryNamespaces ?? namespaces
         self.enrollment = enrollment; self.deviceSecrets = deviceSecrets; self.recoveryDelay = recoveryDelay; self.now = now
         self.location = location; self.privateContainer = privateContainer; self.keys = keys; self.recoveryKeys = recoveryKeys
     }
+}
+
+/// One `services` entry of a member's terms (spec §10.1): an audience and the purposes (or `["*"]`) it may call there.
+public struct ServiceTerms: Equatable, Hashable, Sendable {
+    public let audience: String
+    public let purposes: [String]
+    public init(audience: String, purposes: [String]) { self.audience = audience; self.purposes = purposes }
+}
+
+/// What an approver grants of a request that asks for `services`, narrowing it (spec §10.1, §10.3), beside
+/// `GrantOptions`: `services` keeps entries for audiences the request names with purposes it asks (nil: as requested);
+/// `expires` (a §2.2 date) and `conditionsJSON` (a JSON array of §10.4 predicates) are added. A grant wider than the
+/// request is `SessionError.invalidCommand`, and nothing is signed.
+public struct ServiceGrant: Equatable, Sendable {
+    public let services: [ServiceTerms]?
+    public let expires: String?
+    public let conditionsJSON: String?
+    public init(services: [ServiceTerms]? = nil, expires: String? = nil, conditionsJSON: String? = nil) {
+        self.services = services; self.expires = expires; self.conditionsJSON = conditionsJSON
+    }
+}
+
+/// A home's door refused a provisioning request (`ColophonSession.provisionRequest`): `status` is the HTTP status and
+/// `code` the `result` it gave when valid (for a refused grant call, the core's code, such as `refused:revoked`; a 403 is
+/// final, never retried on another path). `retryAfterSeconds` is its `Retry-After`.
+public struct ProvisionRefusal: Error, Equatable, Sendable {
+    public let status: Int
+    public let code: String?
+    public let retryAfterSeconds: Int?
 }
 
 /// A further controller the account is created with (spec §18: each device's owner key, a passkey per platform,
@@ -217,6 +250,8 @@ public struct AccessRequest: Equatable, Sendable, Identifiable {
     public var namespaces: [String] { records.map(\.0) }
     /// The access it asks for: read, plus write when any record entry asks for it.
     public var access: [Access] { records.contains { $0.1 == "write" } ? [.read, .write] : [.read] }
+    /// The services it asks for (spec §10.1), read from its terms.
+    public var services: [ServiceTerms] { SessionWorker.requestedServices(termsJSON) }
     private var records: [(String, String)] {
         guard let object = try? JSONSerialization.jsonObject(with: Data(termsJSON.utf8)) as? [String: Any],
               let list = object["records"] as? [[String: Any]] else { return [] }

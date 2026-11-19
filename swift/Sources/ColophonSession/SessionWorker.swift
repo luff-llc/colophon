@@ -94,12 +94,78 @@ actor SessionWorker {
     nonisolated func termsJSONNonisolated(namespaces: [String], access: [Access], expires: String?, budget: UInt64?) -> String {
         Self.terms(namespaces: namespaces, access: access, expires: expires, budget: budget)
     }
-    nonisolated static func terms(namespaces: [String], access: [Access], expires: String?, budget: UInt64?) -> String {
-        var terms: [String: Any] = ["records": namespaces.sorted().map { ["namespace": $0, "access": access.contains(.write) ? "write" : "read"] }]
+    /// A member's terms (§9.1, §10.1): `records` for `namespaces` (sorted; absent when there are none) and `services`
+    /// when asked, keys sorted.
+    nonisolated static func terms(namespaces: [String], access: [Access], expires: String?, budget: UInt64?, services: [ServiceTerms] = []) -> String {
+        var terms: [String: Any] = [:]
+        if !namespaces.isEmpty { terms["records"] = namespaces.sorted().map { ["namespace": $0, "access": access.contains(.write) ? "write" : "read"] } }
+        if !services.isEmpty { terms["services"] = servicesValue(services) }
         if let expires { terms["expires"] = expires }
         if let budget { terms["writes"] = budget }
-        let data = (try? JSONSerialization.data(withJSONObject: terms, options: [.sortedKeys])) ?? Data("{}".utf8)
+        return canonicalJSON(terms) ?? "{}"
+    }
+    nonisolated static func servicesValue(_ services: [ServiceTerms]) -> [[String: Any]] {
+        services.sorted { $0.audience < $1.audience }.map { ["audience": $0.audience, "purposes": $0.purposes.sorted()] }
+    }
+    /// JSON with every object's keys sorted and slashes unescaped; the core re-reads what it signs.
+    nonisolated static func canonicalJSON(_ value: Any) -> String? {
+        guard let data = try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys, .withoutEscapingSlashes]) else { return nil }
         return String(decoding: data, as: UTF8.self)
+    }
+    /// The `services` a member's terms ask for (spec §10.1); anything not of that shape is left out.
+    nonisolated static func requestedServices(_ termsJSON: String) -> [ServiceTerms] {
+        guard let object = try? JSONSerialization.jsonObject(with: Data(termsJSON.utf8)) as? [String: Any],
+              let list = object["services"] as? [[String: Any]] else { return [] }
+        return list.compactMap { entry in
+            guard let audience = entry["audience"] as? String, let purposes = entry["purposes"] as? [String] else { return nil }
+            return ServiceTerms(audience: audience, purposes: purposes)
+        }
+    }
+    /// Whether `asked` purposes cover `granted` ones (§10.3: `["*"]` covers all; a granted `["*"]` needs an asked one).
+    nonisolated static func purposesCover(_ asked: [String], _ granted: [String]) -> Bool {
+        if granted.isEmpty { return false }
+        if asked.contains("*") { return true }
+        return !granted.contains("*") && granted.allSatisfy(asked.contains)
+    }
+    /// Whether `services` name `purpose` at exactly `audience`.
+    nonisolated static func servicesCover(_ services: [ServiceTerms], audience: String, purpose: String) -> Bool {
+        services.contains { $0.audience == audience && purposesCover($0.purposes, [purpose]) }
+    }
+    /// Refuses `options` that would widen the request's own bounds (`invalidCommand`): an expiry later than a requested
+    /// one, or a write budget larger than a requested one. `narrowed(requestTerms:options:)` replaces both as given, and
+    /// the core does not compare them with the request (the approver sets them), so this is checked against the request
+    /// as signed before anything is composed or signed.
+    nonisolated static func checkBounds(requestTerms: String, options: GrantOptions) throws {
+        guard let terms = (try? JSONSerialization.jsonObject(with: Data(requestTerms.utf8))) as? [String: Any] else { throw SessionError.invalidCommand }
+        if let expires = options.expires, let asked = terms["expires"] as? String, expires > asked { throw SessionError.invalidCommand }
+        if let budget = options.writeBudget, let asked = (terms["writes"] as? NSNumber)?.uint64Value, budget > asked { throw SessionError.invalidCommand }
+    }
+    /// The request's terms narrowed by `grant` (`ServiceGrant`): each granted service names an audience the request asks
+    /// for with purposes it asks; `expires` is no later than a requested one; conditions are added to any the request
+    /// carries. Everything else is kept. A grant wider than the request, or one that leaves no `records`, `services` or
+    /// `serves`, is `invalidCommand`.
+    nonisolated static func narrowed(requestTerms: String, grant: ServiceGrant) throws -> String {
+        guard var terms = (try? JSONSerialization.jsonObject(with: Data(requestTerms.utf8))) as? [String: Any] else { throw SessionError.invalidCommand }
+        if let granted = grant.services {
+            let asked = requestedServices(requestTerms)
+            for g in granted {
+                guard let a = asked.first(where: { $0.audience == g.audience }), purposesCover(a.purposes, g.purposes) else { throw SessionError.invalidCommand }
+            }
+            if granted.isEmpty { terms.removeValue(forKey: "services") } else { terms["services"] = servicesValue(granted) }
+        }
+        if let expires = grant.expires {
+            if let held = terms["expires"] as? String, expires > held { throw SessionError.invalidCommand }
+            terms["expires"] = expires
+        }
+        if let text = grant.conditionsJSON {
+            guard let added = (try? JSONSerialization.jsonObject(with: Data(text.utf8))) as? [Any] else { throw SessionError.invalidCommand }
+            var held = terms["conditions"] as? [Any] ?? []
+            var seen = Set(held.compactMap { canonicalJSON($0) })
+            for c in added { if let key = canonicalJSON(c), seen.insert(key).inserted { held.append(c) } }
+            if !held.isEmpty { terms["conditions"] = held }
+        }
+        guard terms["records"] != nil || terms["services"] != nil || terms["serves"] != nil, let out = canonicalJSON(terms) else { throw SessionError.invalidCommand }
+        return out
     }
     /// The request's own terms, narrowed by `options` (spec §9.1: a grant is covered by its request). A nil field keeps
     /// the request's; `namespaces` keeps only those record entries; `access` without `.write` lowers each entry to read;
@@ -526,7 +592,7 @@ actor SessionWorker {
         guard let account = accountID, let id = memberID else { throw SessionError.notReady }
         let keys = try await memberKeys.publicKeys()
         let spec = RequestSpec(account: account, signing: keys.signing, agreement: keys.agreement, label: configuration.memberLabel,
-            kind: Self.accountKind(configuration.memberKind), termsJson: termsJSON(namespaces: configuration.namespaces, access: configuration.access, expires: nil, budget: nil),
+            kind: Self.accountKind(configuration.memberKind), termsJson: Self.terms(namespaces: configuration.namespaces, access: configuration.access, expires: nil, budget: nil, services: configuration.services),
             created: try accountFormatDate(ms: nowMs - 1000), custody: nil, operator: nil, endpoints: [])
         let request = try AccountRequest.prepare(spec: spec)
         let step = try request.step()
@@ -959,7 +1025,7 @@ actor SessionWorker {
             _ = try await owner.run { try $0.advance(nowMs: at) }
             let own = try AccountPairing.scanRequest(account: account, request: memberRaw,
                                                      limiter: PairingFailureLimiter.fresh(), nowMs: at)
-            let terms = termsJSON(namespaces: configuration.namespaces, access: configuration.access, expires: nil, budget: nil)
+            let terms = Self.terms(namespaces: configuration.namespaces, access: configuration.access, expires: nil, budget: nil, services: configuration.services)
             let signers = try await signers(owner, ownerID: ownerID, need: .member)
             let approve = try await owner.execute(custody: custody) { engine in try withEntropy(32) { try engine.beginApprove(request: memberRaw, termsJson: terms, signers: signers, pairing: own, entropy: $0) } }
             try await persist(approve, on: owner)
@@ -1283,6 +1349,31 @@ actor SessionWorker {
         }
         guard let artifact = written.artifact else { throw ColophonError.internalFailure(code: "internal", detail: "a call returned no envelope") }
         try await gated { try await engine.run { try $0.exchangeProvideCall(home: need.home, ticket: need.ticket, call: artifact) } }
+    }
+    /// A call (spec §12.2) for `audience` and `purpose` with `argsJSON` (a JSON object), signed by this device's member key
+    /// with no links, as the envelope's bytes. The signer's own check comes first: a service this session did not ask for
+    /// (`SessionConfiguration.services`) is `refused:outOfScope` before the key is asked; then the core judges the signed
+    /// call by §12.3 over the history this device holds (its grant's services, expiry and conditions, a revocation it
+    /// holds, fresh heads) and returns the bytes only when that judgement is `ok`. Each call has a fresh request ID.
+    func signCall(audience: String, purpose: String, argsJSON: String) async throws -> Data {
+        try await gated {
+            if engine == nil { _ = try await reconcile() }
+            guard let engine, let custody = memberCustody, let id = memberID else { throw SessionError.notReady }
+            guard (try? JSONSerialization.jsonObject(with: Data(argsJSON.utf8))) is [String: Any] else { throw SessionError.invalidCommand }
+            guard Self.servicesCover(configuration.services, audience: audience, purpose: purpose) else {
+                throw ColophonError.refused(code: "refused:outOfScope", reason: "outOfScope", detail: "this session asked for no service \(purpose) at \(audience)")
+            }
+            let signing = try await custody.provider(for: id).publicKeys().signing
+            // Judged at the session's clock, not the time of the engine's last refresh.
+            let at = nowMs
+            _ = try await engine.run { try $0.advance(nowMs: at) }
+            let target = CallTarget(audiences: [audience], callOrigins: [], controllerPurposes: [], homeEndpoints: [])
+            let written = try await engine.execute(custody: custody) { engine in
+                try withEntropy(32) { try engine.beginCall(key: signing, links: [], audience: audience, purpose: purpose, argsJson: argsJSON, target: target, entropy: $0) }
+            }
+            guard let artifact = written.artifact else { throw ColophonError.internalFailure(code: "internal", detail: "a call returned no envelope") }
+            return artifact
+        }
     }
     static func base64url(_ data: Data) -> String {
         data.base64EncodedString().replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")

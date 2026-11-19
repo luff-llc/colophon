@@ -1,5 +1,8 @@
 //! H4: the stopped-home table over HTTP against the real relay and wasm module.
 //! Protocol time is exclusively the relay test clock. Polling only waits for I/O completion.
+//! Every relay here runs without a scheduler timer: a head read settles the home itself, and a
+//! test that needs a scheduler pass runs one with `Relay::tick`, so nothing depends on how much
+//! real time passes between two requests.
 #![allow(
     dead_code,
     clippy::unwrap_used,
@@ -28,6 +31,17 @@ struct World {
     member: String,
     scratch: Scratch,
 }
+/// A relay with no scheduler timer (`tickMs` 0): passes run only when the test asks.
+fn untimed(
+    keys: &HomeKeys,
+    account: &str,
+    base: &str,
+    dir: &std::path::Path,
+    clock_ms: i64,
+    resolve: &[(&str, u16)],
+) -> Relay {
+    Relay::start_with(keys, account, base, dir, clock_ms, resolve, 0, json!({"tickMs": 0}))
+}
 fn world(name: &str, history: &str) -> Option<World> {
     prerequisites()?;
     let keys = HomeKeys::new(0x77);
@@ -42,7 +56,7 @@ fn world(name: &str, history: &str) -> Option<World> {
         support::terms("write"),
     );
     let scratch = Scratch::new(name);
-    let relay = Relay::start(
+    let relay = untimed(
         &keys,
         f.account.id().as_str(),
         BASE_A,
@@ -681,7 +695,7 @@ fn a_home_witnesses_a_provisional_raise_and_records_the_vetoed_that_displaces_it
     let (ka, kb) = (HomeKeys::new(0x77), HomeKeys::new(0x78));
     let f = fixture("public", &[(&ka, BASE_A), (&kb, BASE_B)]);
     let scratch = Scratch::new("h4-provisional");
-    let relay = Relay::start(
+    let relay = untimed(
         &ka,
         f.account.id().as_str(),
         BASE_A,
@@ -714,14 +728,16 @@ fn a_home_witnesses_a_provisional_raise_and_records_the_vetoed_that_displaces_it
     assert_eq!(s, 200, "{r}");
     // A accepts the late, already receipted veto but signs no out-of-window receipt.
     assert!(r["receipts"].as_array().unwrap().is_empty());
-    eventually("the provisional raise displaced by vetoed", 30, || {
-        let _ = relay.get("/head"); // Runs the scheduler without advancing protocol time.
+    // One scheduler pass at the same protocol time records the vetoed that displaces the raise.
+    relay.tick();
+    assert!(
         json_get(&relay, "/authority").1["entries"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|e| body(&canonical(e).unwrap())["kind"] == "vetoed")
-    });
+            .any(|e| body(&canonical(e).unwrap())["kind"] == "vetoed"),
+        "the provisional raise displaced by vetoed"
+    );
     relay.set_clock(DUE + 1);
     assert_eq!(
         relay.get("/head").0,
@@ -740,7 +756,7 @@ fn existing_forwarding_sends_stopped_homes_new_removals_vetoes_and_receipts() {
     let (da, db) = (Scratch::new("h4-forward-a"), Scratch::new("h4-forward-b"));
     // Keep the peer unreachable until A has stopped, so observing it at B proves forwarding
     // after the stop rather than a pass that happened before it.
-    let a = Relay::start(
+    let a = untimed(
         &ka,
         f.account.id().as_str(),
         BASE_A,
@@ -785,7 +801,7 @@ fn existing_forwarding_sends_stopped_homes_new_removals_vetoes_and_receipts() {
     for o in [&removal, &v] {
         assert_eq!(post_object(&a, o).0, 200);
     }
-    let b = Relay::start(
+    let b = untimed(
         &kb,
         f.account.id().as_str(),
         BASE_B,
@@ -799,7 +815,10 @@ fn existing_forwarding_sends_stopped_homes_new_removals_vetoes_and_receipts() {
     // its pending listing. Its store still proves that the forwarding pass delivered it.
     for (kind, o) in [("transitions", &removal), ("vetoes", &v)] {
         let d = object_digest(o);
+        // Each poll runs one pass of A's scheduler, which starts forwarding (a pass to B runs
+        // on its own); the wait is only for that I/O to finish.
         eventually("a stopped home's forwarded object and receipt", 45, || {
+            a.tick();
             b.get(&format!("/records/{kind}/{d}.json")).0 == 200
                 && b.get(&format!("/records/receipts/{d}/{}.receipt.json", ka.id))
                     .0

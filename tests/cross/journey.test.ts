@@ -43,7 +43,7 @@ async function ceremony(existing: Device, joining: Device, account: string, mode
  * approving device answers with a nonce, the joiner reveals, both show the same six digits and confirm, and only then
  * the approving device approves what that pairing confirmed. This process only carries the messages; each half runs
  * on its own device, and the approving device cannot approve without the joiner's reveal. */
-async function approve(existing: Device, joining: Device) {
+async function approve(existing: Device, joining: Device, grant?: { expires: string; conditions: string }) {
   await expect(existing.call("approve")).rejects.toThrow();
   const { request, commitment } = await joining.call("approvalJoin");
   const nonce = await existing.call("approvalBegin", { request, commitment });
@@ -51,7 +51,7 @@ async function approve(existing: Device, joining: Device) {
   const digits = await existing.call("approvalCode", { e: reveal.e, nb: reveal.nb });
   expect(digits).toMatch(/^\d{6}$/); expect(reveal.digits).toBe(digits);
   for (const d of [existing, joining]) expect(await d.call("approvalConfirm", { digits })).toEqual({ accepted: true, stage: "confirmed" });
-  await existing.call("approve");
+  await existing.call("approve", grant ? { grant } : {});
 }
 
 async function bootstrap(from: Device, to: Device) {
@@ -271,4 +271,59 @@ for (const creator of ["swift", "kotlin"] as const) {
       } finally { await world.close(); }
     }, 240_000);
   }
+}
+
+// Provisioning by a grant across SDKs (relay/README.md "Provisioning by a grant"): one platform's device holds the
+// operator account on the relay's own slot; the other platform's device joins it as a rig asking for the door's service
+// (beside its namespace), is approved with an expiry and a slot condition by the first platform's session, and signs a
+// call the real door admits. A replay of that call, and a purpose the rig never asked for, are refused. Both devices and
+// the relay run on one fixed clock the test moves; the relay publishes heads only when the test ticks it.
+const AUDIENCE = "https://cross-home-0.test/v1/provision";
+const PREFIX = "https://cross-home-0.test/v1/libraries/";
+const SLOT_ANY = JSON.stringify([{ any: [{ prefix: ["args.slot", "ci-"] }, { not: { prefix: ["args.slot", ""] } }] }]);
+const T0 = Date.parse("2026-11-20T09:00:00Z");
+for (const rigPlatform of ["swift", "kotlin"] as const) {
+  test(`a ${other(rigPlatform)} operator grants a ${rigPlatform} rig that provisions at the door`, async () => {
+    const world = await new World("members", 1, { audience: AUDIENCE, prefix: PREFIX, nowMs: T0 }).init();
+    try {
+      let now = T0;
+      const operator = world.device(other(rigPlatform), "operator");
+      const rig = world.device(rigPlatform, "rig");
+      const step = async () => {
+        now += 1000;
+        await world.setClock(now);
+        for (const d of [operator, rig]) await d.call("clock", { ms: now });
+      };
+      /** Exchanges until clean, one relay pass after each exchange (no waiting on the relay's timer: it has none). */
+      const settled = async (device: Device) => {
+        let state: any;
+        for (let n = 0; n < 6; n++) {
+          await step();
+          state = await device.call("sync");
+          await world.tick();
+          if (state.phase === "ready" && !state.issues.length && !state.faults.length) return state;
+        }
+        throw new Error(`${device.platform} did not settle: ${JSON.stringify(state)}`);
+      };
+      await operator.start(undefined, { nowMs: T0 });
+      await rig.start(undefined, { nowMs: T0, services: [{ audience: AUDIENCE, purposes: ["home.provision"] }] });
+      await operator.call("create"); await settled(operator);
+      await bootstrap(operator, rig);
+      const expires = new Date(T0 + 240_000).toISOString().replace(/\.\d{3}Z$/, "Z");
+      await approve(operator, rig, { expires, conditions: SLOT_ANY });
+      await settled(operator); await settled(rig);
+      const slot = `ci-cross-${rigPlatform}`;
+      const body = JSON.stringify({ account: "ab".repeat(32), base: PREFIX + slot, slot });
+      const call = await rig.call("signCall", { audience: AUDIENCE, purpose: "home.provision", args: body });
+      const post = () => fetch(world.door, { method: "POST", body, headers: { "content-type": "application/json", authorization: `Colophon ${call}` } });
+      const admitted = await post();
+      expect(admitted.status).toBe(200);
+      expect((await admitted.arrayBuffer()).byteLength).toBeGreaterThan(0);
+      const replayed = await post();
+      expect(replayed.status).toBe(403);
+      expect(await replayed.json()).toEqual({ result: "refused:replay" });
+      await expect(rig.call("signCall", { audience: AUDIENCE, purpose: "home.release", args: body })).rejects.toThrow("refused:outOfScope");
+      console.log(`cross grant ${other(rigPlatform)} operator -> ${rigPlatform} rig: provisioned ${slot}; replay refused`);
+    } finally { await world.close(); }
+  }, 240_000);
 }

@@ -55,7 +55,7 @@ export class Device {
   private config?: Record<string, unknown>;
   signer?: Device;
   constructor(readonly platform: Platform, readonly root: string, private world: World) {}
-  async start(extra?: unknown) {
+  async start(extra?: unknown, more: Record<string, unknown> = {}) {
     const swift = process.env.COLOPHON_CROSS_SWIFT;
     const target = process.env.CARGO_TARGET_DIR;
     if (!swift || !target) throw new Error("run scripts/test-cross.sh (driver and native library required)");
@@ -92,7 +92,7 @@ export class Device {
         this.pending?.reject(new Error(`${this.platform}: ${e}\n${this.stderr}`)); this.pending = undefined;
       }
     })();
-    this.config = { op: "init", root: this.root, homes: this.world.homes, history: this.world.history, ...(extra ? { extra } : {}) };
+    this.config = { op: "init", root: this.root, homes: this.world.homes, history: this.world.history, ...(extra ? { extra } : {}), ...more };
     return this.call("init", this.config);
   }
   private async send(value: unknown) {
@@ -131,7 +131,25 @@ export class World {
   private provisioning?: Promise<void>;
   private root = "";
   private closing?: Promise<void>;
-  constructor(readonly history: "members" | "public", readonly count: number) {}
+  /** `grant`: the first relay's door provisions by a grant (gate "grant", relay/README.md) for the account's slot as its
+   *  operator slot, with this audience and slot prefix. */
+  /** With `grant.nowMs`, the relays run on a fixed clock (`--test-clock`) that `setClock` moves, with no scheduler timer:
+   *  `tick` runs one pass of the first relay (its test hook), so nothing waits on real time. */
+  constructor(readonly history: "members" | "public", readonly count: number, readonly grant?: { audience: string; prefix: string; nowMs?: number }) {}
+  private ticks: (() => void)[] = [];
+  private stdin?: { write(text: string): number; flush(): unknown };
+  private get clockFile() { return join(this.root, "clock"); }
+  /** Moves the relays' fixed clock. */
+  async setClock(ms: number) { await writeFile(this.clockFile, String(ms)); }
+  /** One scheduler pass of the first relay, finished when it answers. */
+  async tick() {
+    if (!this.stdin) throw new Error("no relay with a tick hook");
+    const done = new Promise<void>(resolve => this.ticks.push(resolve));
+    this.stdin.write("tick\n"); await this.stdin.flush();
+    await within(done, 60_000, "relay tick");
+  }
+  /** The first relay's door (`POST /v1/provision`) on loopback. */
+  get door(): string { return this.homes[0]!.local.replace(/\/v1\/libraries\/home$/, "/v1/provision"); }
   async init() {
     this.root = await mkdtemp(join(process.env.COLOPHON_CROSS_RUN_DIR ?? tmpdir(), `colophon-cross-relay-${process.env.COLOPHON_CROSS_TAG ?? process.pid}-`));
     activeWorlds.add(this);
@@ -160,19 +178,25 @@ export class World {
   private async startRelays(account: string) {
     for (const [n, home] of this.homes.entries()) {
       const config = join(this.root, `config-${n}.json`);
+      const provision = this.grant && n === 0
+        ? { provision: { enabled: true, prefix: this.grant.prefix, gate: ["grant"], operator: { account, slot: "home" }, audience: this.grant.audience } } : {};
       await writeFile(config, JSON.stringify({ resolve: Object.fromEntries(this.homes.filter(h => h !== home).map(h => [h.base, h.local])),
-        limits: { requestsPerMinute: 100_000 } }));
-      const child = Bun.spawn([process.execPath, join(repo, "relay/server.js"), "--config", config], { cwd: repo,
+        limits: { requestsPerMinute: 100_000 }, ...provision }));
+      const fixed = this.grant?.nowMs !== undefined;
+      if (fixed && n === 0) await writeFile(this.clockFile, String(this.grant!.nowMs));
+      const child = Bun.spawn([process.execPath, join(repo, "relay/server.js"), "--config", config, ...(fixed ? ["--test-clock"] : [])], { cwd: repo,
         env: { ...process.env, COLOPHON_RELAY_PORT: new URL(home.local).port, COLOPHON_RELAY_DATA: join(this.root, `home-${n}`),
           COLOPHON_RELAY_HOME_SLOTS: `home=${account}@${home.base}`, COLOPHON_HOME_KEY_FILE: join(this.root, `key-${n}.json`),
-          COLOPHON_RELAY_TICK_MS: "50", COLOPHON_RELAY_OPEN: "", COLOPHON_RELAY_TOKENS: "" }, stdout: "pipe", stderr: "pipe" });
+          COLOPHON_RELAY_TICK_MS: fixed ? "0" : "50", COLOPHON_RELAY_OPEN: "", COLOPHON_RELAY_TOKENS: "",
+          ...(fixed ? { COLOPHON_RELAY_CLOCK_FILE: this.clockFile } : {}) }, stdout: "pipe", stderr: "pipe", stdin: fixed && n === 0 ? "pipe" : "ignore" });
+      if (fixed && n === 0) this.stdin = (child as unknown as { stdin: { write(text: string): number; flush(): unknown } }).stdin;
       this.relays.push(child);
       const reader = lines(child.stdout as ReadableStream<Uint8Array>);
       let stderr = "";
       this.drains.push((async () => { for await (const b of child.stderr as ReadableStream<Uint8Array>) stderr = (stderr + Buffer.from(b).toString()).slice(-12000); })());
       const line = await within(reader.next(), 15_000, "relay startup");
       if (line.done || !JSON.parse(line.value).listening) throw new Error(`relay failed to start: ${stderr}`);
-      this.drains.push((async () => { for await (const _ of reader) { /* drain relay logs */ } })());
+      this.drains.push((async () => { for await (const l of reader) { if (l.includes('"ticked"')) this.ticks.shift()?.(); } })());
     }
   }
   killOwned() {
