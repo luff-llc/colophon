@@ -2,7 +2,7 @@ import Foundation
 import Testing
 import ColophonKeys
 import ColophonSavedKit
-import ColophonSession
+@testable import ColophonSession
 
 /// A session whose `libraryNamespaces` (what the account declares at genesis) is wider than its own `namespaces` (what
 /// its member is granted) is ready after `create()`: readiness and published revisions follow the member's own
@@ -149,6 +149,10 @@ import ColophonSession
             #expect(reason == .notGranted)
         }
         #expect(first.medium.snapshot().count == before, "a refused write stores nothing")
+        // The refusal starts a refresh (the engine's access check decides the phase), and the approval's writes may have
+        // started a batch refresh: the phase to judge is the one they settle on, not `refreshing` while one runs.
+        await second.session.refusalRefresh?.value
+        await second.session.flushExternalChanges()
         #expect(second.session.phase == .ready, "\(second.session.phase)")
     }
 

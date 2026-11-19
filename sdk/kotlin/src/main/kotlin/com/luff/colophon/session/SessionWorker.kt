@@ -93,7 +93,8 @@ internal class SessionRefusal(val snapshot: SessionSnapshot, val error: SessionE
 internal class SessionWorker(val configuration: SessionConfiguration) {
     @Suppress("OPT_IN_USAGE")
     private val lane: CoroutineDispatcher = Dispatchers.IO.limitedParallelism(1, "colophon-session")
-    private val gate = Mutex()
+    /** Internal so a test can hold it: an operation queued behind it stays in flight exactly as long as the test says. */
+    internal val gate = Mutex()
     private var memberKeys: AsyncKeyProvider = SessionKeys(configuration.keys)
     @Volatile private var engine: ColophonEngine? = null
         set(value) { field = value; if (value == null) memberOpened = false }

@@ -2,6 +2,12 @@
 //! tests through the exports: started on loopback with a temporary data directory and the
 //! explicit test clock, one slot provisioned for one account, killed when dropped.
 //!
+//! No relay here runs a scheduler timer (`COLOPHON_RELAY_TICK_MS` 0): a head read settles a home
+//! by itself, and a test runs each scheduler pass it needs with [`Relay::tick`] (the relay's
+//! `--test-clock` stdin hook). Protocol time is only the relays' test clocks. The one wait is
+//! [`forwarded`]: a pass starts forwarding to the other homes and does not wait for it, so a test
+//! that needs a forwarded object polls for it, with a bound.
+//!
 //! Missing Bun or the module fails the test (it never passes by skipping): build the module with
 //! `scripts/test-home.sh`, or `cargo build --target wasm32-unknown-unknown --release -p
 //! colophon-home-wasm`, and set `COLOPHON_HOME_WASM` if it is not under `CARGO_TARGET_DIR`.
@@ -9,7 +15,8 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::Mutex;
 
 /// The relay script and the home module, or a panic naming what is missing.
 pub fn prerequisites() -> (PathBuf, PathBuf) {
@@ -63,6 +70,8 @@ impl Drop for Scratch {
 /// account's history names); the test maps it to the process.
 pub struct Relay {
     child: Child,
+    /// The relay's stdin and the rest of its stdout (after the listening line), for `tick`.
+    control: Mutex<(ChildStdin, BufReader<ChildStdout>)>,
     pub port: u16,
     pub base: String,
     clock: PathBuf,
@@ -97,16 +106,52 @@ impl Relay {
             .env("COLOPHON_HOME_KEY", key.jwk())
             .env("COLOPHON_HOME_WASM", wasm)
             .env("COLOPHON_RELAY_CLOCK_FILE", &clock)
-            .env("COLOPHON_RELAY_TICK_MS", "50")
+            // No scheduler timer: the test runs each pass (`tick`).
+            .env("COLOPHON_RELAY_TICK_MS", "0")
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
             .unwrap();
+        let stdin = child.stdin.take().unwrap();
+        let mut stdout = BufReader::new(child.stdout.take().unwrap());
         let mut line = String::new();
-        BufReader::new(child.stdout.as_mut().unwrap()).read_line(&mut line).unwrap();
+        stdout.read_line(&mut line).unwrap();
         let v: serde_json::Value = serde_json::from_str(&line).expect("the relay's listening line");
         let port = v["listening"]["port"].as_u64().unwrap() as u16;
-        Self { child, port, base: base.trim_end_matches('/').to_string(), clock, _dir: dir }
+        let control = Mutex::new((stdin, stdout));
+        Self { child, control, port, base: base.trim_end_matches('/').to_string(), clock, _dir: dir }
+    }
+    /// Run one scheduler pass over the home slot (recording entries when due, heads; forwarding
+    /// to the other homes is started, not awaited) and return once it is done: the relay answers
+    /// `{"ticked":true}` on stdout. Other stdout lines are skipped.
+    pub fn tick(&self) {
+        let mut guard = self.control.lock().unwrap();
+        let (stdin, stdout) = &mut *guard;
+        stdin.write_all(b"tick\n").unwrap();
+        stdin.flush().unwrap();
+        loop {
+            let mut line = String::new();
+            assert!(stdout.read_line(&mut line).unwrap() > 0, "the relay exited before it ticked");
+            if serde_json::from_str::<serde_json::Value>(&line).ok() == Some(serde_json::json!({"ticked": true})) {
+                return;
+            }
+        }
+    }
+    /// GET `rest` (a path under the slot's base) at this relay's current clock: `(status, body)`.
+    pub fn get(&self, rest: &str) -> (u16, Vec<u8>) {
+        self.request("GET", rest, &[], &[])
+    }
+    /// The seq the head served at `rest` covers (`/head`, or `/records/heads/{id}.json` for the
+    /// head this home holds of another), or `None` when it serves none.
+    pub fn head_seq(&self, rest: &str) -> Option<u64> {
+        let (status, bytes) = self.get(rest);
+        if status != 200 {
+            return None;
+        }
+        let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+        let body = colophon_core::v05::encoding::decode_base64(v["body"].as_str()?, 4_096).ok()?;
+        serde_json::from_slice::<serde_json::Value>(&body).ok()?["authority"]["seq"].as_u64()
     }
     pub fn set_clock(&self, ms: i64) {
         std::fs::write(&self.clock, ms.to_string()).unwrap();
@@ -115,6 +160,9 @@ impl Relay {
     pub fn send(&self, method: &str, url: &str, headers: &[(String, String)], body: &[u8], now_ms: i64) -> (u16, Vec<u8>) {
         self.set_clock(now_ms);
         let rest = url.strip_prefix(&self.base).expect("a URL at this relay");
+        self.request(method, rest, headers, body)
+    }
+    fn request(&self, method: &str, rest: &str, headers: &[(String, String)], body: &[u8]) -> (u16, Vec<u8>) {
         let path = format!("/v1/libraries/home{rest}");
         let mut s = TcpStream::connect(("127.0.0.1", self.port)).unwrap();
         let mut req = format!("{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\nContent-Length: {}\r\n", body.len());
@@ -153,6 +201,37 @@ fn dechunk(mut b: &[u8]) -> Vec<u8> {
         out.extend_from_slice(&b[i + 2..i + 2 + n]);
         b = &b[i + 2 + n + 2..];
     }
+}
+
+/// One scheduler pass at each of `relays`, then `done`, at most `max` times; no waiting. For what
+/// a home's own passes produce (recording entries, heads), not for forwarding between homes.
+pub fn ticks_until(what: &str, max: usize, relays: &[Relay], mut done: impl FnMut() -> bool) {
+    for _ in 0..max {
+        for r in relays {
+            r.tick();
+        }
+        if done() {
+            return;
+        }
+    }
+    panic!("{what}: not after {max} scheduler passes");
+}
+
+/// Forwarding between homes: each poll runs one pass at each of `relays` (which starts their
+/// forwarding and does not wait for it); the wait, bounded, is only for that I/O to finish. What
+/// the homes decide is the same however long it takes.
+pub fn forwarded(what: &str, relays: &[Relay], mut done: impl FnMut() -> bool) {
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while std::time::Instant::now() < end {
+        for r in relays {
+            r.tick();
+        }
+        if done() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    panic!("timed out waiting for {what}");
 }
 
 /// A free local port (bound and released: a short race, accepted in a test).

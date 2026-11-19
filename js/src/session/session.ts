@@ -42,6 +42,10 @@ export class ColophonSession {
   private restoring: Promise<void> | undefined;
   private usable = false;
   private commandFailureRevision = 0;
+  /** Counts the refreshes that moved `ready` to `refreshing`; only the latest such refresh puts `ready` back. */
+  private refreshMark = 0;
+  /** A test seam: awaited by every refresh after the worker answered and before its outcome is published. Unset outside tests. @internal */
+  refreshWillFinish: (() => Promise<void>) | undefined;
   private retryCreate = false;
   private readonly submissions = new Map<string, Submission>();
   /** Aborted by `shutdown`: every loop and every pass in flight ends. */
@@ -125,15 +129,29 @@ export class ColophonSession {
     await this.restore();
     const lease = this.context;
     const failureRevision = this.commandFailureRevision;
-    if (this.phase.kind === 'ready') this.set({ phase: { kind: 'refreshing' } });
+    let marked = false;
+    if (this.phase.kind === 'ready') { this.set({ phase: { kind: 'refreshing' } }); this.refreshMark++; marked = true; }
+    // This refresh's generation. A refresh that a newer one has since re-marked is stale: its outcome (snapshot or error) is
+    // dropped and the phase follows the newer one.
+    const generation = this.refreshMark;
+    const current = (): boolean => generation === this.refreshMark && lease === this.context;
+    // A command that failed while this refresh was in flight keeps the phase its failure set; a failure that set none (a
+    // cancelled key prompt) leaves the refresh's own outcome to decide.
+    const failureHoldsPhase = (): boolean => failureRevision !== this.commandFailureRevision && this.phase.kind !== 'refreshing';
     try {
       const snapshot = await this.worker.refresh();
-      if (lease !== this.context) return;
-      // A command that failed while this refresh was in flight keeps its phase.
-      if (snapshot.phase.kind === 'ready' && failureRevision !== this.commandFailureRevision) return;
+      await this.refreshWillFinish?.();
+      if (!current()) return;
+      if (snapshot.phase.kind === 'ready' && failureHoldsPhase()) return;
       this.apply(snapshot);
       this.startWatching();
-    } catch (error) { if (lease === this.context && failureRevision === this.commandFailureRevision) this.fail(error); }
+    } catch (error) {
+      if (current() && !failureHoldsPhase()) this.fail(error);
+    } finally {
+      // A finished refresh never leaves the phase at `refreshing`: whatever path ends it (a snapshot apply() ignored, a
+      // failure that set no phase), the phase this refresh replaced comes back.
+      if (marked && current() && this.phase.kind === 'refreshing') this.set({ phase: { kind: 'ready' } });
+    }
   }
 
   /**
