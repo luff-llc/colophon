@@ -101,6 +101,23 @@ actor SessionWorker {
         let data = (try? JSONSerialization.data(withJSONObject: terms, options: [.sortedKeys])) ?? Data("{}".utf8)
         return String(decoding: data, as: UTF8.self)
     }
+    /// The request's own terms, narrowed by `options` (spec §9.1: a grant is covered by its request). A nil field keeps
+    /// the request's; `namespaces` keeps only those record entries; `access` without `.write` lowers each entry to read;
+    /// `expires` and `writeBudget` are added. Everything else in the request (kinds, services, conditions) is kept.
+    nonisolated static func narrowed(requestTerms: String, options: GrantOptions) -> String {
+        guard var terms = (try? JSONSerialization.jsonObject(with: Data(requestTerms.utf8))) as? [String: Any] else { return requestTerms }
+        if var records = terms["records"] as? [[String: Any]] {
+            if let keep = options.namespaces { records = records.filter { keep.contains(($0["namespace"] as? String) ?? "") } }
+            if let access = options.access, !access.contains(.write) {
+                records = records.map { var entry = $0; entry["access"] = "read"; return entry }
+            }
+            terms["records"] = records
+        }
+        if let expires = options.expires { terms["expires"] = expires }
+        if let budget = options.writeBudget { terms["writes"] = budget }
+        guard let data = try? JSONSerialization.data(withJSONObject: terms, options: [.sortedKeys]) else { return requestTerms }
+        return String(decoding: data, as: UTF8.self)
+    }
     func enter() async { if occupied { await withCheckedContinuation { waiters.append($0) } } else { occupied = true } }
     func exit() { if waiters.isEmpty { occupied = false } else { waiters.removeFirst().resume() } }
     private func gated<T: Sendable>(_ body: () async throws -> T) async throws -> T {

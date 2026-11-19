@@ -153,10 +153,7 @@ import Observation
         await restore()
         let lease = context
         do {
-            let terms = grant.map { options in
-                SessionWorker.terms(namespaces: options.namespaces ?? request.namespaces,
-                                    access: options.access ?? request.access, expires: options.expires, budget: options.writeBudget)
-            }
+            let terms = grant.map { SessionWorker.narrowed(requestTerms: request.termsJSON, options: $0) }
             let snapshot = try await worker.approve(request, pairing: pairing, terms: terms)
             if lease == context { apply(snapshot) }
         } catch { if lease == context { handleCommandError(error) }; throw error }
