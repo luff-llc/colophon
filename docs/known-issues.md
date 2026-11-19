@@ -13,6 +13,8 @@ in 0.5.x or in a host.
   without one unless `createWithoutHome` is set. That collides with libraries that today sync
   only through a shared folder; whether an import account may start without a home is an open
   host-rule question for 0.5.x, not a format question.
+- The Kotlin session's refresh after a refused command can leave the phase at `refreshing`
+  until the next refresh; the Swift and JS sessions do not show this.
 - **A revoke keeps only what this device holds.** Keeping everything a revoked member wrote
   names that member's heads in each namespace the revoking device holds. An app syncs only its
   `libraryNamespaces`, so a revoke made from an app with a narrower library, on its own storage,
@@ -75,5 +77,10 @@ in 0.5.x or in a host.
   runner on 19 November 2026 with code unchanged since the freeze, whose check passed, and it
   passes on the Macs (in the release workspace run and five repeats). Several homes are
   experimental (§21.1 item 3).
+- `scripts/test-js.sh` fails a run whose tests all passed when it finds a relay or browser
+  process left behind; on 19 November 2026 two of four runs on a Mac were failed that way and
+  the next was clean. The leftovers looked like the headless browser's helpers outliving the run.
+- Not yet covered by a test: a granted namespace whose epoch key is not held staying
+  `unavailable`, and a provisional member being `denied`.
 - Several homes per account are experimental; their open issues are in
   [multi-home-open-issues.md](multi-home-open-issues.md).
