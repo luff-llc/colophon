@@ -77,7 +77,10 @@ class GrantedNamespacesTest {
             val refused = assertFailsWith<com.luff.colophon.AccountException.Denied> { note(second.session, "x") }
             assertEquals(com.luff.colophon.AccountDenialReason.NOT_GRANTED, refused.reason)
             assertEquals(before, first.medium.snapshot().size, "a refused write stores nothing")
-            second.session.refresh()
+            // The refusal starts a refresh (the engine's access check decides the phase), and the approval's writes may have
+            // started a batch refresh: the phase to judge is the one they settle on, not `Refreshing` while one runs.
+            second.session.refusalRefresh?.join()
+            second.session.flushExternalChanges()
             assertEquals(SessionPhase.Ready, second.session.phase, second.describe())
         } finally { second.close(); first.close() }
     }

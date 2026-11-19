@@ -75,6 +75,11 @@ class ColophonSession(configuration: SessionConfiguration) : AutoCloseable {
     private var checkpointJob: Job? = null
     private var usable = false
     private var commandFailureRevision = 0L
+    /** Counts the refreshes that moved `Ready` to `Refreshing`; only the latest such refresh puts `Ready` back. */
+    private var refreshMark = 0L
+    /** The refresh a refused command started ([handleCommandError]), for hosts and tests that must see its outcome. */
+    internal var refusalRefresh: Job? = null
+        private set
     private var retryCreate = false
     private val submissions = LinkedHashMap<String, Submission>()
     private val syncSignal = Channel<Unit>(Channel.CONFLATED)
@@ -127,16 +132,24 @@ class ColophonSession(configuration: SessionConfiguration) : AutoCloseable {
         restore()
         val lease = context
         val failureRevision = commandFailureRevision
-        if (phase == SessionPhase.Ready) set { copy(phase = SessionPhase.Refreshing) }
+        var mark: Long? = null
+        if (phase == SessionPhase.Ready) { set { copy(phase = SessionPhase.Refreshing) }; mark = ++refreshMark }
+        // A command that failed while this refresh was in flight keeps the phase its failure set; a failure that set none
+        // leaves the refresh's own outcome to decide (Swift's rule).
+        fun failureHoldsPhase() = failureRevision != commandFailureRevision && phase != SessionPhase.Refreshing
         try {
             val snapshot = worker.refresh()
             if (lease != context) return@facade
-            // A command that failed while this refresh was in flight keeps its phase (Swift's rule).
-            if (snapshot.phase == SessionPhase.Ready && failureRevision != commandFailureRevision) return@facade
+            if (snapshot.phase == SessionPhase.Ready && failureHoldsPhase()) return@facade
             apply(snapshot)
             startWatching()
         } catch (e: CancellationException) { throw e
-        } catch (e: Exception) { if (lease == context && failureRevision == commandFailureRevision) fail(e) }
+        } catch (e: Exception) { if (lease == context && !failureHoldsPhase()) fail(e)
+        } finally {
+            // A finished refresh never leaves the phase at `Refreshing`: whatever path ends it (cancelled, a snapshot apply()
+            // ignored, a command failure that set no phase), the phase this refresh replaced comes back.
+            if (mark != null && mark == refreshMark && lease == context && phase == SessionPhase.Refreshing) set { copy(phase = SessionPhase.Ready) }
+        }
     }
 
     /**
@@ -515,7 +528,7 @@ class ColophonSession(configuration: SessionConfiguration) : AutoCloseable {
     private fun handleCommandError(e: Exception) {
         when (e) {
             // A refused command does not decide the phase: the engine's access check does, on the next refresh.
-            is AccountException.Denied -> { set { copy(lastError = e.message) }; scope.launch { refresh(false) } }
+            is AccountException.Denied -> { set { copy(lastError = e.message) }; refusalRefresh = scope.launch { refresh(false) } }
             is AccountException, is StorageException, is SessionKeyFailure, is KeyCustodyException -> { commandFailureRevision++; fail(e) }
             else -> set { copy(lastError = e.message) }
         }

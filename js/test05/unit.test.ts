@@ -457,6 +457,48 @@ describe('a session without a home', () => {
   });
 });
 
+describe('the refreshing phase', () => {
+  // A refresh moves `ready` to `refreshing` while it runs, and a finished refresh never leaves it there. Before the fix a
+  // command that failed while a refresh was in flight, with a failure that sets no phase (a cancelled key prompt), made the
+  // refresh skip its snapshot and left the session `refreshing` until some later refresh. No time passes: the key prompt
+  // holds the worker, so the refresh is queued behind the command exactly as long as the test says.
+  test('a command whose failure sets no phase, failing while a refresh waits, leaves the refresh to decide the phase', async () => {
+    const real = await WebCryptoKeyProvider.generate();
+    let hold = false; let prompted!: () => void; let cancel!: (error: Error) => void;
+    const prompt = new Promise<void>(resolve => { prompted = resolve; });
+    const owner: AsyncKeyProvider = {
+      publicKeys: () => real.publicKeys(),
+      sign: (body, signal) => {
+        if (!hold) return real.sign(body, signal);
+        prompted();
+        return new Promise<Uint8Array>((_, reject) => { cancel = reject; });
+      },
+      sharedSecret: (peer, signal) => real.sharedSecret(peer, signal),
+    };
+    const first = await Device.make({ owner });
+    await first.session.create();
+    const asking = await Device.make({ medium: (first.medium as MemoryMedium).copy(p => p.startsWith('authority/')) });
+    await asking.session.restore();
+    const scanned = await first.session.scanRequest(await asking.session.exportRequest());
+    await first.session.flushExternalChanges();
+    expect(first.session.phase.kind).toBe('ready');
+    hold = true;
+    const approving = first.session.approve(scanned.request, scanned.pairing).then(() => 'approved', error => error as Error);
+    await prompt;
+    const refreshing = first.session.refresh();
+    for (let n = 0; n < 100 && first.session.phase.kind !== 'refreshing'; n++) await Promise.resolve();
+    expect(first.session.phase.kind).toBe('refreshing');
+    cancel(new KeyCustodyError('cancelled', 'The person cancelled the prompt.'));
+    const outcome = await approving;
+    expect(outcome).toBeInstanceOf(KeyCustodyError);
+    expect((outcome as KeyCustodyError).outcome).toBe('cancelled');
+    await refreshing;
+    expect(first.session.phase.kind).toBe('ready');
+    hold = false;
+    first.close(); asking.close();
+  });
+});
+
 describe('a cancelled or broken pass never leaves the engine waiting', () => {
   /** One device with the real relay as its home, and a switch on its transport. */
   async function withHome(exchangeTimeMs?: number): Promise<{ device: Device; mode: { value: 'pass' | 'hang' | 'hangDeaf' | 'abortAfter' | 'offline' }; stop: AbortController[] }> {

@@ -49,6 +49,10 @@ import Observation
     @ObservationIgnored private let homesConfigured: Bool
     @ObservationIgnored private let syncSignal = SyncSignal()
     @ObservationIgnored private var commandFailureRevision: UInt64 = 0
+    /// Counts the refreshes that moved `ready` to `refreshing`; only the latest such refresh puts `ready` back.
+    @ObservationIgnored private var refreshMark: UInt64 = 0
+    /// The refresh a refused command started (`handleCommandError`), for hosts and tests that must see its outcome.
+    @ObservationIgnored private(set) var refusalRefresh: Task<Void, Never>?
     @ObservationIgnored private var retryCreate = false
 
     public init(configuration: SessionConfiguration) {
@@ -89,14 +93,21 @@ import Observation
         await restore()
         let lease = context
         let failureRevision = commandFailureRevision
-        if phase == .ready { phase = .refreshing }
+        var mark: UInt64?
+        if phase == .ready { phase = .refreshing; refreshMark &+= 1; mark = refreshMark }
+        // A finished refresh never leaves the phase at `refreshing`: whatever path ends it (cancelled, a snapshot apply()
+        // ignored, a command failure that set no phase), the phase this refresh replaced comes back.
+        defer { if let mark, mark == refreshMark, lease == context, phase == .refreshing { phase = .ready } }
+        // A command that failed while this refresh was in flight keeps the phase its failure set; a failure that set none
+        // leaves the refresh's own outcome to decide.
+        var failureHoldsPhase: Bool { failureRevision != commandFailureRevision && phase != .refreshing }
         do {
             let snapshot = try await worker.refresh()
             guard lease == context, !Task.isCancelled else { return }
-            if snapshot.phase == .ready, failureRevision != commandFailureRevision { return }
+            if snapshot.phase == .ready, failureHoldsPhase { return }
             apply(snapshot)
             await startWatching()
-        } catch { if lease == context, failureRevision == commandFailureRevision { fail(error) } }
+        } catch { if lease == context, !failureHoldsPhase { fail(error) } }
     }
     /// Creates the account for this device: the owner controller, this device's member, and (spec §18) the
     /// configured homes appointed at once. A passkey owner is asked more than once at first run (see
@@ -572,7 +583,7 @@ import Observation
             // A refused command does not decide the phase: the engine's access check does, on the next refresh (a read-only
             // member keeps reading; a revoked one becomes `denied` there).
             lastError = error.localizedDescription
-            Task { await refresh(preservingCommandFailure: false) }
+            refusalRefresh = Task { await refresh(preservingCommandFailure: false) }
         case is ColophonError, is StorageError, is SessionKeyFailure, is KeyCustodyError:
             commandFailureRevision &+= 1
             fail(error)
