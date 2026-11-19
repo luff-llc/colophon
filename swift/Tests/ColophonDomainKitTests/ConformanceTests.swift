@@ -44,14 +44,14 @@ func syntheticKeys(_ seed: UInt8) throws -> SoftwareKeys {
         let records = try encodedRecords.mapValues { try #require(Data(base64Encoded: $0)) }
         let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: home) }
-        let memory = MemoryRecordStore(records: records)
-        let session = ColophonSession(configuration: .init(memberLabel: "Fixture", namespaces: [namespace], location: .memory(memory), privateContainer: home, keys: try syntheticKeys(seed), ownerController: SoftwareKeys()))
+        let memory = MemoryMedium(files: records)
+        let session = ColophonSession(configuration: .init(memberLabel: "Fixture", namespaces: [namespace], location: .memory(memory), privateContainer: home, keys: try syntheticKeys(seed), ownerController: SoftwareKeys(), createWithoutHome: true, deviceSecrets: MemoryDeviceSecrets()))
         await session.restore()
         guard case .failed = session.phase else { Issue.record("0.3 authority must be rejected"); return }
-        #expect(try await memory.read() == records, "Opening old authority must not rewrite it")
-        let current = MemoryRecordStore()
+        #expect(memory.snapshot() == records, "Opening old authority must not rewrite it")
+        let current = MemoryMedium()
         let active = ColophonSession(configuration: .init(memberLabel: "Fixture", namespaces: [namespace], location: .memory(current),
-            privateContainer: home.appendingPathComponent("current"), keys: SoftwareKeys(), ownerController: SoftwareKeys()))
+            privateContainer: home.appendingPathComponent("current"), keys: SoftwareKeys(), ownerController: SoftwareKeys(), createWithoutHome: true, deviceSecrets: MemoryDeviceSecrets()))
         await active.create()
         try #require(active.phase == .ready)
         let books = BooksStore(session: active), listening = ListeningStore(session: active)

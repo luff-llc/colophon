@@ -8,33 +8,44 @@ import SwiftUI
     var phase: SessionPhase
     var context = UUID()
     var revision: UInt64 = 1
-    var members: [Member]
+    var members: [AccountMember]
     var requests: [AccessRequest]
-    var ledger: [LedgerEntry]
+    var notices: SessionNotices = .empty
     init(phase: SessionPhase = .ready) {
         self.phase = phase
         members = [
-            Member(id: "device", label: "My Mac", kind: .device, grant: Grant(import: nil, namespaces: ["notes", "reading.books"], access: [.read, .write], expires: nil, writeBudget: nil), since: 3, revokedAt: nil, writes: 2),
-            Member(id: "reader", label: "Reading Assistant", kind: .agent,
-                   grant: Grant(import: nil, namespaces: ["reading.books"], access: [.read], expires: nil, writeBudget: nil),
-                   since: 2, revokedAt: nil, writes: 0)
+            Self.member("device", "My Mac", .device, ["notes", "reading.books"], [.read, .write]),
+            Self.member("reader", "Reading Assistant", .agent, ["reading.books"], [.read]),
         ]
         requests = [Self.request]
-        ledger = [LedgerEntry(sequence: 1, at: "2026-11-06T12:00:00Z", actor: "controller", actorLabel: "My Mac",
-                              event: .created, subject: nil, namespace: nil, kind: nil, origin: nil, text: "Created this library")]
+    }
+    static func member(_ id: String, _ label: String, _ kind: AccountMemberKind, _ namespaces: [String], _ access: [AccessKind]) -> AccountMember {
+        AccountMember(id: id, label: label, kind: kind, kindRaw: nil, grant: AccountGrant(namespaces: namespaces, access: access, expires: nil, writeBudget: nil, import: false),
+                      since: 3, revokedAt: nil, writes: 0, expiresMs: nil, provisional: false, home: false, session: 0, grantedBy: [])
     }
     static let request = AccessRequest(id: "request", label: "My iPad", kind: .device,
-                                      namespaces: ["reading.books", "notes"], access: [.read, .write],
-                                      pairingCode: "123456", record: Data())
+        termsJSON: #"{"records":[{"namespace":"reading.books","access":"write"},{"namespace":"notes","access":"write"}]}"#, record: Data())
     func restore() async {}
     func refresh() async {}
     func retry() async {}
     func create() async { phase = .ready }
     func leave() async throws { phase = .noLibrary; context = UUID() }
-    func rejoin(keys: any AsyncKeyProvider) async { phase = .waitingForApproval(code: "123456") }
-    func importRequest(from url: URL) async throws {}
-    func approve(_ request: AccessRequest, grant: GrantOptions?) async throws { requests.removeAll { $0.id == request.id }; revision += 1 }
+    func rejoin(keys: any AsyncKeyProvider) async { phase = .waitingForApproval }
+    func scanRequest(_ data: Data) async throws -> ScannedRequest { throw SessionError.notReady }
+    func rejectPairing(_ pairing: AccountPairing) async throws {}
+    func approve(_ request: AccessRequest, pairing: AccountPairing, grant: GrantOptions?) async throws { requests.removeAll { $0.id == request.id }; revision += 1 }
     func revoke(memberID: String) async throws { revision += 1 }
+    func veto(_ transition: String) async throws { notices = .empty }
+    func acknowledgeActivation(seq: UInt64) async {
+        notices = SessionNotices(notices: Notices(pending: notices.pending, activations: notices.unseenActivations.filter { $0.seq != seq }, owed: notices.owed,
+                                                  controllersWithoutSlot: notices.notices.controllersWithoutSlot, vaultRetiring: notices.notices.vaultRetiring, noHome: notices.noHome))
+    }
+    func unlock() async { phase = .ready }
+    func lock() async { phase = .locked }
+    var duties: HostDuties = .none
+    func resign(_ transition: String) async throws -> String { transition }
+    func removeFollowUp(seq: UInt64) async throws {}
+    func keepFollowUp(seq: UInt64) async throws {}
     static var host: LibraryHostActions {
         .init(containers: [
             .init(id: "cloud", title: "iCloud Drive", kind: .iCloud, location: .iCloud(container: "preview", libraryName: "Library")),
@@ -60,7 +71,7 @@ private struct GatePreview: View {
 #Preview("Welcome · light") { GatePreview(.noLibrary).preferredColorScheme(.light) }
 #Preview("Welcome · dark · large text") { GatePreview(.noLibrary).preferredColorScheme(.dark).environment(\.dynamicTypeSize, .accessibility3) }
 #Preview("Creating") { GatePreview(.creating) }
-#Preview("Pairing") { GatePreview(.waitingForApproval(code: "123456")) }
+#Preview("Pairing") { GatePreview(.waitingForApproval) }
 #Preview("Access ended") { GatePreview(.denied) }
 #Preview("Unavailable") { GatePreview(.unavailable(reason: "The library folder is offline. Make it available on this device, then retry.")) }
 #Preview("Upgrading") { GatePreview(.migrating) }
@@ -68,11 +79,14 @@ private struct GatePreview: View {
 #Preview("Other failure") { GatePreview(.failed(error: .other(detail: "The library could not be opened."))) }
 #Preview("Ready · settings") { GatePreview(.ready) }
 #Preview("Approve · large text") {
-    NavigationStack { ApproveRequestView(request: PreviewLibrarySession.request, session: PreviewLibrarySession()) }
+    // A preview pairing on the code path (a joining device's session; the preview never approves).
+    let pairing = try! AccountPairing.join(account: String(repeating: "ab", count: 32),
+                                           e: try! PairingTransferKey.create(entropy: Data(repeating: 1, count: 32)).public(),
+                                           nb: Data(repeating: 2, count: 32))
+    NavigationStack { ApproveRequestView(request: PreviewLibrarySession.request, pairing: pairing, code: "123456", session: PreviewLibrarySession()) }
         .environment(\.dynamicTypeSize, .accessibility3)
 }
 #Preview("Member") { NavigationStack { MemberDetailView(member: PreviewLibrarySession().members[1], session: PreviewLibrarySession()) } }
-#Preview("Colophon") { NavigationStack { ColophonLedgerView(session: PreviewLibrarySession()) } }
 #Preview("Connect") { NavigationStack { ConnectLibraryView(host: PreviewLibrarySession.host) } }
 #Preview("Join") { NavigationStack { ConnectLibraryView(host: PreviewLibrarySession.host, purpose: .join) } }
 #Preview("Recovery") { NavigationStack { RecoveryKitView(host: PreviewLibrarySession.host) } }

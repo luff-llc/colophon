@@ -1,0 +1,1 @@
+{"description":"`keep` needs the recovery rule.","expected":{"result":"badSignature","seq":3},"sections":["8.4","8.7"],"verifier":{"now":"2026-11-14T09:06:00Z"}}

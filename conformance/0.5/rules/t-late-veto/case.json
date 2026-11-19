@@ -1,0 +1,1 @@
+{"description":"A veto received after the deadline (and before the due time) doesn't count.","expected":{"result":"ok","seq":3},"sections":["8.7"],"verifier":{"now":"2026-11-14T09:06:00Z"}}

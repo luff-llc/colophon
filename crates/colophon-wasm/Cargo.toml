@@ -8,8 +8,16 @@ rust-version.workspace = true
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[features]
+default = ["web05", "zero-on-free"]
+# The 0.5 export attributes (wasm-bindgen) of the sources shared with `colophon-ffi`.
+web05 = []
+native05 = []
+# Install the zero-on-free global allocator the native crate also has.
+zero-on-free = []
+
 [dependencies]
-colophon-core = { path = "../colophon-core", version = "=0.4.0" }
+colophon-core = { path = "../colophon-core", version = "=0.5.0" }
 wasm-bindgen.workspace = true
 serde_json.workspace = true
 

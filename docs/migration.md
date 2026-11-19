@@ -31,7 +31,7 @@ while report.remainingOperations > 0 {
 ```
 
 Marginalia substitutes its own `LegacyLibrarySource` here and adds only the root SDK's products
-alongside its local `packages/Colophon` dependency. See [package identity steps](native-bindings.md#package-identity-and-coexistence-with-01).
+alongside its local `packages/Colophon` dependency. See [package identity steps](native-bindings.md).
 The source adapter owns the reader and root providers; the SDK does not accept 0.1 identity types.
 
 The explicit scope is a nonempty set drawn from `reading.books`, `reading.saved`,
@@ -70,8 +70,9 @@ or replaying over an existing destination.
 
 ## Adapter contract
 
-The public definitions are in
-[`LegacyLibrarySource.swift`](../swift/Sources/ColophonMigration/LegacyLibrarySource.swift).
+The `LegacyLibrarySource` protocols were removed from the root SDK in 0.5: libraries of the shipped
+Swift apps now move by a verified succession ([`SwiftMove.swift`](../swift/Sources/ColophonMigration/SwiftMove.swift)).
+The contract below is kept as the 0.4 history.
 Both protocols are `Sendable`; returning an object with mutable live source state violates the
 contract. Implement the following behavior:
 

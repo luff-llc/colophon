@@ -1,0 +1,1 @@
+{"description":"A transition re-keys the slotted Mac key (a new `agreement` point). At its activation the slot naming it is dropped and the vault is retiring, as for a removal or demotion; the key's other fields and its place in the keyring stay.","expected":{"result":"ok","seq":3,"slots":0,"vault":"retiring"},"sections":["8.3","8.7"],"verifier":{"now":"2026-11-14T09:06:00Z"}}

@@ -1,0 +1,1 @@
+{"description":"A veto by 22 keys: its body is 1041 bytes, within the 4,096 bound.","expected":{"result":"ok","seq":3},"sections":["2.4","8.7"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

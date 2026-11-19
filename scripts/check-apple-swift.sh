@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
+# Builds every Swift product of the package for the iOS and visionOS simulators in Swift 6 mode and fails on any
+# warning. Needs sdk/apple/ColophonFFI.xcframework (scripts/build-apple.sh). Derived data stays in the worktree.
+# It builds arm64 only: the XCFramework ships arm64 slices only (scripts/build-apple.sh), so an x86_64 simulator build
+# cannot link an executable product (the test-only ColophonCrossDevice driver). Library products compile the same either way.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 mkdir -p .build/module-cache
 export CLANG_MODULE_CACHE_PATH="$PWD/.build/module-cache"
-for entry in \
-  'iphoneos arm64-apple-ios17.0 ios-arm64' \
-  'iphonesimulator arm64-apple-ios17.0-simulator ios-arm64-simulator' \
-  'xros arm64-apple-xros26.0 xros-arm64' \
-  'xrsimulator arm64-apple-xros26.0-simulator xros-arm64-simulator'; do
-  read -r sdk target slice <<< "$entry"
-  xcrun swiftc -typecheck -parse-as-library -swift-version 6 -module-name ColophonKit \
-    -target "$target" -sdk "$(xcrun --sdk "$sdk" --show-sdk-path)" \
-    -I "sdk/apple/ColophonFFI.xcframework/$slice/Headers" \
-    swift/Sources/ColophonKit/Generated/ColophonBindings.swift \
-    swift/Sources/ColophonKit/Keys.swift swift/Sources/ColophonKit/Library.swift
-  echo "ColophonKit typechecked: $target"
+for entry in 'iOS Simulator' 'visionOS Simulator'; do
+  log=".build/check-apple-swift-${entry// /-}.log"
+  rm -rf ".build/check-derived"
+  xcodebuild -scheme ColophonSDK-Package -destination "generic/platform=$entry" -derivedDataPath .build/check-derived \
+    -skipPackagePluginValidation ARCHS=arm64 build > "$log" 2>&1 || { tail -40 "$log"; echo "build failed for $entry"; exit 1; }
+  warnings=$(grep -c "warning:" "$log" || true)
+  echo "$entry: build succeeded, $warnings warning(s)"
+  if [[ "$warnings" != 0 ]]; then grep -E "warning:" "$log" | sort -u | head -20; exit 1; fi
 done

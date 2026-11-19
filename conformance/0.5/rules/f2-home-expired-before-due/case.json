@@ -1,0 +1,1 @@
+{"description":"The only home receipts a layout raise and its grant expires before the due time: it still witnesses the activation, so the raise is provisional and the reader is not stopped.","expected":{"result":"ok","seq":3},"sections":["8.5","8.7","20"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

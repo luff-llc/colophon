@@ -1,0 +1,1 @@
+{"description":"The addition at seq 3 is final because a full set at seq 4 is anchored on it. A valid `vetoed` of the addition is held too. A final activation is never displaced: the unvetoable full set and the grant signed by the added key stay.","expected":{"finality":{"3":"final"},"result":"ok","seq":5},"sections":["8.6","8.7"],"verifier":{"now":"2026-11-14T09:21:40Z"}}

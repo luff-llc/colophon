@@ -12,7 +12,7 @@ public struct IngressEnvelope: Codable, Equatable, Sendable, Identifiable {
         self.id = id; self.libraryID = libraryID; self.memberID = memberID; self.expires = expires; self.command = command
     }
     func validate(now: Date = .now) throws {
-        guard libraryID.count == 32, memberID.count == 32, expires > now,
+        guard libraryID.count == 64, memberID.count == 32, expires > now,
               expires.timeIntervalSince(now) <= 7 * 86400, command.payload.count <= 32 * 1024,
               !command.namespace.isEmpty, !command.kind.isEmpty else { throw SessionError.invalidCommand }
     }

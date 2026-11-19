@@ -1,0 +1,1 @@
+{"description":"As authority5-successor-provisional (a genesis with no possession proofs), but a valid `vetoed` displaces F at seq 3 and the predecessor continues. The succession is never verified, so the carried-key exemption never applies: the genesis that was held is `badSignature`.","expected":{"genesis":"badSignature","succession":"unverified"},"sections":["15.1","16.3"]}

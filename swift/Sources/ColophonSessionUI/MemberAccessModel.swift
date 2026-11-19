@@ -3,11 +3,11 @@ import Foundation
 import Observation
 
 @Observable @MainActor public final class MemberAccessModel {
-    public let member: Member
+    public let member: AccountMember
     public let action = LibraryActionModel()
     private let context: UUID
     private let revision: UInt64
-    public init(member: Member, session: any LibrarySessionSource) {
+    public init(member: AccountMember, session: any LibrarySessionSource) {
         self.member = member; context = session.context; revision = session.revision
     }
     public func revoke(session: any LibrarySessionSource) async -> Bool {

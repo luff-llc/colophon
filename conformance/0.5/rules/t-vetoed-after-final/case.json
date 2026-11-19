@@ -1,0 +1,1 @@
+{"description":"seq 4 is the `final` for seq 3; a vetoed for the same transition at seq 3 appears. Same result in any order.","expected":{"finality":{"3":"final"},"result":"ok","seq":4,"vetoed":"changes nothing; equivocation evidence against H2 (veto, receipt, final)"},"sections":["8.6","8.7","13.3"],"verifier":{"now":"2026-11-14T09:08:20Z"}}

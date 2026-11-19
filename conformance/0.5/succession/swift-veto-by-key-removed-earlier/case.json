@@ -1,0 +1,1 @@
+{"description":"X was removed at seq 4, before the last removal and more than the delay before the genesis: X's veto is invalid.","expected":{"seq3":"successionVetoed malformed","succession":"verified"},"sections":["15.1","16.3"]}

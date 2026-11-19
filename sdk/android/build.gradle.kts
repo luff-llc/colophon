@@ -4,7 +4,7 @@ plugins {
 }
 
 group = "org.luff.colophon"
-version = "0.4.0"
+version = "0.5.0"
 
 android {
     namespace = "org.luff.colophon"
@@ -44,7 +44,9 @@ android {
         unitTests.isReturnDefaultValues = true
         unitTests.all {
             it.jvmArgs(if (System.getenv("COLOPHON_SESSION_BENCH") != null) "-Xmx2g" else "-Xmx512m")
-            val hostLibs = rootDir.resolve("../../target/release").canonicalPath
+            // The host library follows CARGO_TARGET_DIR, as scripts/test-android.sh builds it.
+            val cargoTarget = System.getenv("CARGO_TARGET_DIR")?.let { file(it) } ?: rootDir.resolve("../../target")
+            val hostLibs = cargoTarget.resolve("release").canonicalPath
             it.systemProperty("jna.library.path", hostLibs)
             it.systemProperty("java.library.path", hostLibs)
             it.environment("DYLD_LIBRARY_PATH", hostLibs)
@@ -97,6 +99,12 @@ tasks.configureEach {
 
 tasks.withType<Test>().configureEach {
     testLogging { events("passed", "skipped", "failed"); showStandardStreams = false }
+}
+
+// Reproducible archives (scripts/package-release.sh): fixed entry order, no build-time timestamps.
+tasks.withType<AbstractArchiveTask>().configureEach {
+    isPreserveFileTimestamps = false
+    isReproducibleFileOrder = true
 }
 
 

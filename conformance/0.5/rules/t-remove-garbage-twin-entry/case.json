@@ -1,0 +1,1 @@
+{"description":"The signed entry at seq 2 and, over the same body, an envelope with a garbage signature that sorts first. The entry is valid when any held envelope over its body verifies: the history is ok at seq 3.","expected":{"result":"ok","seq":3},"sections":["2.2","8.6","8.7"],"verifier":{"now":"2026-11-14T09:06:00Z"}}

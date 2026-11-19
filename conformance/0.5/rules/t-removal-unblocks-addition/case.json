@@ -1,0 +1,1 @@
+{"description":"Seq 3 adds NEW and waits on H1, which withholds. Seq 4, removal-only, revokes H1 by the recovery rule; it waits for nothing and is final at 5 with H2's head. H1 is then excused, so seq 3 is final at 6 with H2's head.","expected":{"result":"ok","seq":7},"sections":["8.7"],"verifier":{"now":"2026-11-14T09:08:20Z"}}

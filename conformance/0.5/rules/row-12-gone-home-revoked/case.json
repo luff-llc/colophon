@@ -1,0 +1,1 @@
+{"description":"H1 is gone for good. One recovery key (the stronger authority) revokes it: a removal-only transition whose witnesses leave H1 out. Final at 4 with H2's head; then an addition is final with H2's head alone.","expected":{"result":"ok","seq":7},"sections":["8.7","changes §H"],"verifier":{"now":"2026-11-17T09:14:20Z"}}

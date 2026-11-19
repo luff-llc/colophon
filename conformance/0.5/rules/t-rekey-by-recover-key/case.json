@@ -1,0 +1,1 @@
+{"description":"A recover-only key may sign a `rekey` (after a recovery, it may be the only key present).","expected":{"result":"ok","seq":3},"sections":["8.3","8.4"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

@@ -1,0 +1,1 @@
+{"description":"A chain of 17 predecessor accounts: one more than the bound, so the successor's genesis is `malformed`.","expected":{"genesis":"malformed","succession":"unverified"},"sections":["15.1","16.3"]}

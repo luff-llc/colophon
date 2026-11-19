@@ -1,0 +1,1 @@
+{"description":"A /5 predecessor that is itself a successor: A to B to C verifies with both histories.","expected":{"succession":"verified"},"sections":["15.1","16.3"]}

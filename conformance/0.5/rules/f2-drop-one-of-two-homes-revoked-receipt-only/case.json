@@ -1,0 +1,1 @@
+{"description":"The same full set carrying only the receipt of the home it revokes: that is neither headQuorum receipts from the homes current before it (two) nor one from a remaining home, so the activate is malformed.","expected":{"result":"malformed","seq":3},"sections":["8.7"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

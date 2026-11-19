@@ -88,8 +88,8 @@ public struct SecureEnclaveOwnerKey: AsyncKeyProvider {
         do { return try await backend.sign(body: body) } catch { throw KeyProviderError.map(error) }
     }
     /// Returns the raw 32-byte ECDH secret from the separate agreement key.
-    public func agree(peer: Data) async throws -> Data {
-        do { return try await backend.agree(peer: peer) } catch { throw KeyProviderError.map(error) }
+    public func sharedSecret(peer: Data) async throws -> SecretBytes {
+        do { return try await backend.sharedSecret(peer: peer) } catch { throw KeyProviderError.map(error) }
     }
 
     static func storageAttributes(tag: String, data: Data) -> [CFString: Any] {
@@ -125,9 +125,9 @@ private actor EnclaveOwnerBackend: OwnerKeyBackend {
     func sign(body: Data) throws -> Data {
         try SecureEnclave.P256.Signing.PrivateKey(dataRepresentation: references.signing).signature(for: body).rawRepresentation
     }
-    func agree(peer: Data) throws -> Data {
-        try SecureEnclave.P256.KeyAgreement.PrivateKey(dataRepresentation: references.agreement)
-            .sharedSecretFromKeyAgreement(with: P256.KeyAgreement.PublicKey(x963Representation: peer)).withUnsafeBytes { Data($0) }
+    func sharedSecret(peer: Data) throws -> SecretBytes {
+        SecretBytes(copying: try SecureEnclave.P256.KeyAgreement.PrivateKey(dataRepresentation: references.agreement)
+            .sharedSecretFromKeyAgreement(with: P256.KeyAgreement.PublicKey(x963Representation: peer)))
     }
     func presence(scope: String) async throws -> any AsyncKeyProvider {
         guard references.requiresPresence else { return self }
@@ -161,11 +161,10 @@ private actor OwnerKeySession: AsyncKeyProvider {
         try Task.checkCancellation()
         do { return try signing.signature(for: body).rawRepresentation } catch { throw KeyProviderError.map(error) }
     }
-    func agree(peer: Data) throws -> Data {
+    func sharedSecret(peer: Data) throws -> SecretBytes {
         try Task.checkCancellation()
         do {
-            return try agreement.sharedSecretFromKeyAgreement(with: P256.KeyAgreement.PublicKey(x963Representation: peer))
-                .withUnsafeBytes { Data($0) }
+            return SecretBytes(copying: try agreement.sharedSecretFromKeyAgreement(with: P256.KeyAgreement.PublicKey(x963Representation: peer)))
         } catch { throw KeyProviderError.map(error) }
     }
 }

@@ -1,0 +1,1 @@
+{"description":"The vault change of `t-vault-change-previous` with a 47-byte `previousVault.ciphertext`: the component's sealed seed has the wrong shape, so the `activate` is malformed.","expected":{"result":"malformed","seq":3},"sections":["8.3","8.7","11.1"],"verifier":{"now":"2026-11-14T09:06:00Z"}}

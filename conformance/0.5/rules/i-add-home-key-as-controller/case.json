@@ -1,0 +1,1 @@
+{"description":"A `keyring` entry adding as an `approve` controller the signing key of the home appointed at seq 3: a key that is or was a member's is never a controller's (§3.3, §9.7), so the entry is malformed.","expected":{"result":"malformed","seq":4},"sections":["3.3","8.4","9.7"],"verifier":{"now":"2026-11-14T09:06:00Z"}}

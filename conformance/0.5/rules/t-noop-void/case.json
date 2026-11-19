@@ -1,0 +1,1 @@
+{"description":"A transition that changes nothing is void.","expected":{"result":"malformed","seq":3},"sections":["8.7"],"verifier":{"now":"2026-11-14T09:06:00Z"}}

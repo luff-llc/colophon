@@ -1,0 +1,1 @@
+{"description":"The same entry with a 47-byte sealed ciphertext: `malformed` at replay (§7.2).","expected":{"result":"malformed","seq":3},"sections":["7.2","8.4"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

@@ -1,0 +1,1 @@
+{"description":"An entry after a final layout raise is not applied: the reader is stopped at the raise.","expected":{"result":"newerFormat","seq":3},"sections":["1","20"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

@@ -7,7 +7,7 @@ public struct LibrarySettingsView: View {
     let session: any LibrarySessionSource
     let host: LibraryHostActions
     @State private var action = LibraryActionModel()
-    @State private var importing = false
+    @State private var scanned: ScannedRequest?
     @State private var confirmsLeave = false
     public init(session: any LibrarySessionSource, host: LibraryHostActions = .init()) {
         self.session = session; self.host = host
@@ -20,16 +20,18 @@ public struct LibrarySettingsView: View {
             }
             if session.phase == .ready {
                 Section("Requests to Join") {
-                    Button("Import Pairing Request…", systemImage: "person.badge.plus") { importing = true }
-                        .accessibilityIdentifier("library.request.import")
+                    if let scan = host.scanRequest {
+                        Button("Scan a Request to Join", systemImage: "qrcode.viewfinder") {
+                            Task { await action.run { scanned = try await session.scanRequest(try await scan()) } }
+                        }
+                        .accessibilityIdentifier("library.request.scan")
+                    }
+                    // A request listed here is not approved from the list: approving needs the requesting device
+                    // itself, by scanning its screen or by comparing the six-digit code (spec §9.1).
                     ForEach(session.requests, id: \.id) { request in
-                        NavigationLink {
-                            ApproveRequestView(request: request, session: session)
-                        } label: {
-                            VStack(alignment: .leading) {
-                                Text(request.label)
-                                Text("\(LibraryWords.kind(request.kind)) · Review access").foregroundStyle(.secondary)
-                            }
+                        VStack(alignment: .leading) {
+                            Text(request.label)
+                            Text("\(LibraryWords.kind(request.kind)) · Scan this device's request to review it").foregroundStyle(.secondary)
                         }.accessibilityIdentifier("library.request.\(request.id)")
                     }
                     if session.requests.isEmpty { Text("No requests waiting").foregroundStyle(.secondary) }
@@ -48,8 +50,6 @@ public struct LibrarySettingsView: View {
                     }
                 }
                 Section {
-                    NavigationLink { ColophonLedgerView(session: session) } label: { Label("Colophon", systemImage: "text.book.closed") }
-                        .accessibilityIdentifier("library.ledger.open")
                     NavigationLink { ConnectLibraryView(host: host) } label: { Label("Connect Another Device", systemImage: "plus.rectangle.on.rectangle") }
                         .accessibilityIdentifier("library.addDevice")
                 }
@@ -81,11 +81,8 @@ public struct LibrarySettingsView: View {
         .formStyle(.grouped).navigationTitle("Library")
         .disabled(action.isWorking)
         .accessibilityIdentifier("library.settings")
-        .fileImporter(isPresented: $importing, allowedContentTypes: [.json]) { result in
-            switch result {
-            case .success(let url): Task { await action.run { try await session.importRequest(from: url) } }
-            case .failure(let error): action.report(error)
-            }
+        .navigationDestination(item: Binding(get: { scanned.map(ScannedItem.init) }, set: { scanned = $0?.scanned })) { item in
+            ApproveRequestView(scanned: item.scanned, session: session)
         }
         .confirmationDialog("Leave this library?", isPresented: $confirmsLeave, titleVisibility: .visible) {
             Button("Leave Library", role: .destructive) { Task { await action.run { try await session.leave() } } }
@@ -93,4 +90,12 @@ public struct LibrarySettingsView: View {
             Button("Cancel", role: .cancel) {}.accessibilityIdentifier("library.leave.cancel")
         } message: { Text(LibraryWords.leaving) }
     }
+}
+
+/// A scanned request as a navigation item, identified by the member it would admit.
+private struct ScannedItem: Hashable, Identifiable {
+    let scanned: ScannedRequest
+    var id: String { scanned.request.id }
+    static func == (a: ScannedItem, b: ScannedItem) -> Bool { a.id == b.id }
+    func hash(into hasher: inout Hasher) { hasher.combine(id) }
 }

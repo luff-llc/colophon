@@ -1,0 +1,1 @@
+{"description":"A transition adding as a controller the signing key of the home appointed at seq 3: the delta would give a member's key to a controller (§3.3), so it is void and the `activate` is malformed.","expected":{"result":"malformed","seq":4},"sections":["3.3","8.7","9.7"],"verifier":{"now":"2026-11-14T09:06:00Z"}}

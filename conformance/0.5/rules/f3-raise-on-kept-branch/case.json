@@ -1,0 +1,1 @@
+{"description":"A fork at seq 2 resolved by a resolve activation that also raises the layout: the branch keeps itself, the raise is final at once (no home), and the reader stops at it.","expected":{"result":"newerFormat","seq":3},"sections":["8.6","20"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

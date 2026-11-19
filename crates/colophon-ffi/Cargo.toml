@@ -9,11 +9,19 @@ rust-version.workspace = true
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [features]
-default = []
+default = ["native05", "zero-on-free"]
+# The 0.5 export attributes (UniFFI). The wasm crate compiles the same sources with `web05`.
+native05 = []
+# Declared so the shared sources compile cleanly here; the wasm crate is where it is on.
+web05 = []
 bindgen = ["uniffi/cli"]
+# Install the zero-on-free global allocator (`src/v05/zero_alloc.rs`): every freed block is
+# overwritten with zeros, which closes the freed transfer-buffer copy the UniFFI scaffolding
+# leaves of every secret that crosses.
+zero-on-free = []
 
 [dependencies]
-colophon-core = { path = "../colophon-core", version = "=0.4.0" }
+colophon-core = { path = "../colophon-core", version = "=0.5.0" }
 serde.workspace = true
 serde_json.workspace = true
 uniffi = { version = "=0.32.2", default-features = false }

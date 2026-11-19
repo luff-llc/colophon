@@ -1,0 +1,1 @@
+{"description":"The same full set, issued a day before the entry at seq 3: within the 7-day bound, the activate at max(due, previous) is ok and the only home is dropped.","expected":{"result":"ok","seq":4},"sections":["8.7"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

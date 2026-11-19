@@ -1,0 +1,1 @@
+{"description":"The endSessions of a member added by an activation that is not final yet: a provisional member is not a current principal (§8.5).","expected":{"result":"badSignature","seq":4},"sections":["8.5","8.7"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

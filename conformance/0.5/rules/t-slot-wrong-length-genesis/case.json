@@ -1,0 +1,1 @@
+{"description":"A genesis whose only slot has a 47-byte sealed ciphertext (§7.2 requires 48): the slot's shape is checked at replay.","expected":{"result":"malformed","seq":1},"sections":["7.2","8.5"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

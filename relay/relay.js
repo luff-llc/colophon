@@ -1,9 +1,14 @@
 // Colophon 0.3 reference relay (spec §8). Stores opaque records per library slot.
 // Dependency-free: node:http, node:https, node:fs, node:path and node:crypto only.
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { constants as fsc, promises as fsp } from 'node:fs';
+import { constants as fsc, promises as fsp, writeSync } from 'node:fs';
 import http from 'node:http';
 import https from 'node:https';
+import { HomeKey, HomeModule, HomeSlot } from './home.js';
+import {
+  ProvisionTable, TABLE_FILE, clientAddressConfig, tableKind, clientAddressResolver, isJsonType, memberRequest, parseProvisionBody,
+  provisionConfig, provisionGate,
+} from './provision.js';
 import path from 'node:path';
 
 export const PROTOCOL = 'colophon/relay/3';
@@ -13,12 +18,106 @@ export const DEFAULT_LIMITS = Object.freeze({
   pageEntries: 1000,
   waitSeconds: 30,
   slotBytes: 0, // 0 = no per-slot quota
+  // Home slots only (not published at GET {base}):
+  authorityBodyBytes: 16 * 1024 * 1024,
+  pendingBodyBytes: 12 * 1024 * 1024,
+  replayRows: 65536, // replay rows per slot, shared out per principal by the home module
+  requestsPerMinute: 1200, // per address; 0 = unlimited
 });
 
 const SLOT = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const HEX64 = /^[0-9a-f]{64}$/;
 
 export function sha256(bytes) { return createHash('sha256').update(bytes).digest('hex'); }
+
+// Cross-origin answers (operator behaviour, not protocol). CORS is not access control: no
+// decision about a request reads `Origin`; it only chooses which headers decorate the answer.
+const CORS_EXPOSE = 'ETag, Retry-After, WWW-Authenticate';
+const CORS_METHODS = 'GET, POST, PUT, OPTIONS';
+const CORS_HEADERS = 'Authorization, Content-Type, If-Match, If-None-Match';
+const CORS_MAX_AGE = '600';
+const OPTIONS_ALLOW = 'GET, HEAD, POST, PUT, DELETE, OPTIONS';
+const CACHE_CONTROL = 'no-store, no-transform';
+// scheme://host[:port], lower case: a DNS name of letter-digit-hyphen labels, an IPv4 literal,
+// or a bracketed IPv6 literal. No path, no trailing slash, no wildcard, no user info.
+const ORIGIN = /^https?:\/\/(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*|\[[0-9a-f:.]+\])(?::[1-9][0-9]{0,4})?$/;
+
+/** Checks the configured CORS origins and returns them as a Set. Throws on any entry that is
+ * not exactly `scheme://host[:port]` as a browser serializes an origin (so `*`, `null`, an
+ * upper-case letter, a path, a trailing slash or dot, or an explicit default port are refused:
+ * a browser never sends them, and a wildcard is never wanted). */
+export function corsOrigins(list) {
+  if (list === undefined || list === null) return new Set();
+  if (!Array.isArray(list)) throw new Error('cors.origins must be an array of origins (scheme://host[:port])');
+  const out = new Set();
+  for (const entry of list) {
+    let canonical = null;
+    if (typeof entry === 'string' && ORIGIN.test(entry)) {
+      try { canonical = new URL(entry).origin; } catch { canonical = null; }
+    }
+    if (typeof entry !== 'string' || canonical !== entry) throw new Error(`Invalid CORS origin ${JSON.stringify(entry)}: each entry must be exactly scheme://host[:port], lower case, http or https, no path, no wildcard, no default port`);
+    out.add(entry);
+  }
+  return out;
+}
+
+/** The single enforcement point for headers every answer carries. It is applied before any
+ * handler runs, and `res.writeHead` (which every answer passes through, an implicit one from a
+ * bare `res.end()` included) is wrapped so that the headers a call site passes are merged first
+ * and these are set last: no later call site can drop or override them. */
+function enforceAnswerHeaders(req, res, origins) {
+  const origin = req.headers.origin;
+  const listed = typeof origin === 'string' && origins.has(origin);
+  const apply = () => {
+    res.setHeader('cache-control', CACHE_CONTROL);
+    res.removeHeader('content-encoding');
+    res.removeHeader('access-control-allow-credentials');
+    if (origins.size > 0) {
+      const vary = res.getHeader('vary');
+      const parts = (vary === undefined ? [] : String(vary).split(',')).map((v) => v.trim()).filter(Boolean);
+      if (!parts.some((v) => v.toLowerCase() === 'origin')) parts.push('Origin');
+      res.setHeader('vary', parts.join(', '));
+    }
+    if (listed) {
+      res.setHeader('access-control-allow-origin', origin);
+      res.setHeader('access-control-expose-headers', CORS_EXPOSE);
+    } else {
+      for (const name of res.getHeaderNames()) if (name.startsWith('access-control-')) res.removeHeader(name);
+    }
+  };
+  const writeHead = res.writeHead;
+  res.writeHead = function (status, ...rest) {
+    const last = rest[rest.length - 1];
+    const headers = last !== null && typeof last === 'object' ? rest.pop() : undefined;
+    if (Array.isArray(headers)) {
+      const pairs = Array.isArray(headers[0]) ? headers : headers.flatMap((v, i) => (i % 2 ? [] : [[v, headers[i + 1]]]));
+      for (const [name, value] of pairs) this.setHeader(name, value);
+    } else if (headers) {
+      for (const [name, value] of Object.entries(headers)) this.setHeader(name, value);
+    }
+    apply();
+    return writeHead.call(this, status, ...rest);
+  };
+  apply();
+  return listed;
+}
+
+/** `OPTIONS` on any path: answered before slot lookup, authorization, call checks and rate
+ * counting. It opens no slot and touches no disk. */
+function answerOptions(req, res, listed) {
+  req.resume();
+  const preflight = typeof req.headers.origin === 'string' && req.headers['access-control-request-method'] !== undefined;
+  const headers = {}; // a 204 carries no Content-Length (RFC 9110 §8.6)
+  if (preflight) {
+    if (listed) {
+      headers['access-control-allow-methods'] = CORS_METHODS;
+      headers['access-control-allow-headers'] = CORS_HEADERS;
+      headers['access-control-max-age'] = CORS_MAX_AGE;
+    }
+  } else headers.allow = OPTIONS_ALLOW;
+  res.writeHead(204, headers);
+  res.end();
+}
 
 /** Path grammar shared with the SDK adapters (RecordPath/BlobPath). Returns the kind or null. */
 export function classifyPath(p) {
@@ -55,13 +154,14 @@ export function newToken() {
 }
 
 class HttpError extends Error {
-  constructor(status, message, headers = {}) { super(message); this.status = status; this.headers = headers; }
+  /** `body`, when given, is the JSON answer as it is (a home's `{"result":…}`), else `{"error"}`. */
+  constructor(status, message, headers = {}, body = undefined) { super(message); this.status = status; this.headers = headers; this.body = body; }
 }
 
 /** One library slot on disk: records/<path>, an append-only log.jsonl and meta.json. */
 class Slot {
-  constructor(root, name, limits) {
-    this.root = root; this.name = name; this.limits = limits;
+  constructor(root, name, limits, classify = classifyPath) {
+    this.root = root; this.name = name; this.limits = limits; this.classify = classify; this.home = null;
     this.entries = []; this.current = new Map(); this.bytes = 0;
     this.waiters = new Set(); this.chain = Promise.resolve(); this.instance = null;
   }
@@ -120,7 +220,7 @@ class Slot {
       if (!line) continue;
       try {
         const e = JSON.parse(line);
-        if (!classifyPath(e.path)) return null;
+        if (!this.classify(e.path)) return null;
         out.push(e.deleted ? { path: e.path, deleted: true } : { path: e.path, size: e.size, sha256: e.sha256 });
       } catch { return null; }
     }
@@ -136,7 +236,7 @@ class Slot {
         const full = path.join(dir, ent.name);
         if (ent.isSymbolicLink()) throw new Error(`Refusing symlink in relay storage: ${full}`);
         if (ent.isDirectory()) await walk(full, relPath);
-        else if (ent.isFile() && classifyPath(relPath)) found.set(relPath, { size: (await fsp.lstat(full)).size });
+        else if (ent.isFile() && this.classify(relPath)) found.set(relPath, { size: (await fsp.lstat(full)).size });
       }
     };
     await walk(this.recordsDir(), '');
@@ -335,30 +435,97 @@ function readBody(req, max) {
  * Creates the relay. `libraries` maps slot names to `{ tokenSha256 }`, `{ token }` or
  * `{ open: true }` (no bearer token; local testing only).
  */
-export async function createRelay({ dataDir, libraries, limits = {} }) {
+export async function createRelay({ dataDir, libraries, limits = {}, home, clock = Date.now, resolve, tickMs = 0, tracing = false, cors, provision, clientAddress: addressConfig, crashAt, hook }) {
   if (!dataDir) throw new Error('dataDir is required');
+  if (cors !== undefined && cors !== null && (typeof cors !== 'object' || Array.isArray(cors))) throw new Error('cors must be an object with origins, an array of origins');
+  const origins = corsOrigins(cors?.origins);
+  const provisioning = provisionConfig(provision);
+  // The address requests count against, for every per-address limit (never for access).
+  const clientAddress = clientAddressResolver(clientAddressConfig(addressConfig));
+  // Test builds only (tracing needs --test-clock): a marker on stderr, a SIGKILL of this process
+  // at the named point, and `hook` (a test's pause), so a test can stop it exactly there.
+  const reach = async (point) => {
+    if (!tracing) return;
+    writeSync(2, `trace ${point}\n`);
+    if (crashAt === point) process.kill(process.pid, 'SIGKILL');
+    if (hook) await hook(point);
+  };
   const effective = { ...DEFAULT_LIMITS, ...limits };
   await fsp.mkdir(dataDir, { recursive: true, mode: 0o700 });
   await ensureRealDir(path.resolve(dataDir));
   const auth = new Map();
+  const homeSlots = new Map();
+  // Slots apps provisioned through the door (`POST /v1/provision`), read before anything is served.
+  // The table is in use only when provisioning is on or a regular file of that name is there;
+  // otherwise nothing of that name is read, scanned or removed (a 0.3 slot may be called so).
+  const kind = await tableKind(path.resolve(dataDir));
+  if (provisioning.enabled && kind === 'other') {
+    throw new Error(`${path.join(path.resolve(dataDir), TABLE_FILE)} is not a regular file (a 0.3 slot of that name?): rename that slot before turning provisioning on`);
+  }
+  const tableInUse = provisioning.enabled || kind === 'file';
+  const table = tableInUse ? await ProvisionTable.load(path.resolve(dataDir), provisioning) : ProvisionTable.empty(path.resolve(dataDir));
+  let homeModule = null; let homeKey = null;
+  if (Object.values(libraries ?? {}).some((e) => e && e.home) || provisioning.enabled || table.size > 0) {
+    if (!home?.wasm || !home?.key) throw new Error('A home slot, and provisioning, need home.wasm (the module path) and home.key (a private P-256 JWK)');
+    homeModule = home.wasm instanceof HomeModule ? home.wasm : await HomeModule.load(home.wasm);
+    homeKey = await HomeKey.fromJwk(home.key, homeModule);
+  }
+  // Every row against this relay's settings and key, through the module. Nothing is repaired.
+  table.validate(provisioning, (slot, e) => homeModule.call({ op: 'member_request', account: e.account,
+    signing: homeKey.point.toString('base64'), endpoint: `${e.base}/`, request: e.request }));
   for (const [name, entry] of Object.entries(libraries ?? {})) {
     if (!SLOT.test(name)) throw new Error(`Invalid library slot name: ${name}`);
+    if (name === TABLE_FILE && tableInUse) throw new Error(`${TABLE_FILE} is the provisioning table, not a slot name, while provisioning is or has been on`);
+    const provisioned = table.get(name);
+    if (provisioned && (!entry?.home || entry.account !== provisioned.account)) {
+      throw new Error(`Slot ${name} is configured, and provisioned for account ${provisioned.account} in ${TABLE_FILE}: they must agree, or the slot be removed from one`);
+    }
+    if (entry && entry.home) {
+      if (typeof entry.base !== 'string' || !/^https?:\/\//.test(entry.base)) throw new Error(`Home slot ${name} needs base, the URL its account names as its endpoint`);
+      // Provisioning: a home slot serves the one account the operator created it for.
+      if (typeof entry.account !== 'string' || !HEX64.test(entry.account)) throw new Error(`Home slot ${name} needs account, the 64-hex ID of the account it is provisioned for`);
+      homeSlots.set(name, { base: entry.base.replace(/\/+$/, ''), account: entry.account });
+      if (entry.token || entry.tokenSha256) console.error(`Home slot ${name}: a bearer token authorizes nothing at a 0.5 home and is ignored`);
+      continue;
+    }
     if (entry && entry.open === true) auth.set(name, null);
+    else if (entry && entry.home && !entry.token && !entry.tokenSha256) auth.set(name, Buffer.alloc(32)); // calls only: no bearer matches
     else if (entry && typeof entry.tokenSha256 === 'string' && HEX64.test(entry.tokenSha256)) auth.set(name, Buffer.from(entry.tokenSha256, 'hex'));
     else if (entry && typeof entry.token === 'string' && entry.token.length >= 16) auth.set(name, createHash('sha256').update(entry.token).digest());
     else throw new Error(`Library slot ${name} needs tokenSha256, a token of at least 16 characters, or open: true`);
   }
+  for (const [name, e] of table.rows) if (!homeSlots.has(name)) homeSlots.set(name, { base: e.base, account: e.account });
+  const configured = new Set(Object.keys(libraries ?? {}));
   const slots = new Map();
   const opening = new Map();
+  const notProvisioned = () => new HttpError(404, 'Not provisioned', {}, { result: 'refused:notProvisioned' });
   async function slot(name) {
     if (slots.has(name)) return slots.get(name);
+    // Never opened for a name this relay does not hold (a released slot is not reopened).
+    if (!homeSlots.has(name) && !auth.has(name)) throw notProvisioned();
     if (!opening.has(name)) {
       opening.set(name, (async () => {
-        const s = new Slot(path.join(path.resolve(dataDir), name), name, effective);
-        await s.open();
+        const isHome = homeSlots.has(name);
+        // A home slot's path grammar is the module's (the engine's paths).
+        const homeClassify = (p) => homeModule.call({ op: 'classify', path: p }).kind;
+        const s = new Slot(path.join(path.resolve(dataDir), name), name, effective, isHome ? homeClassify : classifyPath);
+        if (isHome) {
+          s.home = new HomeSlot({
+            slot: s, wasm: homeModule, key: homeKey, base: homeSlots.get(name).base, account: homeSlots.get(name).account,
+            clock, resolve, tracing,
+            deps: { HttpError, send, readBody, clampInt, clientAddress, reach },
+            limits: { ...effective, requestsPerMinute: effective.requestsPerMinute ?? 0 },
+          });
+          await s.home.open();
+        } else await s.open();
         slots.set(name, s);
         return s;
-      })());
+      })().catch((error) => {
+        opening.delete(name); // a repaired runtime slot is retried on the next request
+        if (!homeSlots.has(name) || configured.has(name)) throw error;
+        console.error(`Home slot ${name} unavailable: ${error.message}`);
+        throw new HttpError(503, 'Home slot unavailable', {}, { result: 'unavailable' });
+      }));
     }
     return opening.get(name);
   }
@@ -373,19 +540,131 @@ export async function createRelay({ dataDir, libraries, limits = {} }) {
     if (!match || !timingSafeEqual(given, expected)) throw new HttpError(401, 'Unauthorized', { 'www-authenticate': 'Bearer' });
   }
 
-  async function handle(req, res) {
+  // ---------------------------------------------------------------------------------------------
+  // Work in flight on a slot: every request from dispatch until both its response has ended and
+  // its handler has settled, and every scheduler pass. A slot being released waits for none.
+
+  function enter(s) { s.active = (s.active ?? 0) + 1; }
+  function leave(s) {
+    s.active -= 1;
+    if (s.active === 0 && s.drained) { const done = s.drained; s.drained = null; done(); }
+  }
+  const drained = (s) => (s.active ? new Promise((done) => { s.drained = done; }) : Promise.resolve());
+
+  // ---------------------------------------------------------------------------------------------
+  // Provisioning: the door, under one lock, and the release of slots nobody claimed.
+
+  const admitProvision = provisionGate(provisioning, clock);
+  let provisionTail = Promise.resolve();
+  const provisionLock = (fn) => { const run = provisionTail.then(fn, fn); provisionTail = run.catch(() => {}); return run; };
+  const claimed = (s) => { const st = s.home.status(); return Boolean(st.appointed || st.held > 0); };
+
+  /**
+   * Release one provisioned slot that holds no genesis (never appointed). Under the
+   * provisioning lock, so no provision of the name proceeds until this ends. The slot is marked
+   * closing and taken out of dispatch (new requests answer refused:notProvisioned, long polls
+   * are woken and end), the work in flight on it is drained, and "nothing held" is checked again
+   * under its lock: only then are its directory and its row removed. If something is held by
+   * then, the release is abandoned and the slot returns to service. A late use of the released
+   * Slot fails closed (its locks refuse), never on a later slot's directory. A crash between the
+   * directory and the row leaves the row: the slot is opened fresh and released at the next
+   * start-up.
+   */
+  async function release(name, e) {
+    const s = await slot(name);
+    if (await s.home.lock(async () => claimed(s))) return;
+    s.closing = true;
+    homeSlots.delete(name);
+    for (const wake of [...s.waiters]) wake();
+    await reach(`release draining ${name}`);
+    await drained(s);
+    await reach(`release drained ${name}`);
+    const removed = await s.home.lock(async () => {
+      if (claimed(s)) return false;
+      const refuse = () => Promise.reject(new Error(`slot ${name} was released`));
+      s.released = true;
+      s.home.lock = refuse; s.home.replayLock = refuse; s.exclusive = refuse;
+      slots.delete(name); opening.delete(name);
+      await fsp.rm(s.root, { recursive: true, force: true });
+      return true;
+    });
+    if (!removed) { s.closing = false; homeSlots.set(name, { base: e.base, account: e.account }); await reach(`release abandoned ${name}`); return; }
+    await table.write(name, null);
+    await reach(`released ${name}`);
+  }
+
+  /** A provisioned slot holding no genesis `unclaimedHours` after it was provisioned is
+   * released (on the relay's clock). Configured slots never are. An appointed home is never
+   * released: it witnesses and receipts until the account's revocation of it is final. */
+  async function releaseUnclaimed() {
+    const now = clock();
+    for (const name of [...table.keys()]) {
+      const e = table.get(name);
+      if (configured.has(name) || now - e.at < provisioning.unclaimedHours * 3_600_000) continue;
+      try { await release(name, e); }
+      catch (error) { if (!(error instanceof HttpError && error.status === 503)) throw error; }
+    }
+  }
+
+  async function door(req, res) {
+    if (req.method !== 'POST') throw new HttpError(405, 'Method not allowed', { allow: 'POST' });
+    // Checked before the body is read. A page on an origin not listed is refused here; any page
+    // must send application/json, which a browser preflights, and only a listed origin's
+    // preflight succeeds.
+    if (req.headers.origin !== undefined && !origins.has(req.headers.origin)) { req.resume(); throw new HttpError(403, 'Requests from this origin are refused'); }
+    if (!isJsonType(req.headers['content-type'])) { req.resume(); throw new HttpError(415, 'Content-Type must be application/json'); }
+    const body = await readBody(req, 4096);
+    const asked = parseProvisionBody(body) ?? {};
+    const address = clientAddress(req);
+    const answer = await provisionLock(async () => {
+      await releaseUnclaimed();
+      const valid = typeof asked.slot === 'string' && SLOT.test(asked.slot);
+      const occupied = valid && (configured.has(asked.slot)
+        || (!table.get(asked.slot) && await fsp.lstat(path.join(path.resolve(dataDir), asked.slot)).then(() => true, () => false)));
+      const verdict = admitProvision({ ...asked, address, authorization: req.headers.authorization,
+        held: { entry: table.get(asked.slot), occupied, count: table.size } });
+      if (!verdict.admit) {
+        throw new HttpError(verdict.status, verdict.error ?? 'Refused', verdict.retryAfter ? { 'retry-after': String(verdict.retryAfter) } : {},
+          verdict.result ? { result: verdict.result } : undefined);
+      }
+      if (verdict.existing) return Buffer.from(verdict.existing.request, 'base64');
+      const request = await memberRequest({ wasm: homeModule, key: homeKey, account: asked.account, base: asked.base, now: clock() });
+      // Durable before answered: a crash after this write leaves a row the same request completes.
+      await table.write(asked.slot, { account: asked.account, base: asked.base, at: clock(), request: request.toString('base64') });
+      await reach('provision written');
+      homeSlots.set(asked.slot, { base: asked.base, account: asked.account });
+      await slot(asked.slot);
+      return request;
+    });
+    res.writeHead(200, { 'content-type': 'application/json', 'content-length': answer.length });
+    res.end(answer);
+  }
+
+  async function handle(req, res, work) {
     const url = new URL(req.url, 'http://relay.invalid');
     if (url.pathname === '/healthz' && req.method === 'GET') return send(res, 200, { ok: true });
-    const route = /^\/v1\/libraries\/([^/]+)(?:\/(changes|records)(?:\/(.*))?)?$/.exec(url.pathname);
+    if (provisioning.enabled && url.pathname === '/v1/provision') return door(req, res);
+    const route = /^\/v1\/libraries\/([^/]+)(?:\/(changes|records|head|authority|pending|predecessor)(?:\/(.*))?)?$/.exec(url.pathname);
     if (!route) throw new HttpError(404, 'Not found');
     const [, name, section, recordPath] = route;
+    // With provisioning on, a slot this home does not hold is named as such (an app asks for its
+    // slot at the door); off, it is the 0.3 answer, unchanged.
+    if (provisioning.enabled && !homeSlots.has(name) && !auth.has(name)) {
+      throw notProvisioned();
+    }
     if (!SLOT.test(name)) throw new HttpError(401, 'Unauthorized', { 'www-authenticate': 'Bearer' });
-    authorize(req, name);
+    if (!homeSlots.has(name)) authorize(req, name);
     const s = await slot(name);
+    // Counted from here until the response has ended and this handler has settled.
+    if (s.closing || s.released) throw notProvisioned();
+    enter(s); work.slot = s;
+    if (s.home && await s.home.handle(req, res, url, section, recordPath)) return undefined;
+    if (!s.home && ['head', 'authority', 'pending', 'predecessor'].includes(section)) throw new HttpError(404, 'Not found');
     if (!section) {
       if (req.method !== 'GET') throw new HttpError(405, 'Method not allowed', { allow: 'GET' });
-      const { slotBytes, ...published } = effective;
-      return send(res, 200, { protocol: PROTOCOL, slot: name, limits: published, ...(slotBytes ? { quotaBytes: slotBytes } : {}) });
+      const { slotBytes, authorityBodyBytes, pendingBodyBytes, replayRows, requestsPerMinute, ...published } = effective;
+      return send(res, 200, { protocol: PROTOCOL, slot: name, limits: published, ...(slotBytes ? { quotaBytes: slotBytes } : {}),
+        ...(s.home ? { home: { member: s.home.key.memberId }, layouts: homeModule.call({ op: 'limits' }).layouts } : {}) });
     }
     if (section === 'changes') {
       if (req.method !== 'GET' || recordPath !== undefined) throw new HttpError(405, 'Method not allowed', { allow: 'GET' });
@@ -397,11 +676,12 @@ export async function createRelay({ dataDir, libraries, limits = {} }) {
       if (page.entries.length === 0 && wait > 0) {
         await Promise.race([s.waitForEntry(wait * 1000), closed(res)]);
         if (res.destroyed) return undefined;
+        if (s.closing) throw notProvisioned(); // woken by a release
         page = s.changes(after, limit, namespaces);
       }
       return send(res, 200, page);
     }
-    const kind = classifyPath(recordPath);
+    const kind = s.classify(recordPath);
     if (!kind) throw new HttpError(400, 'Invalid record path');
     if (url.search) throw new HttpError(400, 'Record URLs take no query');
     if (req.method === 'GET' || req.method === 'HEAD') {
@@ -439,18 +719,50 @@ export async function createRelay({ dataDir, libraries, limits = {} }) {
   }
 
   function listener(req, res) {
-    handle(req, res).catch((error) => {
+    const listed = enforceAnswerHeaders(req, res, origins);
+    if (req.method === 'OPTIONS') { answerOptions(req, res, listed); return; }
+    const work = { slot: null };
+    const settled = handle(req, res, work).catch((error) => {
       if (res.headersSent || res.destroyed) { res.destroy(); return; }
-      if (error instanceof HttpError) send(res, error.status, { error: error.message }, error.headers);
+      if (error instanceof HttpError) send(res, error.status, error.body !== undefined ? error.body : { error: error.message }, error.headers);
       else { console.error(error); send(res, 500, { error: 'Internal relay error' }); }
     });
+    Promise.all([settled, ended(res)]).then(() => { if (work.slot) leave(work.slot); });
   }
 
-  return { listener, limits: effective, slot };
+  // The scheduler: recording entries, heads and forwarding for every home slot, on the relay's clock.
+  // Slots tick concurrently (each runs one pass at a time), so one slot never waits on another.
+  const tickAll = async () => {
+    await Promise.all([...homeSlots.keys()].map(async (name) => {
+      let s;
+      try { s = await slot(name); } catch { return; }
+      if (s.closing || s.released) return;
+      enter(s);
+      try { await s.home.tick(); } catch (error) { console.error(`home tick failed for slot ${name}: ${error.message}`); } finally { leave(s); }
+    }));
+  };
+  let timer = null;
+  for (const name of configured) if (homeSlots.has(name)) await slot(name);
+  for (const name of table.keys()) if (!configured.has(name)) {
+    try { await slot(name); }
+    catch (error) { if (!(error instanceof HttpError && error.status === 503)) throw error; }
+  }
+  if (table.size > 0) await provisionLock(releaseUnclaimed);
+  // The timer runs whenever a home slot may exist: provisioning adds slots at run time, and
+  // `tickAll` reads the slot table on every pass.
+  if ((homeSlots.size > 0 || provisioning.enabled) && tickMs > 0) { timer = setInterval(() => { tickAll(); }, tickMs); timer.unref?.(); }
+
+  return { listener, limits: effective, slot, tickAll, close: () => { if (timer) clearInterval(timer); } };
 }
 
 // The response (not the request, which closes once its body is read) closes with the client.
 function closed(res) { return new Promise((resolve) => res.once('close', resolve)); }
+
+/** The response has ended: finished, or closed with its client. */
+function ended(res) {
+  if (res.writableFinished || res.destroyed) return Promise.resolve();
+  return new Promise((resolve) => { res.once('finish', resolve); res.once('close', resolve); });
+}
 
 function clampInt(value, fallback, min, max) {
   if (value === null || value === '') return fallback;
@@ -473,5 +785,5 @@ export async function startRelay({ host = '127.0.0.1', port = 8787, tls, ...opti
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, host, resolve); });
   const address = server.address();
   return { server, relay, host: address.address, port: address.port,
-    close: () => new Promise((resolve) => { server.closeAllConnections?.(); server.close(() => resolve()); }) };
+    close: () => new Promise((resolve) => { relay.close(); server.closeAllConnections?.(); server.close(() => resolve()); }) };
 }

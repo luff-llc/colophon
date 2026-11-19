@@ -1,0 +1,1 @@
+{"description":"Three valid candidates form a comparison cycle: low-digest activate, final-covered activate, and vetoed. Keep all as an unresolved fork.","expected":{"result":"refused:fork","seq":3},"sections":["8.6"],"verifier":{"now":"2026-11-14T09:06:00Z"}}

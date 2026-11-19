@@ -1,0 +1,1 @@
+{"description":"Issued 11 minutes before now with headMaxAge 300: a call verifier needing a fresh head returns unavailable.","expected":"ok (accepted, not fresh)","sections":["13.3"],"verifier":{"history":"conformance/0.5/candidate/account/records","now":"2026-11-11T09:01:00Z"}}

@@ -1,0 +1,1 @@
+{"description":"A revoke introduces epoch 3 while the namespace is at epoch 1. Epochs a revoke introduces must be consecutive like a rekey's (§11.1): the entry at seq 4 is malformed.","expected":{"history":{"result":"malformed","seq":4},"opened":[],"records":{}},"holders":[],"sections":["9.5","11.1"],"verifier":{"now":"2026-11-11T16:20:00Z"}}

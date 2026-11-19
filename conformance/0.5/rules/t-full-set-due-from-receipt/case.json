@@ -1,0 +1,1 @@
+{"description":"A full set claims issued R0 but is received at R0 + 200: its due time is the receipt, so the grant at R0 + 100 keeps seq 3.","expected":{"result":"ok","seq":4},"sections":["8.6","8.7"],"verifier":{"now":"2026-11-11T09:05:00Z"}}

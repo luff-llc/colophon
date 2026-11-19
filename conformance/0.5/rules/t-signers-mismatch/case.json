@@ -1,0 +1,1 @@
+{"description":"`signers` names K1, who didn't sign.","expected":{"transition":"malformed"},"sections":["8.7"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

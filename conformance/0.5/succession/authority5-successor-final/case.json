@@ -1,0 +1,1 @@
+{"description":"As authority5-successor-provisional, with the `final` of F (the heads of H1 and H2) at seq 4. F is final: the succession is verified, and the `final` is the only entry the predecessor admitted after F. The same genesis that was held is now `ok`.","expected":{"succession":"verified"},"sections":["15.1","16.3"]}

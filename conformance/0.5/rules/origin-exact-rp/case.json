@@ -1,0 +1,1 @@
+{"description":"No pin: the bare rp origin may sign authority.","expected":{"result":"ok","seq":1},"sections":["4.3"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

@@ -1,0 +1,1 @@
+{"description":"H2 remains current for receipts until its control-rule revocation is final; no final is held.","expected":{"result":"ok","seq":4},"sections":["8.5","8.7","13.5"],"verifier":{"now":"2026-11-17T09:13:00Z"}}

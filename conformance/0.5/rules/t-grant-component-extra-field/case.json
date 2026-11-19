@@ -1,0 +1,1 @@
+{"description":"The same grant with another member beside `request` and `terms`: the component is exactly `{request, terms}`, so the `activate` is malformed.","expected":{"result":"malformed","seq":4},"sections":["2.3","8.7","9.3"],"verifier":{"now":"2026-11-14T09:06:00Z"}}

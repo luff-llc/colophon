@@ -1,0 +1,1 @@
+{"description":"Account limit 64: after 64 grants a revoke is still accepted; the next grant is refused.","expected":{"ok":"seq 66, the revoke, counts toward A only","result":"malformed","seq":67},"sections":["13.1"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

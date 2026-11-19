@@ -1,0 +1,1 @@
+{"description":"K1 didn't sign the transition.","expected":{"result":"badSignature","seq":3},"sections":["8.4","8.7"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

@@ -1,0 +1,1 @@
+{"description":"B, whose removal activated, signs a grant at seq 3 dated before the due time. No primary head covers it: the activation stands.","expected":{"result":"ok","seq":3},"sections":["8.6"],"verifier":{"now":"2026-11-14T09:06:00Z"}}

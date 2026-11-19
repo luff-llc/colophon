@@ -8,6 +8,7 @@ public struct LibraryGate<Artwork: View, Content: View>: View {
     private let presentation: LibraryPresentation
     private let host: LibraryHostActions
     private let migrationProgress: Double?
+    private let backgroundLock: BackgroundLock
     private let artwork: () -> Artwork
     private let content: () -> Content
     @State private var action = LibraryActionModel()
@@ -16,40 +17,51 @@ public struct LibraryGate<Artwork: View, Content: View>: View {
     @State private var support = false
     @Environment(\.scenePhase) private var scenePhase
 
+    /// `backgroundLock` is when the gate locks the session after the scene goes inactive or to the background: at once
+    /// by default, after a delay, or `.never`. Returning to the foreground unlocks it (silent for a Secure Enclave key).
     public init(session: any LibrarySessionSource, presentation: LibraryPresentation,
-                host: LibraryHostActions = .init(), migrationProgress: Double? = nil,
+                host: LibraryHostActions = .init(), migrationProgress: Double? = nil, backgroundLock: BackgroundLock = .immediately,
                 @ViewBuilder artwork: @escaping () -> Artwork,
                 @ViewBuilder content: @escaping () -> Content) {
         self.session = session; self.presentation = presentation; self.host = host
-        self.migrationProgress = migrationProgress; self.artwork = artwork; self.content = content
+        self.migrationProgress = migrationProgress; self.backgroundLock = backgroundLock; self.artwork = artwork; self.content = content
     }
+    private var capabilities: GateCapabilities { GateCapabilities(rejoin: host.rejoinKeys != nil, recovery: host.importRecoveryKit != nil) }
     public var body: some View {
         Group {
-            if session.hasUsableContent {
+            switch GateModel.content(phase: session.phase, usable: session.hasUsableContent, presentation: presentation,
+                                     capabilities: capabilities, migrationProgress: migrationProgress) {
+            case .content(let status, let controls):
                 VStack(spacing: 0) {
-                    if session.phase != .ready {
+                    NoticesView(session: session, host: host)
+                    if let status {
                         HStack {
-                            Text(session.phase == .retry ? "Refresh failed" : "Updating Your Library…")
-                            if session.phase == .retry || session.phase == .waitingForDownload { retryButton }
-                        }.font(.caption).padding(8)
+                            Text(status)
+                            ForEach(controls) { control in GateControlButton(control: control, disabled: action.isWorking, perform: perform) }
+                        }.font(.caption).padding(8).accessibilityElement(children: .contain).accessibilityIdentifier("library.status")
                     }
                     content()
                 }
-            }
-            else {
+            case .screen(let screen):
                 VStack {
-                    phaseView
+                    GateScreenView(screen: screen, artwork: artwork, disabled: action.isWorking, perform: perform)
                     LibraryErrorView(message: action.error).padding(.horizontal)
-                    Button { support = true } label: {
-                        Label("Support Report", systemImage: "ladybug").frame(minHeight: 44)
-                    }
-                        .accessibilityIdentifier("library.bugReport")
-                        .padding()
                 }
             }
         }
         .task { await session.restore() }
-        .task(id: scenePhase) { if scenePhase == .active { await session.refresh() } }
+        .task(id: scenePhase) {
+            let scene: GateScene = switch scenePhase { case .active: .active; case .background: .background; default: .inactive }
+            switch GateModel.sceneStep(scene, phase: session.phase, policy: backgroundLock) {
+            case .lock(let delay):
+                if delay > .zero { try? await Task.sleep(for: delay) }
+                guard !Task.isCancelled else { return }
+                await session.lock()
+            case .unlock: await session.unlock()
+            case .refresh: await session.refresh()
+            case .nothing: break
+            }
+        }
         .sheet(isPresented: $joining) {
             LibrarySheet(title: "Use Your Library") { ConnectLibraryView(host: host, purpose: .join) }
         }
@@ -60,91 +72,67 @@ public struct LibraryGate<Artwork: View, Content: View>: View {
             LibrarySheet(title: "Support Report") { SupportReportView(session: session) }
         }
     }
-    @ViewBuilder private var phaseView: some View {
-        switch session.phase {
-        case .ready: EmptyView()
-        case .noLibrary:
-            LibraryStatusView(title: presentation.welcomeTitle, message: presentation.promise, artwork: artwork) {
-                Button(presentation.createTitle) { Task { await action.run { await session.create() } } }
-                    .buttonStyle(.borderedProminent).buttonBorderShape(.capsule)
-                    .accessibilityIdentifier("library.createLocal")
-                Button(presentation.joinTitle) { joining = true }
-                    .accessibilityIdentifier("library.join")
-                rejoinButton
-                Text(presentation.dataNote).font(.footnote).foregroundStyle(.secondary)
-            }
-            .disabled(action.isWorking)
-        case .opening: progress(title: "Opening Your Library", id: "library.opening")
-        case .waitingForDownload: progress(title: "Waiting for Your Library", id: "library.waitingForDownload")
-        case .refreshing: progress(title: "Updating Your Library", id: "library.refreshing")
-        case .retry: failure(title: "Couldn’t Open Your Library", reason: "Retry to try again.", id: "library.retryPhase")
-        case .updateRequired:
-            LibraryStatusView(title: "Update Required", message: "This library uses a newer storage layout. Update this app to open it. Your folder, identity and records are unchanged.", artwork: artwork) {
-                retryButton
-            }.accessibilityIdentifier("library.updateRequired")
-        case .creating: progress(title: "Creating Your Library", id: "library.creating")
-        case .migrating:
-            LibraryStatusView(title: "Your Library Is Being Upgraded", message: "Your existing library is kept while the upgrade completes.", artwork: artwork) {
-                if let value = migrationProgress, value.isFinite {
-                    ProgressView("Upgrading library", value: min(1, max(0, value)))
-                        .accessibilityIdentifier("library.migrationProgress")
-                } else {
-                    ProgressView("Upgrading library").accessibilityIdentifier("library.migrationProgress")
+    private func perform(_ gateAction: GateAction) {
+        Task {
+            await GateModel.perform(gateAction, session: session, host: host, model: action) { sheet in
+                switch sheet {
+                case .join: joining = true
+                case .useRecoveryKit: recovering = true
+                case .supportReport: support = true
+                default: break
                 }
-                retryButton
-            }.accessibilityIdentifier("library.migrating")
-        case .waitingForApproval(let code):
-            LibraryStatusView(title: "Waiting for Approval", message: "On a device with access, open Library settings. Approve \(presentation.appName) only when both devices show the same code.", artwork: artwork) {
-                PairingCodeView(code: code)
-                Button("Check Again") { Task { await action.run { await session.refresh() } } }
-                    .accessibilityIdentifier("library.retryPairing")
-                recoveryButton
-                Button("Cancel Pairing", role: .cancel) { Task { await action.run { try await session.leave() } } }
-                    .accessibilityIdentifier("library.cancelPairing")
-            }.disabled(action.isWorking)
-        case .denied:
-            LibraryStatusView(title: "Access Has Ended", message: "This identity may have been revoked, expired, or not granted the access this app needs. Your past contributions stay attributed to you.", artwork: artwork) {
-                rejoinButton
-                recoveryButton
-                retryButton
-            }.accessibilityIdentifier("library.denied")
-        case .unavailable(let reason): failure(title: "Library Unavailable", reason: reason, id: "library.unavailable")
-        case .failed(let error): failure(title: "Couldn’t Open Your Library", reason: error.message, id: "library.failed")
+            }
         }
     }
-    private func progress(title: String, id: String) -> some View {
-        LibraryStatusView(title: title, message: "", artwork: artwork) {
-            ProgressView(title).accessibilityIdentifier(id)
+}
+
+/// A full-screen gate state, rendered from its value.
+struct GateScreenView<Artwork: View>: View {
+    let screen: GateScreen
+    let artwork: () -> Artwork
+    let disabled: Bool
+    let perform: (GateAction) -> Void
+    var body: some View {
+        LibraryStatusView(title: screen.title, message: screen.message, artwork: artwork) {
+            if let code = screen.pairingCode { PairingCodeView(code: code) }
+            switch screen.progress {
+            case .indeterminate(let label): ProgressView(label).accessibilityIdentifier(screen.identifier + ".progress")
+            case .fraction(let label, let value): ProgressView(label, value: value).accessibilityIdentifier(screen.identifier + ".progress")
+            case nil: EmptyView()
+            }
+            ForEach(screen.controls) { control in GateControlButton(control: control, disabled: disabled, perform: perform) }
+            if let footnote = screen.footnote { Text(footnote).font(.footnote).foregroundStyle(.secondary) }
         }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier(screen.identifier)
     }
-    private func failure(title: String, reason: String, id: String) -> some View {
-        LibraryStatusView(title: title, message: reason, artwork: artwork) {
-            retryButton
-            recoveryButton
-        }.accessibilityIdentifier(id)
-    }
-    private var retryButton: some View {
-        Button("Retry") { Task { await action.run { await session.retry() } } }
-            .disabled(action.isWorking).accessibilityIdentifier("library.retry")
-    }
-    @ViewBuilder private var rejoinButton: some View {
-        if host.rejoinKeys != nil {
-            Button("Rejoin Library") { Task { await action.rejoin(session: session, host: host) } }
-                .accessibilityIdentifier("library.rejoin").disabled(action.isWorking)
-        }
-    }
-    @ViewBuilder private var recoveryButton: some View {
-        if host.importRecoveryKit != nil {
-            Button("Use Recovery Kit") { recovering = true }.accessibilityIdentifier("library.recoverFromPairing")
+}
+
+/// One control, rendered from its value: its title is its label, its identifier is its accessibility identifier.
+struct GateControlButton: View {
+    let control: GateControl
+    let disabled: Bool
+    let perform: (GateAction) -> Void
+    var body: some View {
+        switch control.weight {
+        case .prominent:
+            Button(control.title) { perform(control.action) }.buttonStyle(.borderedProminent).buttonBorderShape(.capsule)
+                .disabled(disabled).accessibilityIdentifier(control.identifier)
+        case .destructive:
+            Button(control.title, role: .destructive) { perform(control.action) }.disabled(disabled).accessibilityIdentifier(control.identifier)
+        case .cancel:
+            Button(control.title, role: .cancel) { perform(control.action) }.disabled(disabled).accessibilityIdentifier(control.identifier)
+        case .normal:
+            Button(control.title) { perform(control.action) }.disabled(disabled).accessibilityIdentifier(control.identifier)
         }
     }
 }
 
 extension LibraryGate where Artwork == Image {
     public init(session: any LibrarySessionSource, presentation: LibraryPresentation,
-                host: LibraryHostActions = .init(), migrationProgress: Double? = nil,
+                host: LibraryHostActions = .init(), migrationProgress: Double? = nil, backgroundLock: BackgroundLock = .immediately,
                 @ViewBuilder content: @escaping () -> Content) {
-        self.init(session: session, presentation: presentation, host: host, migrationProgress: migrationProgress,
+        self.init(session: session, presentation: presentation, host: host, migrationProgress: migrationProgress, backgroundLock: backgroundLock,
                   artwork: { Image(systemName: "books.vertical.fill") }, content: content)
     }
 }

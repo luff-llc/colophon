@@ -1,0 +1,1 @@
+{"description":"The same grant to a member whose signing point is that of the home appointed by the transition at seq 3: the point (and its key ID) was a principal's, so the member is not new to the account (§3.3) and the `activate` is malformed.","expected":{"result":"malformed","seq":4},"sections":["3.3","8.7","9.2","9.3"],"verifier":{"now":"2026-11-14T09:06:00Z"}}

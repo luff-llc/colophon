@@ -8,7 +8,7 @@ public struct SupportReportView: View {
         Form {
             Section {
                 Label("A Report You Can Review", systemImage: "ladybug").font(.title2.bold())
-                Text("Includes your system version, connection state and counts of members, requests and ledger entries. Library content, names, identifiers, paths, pairing codes, keys and error details are excluded.")
+                Text("Includes your system version, connection state and counts of members and requests. Library content, names, identifiers, paths, pairing codes, keys and error details are excluded.")
                 Text("Nothing is sent until you choose where to share it.").foregroundStyle(.secondary)
             }
             Section("Report Preview") {

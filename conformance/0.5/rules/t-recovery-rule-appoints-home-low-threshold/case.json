@@ -1,0 +1,1 @@
+{"description":"recoverThreshold 1 < threshold 2: the recovery rule may revoke homes but not appoint them.","expected":{"result":"badSignature","seq":3},"sections":["8.4"],"verifier":{"now":"2026-11-14T09:06:00Z"}}

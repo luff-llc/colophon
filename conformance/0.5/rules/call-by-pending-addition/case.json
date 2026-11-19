@@ -1,0 +1,1 @@
+{"description":"NEW's addition is pending.","expected":{"call":"refused:revoked"},"sections":["8.7","12.3"],"verifier":{"audiences":["https://service.example"],"controllerPurposes":["sign-in"],"now":"2026-11-11T09:17:00Z","statuses":{"controllers":{"b1176479fa12231725a6d79e102c00c5":"pendingAddition"}}}}

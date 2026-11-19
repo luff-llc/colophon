@@ -1,0 +1,1 @@
+{"description":"The link names session 1; the member's session number is 0 (step 6).","expected":"refused:ended","sections":["12.3"],"verifier":{"audiences":["https://projects.example/scopes/7"],"heads":["conformance/0.5/candidate/account/head.json"],"history":"conformance/0.5/candidate/account/records","now":"2026-11-11T09:01:00Z","replay":"empty"}}

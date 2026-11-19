@@ -1,0 +1,1 @@
+{"description":"A grant conflicts with an activate at seq 3; the primary home's head covering the grant was issued after that home expired, so it counts for nothing and the activate stands.","expected":{"result":"ok","seq":4},"sections":["8.6","13.3"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

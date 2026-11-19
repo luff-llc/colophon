@@ -1,0 +1,1 @@
+{"description":"After a full set drops the only home (seq 3), A appoints a new home with no receipt, as an account with no home does (seq 4); the new home then receipts a transition that waits the recovery delay (seq 5).","expected":{"result":"ok","seq":5},"sections":["8.7"],"verifier":{"now":"2026-11-20T00:00:00Z"}}
