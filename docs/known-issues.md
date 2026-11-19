@@ -13,16 +13,28 @@ in 0.5.x or in a host.
   without one unless `createWithoutHome` is set. That collides with libraries that today sync
   only through a shared folder; whether an import account may start without a home is an open
   host-rule question for 0.5.x, not a format question.
-- **Fixed in 0.5.0:** a session whose `libraryNamespaces` was wider than its own `namespaces`
-  came out `denied` right after `create()`, in Swift, Kotlin and JS. Readiness now follows the
-  member's own namespaces.
+- A member whose own `namespaces` is empty (a service or identity-only member) is reported
+  `ready` without its grant's expiry or provisional state being checked: the sessions judge
+  readiness by asking for each of the member's namespaces.
+- **Fixed in 0.5.0** (in its final commit, before any package was published):
+  - a session whose `libraryNamespaces` was wider than its own `namespaces` came out `denied`
+    right after `create()` (Swift, Kotlin, JS); readiness now follows the member's own namespaces;
+  - the owner's engine was scoped to the app's `libraryNamespaces`, so a revoke made from an app
+    with a narrower library dropped what the revoked member wrote in the other namespaces (Swift,
+    Kotlin, JS); the owner's engine now sees every namespace;
+  - the Swift `approve(_:pairing:grant:)` filled a `GrantOptions` field left nil from the
+    approving app's own namespaces and read-write access instead of from the request;
+  - the JS session did not load a member's engine when there was nothing to unlock, so a revoked
+    member reopening cold came out `failed` instead of `denied`.
 
 ## Blobs
 
-- The core runs no garbage collection. A session's `collectBlobGarbage` removes only that
-  device's local copies, and on a device with no home that is the only copy: releasing the last
-  reference is the app's decision. Homes never delete blob copies.
-- A blob is at most 250 MiB per manifest; larger media must be split into parts by the app.
+- Nothing collects blobs. The core runs no garbage collection, the Swift session's
+  `collectBlobGarbage` removes nothing (the Kotlin and JS sessions have no such call), and homes
+  never delete blob copies. Zero live references is not permission to delete an original.
+- A manifest holds up to 8,192 chunks of 64 KiB (512 MiB, spec §20), but the 1 MiB bound on a
+  `colophon.blobPublish` operation's metadata can impose a smaller limit, about 250 MiB; larger
+  media must be split into parts by the app.
 - Required blob downloads run during sync passes while the process lives. There is no background
   scheduling (BGTask, WorkManager); 64 KiB chunks are the resume unit.
 - App extensions (Safari, share) cannot write blobs: the ingress envelope is 32 KiB and has no
@@ -33,16 +45,18 @@ in 0.5.x or in a host.
 
 - Phones, the wasm build and the FFI boundary are not measured, and nothing is proven on a
   physical device (§21.1 items 10 and 11). Sync makes one request per record.
-- Android has no equivalent of the Swift import of a 0.1 library (`performMigration`); the
-  imported-baseline mode is a write gate only.
+- Libraries of the shipped Swift apps move to 0.5 by a verified succession (`SwiftMove` in
+  `ColophonMigration`); there is no Kotlin or JS equivalent.
 - The Gradle build has no dependency verification metadata yet ([release packaging](release-packaging.md)).
 - The AAR built by `scripts/build-android.sh` keeps an old file name
   (`colophon-android-0.3.0.aar`); the release package is named by version.
 
 ## Tests
 
-- One relay test of a stopped home with two homes failed once on a loaded Linux machine and
-  passed on every other run, including twelve repeats. It is timing-sensitive; a failure on one
-  machine is rerun on a second before it is believed.
+- Two tests are timing-sensitive. A relay test of a stopped home with two homes failed once on a
+  loaded Linux machine and passed on every other run, including twelve repeats. The Kotlin
+  `RevokedReopenTest` (a revoked member's cold reopen with saved state, against the real relay)
+  failed once on a Mac during the 0.5.0 release runs and passed in twelve repeats and every full
+  run. A failure on one machine is rerun on a second before it is believed.
 - Several homes per account are experimental; their open issues are in
   [multi-home-open-issues.md](multi-home-open-issues.md).

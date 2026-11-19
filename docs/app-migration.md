@@ -135,7 +135,7 @@ All five arm64 Apple slices build, including nightly-built visionOS, and the hos
 passes. The `android` worktree turns that AAR script into a Gradle library
 (`org.luff.colophon:colophon-android`) with both JNI ABIs, `ColophonSession`, Keystore keys,
 and a private file store. See [Android session](android.md).
-See [native bindings](native-bindings.md), [FFI measurements](performance.md#ffi), and [the Apple build](native-bindings.md) for the exact build gates.
+See [native bindings](native-bindings.md) for the exact build gates and [FFI measurements](performance.md#ffi).
 
 ### App SDK implementation status (November 6, 2026)
 

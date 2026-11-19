@@ -488,8 +488,7 @@ in digest order (`{digest,size,mediaType,chunks,references,required}`, `next`). 
 Native hosts authenticate fetched ciphertext with `openBlobChunk(namespace,digest,index,ciphertext)`
 (no callback) and copy only a write's own records with `recordsAt(paths)`. Zero live references is
 **not** permission to delete retained originals or bytes needed by immutable history. The core
-runs no garbage collection; the SDK sessions' explicit `collectBlobGarbage` removes only this
-device's local copies (see [known issues](known-issues.md#blobs)).
+runs no garbage collection, and neither do the 0.5 sessions (see [known issues](known-issues.md#blobs)).
 
 `Engine::blob_chunk` fetches one chunk through `RecordSource::read_blob`; default sources may use
 `read`, while hosts can return `Missing` or `Inaccessible`. Native `BlobSource` callbacks run outside

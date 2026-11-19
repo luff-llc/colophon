@@ -1172,7 +1172,7 @@ with the result shown, and an entry that fails changes nothing. Every recording 
 ```json
 {"protocol":"colophon/request/5","account":"<64 hex>",
  "member":{"signing":"<base64>","agreement":"<base64>"},
- "label":"Codex on optiplex","kind":"agent","terms":{…},"created":"2026-11-11T09:00:00Z",
+ "label":"Codex on a build machine","kind":"agent","terms":{…},"created":"2026-11-11T09:00:00Z",
  "custody":"software","operator":"Example hosting",
  "service":{"endpoints":["https://home.example/v1/accounts/<64 hex>"]}}
 ```

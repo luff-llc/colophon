@@ -1,5 +1,5 @@
 //! Freeze package, stream W2-C calls: the 0.5 candidate vectors this stream generates.
-//! Only that stream edits this file (`docs/design-freeze-package.md`, §0 "Order of work").
+//! One stream of the freeze package (`docs/design-freeze-package.md`) wrote this file.
 //!
 //! S, a stopped reader trusts nothing new (§1 "A stop", §12.3 step 4; design §S, finding 4). One
 //! account (controllers A: approve, control and B: control; an agent granted at seq 2; a home

@@ -1,10 +1,9 @@
 # Colophon 0.5: the freeze package (design)
 
 Status: design. Revision 16 of the spec stated the whole package; after the independent check it was
-revised once. **Revision 17 cuts it to what shipping 0.5 and a later in-place upgrade need**, on the
-owner's word: "modularity can wait till 0.6, I just don't want to get blocked on shipping 0.5. also
-don't want to do another full on migration once we start to work on 0.6", and "I'm not that worried
-about the unknowns." The 0.5 parts are built, and 0.5 was frozen on 2026-11-16 at revision 18, provisionally (spec §21); the
+revised once. **Revision 17 cuts it to what shipping 0.5 and a later in-place upgrade need**, by the
+owner's decision: modularity waits for 0.6, shipping 0.5 must not be blocked, and 0.6 must not need
+another full migration. The 0.5 parts are built, and 0.5 was frozen on 2026-11-16 at revision 18, provisionally (spec §21); the
 sections marked "Deferred to 0.6" are not built. The spec text is revision 17 of
 [`spec/colophon-0.5.md`](../spec/colophon-0.5.md), mapped in
 [`spec/colophon-0.5-changes.md`](../spec/colophon-0.5-changes.md) §A.12 (rows 159–197, the
@@ -38,41 +37,6 @@ where a newer one decides, but never decides differently.
 **Existing vectors that change verdict:** one, `upgrade/then-v5-layout` (F3). The three that revision
 16 would have changed (`rules/t-grant-component-extra-field`, `records/revoke-17-heads`,
 `succession/authority5-chain-17`) no longer change.
-
-### Order of work: dispatchable streams
-
-W0 is merged (`cases_freeze_{authority,swift,records,calls,home}.rs` exist and are registered; no
-stream edits `tests/v5_candidate.rs`). `cases_freeze_records.rs` stays empty in 0.5 (its items are
-deferred). No file belongs to two streams of one wave; a stream starts when everything it depends on
-is merged into `spec-0.5`.
-
-Common acceptance for every Rust stream (private `CARGO_TARGET_DIR`, Rust 1.99.1, through
-`pressroom run`): `cargo test -p colophon-core --test v05_candidate`, `cargo test -p colophon-core
---test v5_candidate -- --ignored v5_generator_check`, `cargo test -p colophon-core`, `cargo clippy -p
-colophon-core --all-targets -- -D warnings`.
-
-**Wave 1**
-
-| Stream | Owns exactly | Depends on | Items | Vectors and generator | Extra acceptance |
-| --- | --- | --- | --- | --- | --- |
-| **W1-P Approval** | `crates/colophon-core/src/v05/pairing.rs`, `v05/account/action.rs`, `v05/write/authority.rs`, `crates/colophon-ffi/src/v05/api/{pairing,engine,action}.rs`, `crates/colophon-ffi/src/v05/surface-names.txt`, generated bindings (`swift/Sources/ColophonKit/Generated/*`, `sdk/kotlin/src/main/kotlin/com/luff/colophon/colophon_ffi.kt`), `swift/Sources/ColophonSession/*`, `swift/Sources/ColophonSessionUI/*`, `swift/Tests/ColophonSessionTests/*`, `sdk/kotlin/src/main/kotlin/com/luff/colophon/session/*`, `js/src/session/*`, `js/src/index.ts`, `js/scripts/smoke.mjs`, `playground/src/*`, `examples/ColophonSample/*`, new `crates/colophon-core/tests/v05_freeze_approval.rs` | — | P, L2 | none in `conformance/`; tests: approve without a token refused; a token for another key refused; a token spent twice refused; the code path and the scan path each issue one | `cargo test -p colophon-core --test v05_freeze_approval`, `cargo test -p colophon-ffi`, `swift test`, `cd sdk/kotlin && ./gradlew test`, `cd js && npm test`, `cd playground && npm test` |
-| **W1-A Authority** | `crates/colophon-core/src/v05/history/state.rs`, `history/mod.rs`, `engine/checkpoint.rs`, `tests/v5_candidate/cases_freeze_authority.rs`, the `conformance/0.5/{rules,upgrade}/` cases it generates (and the regenerated `upgrade/then-v5-layout`) | — | F2 (current principal, first commit), F3 (stored layout, the door), S (the reader's stopped flag, `Verdict::stopped`), L1 | §2 vectors, §3.4 vectors | — |
-
-**Wave 2** (after W1-A: the stopped flag and the current-principal helper)
-
-| Stream | Owns exactly | Depends on | Items | Vectors and generator | Extra acceptance |
-| --- | --- | --- | --- | --- | --- |
-| **W2-C Calls** | `crates/colophon-core/src/v05/calls.rs`, `tests/v5_candidate/cases_freeze_calls.rs`, `conformance/0.5/calls/` cases it generates | W1-A | S (a stopped reader's calls `unavailable`) | `calls/s-stopped-reader-call` | — |
-
-**Wave 3**
-
-| Stream | Owns exactly | Depends on | Items | Vectors and generator | Extra acceptance |
-| --- | --- | --- | --- | --- | --- |
-| **W3-H Home** | `crates/colophon-home-wasm/src/*`, `crates/colophon-core/src/v05/history/home.rs`, `engine/paths.rs`, `engine/exchange.rs`, `relay/*`, `tests/v5_candidate/cases_freeze_home.rs`, new `crates/colophon-core/tests/v05_freeze_home.rs` | W2-C and PR 28 merged | S (the stopped home, §13.6), R (`layouts`, refusal names shown raw) | home tests: each row of §13.6; unknown `refused:` refuses one request | `cargo test -p colophon-home-wasm`, `cargo test -p colophon-core --test v05_freeze_home --test v05_home --test v05_engine_home`, `cd relay && npm test` |
-| **W3-G Write side, exports, SDK surfacing** | `crates/colophon-core/src/v05/account/{read,derived,mod}.rs`, `crates/colophon-ffi/src/v05/api/*` other than W1-P's (and those once W1-P is merged), the three session layers, `playground/src/*` | W1-P, W2-C, W3-H | the stopped status; "waiting for approval" wording for a member no grant names | none new | as W1-P |
-
-W1-P and W3-G both touch the FFI and the session layers, in different waves. At most two builders at once
-(wave 1).
 
 ## 1. F1: Unknown content, one rule
 
@@ -1109,7 +1073,7 @@ For the owner's principles file (private repository):
 | 15 namespace exhaustion by one key | Medium | declaring needs the control rule (§5, spec §8.2, §8.4) |
 | 16 unknown signer without account authentication | Medium | `malformed` unless `key` is a current principal's point; reserved names refused (spec §12.2) |
 | 17 invite closed or open | Medium | in §1's closed list |
-| 18 order of work | Low | dispatchable streams with exact files, W0 stubs, waves (§0) |
+| 18 order of work | Low | streams with exact files, W0 stubs, waves (an internal plan, not kept here) |
 
 **What could not be made sound as asked:** a stopped home cannot keep serving under `members`,
 because every read there is a call and verifying it is a trust decision (item S); a device that knows

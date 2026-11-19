@@ -25,7 +25,7 @@ now in force.
 
 This was checked in code, not only in documents.
 
-- **Mike's library, used by Taupe and Marginalia, is not a 0.4 library.** The shipped apps run
+- **The owner's library, used by Taupe and Marginalia, is not a 0.4 library.** The shipped apps run
   Marginalia's Swift `ColophonAuthority` (`origin/main` `c8280332`). That format is a 0.1 genesis
   with a root and a recovery identity, optionally followed by a root-signed `keyring` entry that
   adopts controllers.
@@ -35,12 +35,11 @@ This was checked in code, not only in documents.
   - Its slots use the labels `colophon/vault-prf/1`, `colophon/sealed-key/1` and others.
   - §16.3 now specifies this format normatively. The candidate's Swift vectors were replayed by
     that exact source, unmodified.
-- The clean copy of Mike's library to 0.4 was never done (recorded in an internal handoff note). I could not
-  inspect his devices, so whether his library has adopted a keyring, and which keys it holds, is
-  unverified.
+- The clean copy of the owner's library to 0.4 was never done. Its devices could not be
+  inspected, so whether that library has adopted a keyring, and which keys it holds, is unverified.
 - That leaves two paths:
   - **in place from 0.4** (§16.1), for libraries made with the 0.4.0 SDK;
-  - **succession from the Swift format** (§16.2), which is Mike's real path. It needs no new
+  - **succession from the Swift format** (§16.2), which is the owner's real path. It needs no new
     account and no new passkey.
 
 ## A. Changes from 0.4

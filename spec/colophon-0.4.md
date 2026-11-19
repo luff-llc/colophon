@@ -1,10 +1,10 @@
 # Colophon 0.4
 
 **Status: interface frozen as v1 on 2026-11-08; implementation and integration complete; final
-freeze (S6) awaits Mike's sign-off and the open deviation below.** The normative implementation is `crates/colophon-core`.
+freeze (S6) awaits the owner's sign-off and the open deviation below.** The normative implementation is `crates/colophon-core`.
 `conformance/0.4/` contains its reproducible vectors. 0.4 is a clean break from 0.3's
 authority: no 0.1 or 0.3 authority record is interpreted. Older libraries move to 0.4 by
-clean copy (`docs/clean-copy.md`).
+clean copy (`colophon-clean-copy` in `reference/swift`).
 
 Colophon 0.4 is [Colophon 0.3](colophon-0.3.md) with its key and authority model replaced by
 [**keys and the keyring**](colophon-0.4-keys.md):

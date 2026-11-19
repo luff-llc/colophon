@@ -239,7 +239,7 @@ Files: `relay/relay.js`, `relay/server.js`, `relay/README.md`.
 
 Files: `reference/swift/Sources/ColophonCleanCopy` (refresh `reference/swift/Sources/ColophonAuthority`
 from Marginalia `origin/main` first: the reference copy lacks the `layout` kind), `crates/colophon-ffi/src/migration.rs`,
-`docs/clean-copy.md`, `docs/app-migration.md`.
+`docs/app-migration.md`.
 
 - 0.4 in place: the host asks whether every writing app reads 0.5, shows the chosen settings,
   and signs `upgrade`.

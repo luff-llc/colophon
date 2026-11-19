@@ -23,9 +23,8 @@ The eight real-home journeys cover both creation directions (Swift → Kotlin an
 - Both SDKs read each other's saved links, preserving UTF-8, combining marks, escapes and NUL.
   Seven encrypted operation files match byte for byte. Each direction delivers a 90,000-byte required
   blob automatically and a 20,000-byte optional blob on demand: 220,000 plaintext bytes per journey.
-- Today the journey approves imported requests **without pairing the request’s signing key**. This
-  violates spec §9.1; confirmed-pairing approval is being fixed in another package (core, exports and
-  sessions). The separate seed-transfer ceremony does not prove paired member approval. The second
+- Every approval spends a confirmed pairing (spec §9.1): the approving device first tries to approve
+  without one and is refused, then the two devices pair and it approves what the pairing confirmed. The second
   device approves a third device of the other SDK; the first revokes it. Refusal codes
   must be exactly `refused:revoked`, and the revoked device reads no new content.
 - Swift proposes a pending policy change that Kotlin displays and vetoes, and vice versa. Each

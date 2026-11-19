@@ -50,14 +50,16 @@ were built ([release packaging](docs/release-packaging.md)); they are unsigned.
 The root Swift package is **ColophonSDK**. It expects the framework at
 `sdk/apple/ColophonFFI.xcframework`: unzip the release's framework there, or build it with
 `bash scripts/build-apple.sh`. Its products are `ColophonSession`, `ColophonSessionUI`,
-`ColophonKeys`, `ColophonKit`, `ColophonKitStorage`, `ColophonMigration` and one kit per domain
+`ColophonKeys`, `ColophonKit`, `ColophonKitStorage`, `ColophonMigration`, `ColophonFFI` (the
+framework itself) and one kit per domain
 (`ColophonSavedKit`, `ColophonBooksKit`, `ColophonListeningKit`, `ColophonNotesKit`).
 
 The four domains are specified in [docs/domains](docs/domains/README.md):
 [`reading.saved`](docs/domains/reading.saved.md), [`reading.books`](docs/domains/reading.books.md),
 [`listening.podcasts`](docs/domains/listening.podcasts.md) and [`notes`](docs/domains/notes.md).
-Apps moving from the shipped Swift libraries follow [migration](docs/migration.md) and
-[app migration](docs/app-migration.md).
+Libraries of the shipped Swift apps move to 0.5 by a verified succession (spec §15 and §16.3,
+the [guide](spec/colophon-0.5-guide.md) §4, `SwiftMove` in `ColophonMigration`);
+[migration](docs/migration.md) and [app migration](docs/app-migration.md) keep the 0.4 history.
 
 ## Build and test from source
 

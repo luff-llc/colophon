@@ -1,5 +1,5 @@
 //! Freeze package, stream W1-A authority: the 0.5 candidate vectors this stream generates.
-//! Only that stream edits this file (`docs/design-freeze-package.md`, §0 "Order of work").
+//! One stream of the freeze package (`docs/design-freeze-package.md`) wrote this file.
 //!
 //! Every case is built from the published test keys and keys derived from fixed labels
 //! (synthetic, never real data). Helpers are local copies of the shapes `cases_v8.rs` uses, so

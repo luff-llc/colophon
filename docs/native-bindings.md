@@ -35,6 +35,6 @@ bash scripts/check-apple-swift.sh          # every product for the iOS and visio
 
 ## Not in the Apple build
 
-Android and JavaScript SDKs, the relay, and the engine speed work live on other branches. A resumed open of 10,000 records is
+The Android and JavaScript SDKs and the relay are documented in [android.md](android.md), [js-session.md](js-session.md) and [the relay README](../relay/README.md). A resumed open of 10,000 records is
 about 0.7 s today, so the session opens off the main actor and shows `opening`. The 0.4 `NativeEngine` and `Library` wrappers
 remain in ColophonKit for tools that read a 0.4 library; the session no longer uses them.

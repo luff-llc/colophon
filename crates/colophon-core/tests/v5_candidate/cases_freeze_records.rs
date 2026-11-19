@@ -1,5 +1,5 @@
 //! Freeze package, stream W2-R records: the 0.5 candidate vectors this stream generates.
-//! Only that stream edits this file (`docs/design-freeze-package.md`, §0 "Order of work").
+//! One stream of the freeze package (`docs/design-freeze-package.md`) wrote this file.
 use super::kit::*;
 
 pub fn part(_out: &mut Out) {}

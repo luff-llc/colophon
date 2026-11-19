@@ -13,7 +13,11 @@
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
-if [[ -z "${ANDROID_HOME:-}" && -d "$HOME/.local/share/luff/android-sdk" ]]; then export ANDROID_HOME="$HOME/.local/share/luff/android-sdk"; fi
+if [[ -z "${ANDROID_HOME:-}" ]]; then
+  for sdk in "$HOME/Library/Android/sdk" "$HOME/Android/Sdk"; do
+    if [[ -d "$sdk" ]]; then export ANDROID_HOME="$sdk"; break; fi
+  done
+fi
 : "${ANDROID_HOME:?Set ANDROID_HOME to the installed Android SDK}"
 if [[ -z "${JAVA_HOME:-}" && -d /opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home ]]; then
   export JAVA_HOME=/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home

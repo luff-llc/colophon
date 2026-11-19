@@ -706,4 +706,3 @@ run the Rust example binary, then `COLOPHON_FFI_BENCH=1 bash scripts/test-swift.
 `crates/colophon-ffi/benchmarks/2026-11-06.json`; build/test logs are local artifacts under
 `target/ffi-validation/`.
 
-<!-- End FFI measurements; keep engine sections separate when merging. -->
