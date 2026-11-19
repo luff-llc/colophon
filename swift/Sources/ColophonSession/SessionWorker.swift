@@ -131,6 +131,15 @@ actor SessionWorker {
     nonisolated static func servicesCover(_ services: [ServiceTerms], audience: String, purpose: String) -> Bool {
         services.contains { $0.audience == audience && purposesCover($0.purposes, [purpose]) }
     }
+    /// Refuses `options` that would widen the request's own bounds (`invalidCommand`): an expiry later than a requested
+    /// one, or a write budget larger than a requested one. `narrowed(requestTerms:options:)` replaces both as given, and
+    /// the core does not compare them with the request (the approver sets them), so this is checked against the request
+    /// as signed before anything is composed or signed.
+    nonisolated static func checkBounds(requestTerms: String, options: GrantOptions) throws {
+        guard let terms = (try? JSONSerialization.jsonObject(with: Data(requestTerms.utf8))) as? [String: Any] else { throw SessionError.invalidCommand }
+        if let expires = options.expires, let asked = terms["expires"] as? String, expires > asked { throw SessionError.invalidCommand }
+        if let budget = options.writeBudget, let asked = (terms["writes"] as? NSNumber)?.uint64Value, budget > asked { throw SessionError.invalidCommand }
+    }
     /// The request's terms narrowed by `grant` (`ServiceGrant`): each granted service names an audience the request asks
     /// for with purposes it asks; `expires` is no later than a requested one; conditions are added to any the request
     /// carries. Everything else is kept. A grant wider than the request, or one that leaves no `records`, `services` or
@@ -1355,6 +1364,9 @@ actor SessionWorker {
                 throw ColophonError.refused(code: "refused:outOfScope", reason: "outOfScope", detail: "this session asked for no service \(purpose) at \(audience)")
             }
             let signing = try await custody.provider(for: id).publicKeys().signing
+            // Judged at the session's clock, not the time of the engine's last refresh.
+            let at = nowMs
+            _ = try await engine.run { try $0.advance(nowMs: at) }
             let target = CallTarget(audiences: [audience], callOrigins: [], controllerPurposes: [], homeEndpoints: [])
             let written = try await engine.execute(custody: custody) { engine in
                 try withEntropy(32) { try engine.beginCall(key: signing, links: [], audience: audience, purpose: purpose, argsJson: argsJSON, target: target, entropy: $0) }

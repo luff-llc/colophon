@@ -148,15 +148,22 @@ import Observation
     /// `pairing`: confirmed on this device for exactly this request's key (spec §9.1), by the six-digit code
     /// (`beginApproval`, `approvalCode`, then `pairing.confirm()` once the person saw the same digits on both
     /// devices) or by `scanRequest`. Any other pairing is refused; a pairing is spent whatever the answer.
-    /// In `grant`, a field left nil inherits the request; a field given must narrow it.
+    /// In `grant`, a field left nil inherits the request; a field given must narrow it: an expiry later than a requested
+    /// one or a write budget larger than a requested one is `SessionError.invalidCommand`, and the pairing is not spent.
     public func approve(_ request: AccessRequest, pairing: AccountPairing, grant: GrantOptions? = nil) async throws {
-        try await approve(request, pairing: pairing, terms: { grant.map { SessionWorker.narrowed(requestTerms: request.termsJSON, options: $0) } })
+        try await approve(request, pairing: pairing, terms: {
+            guard let grant else { return nil }
+            try SessionWorker.checkBounds(requestTerms: request.termsJSON, options: grant)
+            return SessionWorker.narrowed(requestTerms: request.termsJSON, options: grant)
+        })
     }
     /// Approves a request that asks for services (spec §10.1), narrowed by `services` (the services granted, an expiry,
     /// conditions) and, for its records, by `grant`. A grant wider than the request is `SessionError.invalidCommand`, and
     /// the pairing is not spent.
     public func approve(_ request: AccessRequest, pairing: AccountPairing, services: ServiceGrant, grant: GrantOptions? = nil) async throws {
         try await approve(request, pairing: pairing, terms: {
+            // Both are judged against the request as signed: `grant` first (its expiry and write budget), then `services`.
+            if let grant { try SessionWorker.checkBounds(requestTerms: request.termsJSON, options: grant) }
             let records = grant.map { SessionWorker.narrowed(requestTerms: request.termsJSON, options: $0) } ?? request.termsJSON
             return try SessionWorker.narrowed(requestTerms: records, grant: services)
         })
