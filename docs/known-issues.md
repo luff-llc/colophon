@@ -67,5 +67,11 @@ in 0.5.x or in a host.
   `RevokedReopenTest` (a revoked member's cold reopen with saved state, against the real relay)
   failed once on a Mac during the 0.5.0 release runs and passed in twelve repeats and every full
   run. A failure on one machine is rerun on a second before it is believed.
+- The GitHub Actions check fails on one multi-home relay test,
+  `a_silent_peer_does_not_hold_up_forwarding_to_the_others` (`v05_relay_h2`), which asserts that a
+  second home receives a forwarded transition within 3 seconds. It failed twice on the hosted
+  runner on 19 November 2026 with code unchanged since the freeze, whose check passed, and it
+  passes on the Macs (in the release workspace run and five repeats). Several homes are
+  experimental (§21.1 item 3).
 - Several homes per account are experimental; their open issues are in
   [multi-home-open-issues.md](multi-home-open-issues.md).
