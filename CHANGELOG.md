@@ -11,6 +11,7 @@ On main, not in v0.5.0.
   - Provisioned rows record `by`, and `bun relay/server.js provisioned <config>` lists them.
   - No format and no reader rule changes. Core gains `Call::verify_possession`, the existing possession step moved out unchanged.
   - Settings and the issuing and revoking steps are in [relay/README.md](relay/README.md).
+- **Sessions use a grant** (JS, Swift, Kotlin): `SessionConfiguration.services` asks for service terms (§10.1), approving with a `ServiceGrant` can only narrow them, `signCall(audience, purpose, args)` signs a call with the member's own key, and `provisionRequest(door, audience, slot, base, account)` provisions a slot by grant and plugs into `HomeConfiguration.request`. A grant's slot condition must also allow calls naming no slot, since conditions bind the member's own history reads (see the session guides). No format, binding or core change.
 
 ## 0.5.0 — 2026-11-19
 
