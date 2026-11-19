@@ -535,7 +535,10 @@ export class HomeSlot {
         return true;
       }
       const body = await readBody(req, this.limits.authorityBodyBytes);
-      await this.lock(() => this.postAuthority(res, body));
+      // A test marker (traced builds only): the upload holds the slot's lock. The provisioning
+      // door holds the operator slot's lock from a grant's verification to its durable write,
+      // so an upload (a revocation) to that slot is ordered before or after it, never between.
+      await this.lock(() => { this.trace('authority locked'); return this.postAuthority(res, body); });
       return true;
     }
     if (section === 'pending') {
