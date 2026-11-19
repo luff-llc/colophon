@@ -20,14 +20,14 @@ export class Device {
   private constructor(readonly medium: RecordMedium, readonly member: AsyncKeyProvider, readonly owner: AsyncKeyProvider, session: ColophonSession) { this.session = session; }
   static async make(options: {
     medium?: RecordMedium; member?: AsyncKeyProvider; owner?: AsyncKeyProvider; homes?: HomeConfiguration[]; createWithoutHome?: boolean;
-    additional?: AdditionalController[]; namespaces?: string[]; history?: HistoryAccess; headQuorum?: number; secrets?: DeviceSecretStore;
+    additional?: AdditionalController[]; namespaces?: string[]; libraryNamespaces?: string[]; now?: () => number; history?: HistoryAccess; headQuorum?: number; secrets?: DeviceSecretStore;
     privateStore?: PrivateStore; exchangeTimeMs?: number;
   } = {}): Promise<Device> {
     const medium = options.medium ?? new MemoryMedium();
     const member = options.member ?? await WebCryptoKeyProvider.generate();
     const owner = options.owner ?? await WebCryptoKeyProvider.generate();
     const session = new ColophonSession({
-      memberLabel: 'Test device', namespaces: options.namespaces ?? ['notes'], medium, privateStore: options.privateStore ?? new MemoryPrivateStore(),
+      memberLabel: 'Test device', namespaces: options.namespaces ?? ['notes'], libraryNamespaces: options.libraryNamespaces, now: options.now, medium, privateStore: options.privateStore ?? new MemoryPrivateStore(),
       keys: member, ownerController: owner, homes: options.homes ?? [], createWithoutHome: options.createWithoutHome ?? (options.homes === undefined),
       additionalControllers: options.additional ?? [], deviceSecrets: options.secrets ?? new MemoryDeviceSecrets(), history: options.history,
       headQuorum: options.headQuorum, exchangeTimeMs: options.exchangeTimeMs,
