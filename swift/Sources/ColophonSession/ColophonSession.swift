@@ -150,13 +150,59 @@ import Observation
     /// devices) or by `scanRequest`. Any other pairing is refused; a pairing is spent whatever the answer.
     /// In `grant`, a field left nil inherits the request; a field given must narrow it.
     public func approve(_ request: AccessRequest, pairing: AccountPairing, grant: GrantOptions? = nil) async throws {
+        try await approve(request, pairing: pairing, terms: { grant.map { SessionWorker.narrowed(requestTerms: request.termsJSON, options: $0) } })
+    }
+    /// Approves a request that asks for services (spec §10.1), narrowed by `services` (the services granted, an expiry,
+    /// conditions) and, for its records, by `grant`. A grant wider than the request is `SessionError.invalidCommand`, and
+    /// the pairing is not spent.
+    public func approve(_ request: AccessRequest, pairing: AccountPairing, services: ServiceGrant, grant: GrantOptions? = nil) async throws {
+        try await approve(request, pairing: pairing, terms: {
+            let records = grant.map { SessionWorker.narrowed(requestTerms: request.termsJSON, options: $0) } ?? request.termsJSON
+            return try SessionWorker.narrowed(requestTerms: records, grant: services)
+        })
+    }
+    private func approve(_ request: AccessRequest, pairing: AccountPairing, terms: () throws -> String?) async throws {
         await restore()
         let lease = context
         do {
-            let terms = grant.map { SessionWorker.narrowed(requestTerms: request.termsJSON, options: $0) }
-            let snapshot = try await worker.approve(request, pairing: pairing, terms: terms)
+            let snapshot = try await worker.approve(request, pairing: pairing, terms: try terms())
             if lease == context { apply(snapshot) }
         } catch { if lease == context { handleCommandError(error) }; throw error }
+    }
+
+    // MARK: Calls for services (§12)
+
+    /// Signs a call (spec §12.2) for `audience` and `purpose` with `argsJSON` (a JSON object) by this device's member key
+    /// and returns its bytes base64url-encoded, ready for `Authorization: Colophon <call>`. Refused locally, with nothing
+    /// sent: a service this session did not ask for (`refused:outOfScope`, before the key is asked), and any call the
+    /// core's own §12.3 check refuses over what this device holds (its grant's services, expiry or conditions, a
+    /// revocation it holds). Sign a fresh call for each request: a home refuses a replay.
+    public func signCall(audience: String, purpose: String, argsJSON: String) async throws -> String {
+        await restore()
+        return SessionWorker.base64url(try await worker.signCall(audience: audience, purpose: purpose, argsJSON: argsJSON))
+    }
+
+    /// Provisions a slot at a home's door by this member's grant (the reference home's gate `"grant"`, relay/README.md):
+    /// signs a fresh call for `audience` with purpose `home.provision` and args exactly the body
+    /// `{"account","base","slot"}`, POSTs the body to `door` with `Content-Type: application/json`, its `Content-Length`
+    /// and `Authorization: Colophon <call>`, and returns the home's signed member request (§9.1). So it plugs into
+    /// `HomeConfiguration.request`: `request: { account in try await rig.provisionRequest(door: door, audience: audience,
+    /// slot: slot, base: base, account: account) }`. A refusal is a `ProvisionRefusal` with the door's status and code;
+    /// the signer's own refusal is the engine's error and sends nothing. `transport` defaults to
+    /// `URLSessionHomeTransport` (`allowsLoopbackHTTP` for a test door on loopback).
+    public func provisionRequest(door: URL, audience: String, slot: String, base: String, account: String,
+                                 transport: (any HomeTransport)? = nil, allowsLoopbackHTTP: Bool = false) async throws -> Data {
+        let body = SessionWorker.canonicalJSON(["account": account, "base": base, "slot": slot]) ?? "{}"
+        let call = try await signCall(audience: audience, purpose: "home.provision", argsJSON: body)
+        let bytes = Data(body.utf8)
+        let sender = transport ?? URLSessionHomeTransport(allowingLoopbackHTTP: allowsLoopbackHTTP)
+        let answer = try await sender.send(HttpRequest(ticket: 0, home: "", method: .post, url: door.absoluteString, headers: [
+            Header(name: "Content-Type", value: "application/json"), Header(name: "Content-Length", value: String(bytes.count)),
+            Header(name: "Authorization", value: "Colophon \(call)"),
+        ], body: bytes))
+        if answer.status == 200 { return answer.body }
+        let refusal = HomeRefusal(status: answer.status, headers: answer.headers, body: answer.body)
+        throw ProvisionRefusal(status: Int(answer.status), code: refusal?.code, retryAfterSeconds: refusal?.retryAfterSeconds)
     }
 
     // MARK: Pairing before approval (§7.3)

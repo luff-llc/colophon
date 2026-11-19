@@ -70,14 +70,17 @@ final class RelayHome: @unchecked Sendable {
         return "{\"kty\":\"EC\",\"crv\":\"P-256\",\"x\":\"\(b64(point[1..<33]))\",\"y\":\"\(b64(point[33..<65]))\",\"d\":\"\(b64(key.rawRepresentation))\"}"
     }
 
-    /// Start the relay for `account`; `peers` are the other homes of the account (forwarding).
-    func start(account: String, peers: [RelayHome] = []) throws {
+    /// Start the relay for `account`; `peers` are the other homes of the account (forwarding). `provision` is the
+    /// config file's `provision` object (the door), as JSON.
+    func start(account: String, peers: [RelayHome] = [], provision: String? = nil) throws {
         let bun = try Self.bun(), module = try Self.module()
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         try String(Self.nowMs()).write(to: clock, atomically: true, encoding: .utf8)
         let resolve = Dictionary(uniqueKeysWithValues: peers.map { ($0.base, "http://127.0.0.1:\($0.port)/v1/libraries/home") })
         let config = dir.appendingPathComponent("config.json")
-        try JSONSerialization.data(withJSONObject: ["resolve": resolve]).write(to: config)
+        var settings: [String: Any] = ["resolve": resolve]
+        if let provision { settings["provision"] = try JSONSerialization.jsonObject(with: Data(provision.utf8)) }
+        try JSONSerialization.data(withJSONObject: settings).write(to: config)
         let p = Process()
         p.executableURL = bun
         p.arguments = [Self.repository.appendingPathComponent("relay/server.js").path, "--test-clock", "--config", config.path]
@@ -143,6 +146,26 @@ final class RelayHome: @unchecked Sendable {
                 refusals?.append(result ?? "-")
             }
             return answer
+        }
+    }
+
+    /// This relay's door (`POST /v1/provision`) on loopback.
+    var door: URL { URL(string: "http://127.0.0.1:\(port)/v1/provision")! }
+    /// A transport to the door that sets the relay's clock first.
+    func doorTransport() -> any HomeTransport { Slot(relay: self, base: nil, local: "") }
+    /// The transport to a slot this relay provisioned: `base` (its `https://` name) goes to `/v1/libraries/<slot>`.
+    func slotTransport(base: String, slot: String) -> any HomeTransport { Slot(relay: self, base: base, local: "http://127.0.0.1:\(port)/v1/libraries/\(slot)") }
+    private struct Slot: HomeTransport {
+        let relay: RelayHome
+        let base: String?
+        let local: String
+        let inner = URLSessionHomeTransport(allowingLoopbackHTTP: true)
+        func send(_ request: HttpRequest) async throws -> HttpAnswer {
+            relay.setClock(RelayHome.nowMs())
+            guard let base else { return try await inner.send(request) }
+            guard request.url.hasPrefix(base) else { throw URLError(.unsupportedURL) }
+            return try await inner.send(HttpRequest(ticket: request.ticket, home: request.home, method: request.method, url: local + request.url.dropFirst(base.count),
+                                                    headers: request.headers, body: request.body))
         }
     }
 
