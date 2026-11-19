@@ -14,6 +14,10 @@
 //! home refuses its calls and it reads nothing new. A pending key change proposed on the first
 //! device is shown on the second (which holds a control key) and vetoed there. Under `members`
 //! and under `public`, and with two homes at `headQuorum` 2.
+//!
+//! Protocol time is only the test's clock (`World::now`, a second a pass). No home runs a
+//! scheduler timer: the test runs each scheduler pass with `Relay::tick`, and waits (bounded) only
+//! for forwarding between the two homes to arrive (`World::converge`).
 #![allow(clippy::unwrap_used, clippy::too_many_arguments)]
 mod v05_support;
 mod v05_relay;
@@ -40,6 +44,8 @@ struct World {
     unbuilt: Vec<String>,
     /// The `result` of every 403 a home answered, in order.
     refused: Vec<String>,
+    /// With two homes: both hold a head, and `sync` lets them converge before each pass.
+    converging: bool,
 }
 impl World {
     fn tick(&mut self) -> i64 {
@@ -48,6 +54,30 @@ impl World {
     }
     fn relay_for(&self, url: &str) -> &Relay {
         self.relays.iter().find(|r| url.starts_with(&format!("{}/", r.base))).expect("a request for a home of the account")
+    }
+    /// With more than one home: scheduler passes at every home until each serves a head over the
+    /// same seq and holds every other home's head over it (a home judges a call by the heads it
+    /// holds, and forwarding is how it gets the others', §13.1). A device fetches each home's head
+    /// from that home, so without this it can hold a head its other home has not been given yet,
+    /// and that home refuses the call it builds (`unavailable`, `refused:revoked`). The clock moves
+    /// a second first: a home that signed a head at the last reading and has taken entries since
+    /// can sign the head over them only at a later one (heads' `issued` strictly increase, §13.3).
+    fn converge(&mut self, what: &str) {
+        if self.relays.len() < 2 {
+            return;
+        }
+        let now = self.tick();
+        for r in &self.relays {
+            r.set_clock(now);
+        }
+        forwarded(what, &self.relays, || {
+            let own: Vec<Option<u64>> = self.relays.iter().map(|r| r.head_seq("/head")).collect();
+            own[0].is_some()
+                && own.iter().all(|s| *s == own[0])
+                && self.relays.iter().enumerate().all(|(i, r)| {
+                    self.homes.iter().enumerate().all(|(j, id)| i == j || r.head_seq(&format!("/records/heads/{id}.json")) == own[j])
+                })
+        });
     }
 }
 
@@ -61,9 +91,34 @@ fn finish(engine: &AccountEngine, host: &Host, action: Arc<AccountAction>) -> Wr
     engine.finish(action, sigs).unwrap()
 }
 
+/// A pass of `engine` with every home (`pass`). With two homes, once both hold a head (`World::
+/// converging`), the homes first exchange what they forward (`World::converge`), so the device
+/// fetches no head from one home that the other has not been given; and a pass the second home
+/// sent to the primary (421: entries the device pushed before the primary's head over them reached
+/// it, §13.1) is run again once that head has been forwarded. Its 421s are not returned.
+fn sync(w: &mut World, engine: &AccountEngine, src: &MemSource, me: &str) -> Vec<ExchangeFault> {
+    if !w.converging {
+        return pass(w, engine, src, me);
+    }
+    w.converge("the homes hold each other's heads before a pass");
+    let faults = pass(w, engine, src, me);
+    if !faults.iter().any(|f| f.kind == ExchangeFaultKind::Redirect) {
+        return faults;
+    }
+    assert!(
+        faults.iter().all(|f| f.kind != ExchangeFaultKind::Redirect || f.home != w.homes[0]),
+        "only the second home sends the device to the primary: {}",
+        show(&faults)
+    );
+    let mut faults: Vec<ExchangeFault> = faults.into_iter().filter(|f| f.kind != ExchangeFaultKind::Redirect).collect();
+    w.converge("the primary's head over the pushed entries reaches the second home");
+    faults.extend(pass(w, engine, src, me));
+    faults
+}
+
 /// One pass of `engine` with every home, as an app runs it: each request goes to the home its URL
 /// names; each `NeedCall` gets a call built by the engine and signed by `me`.
-fn sync(w: &mut World, engine: &AccountEngine, src: &MemSource, me: &str) -> Vec<ExchangeFault> {
+fn pass(w: &mut World, engine: &AccountEngine, src: &MemSource, me: &str) -> Vec<ExchangeFault> {
     let now = w.tick();
     let mut faults = Vec::new();
     engine.advance(now).unwrap();
@@ -278,7 +333,7 @@ fn journey(history: &str, homes: u8) {
     let r1 = request(&host, &account, &m1, "Mac", AccountMemberKind::Device, terms.clone(), vec![]);
     let a = owner.begin_approve(r1.raw.clone(), terms.to_string(), vec![d.clone()], scanned(&owner, &r1.raw, NOW), host.fresh(32)).unwrap();
     mac.store(&finish(&owner, &host, a).stores);
-    let mut w = World { host, relays, account: account.clone(), homes: home_ids, now: NOW, unbuilt: Vec::new(), refused: Vec::new() };
+    let mut w = World { host, relays, account: account.clone(), homes: home_ids, now: NOW, unbuilt: Vec::new(), refused: Vec::new(), converging: false };
 
     // --- Device one: its member writes a note, a required and an optional blob, and syncs.
     let dev1 = member_engine(&w, &mac, &m1);
@@ -287,26 +342,22 @@ fn journey(history: &str, homes: u8) {
     let optional = put_blob(&mut w, &dev1, &mac, &vec![9u8; 5_000], false);
     // The first upload. At headQuorum 2 a call needs both homes' fresh heads covering the
     // member's grant; the second home stores entries only once a primary head covers them. Until
-    // then the device's own check builds no call and the passes repeat; then every call is built.
+    // then the device's own check builds no call; then every call is built.
     let f = sync(&mut w, &dev1, &mac, &m1);
     assert!(homes > 1 || f.is_empty(), "the first upload and the records: {}", show(&f));
     if homes > 1 {
-        // The second home stores the entries once a primary head covers them (§13.1): the first
-        // home forwards its head on its schedule, and until then the second answers 421.
-        let mut f = f;
-        for _ in 0..50 {
-            assert!(f.iter().all(|f| f.kind == ExchangeFaultKind::Redirect), "{}", show(&f));
-            // Until both homes' fresh heads cover the member's grant, S (the seq covered by
-            // headQuorum heads) is before it: the device's own check says `refused:revoked`, as
-            // the homes would.
-            assert!(w.unbuilt.iter().all(|c| c == "unavailable" || c == "refused:revoked"), "{:?}", w.unbuilt);
-            if f.is_empty() && w.unbuilt.is_empty() {
-                break;
-            }
-            w.unbuilt.clear();
-            std::thread::sleep(std::time::Duration::from_millis(200));
-            f = sync(&mut w, &dev1, &mac, &m1);
-        }
+        // The second home has no primary head yet, so it answers 421 (§13.1); and with one home's
+        // head at most, S (the seq covered by headQuorum heads) is before the grant: the device's
+        // own check builds no call (`unavailable`, `refused:revoked`), as the homes would refuse it.
+        assert!(!f.is_empty() && f.iter().all(|f| f.kind == ExchangeFaultKind::Redirect), "{}", show(&f));
+        assert!(!w.unbuilt.is_empty(), "no call is built before both heads cover the grant");
+        assert!(w.unbuilt.iter().all(|c| c == "unavailable" || c == "refused:revoked"), "{:?}", w.unbuilt);
+        assert!(w.refused.is_empty(), "nothing was sent to be refused: {:?}", w.refused);
+        w.unbuilt.clear();
+        // The first home forwards the entries and its head; the second stores them, signs its own
+        // head over them, and forwards that back.
+        w.converge("each home holds the other's head over the first upload");
+        w.converging = true;
     }
     clean(sync(&mut w, &dev1, &mac, &m1), "");
     assert_eq!(w.unbuilt, Vec::<String>::new(), "every call was built");
@@ -418,18 +469,18 @@ fn journey(history: &str, homes: u8) {
     assert!(p.vetoable, "the phone's control key may veto it");
     let a = phone_owner.begin_veto(digest.clone(), vec![d2.clone()], vec![]).unwrap();
     phone.store(&finish(&phone_owner, &w.host, a).stores);
+    let before_veto = w.relays[0].head_seq("/head");
     clean(sync(&mut w, &phone_owner, &phone, &d2), "the veto is submitted");
-    // The home records `vetoed` on its schedule; the Mac sees the change is no longer pending.
-    let mut vetoed = false;
-    for _ in 0..100 {
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        let _ = sync(&mut w, &dev1, &mac, &m1);
-        if !dev1.pending().unwrap().iter().any(|p| p.digest == digest) {
-            vetoed = true;
-            break;
-        }
+    // The home records `vetoed` in a scheduler pass (the test runs it); the Mac sees the change is
+    // no longer pending.
+    assert!(dev1.pending().unwrap().iter().any(|p| p.digest == digest), "pending before the home records the veto");
+    let now = w.tick();
+    for r in &w.relays {
+        r.set_clock(now);
     }
-    assert!(vetoed, "the veto is recorded at the home and reaches the Mac");
+    ticks_until("the veto is recorded at the home", 3, &w.relays, || w.relays[0].head_seq("/head") > before_veto);
+    clean(sync(&mut w, &dev1, &mac, &m1), "the veto reaches the Mac");
+    assert!(!dev1.pending().unwrap().iter().any(|p| p.digest == digest), "the veto is recorded at the home and reaches the Mac");
 }
 
 fn clean(f: Vec<ExchangeFault>, what: &str) {
