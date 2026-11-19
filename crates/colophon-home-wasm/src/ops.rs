@@ -10,8 +10,8 @@
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use colophon_core::v05::account::{Account, Identity};
 use colophon_core::v05::calls::{
-    home_purposes, home_record_writes, verify_home_request, AccountView, Call, CallConfig,
-    CallSigner, HomeRequest, HomeWrite,
+    home_purposes, home_record_writes, verify_call, verify_home_request, AccountView, Call,
+    CallConfig, CallSigner, HomeRequest, HomeWrite,
 };
 use colophon_core::v05::descriptor::HistoryAccess;
 use colophon_core::v05::encoding::{bounds, canonical, digest, parse_date, strict_parse};
@@ -101,6 +101,7 @@ fn run(input: &[u8]) -> R<Value> {
         "peer_answer" => peer_answer(&req),
         "objects" => objects(&req),
         "member_request" => member_request(&req),
+        "provision_access" => provision_access(&req),
         other => Err(format!("unknown op {other}")),
     }
 }
@@ -2003,4 +2004,192 @@ fn member_request(req: &Value) -> R<Value> {
     };
     let envelope = finish_request(&prepared, &sig).map_err(|e| e.to_string())?;
     Ok(json!({"request": b64(&envelope)}))
+}
+
+// ---------------------------------------------------------------------------------------------
+// Provisioning by a grant from the operator's keyring (operator behaviour of the reference home,
+// not protocol). A request to the door carries a call (§12.2) by a member of the operator
+// account, one of this home's own slots; this op judges it over that slot's verified history
+// with the core's `verify_call` (§12.3) and the replay row the host looked up (§12.4). It adds no
+// rule: the bounds a grant carries are its terms (services audience and purpose, expiry, depth,
+// conditions on `args`), judged by the core.
+
+/// The purpose a provisioning call names: the reference home's own, not the spec's
+/// `colophon.` prefix. The door's audience is unique to it, so no app purpose collides.
+const PROVISION_PURPOSE: &str = "home.provision";
+
+/// `{"query":"audience","audience"}`: whether a configured audience is a §10.1 audience
+/// (`{"valid"}`), for the host's start-up check. `{"query":"members","state"}`: the operator
+/// slot's members as its verified history names them (`{"members":[{"id","label","revoked",
+/// "expires"}]}`), for the operator's listing. Otherwise the decision for one request:
+///
+/// In: `state` (the operator slot), `call` (base64 envelope), `body` (base64: the request body,
+/// already checked by the host to be exactly `{"account","base","slot"}`), `operator` (the
+/// operator account ID), `audience`, `now`, `existing` (the replay row for the call's key, or
+/// null), `signerRows` (the principal's rows, `{"key","at"}`), `replayRows` (the table's size).
+///
+/// Order, as §12.3 orders it: parse (`malformed`); possession (`badSignature`); then the cheap
+/// refusals before any history work: the account (`refused:outOfScope`), the audience
+/// (`refused:audience`), the purpose and `args` equal to the body (`refused:outOfScope`), a
+/// controller or this home's own member as signer (`refused:outOfScope`); then, with a verified
+/// history (else `unavailable`), the full `verify_call` with no home endpoints and no controller
+/// purposes. A refusal is `{"allowed":false,"status":403|503,"result"}`; the principal over its
+/// share of the table `429 refused:window`. Allowed: the member, the acting key's ID and the
+/// reservation, which the host writes durably before any effect. Nothing is reserved for a
+/// refused call.
+fn provision_access(req: &Value) -> R<Value> {
+    match req.get("query").and_then(Value::as_str) {
+        Some("audience") => {
+            let a = str_of(req, "audience")?;
+            return Ok(json!({"valid": colophon_core::v05::terms::valid_audience(a)}));
+        }
+        Some("members") => return provision_members(req),
+        Some(other) => return Err(format!("unknown query {other}")),
+        None => {}
+    }
+    let refuse = |code: String| Ok(json!({"allowed": false, "status": 403, "result": code}));
+    let unavailable = || Ok(json!({"allowed": false, "status": 503, "result": "unavailable"}));
+    let call_bytes = bytes_of(req, "call")?;
+    let call = match Call::parse(&call_bytes) {
+        Ok(c) => c,
+        Err(f) => return refuse(f.code()),
+    };
+    if let Err(f) = call.verify_possession() {
+        return refuse(f.code());
+    }
+    if call.account != str_of(req, "operator")? {
+        return refuse("refused:outOfScope".into());
+    }
+    let audience = str_of(req, "audience")?.to_string();
+    if call.audience != audience {
+        return refuse("refused:audience".into());
+    }
+    if call.purpose != PROVISION_PURPOSE {
+        return refuse("refused:outOfScope".into());
+    }
+    let body: Value = match serde_json::from_slice(&bytes_of(req, "body")?) {
+        Ok(v) => v,
+        Err(_) => return refuse("malformed".into()),
+    };
+    let same = match (canonical(&call.args), canonical(&body)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    };
+    if !same {
+        return refuse("refused:outOfScope".into());
+    }
+    // A controller's key is for authority; delegation is a member grant, revocable alone.
+    let CallSigner::Member(member) = &call.signer else {
+        return refuse("refused:outOfScope".into());
+    };
+    let member = member.clone();
+    // No operator slot set up on this home (the host passes no state): nothing to verify over.
+    if req.get("state").is_none_or(Value::is_null) {
+        return unavailable();
+    }
+    let l = load(req)?;
+    // This home serves the account as its home; it provisions nothing for itself.
+    if member == l.slot.home {
+        return refuse("refused:outOfScope".into());
+    }
+    if l.slot.account != str_of(req, "operator")? {
+        return Err("the operator slot serves another account".into());
+    }
+    let now_ms = i64_of(req, "now")?;
+    let Some(h) = l.home.as_ref() else {
+        return unavailable();
+    };
+    let v = match view(h, now_ms) {
+        Ok(v) => v,
+        Err(_) => return unavailable(),
+    };
+    if v.stopped {
+        return unavailable();
+    }
+    let objects = held(h)?;
+    let verdict = verify_history(&objects, &v.persisted, now_ms);
+    let Ok(account_view) = AccountView::from_history_verifier(&verdict, &objects, now_ms) else {
+        return unavailable();
+    };
+    let existing = req.get("existing").filter(|e| !e.is_null()).map(|e| {
+        (
+            e["at"].as_i64().unwrap_or(0),
+            e["digest"].as_str().unwrap_or_default().to_string(),
+        )
+    });
+    let mut store = OneRow { existing };
+    let audiences = [audience];
+    let origins = BTreeMap::new();
+    let cfg = CallConfig {
+        now_ms,
+        audiences: &audiences,
+        call_origins: &origins,
+        controller_purposes: &[],
+        home_endpoints: &[],
+    };
+    let vc = match verify_call(&call_bytes, &account_view, &cfg, &mut store) {
+        Ok(vc) => vc,
+        Err(f) if f.code() == "unavailable" => return unavailable(),
+        Err(f) => return refuse(f.code()),
+    };
+    // The principal's share of the provisioning table, as for a slot's calls (§12.4).
+    let signer = signer_text(&vc.call.signer);
+    let mut live = 0usize;
+    let mut oldest: Option<i64> = None;
+    let mut drop = Vec::new();
+    for row in req
+        .get("signerRows")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let at = row["at"].as_i64().unwrap_or(i64::MIN);
+        if retained(at, now_ms) {
+            live += 1;
+            oldest = Some(oldest.map_or(at, |o| o.min(at)));
+        } else {
+            drop.push(row["key"].clone());
+        }
+    }
+    let capacity = req
+        .get("replayRows")
+        .and_then(Value::as_u64)
+        .map_or(DEFAULT_REPLAY_ROWS, |n| n as usize);
+    let principals = v.state.keyring().controllers.len()
+        + v.state
+            .members()
+            .iter()
+            .filter(|m| m.revoked_seq.is_none())
+            .count();
+    let share = (capacity / principals.max(1)).max(MIN_SHARE);
+    if live >= share {
+        let wait_ms = oldest.map_or(60_000, |o| (o + RETENTION_MS + 1 - now_ms).max(1_000));
+        return Ok(json!({"allowed": false, "status": 429, "result": "refused:window",
+                         "retryAfter": (wait_ms + 999) / 1000, "drop": drop}));
+    }
+    Ok(json!({
+        "allowed": true, "member": member, "key": key_id(&vc.call.key), "drop": drop,
+        "reserve": {"key": key_text(&vc.replay_key), "signer": signer, "at": now_ms,
+                    "digest": vc.call.digest},
+    }))
+}
+
+/// The operator slot's members, for the listing: ID, label, whether revoked, expiry (ms).
+fn provision_members(req: &Value) -> R<Value> {
+    let l = load(req)?;
+    let now_ms = i64_of(req, "now")?;
+    let Some(h) = l.home.as_ref() else {
+        return Ok(json!({"members": []}));
+    };
+    let v = view(h, now_ms)?;
+    let members: Vec<Value> = v
+        .state
+        .members()
+        .iter()
+        .map(|m| {
+            json!({"id": m.request.member_id(), "label": m.request.label,
+                   "revoked": m.revoked_seq.is_some(), "expires": m.expires_ms})
+        })
+        .collect();
+    Ok(json!({"members": members}))
 }
