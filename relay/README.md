@@ -142,8 +142,8 @@ without its token is 401, and a home slot answers `GET {base}` with 200. That is
 names are not secrets, and access is by call (or, at a 0.3 slot, by token), never by knowing a name.
 
 **The client address.** The per-address request limit and `perAddressPerHour` count against one
-address, from one function. By default it is the socket address. Behind a proxy (the staging home
-sits behind a Cloudflare tunnel, so every request comes from 127.0.0.1) set `clientAddress`: the
+address, from one function. By default it is the socket address. Behind a proxy (behind a tunnel,
+every request comes from 127.0.0.1) set `clientAddress`: the
 header is read only when the socket peer is in `trustedPeers`; from a trusted peer a missing or
 malformed header (a list, two headers, not an IP address) counts against one shared bucket, never
 an unlimited one; from any other peer the header is ignored. The address is used for limits only,
@@ -158,7 +158,7 @@ rate work: 204, with the allowed methods (`GET, POST, PUT, OPTIONS`) and headers
 listed origin's preflight.
 
 **Clients must send `Content-Length`.** A body without one is refused with 411. A proxy that passes
-chunked bodies through (the Cloudflare tunnel does) reaches the relay as 411.
+chunked bodies through (some tunnels do) reaches the relay as 411.
 
 **Credentials.** At a home slot a bearer token authorizes nothing (it is ignored, with a warning
 at start-up): every request that needs authorization takes `Authorization: Colophon …`. The key

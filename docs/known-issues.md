@@ -13,6 +13,12 @@ in 0.5.x or in a host.
   without one unless `createWithoutHome` is set. That collides with libraries that today sync
   only through a shared folder; whether an import account may start without a home is an open
   host-rule question for 0.5.x, not a format question.
+- **A revoke keeps only what this device holds.** Keeping everything a revoked member wrote
+  names that member's heads in each namespace the revoking device holds. An app syncs only its
+  `libraryNamespaces`, so a revoke made from an app with a narrower library, on its own storage,
+  drops what the member wrote in the namespaces it does not hold. Revoke from an app or device
+  that holds every namespace the member wrote in when keeping matters; making the revoking engine
+  fetch every namespace first is a 0.5.x change (no format changes).
 - A member whose own `namespaces` is empty (a service or identity-only member) is reported
   `ready` without its grant's expiry or provisional state being checked: the sessions judge
   readiness by asking for each of the member's namespaces.
@@ -20,10 +26,13 @@ in 0.5.x or in a host.
   - a session whose `libraryNamespaces` was wider than its own `namespaces` came out `denied`
     right after `create()` (Swift, Kotlin, JS); readiness now follows the member's own namespaces;
   - the owner's engine was scoped to the app's `libraryNamespaces`, so a revoke made from an app
-    with a narrower library dropped what the revoked member wrote in the other namespaces (Swift,
-    Kotlin, JS); the owner's engine now sees every namespace;
-  - the Swift `approve(_:pairing:grant:)` filled a `GrantOptions` field left nil from the
-    approving app's own namespaces and read-write access instead of from the request;
+    with a narrower library dropped what the revoked member wrote in the other namespaces even when
+    this device held them (Swift, Kotlin, JS); the owner's engine now reads every namespace this
+    device holds (see the next item for what it does not hold);
+  - the Swift `approve(_:pairing:grant:)` rebuilt the grant's terms from scratch: a field left nil
+    took the approving app's own namespaces and read-write access, per-namespace access and kinds
+    were lost, and the core refused the grant after spending the pairing. A grant now narrows the
+    request's own terms;
   - the JS session did not load a member's engine when there was nothing to unlock, so a revoked
     member reopening cold came out `failed` instead of `denied`.
 

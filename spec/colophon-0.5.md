@@ -429,7 +429,7 @@ an account is resolved only by obtaining the history and checking the prefix.
 ### 6.1 Controller
 
 ```json
-{"key":{…},"label":"Passkey","roles":["approve","control"],"verification":true,"holder":"mike"}
+{"key":{…},"label":"Passkey","roles":["approve","control"],"verification":true,"holder":"owner"}
 ```
 
 | Field | Rule |
