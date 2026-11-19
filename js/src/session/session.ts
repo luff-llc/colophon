@@ -129,8 +129,8 @@ export class ColophonSession {
     await this.restore();
     const lease = this.context;
     const failureRevision = this.commandFailureRevision;
-    const marked = this.phase.kind === 'ready';
-    if (marked) { this.set({ phase: { kind: 'refreshing' } }); this.refreshMark++; }
+    let marked = false;
+    if (this.phase.kind === 'ready') { this.set({ phase: { kind: 'refreshing' } }); this.refreshMark++; marked = true; }
     // This refresh's generation. A refresh that a newer one has since re-marked is stale: its outcome (snapshot or error) is
     // dropped and the phase follows the newer one.
     const generation = this.refreshMark;
