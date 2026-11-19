@@ -1,6 +1,6 @@
 # Colophon 0.5
 
-**Status: frozen 0.5, revision 18, 2026-11-16.** The 0.5 formats and the rules by which a reader
+**Status: frozen 0.5, revision 18, 2026-11-16; released as 0.5.0 on 2026-11-19.** The 0.5 formats and the rules by which a reader
 judges an account are frozen for now. The freeze is provisional: the gaps listed in §21 are closed
 in 0.5.x without changing any format, and §21.1 lists what 0.5.0 does not do. History of the
 revisions: revision 2 answered two reviews of revision 1 (152d991); revision 3 answered two reviews of revision 2
@@ -2721,7 +2721,7 @@ in 0.5.x without changing any format. What 0.5.0 does not do is listed in §21.1
    named outcome per case (built at `conformance/0.5/candidate/` and moved at the freeze, bytes
    unchanged), and the Rust verifier replays every case
    (`crates/colophon-core/tests/v05_candidate.rs`, `candidate_conformance`). Its README lists them
-   and indexes what covers each required item. The final runs, 16 November 2026, at commit `b4bc915` (every later commit of the freeze changes text only), all with exit 0: on a Mac (macOS 27.2, Xcode 27.1, arm64) the home suite with its kill loop, the workspace (935 passed, 0 failed, the relay tests required) and the Swift suite (129 tests) on a framework built from that commit; on a second Mac (macOS 27, arm64) the Kotlin suite, the cross-platform journeys (16 tests, with 19 Swift tests and the Kotlin side) and the JS suite (55 tests and 8 in a browser); on a Linux x86-64 machine the home suite, the workspace (935 passed, 0 failed) and the JS suite. One stopped-home relay test that uses two homes failed once on the Linux machine on the commit before, under load, and passed on every other run including twelve repeats; it is listed as timing-sensitive.
+   and indexes what covers each required item. The release runs, 19 November 2026, on the code of commit `aa08023` (every later commit changes text only), all with exit 0: on a Mac (macOS 27.2, Xcode 27.1, arm64, Rust 1.99.1) the home suite with its kill loop (283 kills), the workspace (935 passed, 0 failed, the relay tests required) and the Swift suite (136 tests) on a framework built from that code; on a second Mac (macOS 27.0.1, arm64, Rust 1.99.1) the Kotlin suite (76 tests) and the JS suite (63 tests and 8 in a browser). The Linux machine and the cross-platform journeys were not run for the release; the code they cover changed only in the three sessions' fixes, which their own suites cover. One Kotlin test (`RevokedReopenTest`, a revoked member's cold reopen against the relay) failed once on the second Mac in an earlier run that day and passed in twelve repeats and every later full run. The freeze runs, 16 November 2026, at commit `b4bc915`, also all exited 0, on the same two Macs and a Linux x86-64 machine, with the cross-platform journeys; one stopped-home relay test that uses two homes failed once on the Linux machine on the commit before, under load, and passed on every other run including twelve repeats. Both tests are listed as timing-sensitive in [docs/known-issues.md](../docs/known-issues.md).
 
    **Required items with no vector or test (open).** The index in
    [conformance/0.5/README.md](../conformance/0.5/README.md) finds none for:

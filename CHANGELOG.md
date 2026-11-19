@@ -1,6 +1,10 @@
 # Changelog
 
-## 0.5.0 — 2026-11-16
+## 0.5.0 — 2026-11-19
+
+Frozen on 2026-11-16 (spec revision 18) and released on 2026-11-19. Nothing was published in
+between, so the fixes found in that time are part of 0.5.0 rather than a 0.5.1; none changes a
+format. They are listed under "Fixed before release".
 
 **One portable identity: an account.** An account is a keyring of controllers whose identifier is
 the digest of its first authority record. Members (apps, devices, agents, servers) act under
@@ -62,6 +66,23 @@ see §21); [changes from 0.4](spec/colophon-0.5-changes.md);
 - **JavaScript:** the session layer over the web exports.
 - One iPhone and one Android device on one account, and test apps for both. The SDKs show a
   stopped account and a home's refusals.
+
+### Fixed before release
+
+- **Sessions (Swift, Kotlin, JS):** a session whose `libraryNamespaces` is wider than its own
+  `namespaces` is ready after `create()`; it came out `denied`. Readiness and published revisions
+  follow the member's own namespaces.
+- **Sessions (Swift, Kotlin, JS):** the owner's engine reads every namespace the device holds, not
+  only the app's `libraryNamespaces`, so a revoke from an app with a narrower library keeps what
+  the revoked member wrote in the other namespaces held there.
+- **Swift:** `approve(_:pairing:grant:)` narrows the request's own terms. It rebuilt them, so a
+  grant that changed only the expiry or budget lost per-namespace access and kinds, and the core
+  refused it after spending the pairing.
+- **JS:** a revoked member reopening cold is `denied`; it came out `failed` because its engine was
+  never loaded.
+- **Repository:** internal working notes left the tree, the scripts no longer name a build
+  machine's paths, and [docs/known-issues.md](docs/known-issues.md) lists the implementation gaps
+  beside spec §21.1.
 
 ### The reference relay
 
