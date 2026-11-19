@@ -53,6 +53,8 @@ import Observation
     @ObservationIgnored private var refreshMark: UInt64 = 0
     /// The refresh a refused command started (`handleCommandError`), for hosts and tests that must see its outcome.
     @ObservationIgnored private(set) var refusalRefresh: Task<Void, Never>?
+    /// A test seam: awaited by every refresh after the worker answered and before its outcome is published. Nil outside tests.
+    @ObservationIgnored var refreshWillFinish: (@MainActor () async throws -> Void)?
     @ObservationIgnored private var retryCreate = false
 
     public init(configuration: SessionConfiguration) {
@@ -93,21 +95,26 @@ import Observation
         await restore()
         let lease = context
         let failureRevision = commandFailureRevision
-        var mark: UInt64?
-        if phase == .ready { phase = .refreshing; refreshMark &+= 1; mark = refreshMark }
+        let marked = phase == .ready
+        if marked { phase = .refreshing; refreshMark &+= 1 }
+        // This refresh's generation. A refresh that a newer one has since re-marked is stale: its outcome (snapshot or
+        // error) is dropped and the phase follows the newer one.
+        let generation = refreshMark
+        var current: Bool { generation == refreshMark && lease == context }
         // A finished refresh never leaves the phase at `refreshing`: whatever path ends it (cancelled, a snapshot apply()
         // ignored, a command failure that set no phase), the phase this refresh replaced comes back.
-        defer { if let mark, mark == refreshMark, lease == context, phase == .refreshing { phase = .ready } }
+        defer { if marked, current, phase == .refreshing { phase = .ready } }
         // A command that failed while this refresh was in flight keeps the phase its failure set; a failure that set none
         // leaves the refresh's own outcome to decide.
         var failureHoldsPhase: Bool { failureRevision != commandFailureRevision && phase != .refreshing }
         do {
             let snapshot = try await worker.refresh()
-            guard lease == context, !Task.isCancelled else { return }
+            try await refreshWillFinish?()
+            guard current, !Task.isCancelled else { return }
             if snapshot.phase == .ready, failureHoldsPhase { return }
             apply(snapshot)
             await startWatching()
-        } catch { if lease == context, !failureHoldsPhase { fail(error) } }
+        } catch { if current, !failureHoldsPhase { fail(error) } }
     }
     /// Creates the account for this device: the owner controller, this device's member, and (spec §18) the
     /// configured homes appointed at once. A passkey owner is asked more than once at first run (see

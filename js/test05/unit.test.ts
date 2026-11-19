@@ -497,6 +497,51 @@ describe('the refreshing phase', () => {
     hold = false;
     first.close(); asking.close();
   });
+
+  // The refreshes held at `refreshWillFinish`, numbered in the order they reach it: a held one waits there (its worker has
+  // answered, its outcome is not published) until the test releases it, with or without an error.
+  const refreshHolds = (holding: number[]) => {
+    let count = 0;
+    const arrived = new Map<number, () => void>(); const arrivals = new Map<number, Promise<void>>();
+    const gates = new Map<number, { release: () => void; fail: (error: Error) => void }>();
+    for (const n of holding) arrivals.set(n, new Promise<void>(resolve => { arrived.set(n, resolve); }));
+    return {
+      reached: (): Promise<void> => {
+        const n = ++count;
+        if (!holding.includes(n)) return Promise.resolve();
+        return new Promise<void>((release, fail) => { gates.set(n, { release, fail }); arrived.get(n)!(); });
+      },
+      waiting: (n: number): Promise<void> => arrivals.get(n)!,
+      release: (n: number, error?: Error): void => { const gate = gates.get(n)!; if (error) gate.fail(error); else gate.release(); },
+    };
+  };
+  // R1 is held after its worker answered; another refresh publishes `ready`; R2 marks `refreshing` and is held. R1, now stale,
+  // finishes or fails afterwards: its outcome is dropped and the phase follows R2.
+  for (const failing of [false, true]) {
+    test(`a stale refresh that ${failing ? 'fails' : 'finishes'} after a newer one marked refreshing is dropped`, async () => {
+      const device = await Device.make();
+      await device.session.create();
+      await device.session.flushExternalChanges();
+      expect(device.session.phase.kind).toBe('ready');
+      const holds = refreshHolds([1, 3]);
+      device.session.refreshWillFinish = holds.reached;
+      const r1 = device.session.refresh();
+      await holds.waiting(1);
+      expect(device.session.phase.kind).toBe('refreshing');
+      await device.session.refresh(); // the second to reach the hold, not held: it publishes `ready`
+      expect(device.session.phase.kind).toBe('ready');
+      const r2 = device.session.refresh();
+      await holds.waiting(3);
+      expect(device.session.phase.kind).toBe('refreshing');
+      holds.release(1, failing ? StorageError.unavailable('the disk is gone') : undefined);
+      await r1;
+      expect(device.session.phase.kind).toBe('refreshing');
+      holds.release(3);
+      await r2;
+      expect(device.session.phase.kind).toBe('ready');
+      device.close();
+    });
+  }
 });
 
 describe('a cancelled or broken pass never leaves the engine waiting', () => {

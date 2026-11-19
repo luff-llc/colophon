@@ -80,6 +80,8 @@ class ColophonSession(configuration: SessionConfiguration) : AutoCloseable {
     /** The refresh a refused command started ([handleCommandError]), for hosts and tests that must see its outcome. */
     internal var refusalRefresh: Job? = null
         private set
+    /** A test seam: awaited by every refresh after the worker answered and before its outcome is published. Null outside tests. */
+    internal var refreshWillFinish: (suspend () -> Unit)? = null
     private var retryCreate = false
     private val submissions = LinkedHashMap<String, Submission>()
     private val syncSignal = Channel<Unit>(Channel.CONFLATED)
@@ -132,23 +134,28 @@ class ColophonSession(configuration: SessionConfiguration) : AutoCloseable {
         restore()
         val lease = context
         val failureRevision = commandFailureRevision
-        var mark: Long? = null
-        if (phase == SessionPhase.Ready) { set { copy(phase = SessionPhase.Refreshing) }; mark = ++refreshMark }
+        val marked = phase == SessionPhase.Ready
+        if (marked) { set { copy(phase = SessionPhase.Refreshing) }; refreshMark++ }
+        // This refresh's generation. A refresh that a newer one has since re-marked is stale: its outcome (snapshot or
+        // error) is dropped and the phase follows the newer one (Swift's rule).
+        val generation = refreshMark
+        fun current() = generation == refreshMark && lease == context
         // A command that failed while this refresh was in flight keeps the phase its failure set; a failure that set none
-        // leaves the refresh's own outcome to decide (Swift's rule).
+        // leaves the refresh's own outcome to decide.
         fun failureHoldsPhase() = failureRevision != commandFailureRevision && phase != SessionPhase.Refreshing
         try {
             val snapshot = worker.refresh()
-            if (lease != context) return@facade
+            refreshWillFinish?.invoke()
+            if (!current()) return@facade
             if (snapshot.phase == SessionPhase.Ready && failureHoldsPhase()) return@facade
             apply(snapshot)
             startWatching()
         } catch (e: CancellationException) { throw e
-        } catch (e: Exception) { if (lease == context && !failureHoldsPhase()) fail(e)
+        } catch (e: Exception) { if (current() && !failureHoldsPhase()) fail(e)
         } finally {
             // A finished refresh never leaves the phase at `Refreshing`: whatever path ends it (cancelled, a snapshot apply()
             // ignored, a command failure that set no phase), the phase this refresh replaced comes back.
-            if (mark != null && mark == refreshMark && lease == context && phase == SessionPhase.Refreshing) set { copy(phase = SessionPhase.Ready) }
+            if (marked && current() && phase == SessionPhase.Refreshing) set { copy(phase = SessionPhase.Ready) }
         }
     }
 
