@@ -1,2 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest />
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- CredentialManagerAdapter asks, with no UI, whether a just-created passkey is offered yet (Android 14+). -->
+    <uses-permission android:name="android.permission.CREDENTIAL_MANAGER_QUERY_CANDIDATE_CREDENTIALS" />
+</manifest>
