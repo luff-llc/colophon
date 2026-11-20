@@ -43,6 +43,7 @@ field; `u64` and `i64` are `bigint`; `optional<T>` is `undefined`.
 | `AccountCreation` | Creation before any store exists: PRF, genesis, first `rekey`; the result is the account ID and the stores; `open_engine(source, listing, namespaces, batch, key, now_ms)` then opens the session over the stored result, unlocked as the creation left it (the owner is asked once at first run). |
 | `SwiftSuccessorCreation` | The genesis of the account that succeeds a Swift library: the carried controllers, the rebuilt slots (one passkey assertion each), the `handover`; the result is the account ID and the stores. Every other step of the Swift move needs an account made this way. |
 | `AccountRequest` | A device's membership request before it is a member (public values only). |
+| `AccountHistoryRead` | A `colophon.history.read` call by a member that holds no history yet (joining at an invite's head, 0.5.2): `asOf` the head it was given, one `GET` at a home path that serves the history; `finish` returns the envelope, its URL and the `Authorization` value. |
 | `AccountPairing`, `PairingFailureLimiter`, `PairingTransferKey` | The pairing ceremony (§7.3). A confirmed `AccountPairing` is also what approving a member spends (§9.1): see "Approving a member" below. |
 | `AccountMove` | A prepared move step: the 0.4 upgrade, a Swift veto, F, a copier's shares, the migration. |
 | `SwiftSource`, `SwiftCopyPlan`, `SwiftCopyDestination`, `SwiftCopyResult`, `AccountCopyWrite` | The Swift record copy: the predecessor library with its vault and keys, the plan with the host's translator, the import writes, the finished copy. |
@@ -192,6 +193,12 @@ Standalone: `account_verify_history`, `account_webauthn_check(KeyDescriptorView,
 authenticator_data, client_data, WebauthnMode)`, `account_verify_swift_predecessor`, `account_key_id`,
 `account_webauthn_prf_input`, `account_vault_public`, `account_format_date`, `account_request_info`,
 `account_default_policy`.
+
+Joining at an invite's head (0.5.2): `account_history_page_path(after)`, `account_history_page(body)` (one page of
+`GET {base}/authority`), `account_verify_at_head(account, seq, head, request, base, signed_head, entries, now_ms)` (accept
+a fetched history only when it verifies `ok`, is the account's, holds the head at `seq`, ends at the home's fresh signed
+head and grants the member of `request` from exactly that request; `admitted` false when it names no such member) and
+`account_current_webauthn_controller(entries, id, now_ms)`. The SDKs wrap them as `ColophonJoin`.
 
 ### A stopped account
 

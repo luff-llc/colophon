@@ -28,10 +28,11 @@ class Device(
     /** The member key the session uses, when not `member` (a test that watches its signatures). */
     keys: AsyncKeyProvider? = null,
 ) {
-    val session = ColophonSession(SessionConfiguration(
+    val configuration = SessionConfiguration(
         memberLabel = "Test device", namespaces = namespaces, services = services, libraryNamespaces = libraryNamespaces, medium = storage, privateDirectory = dir, keys = keys ?: member,
         ownerController = owner, homes = homes, createWithoutHome = createWithoutHome, additionalControllers = additional,
-        deviceSecrets = secrets, history = history, headQuorum = headQuorum, now = now))
+        deviceSecrets = secrets, history = history, headQuorum = headQuorum, now = now)
+    val session = ColophonSession(configuration)
 
     suspend fun close() { session.shutdown(); dir.deleteRecursively() }
 

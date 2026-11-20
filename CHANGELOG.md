@@ -2,9 +2,32 @@
 
 ## Unreleased
 
-Text only, with no format, reader-rule or version change. The spec stays Colophon 0.5, revision 18.
+No format, reader-rule or version change. The spec stays Colophon 0.5, revision 18.
 
 - **An account that syncs only through a shared folder may be created without a home** (spec §18, §13.1, §6.4, guide §5; changes row 240). It read "a host MUST create every account with at least one". A host that creates one MUST warn the person, and SHOULD offer a second unit when a home is later appointed. A host SHOULD NOT add a separate recovery unit (a `recover`-only controller such as a recovery kit) without also appointing a home, and MUST give the §6.4 warning (no theft safety) whenever an account has one and no home. `createWithoutHome` is the supported path for folder-only libraries ([docs/session.md](docs/session.md)); like the other §6.4 warnings, the sessions give these only after creation, so the app warns before `create()` (§21.1 item 7).
+- **Joining at a history head** (core, FFI, Kotlin, Swift; no home change): a device that holds only an account ID, a home's base, the
+  head of the history `(seq, entry digest)` and its own member keys can ask to join and, once approved, fetch the
+  history from the home. This lets an invite carry the head instead of the whole `authority/` history (small enough
+  for a QR code).
+  - `ColophonJoin` (Kotlin and Swift) is built from the session configuration, the account ID, the home and the head.
+    `request()` makes and stores the member's signed request at `requests/<member ID>.json` by the session's own code,
+    so the session opened afterwards finds and reuses it. `fetchHistory()` reads `GET {base}/authority` with a
+    `colophon.history.read` call signed by the member key, `asOf` the head, and `GET {base}/head`. It returns `waiting`
+    while the home refuses the call with `403 refused:revoked` (no grant names the key; 0.5 gives the same result after
+    a revocation) or the history names no such member. It returns the files only when the history verifies `ok`, is the
+    account's, holds the head at `seq`, ends at the home's fresh signed head, and grants this member from exactly the
+    stored request, still current. Any other refusal or check is an error: `refused:fork` (another account or digest),
+    `refused:rollback` (a history shorter than the signed head), `refused:revoked` / `refused:expired`,
+    `refused:conflict` (a grant of another request), `unavailable` (a history short of the head, a head behind).
+    `ColophonJoin.ownerDescriptor` reads a current WebAuthn controller's descriptor (`rp`, credential, origins) from the
+    verified history by key ID.
+  - Core: `write::calls::prepare_history_read` / `finish_history_read` (a history read with no engine or held history,
+    only at a path that serves the history, `args` bound as a home checks them) and `v05::join` (`history_page_path`,
+    `parse_history_page`, `verify_at_head`, `current_webauthn_controller`). FFI: `AccountHistoryRead`,
+    `account_history_page_path`, `account_history_page`, `account_verify_at_head`,
+    `account_current_webauthn_controller`.
+  - The session's own request moved, unchanged, to one helper the join shares (`OwnRequest`).
+
 
 ## 0.5.1 — 2026-11-20
 
