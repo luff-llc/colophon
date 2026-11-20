@@ -1826,9 +1826,37 @@ fn genesis_receipt_request(h: &HomeState, home: &str, now_ms: i64) -> R<Option<V
         .map(|p| json!({"object": p.object(), "body": b64(p.step().body())})))
 }
 
+// What `waiting` costs, counted for the tests (a no-op in any other build): the full-history
+// verifications it starts, and the recording entries it tries to build (`prepare_*` calls).
+#[cfg(test)]
+thread_local! {
+    static WAITING_WORK: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
+}
+#[cfg(test)]
+fn tally(verifications: usize, prepares: usize) {
+    WAITING_WORK.with(|c| {
+        let (v, p) = c.get();
+        c.set((v + verifications, p + prepares));
+    });
+}
+#[cfg(not(test))]
+#[inline(always)]
+fn tally(_verifications: usize, _prepares: usize) {}
+
 /// Why nothing was recorded: what each held transition, veto and activation is waiting for.
+///
+/// The held objects are verified once, and every entry is built over that one verified state.
+/// A transition already recorded on the branch, and a veto of one, is not tried: nothing more
+/// can be recorded of it, and `pending` keeps settled objects for ever, so trying them made
+/// this note cost O(everything held × history) on every pass. At an unresolved fork there is
+/// no verified head to say what is recorded, so every held object is tried as before.
 fn waiting(h: &HomeState, objects: &Objects, now_ms: i64) -> Value {
-    use colophon_core::v05::write::authority::{prepare_activate, prepare_final, prepare_vetoed};
+    use colophon_core::v05::write::authority::{
+        prepare_activate_verified, prepare_final_verified, prepare_vetoed_verified, VerifiedHead,
+    };
+    tally(1, 0);
+    let verified = VerifiedHead::new(objects, now_ms);
+    let settled = |transition: &str| verified.state().is_ok_and(|s| s.is_recorded(transition));
     let mut why: Vec<String> = objects
         .pending
         .iter()
@@ -1837,9 +1865,13 @@ fn waiting(h: &HomeState, objects: &Objects, now_ms: i64) -> Value {
                 .ok()
         })
         .filter_map(|e| match e.value.get("protocol").and_then(Value::as_str) {
-            Some("colophon/transition/5") => prepare_activate(objects, now_ms, &e.digest)
-                .err()
-                .map(|x| format!("activate {}: {x}", &e.digest[..8])),
+            Some("colophon/transition/5") if !settled(&e.digest) => {
+                // At a fork, `prepare_activate` verifies the branch a `resolve` is anchored on.
+                tally(usize::from(verified.fork()), 1);
+                prepare_activate_verified(objects, &verified, now_ms, &e.digest)
+                    .err()
+                    .map(|x| format!("activate {}: {x}", &e.digest[..8]))
+            }
             Some("colophon/veto/5") => {
                 let t = e
                     .value
@@ -1847,16 +1879,22 @@ fn waiting(h: &HomeState, objects: &Objects, now_ms: i64) -> Value {
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_string();
-                prepare_vetoed(objects, now_ms, &t, &e.digest)
+                if settled(&t) {
+                    return None;
+                }
+                tally(0, 1);
+                prepare_vetoed_verified(objects, &verified, now_ms, &t, &e.digest)
                     .err()
                     .map(|x| format!("vetoed {}: {x}", &e.digest[..8]))
             }
             _ => None,
         })
         .collect();
+    tally(1, 0);
     if let Ok(v) = view(h, now_ms) {
         for a in v.state.activations().iter().filter(|a| !a.final_) {
-            if let Err(e) = prepare_final(objects, now_ms, a.seq) {
+            tally(0, 1);
+            if let Err(e) = prepare_final_verified(objects, &verified, now_ms, a.seq) {
                 why.push(format!("final {}: {e}", a.seq));
             }
         }
@@ -1867,6 +1905,9 @@ fn waiting(h: &HomeState, objects: &Objects, now_ms: i64) -> Value {
         json!(format!("waiting: {}", why.join("; ")))
     }
 }
+
+#[cfg(test)]
+mod waiting_tests;
 
 // ---------------------------------------------------------------------------------------------
 // Records, live values, blob chunks.

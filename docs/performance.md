@@ -83,6 +83,34 @@ or AAR was built. Older tables below have different fixtures and boundaries.
 Reproduce on this Mac with `bash scripts/bench-05.sh` (fresh fixture directory by default).
 The measured invocation used `target/bench-05-20261116-b`; only that run is in the raw results.
 
+## The home module's `record_due` (19 November 2026)
+
+When nothing was due, `record_due` built its log note by trying every transition and veto the
+home had ever held, and verified the whole history again for each. An account's pending objects
+keep settled ones for ever, so the call grew with held objects × history: quadratic in the
+account's age. It now verifies once and skips transitions already recorded and their vetoes. A
+unit test counts the work in one such call over 12 settled transitions (16 held transitions and
+vetoes) and 2 pending ones: 33 history verifications and 18 `prepare_*` calls before, 2 and 2 after.
+
+Times are one `record_due` call on a saved slot state that has nothing due, through the release
+wasm module in Bun 1.4.4, in a fresh instance per run (the relay's own call path). Median / worst
+of five runs, except the 300-transition "before" case, which is one run. Apple M3 Max MacBook Pro
+(Mac15,9), 64 GB RAM, macOS 27.0.1, Rust 1.99.1. The machine was shared: one-minute load 6.6–7.5
+for the first three rows and about 18–20 for the last.
+
+| Saved state | State | Before (ms) | After (ms) |
+| --- | ---: | ---: | ---: |
+| Kill-loop schedule, round 0 (3 entries, 1 pending transition) | 124 KB | 49.3 / 76.8 | 38.7 / 64.7 |
+| Kill-loop schedule, round 9 (9 settled: 6 activated, 3 vetoed) | 591 KB | 1,035.4 / 1,037.1 | 209.0 / 212.6 |
+| Round 9 without vetoes (9 activated and final) | 534 KB | 788.2 / 804.5 | 160.6 / 161.4 |
+| 300 settled transitions (activated and final), 1 pending | 10,377 KB | 96,527 (one run) | 3,468.8 / 3,496.0 |
+
+The states are built by the kill loop's schedule (`v05_relay_kill`: a transition every three hours,
+every third vetoed, then `activate` and `final`) driven straight through the module, without the
+relay or its kills; the kill loop's own saved states measured 40 ms and 951 ms at rounds 0 and 9.
+What remains is linear in the state: every call passes and parses the whole state, and
+`record_due` replays the history once to find what is due.
+
 # Engine performance — Colophon 0.3
 
 ## Native session engine migration
