@@ -45,12 +45,13 @@ let session = ColophonSession(configuration: .init(
 * **Folder-only libraries.** `createWithoutHome` is the supported path for a library that syncs only through a shared
   folder; it keeps working until the person wants the library on another platform, and a hosted home can be appointed
   then. A host that creates an account this way MUST warn the person before it does (spec §6.4: with no home there is no
-  witness of time or order; `notices.noHome` repeats it afterwards), MUST NOT add a separate recovery unit (a controller with
-  `recover` and not `control`: `recoveryKeys`, or an `additionalControllers` entry with `recover` and not `control`) without
-  also appointing a home, and SHOULD offer a second unit when a home is later
-  appointed. The owner controller `create()` makes always holds `approve`, `control` and
-  `recover`; that is not a separate recovery unit and is allowed. The session does not enforce these rules yet: `create()`
-  still accepts `recoveryKeys` or a recover-only additional controller together with `createWithoutHome`, so the app checks. A verifier judges a call on an account with no home
+  witness of time or order; `notices.noHome` repeats it afterwards) and SHOULD offer a second unit when a home is later
+  appointed. It SHOULD NOT add a separate recovery unit (a controller with `recover` but not `control`: `recoveryKeys`, or an
+  `additionalControllers` entry with `recover` and not `control`) without also appointing a home; if it does, it MUST give the
+  spec §6.4 warning (no theft safety: nothing delays a recovery key). `create()` accepts `recoveryKeys` with
+  `createWithoutHome`, which is allowed. The owner controller `create()` makes holds `recover` beside `control`; that is not a
+  separate recovery unit. The session gives these warnings only after creation (the known gap below), so the app warns
+  before it calls `create()`. A verifier judges a call on an account with no home
   `unavailable` (spec §12.3 step 4), so `signCall` and grants to services need a home.
 * A home's signed member request names the account, which does not exist before creation, so `HomeConfiguration.request`
   is a closure the session calls with the new account ID; the home service answers with its request. The session appoints the home in a
@@ -249,7 +250,7 @@ refused:revoked` at the door, or refused by its own check once it has synced the
 * `pending` carries `dueMs`: the session rebuilds `notices` after every sync, so each pending change is shown with its
   due time on every sync (spec §17.5 "Showing on sync"). 0.5 defines no notice delivery.
 
-**Known gap: the spec §6.4 warnings before creation.** This session does not yet give the §6.4 warnings before the genesis is written: it exposes `soleDevice` after creation. The warnings stay normative for a host (a person must see them before an account is created). Until the session gives them, an app checks the three conditions from the creation parameters (one home, every control key on one device, exactly one recovery unit) and warns before it calls create. Spec §21.1 lists this among what 0.5.0 does not do.
+**Known gap: the spec §6.4 warnings before creation.** This session does not yet give the §6.4 warnings before the genesis is written: it exposes `soleDevice` after creation. The warnings stay normative for a host (a person must see them before an account is created). Until the session gives them, an app checks these conditions from the creation parameters: no home, a separate recovery unit and no home, one home, every control key on one device, exactly one recovery unit and warns before it calls create. Spec §21.1 lists this among what 0.5.0 does not do.
 
 ## Lock
 

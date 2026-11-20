@@ -4,7 +4,7 @@
 
 Text only, with no format, reader-rule or version change. The spec stays Colophon 0.5, revision 18.
 
-- **An account that syncs only through a shared folder may be created without a home** (spec §18, §13.1, §6.4, guide §5; changes row 240). It read "a host MUST create every account with at least one". A host that creates one MUST warn the person, MUST NOT add a separate recovery unit to it (a `recover`-only controller such as a recovery kit; the owner's controller keeping `recover` beside `control` is not one) without also appointing a home, and SHOULD offer a second unit when a home is later appointed. `createWithoutHome` is the supported path for folder-only libraries ([docs/session.md](docs/session.md)); the sessions do not enforce the new host rules yet, so the app checks them before `create()`.
+- **An account that syncs only through a shared folder may be created without a home** (spec §18, §13.1, §6.4, guide §5; changes row 240). It read "a host MUST create every account with at least one". A host that creates one MUST warn the person, and SHOULD offer a second unit when a home is later appointed. A host SHOULD NOT add a separate recovery unit (a `recover`-only controller such as a recovery kit) without also appointing a home, and MUST give the §6.4 warning (no theft safety) whenever an account has one and no home. `createWithoutHome` is the supported path for folder-only libraries ([docs/session.md](docs/session.md)); like the other §6.4 warnings, the sessions give these only after creation, so the app warns before `create()` (§21.1 item 7).
 
 ## 0.5.1 — 2026-11-20
 

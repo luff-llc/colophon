@@ -9,13 +9,11 @@ in 0.5.x or in a host.
 
 - **The §6.4 warnings come after creation** (§21.1 item 7). An app checks the creation parameters
   itself and warns before it calls `create()`.
-- **An account with no home is checked by the app, not the session.** An account that syncs
-  only through a shared folder may be created without a home (§18), with `createWithoutHome`.
-  The host rules that come with it (warn first, no separate recovery unit without a home, offer
-  a second unit when a home is appointed) are not enforced by the sessions: `create()` still
-  accepts `recoveryKeys`, or an additional controller with `recover` and not `control`, together
-  with `createWithoutHome`, and the warning comes after creation as `notices.noHome`. The owner
-  controller `create()` makes holds `recover` beside `control`; that is allowed. The app checks them before it calls `create()`.
+  This covers an account that syncs only through a shared folder and is created without a home
+  (§18, `createWithoutHome`): the no-home warning comes after creation as `notices.noHome`, and
+  the no-theft-safety warning for a separate recovery unit and no home (`recoveryKeys`, which
+  `create()` accepts with `createWithoutHome`) is not given by the sessions at all, so the app
+  gives both.
 - The Kotlin session's refresh after a refused command can leave the phase at `refreshing`
   until the next refresh; the Swift and JS sessions do not show this.
 - **A revoke keeps only what this device holds.** Keeping everything a revoked member wrote

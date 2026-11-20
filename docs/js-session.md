@@ -246,7 +246,7 @@ not the transition's; it is also done when the transition is no longer pending, 
 veto the other homes have nothing left to receipt. `acknowledgeActivation` marks one activation seen and never dismisses a pending
 transition.
 
-**Known gap: the spec §6.4 warnings before creation.** This session does not yet give the §6.4 warnings before the genesis is written: it exposes `soleDevice` after creation. The warnings stay normative for a host (a person must see them before an account is created). Until the session gives them, an app checks the three conditions from the creation parameters (one home, every control key on one device, exactly one recovery unit) and warns before it calls create. Spec §21.1 lists this among what 0.5.0 does not do.
+**Known gap: the spec §6.4 warnings before creation.** This session does not yet give the §6.4 warnings before the genesis is written: it exposes `soleDevice` after creation. The warnings stay normative for a host (a person must see them before an account is created). Until the session gives them, an app checks these conditions from the creation parameters: no home, a separate recovery unit and no home, one home, every control key on one device, exactly one recovery unit and warns before it calls create. Spec §21.1 lists this among what 0.5.0 does not do.
 
 ## Services and calls: provisioning a test rig by grant
 

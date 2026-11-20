@@ -1789,10 +1789,11 @@ sequence conflicts and malformed entries keep their ordinary results (409, §8.5
   now follow reports `refused:rollback`, and a host MUST treat that as a refusal and show it. A
   host creates every account with at least one home, unless the account syncs only through a
   shared folder, in which case it MAY have none (§18). A host MUST warn when an account has no home
-  (§6.4), MUST NOT add a separate recovery unit to such an account (a controller with `recover` and
-  not `control`, for example a recovery kit or recovery keys) without also appointing a home, and
-  SHOULD offer a second unit when a home is later appointed. An owner controller that holds
-  `recover` beside `control` is not such a unit.
+  (§6.4) and SHOULD offer a second unit when a home is later appointed. A host SHOULD NOT add a
+  separate recovery unit (a controller with `recover` but not `control`, such as a recovery kit) to
+  an account with no home without also appointing a home; when an account has a separate recovery
+  unit and no home, however it came to, the host MUST give the §6.4 warning (no theft safety:
+  nothing delays a recovery key).
 - **A new member at `headQuorum` ≥ 2.** A non-primary home stores an entry only once a primary
   head covers it (Ordering), and a call needs fresh heads from `headQuorum` homes (§12.3 step
   4). So a member granted after what another home covers can make no call anywhere until enough
@@ -2572,7 +2573,7 @@ ranges.
 | `policy.primaryHome` | absent | a current home | transition with consent |
 | `policy.rate` | signer 64 entries / 4 MiB, account 256 / 16 MiB, per 24 h | §6.3 | transition with consent, in either direction |
 | Member `expires`, `depth` | 7 days and 1 for `agent`; none and 0 otherwise | §10.1 | approver; `renew` extends |
-| Homes | **one; two or three are optional and experimental in 0.5 and a host SHOULD NOT offer them as the default; a host creates every account with at least one, unless the account syncs only through a shared folder, in which case it MAY have none; a host that creates an account with no home MUST warn the person (§6.4; §13.1: without a home there is no witness of time or order and no rollback protection for a new verifier), MUST NOT add a separate recovery unit to that account (a controller with `recover` and not `control`, for example a recovery kit or recovery keys; an owner controller holding `recover` beside `control` is not one) without also appointing a home, and SHOULD offer a second unit when a home is later appointed (§21.1 item 1)**; each home is provisioned for its one account (§13.1) | 0–8 | transition with consent |
+| Homes | **one; two or three are optional and experimental in 0.5 and a host SHOULD NOT offer them as the default; a host creates every account with at least one, unless the account syncs only through a shared folder, in which case it MAY have none; a host that creates an account with no home MUST warn the person (§6.4; §13.1: without a home there is no witness of time or order and no rollback protection for a new verifier), and SHOULD offer a second unit when a home is later appointed (§21.1 item 1); a host SHOULD NOT add a separate recovery unit (a controller with `recover` but not `control`, such as a recovery kit) to an account with no home without also appointing a home, and when an account has a separate recovery unit and no home, however it came to, the host MUST give the §6.4 warning (no theft safety: nothing delays a recovery key)**; each home is provisioned for its one account (§13.1) | 0–8 | transition with consent |
 | Drain window | 7 days | 0–30 days | the copying host |
 
 **Reference setup for new accounts:**
@@ -2820,7 +2821,7 @@ The one list. The README, the changelog and §18 point here.
 7. **The reference sessions do not give the §6.4 warnings before creation.** They expose
    `soleDevice` after the genesis is written. Until they do, an app checks the creation
    parameters (no home, which a host allows only for an account that syncs only through a shared
-   folder and then with no separate recovery unit, §18; one home; every control key on one device;
+   folder, §18; a separate recovery unit and no home; one home; every control key on one device;
    exactly one recovery unit) and warns before it calls create.
 8. **One verifier implementation** (§21 condition 2).
 9. **No dry run on a real library** (§21 condition 4).
