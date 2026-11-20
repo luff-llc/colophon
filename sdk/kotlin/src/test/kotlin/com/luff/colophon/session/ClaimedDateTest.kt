@@ -40,6 +40,17 @@ class ClaimedDateTest {
             }
             assertEquals(ops, device.medium.listing().count { it.path.startsWith("ops/") })
             assertNull(created(device.session, "future"))
+
+            // Extremes outside the years 0001–9999 are refused before the engine sees them, and write nothing.
+            for (bad in listOf(Long.MIN_VALUE, Long.MIN_VALUE + 1, -62_135_596_800_001L, Long.MAX_VALUE)) {
+                assertFailsWith<SessionError.InvalidCommand>("$bad") {
+                    device.session.perform(addNote("bad"), device.session.observedRevision, claimedMs = bad)
+                }
+            }
+            assertEquals(ops, device.medium.listing().count { it.path.startsWith("ops/") })
+            // The first instant of year 1 is a date.
+            device.session.perform(addNote("first"), device.session.observedRevision, claimedMs = -62_135_596_800_000L)
+            assertEquals("0001-01-01T00:00:00Z", created(device.session, "first"))
         } finally {
             device.close()
         }

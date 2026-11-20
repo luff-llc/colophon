@@ -160,6 +160,24 @@ fn a_claimed_date_later_than_now_is_refused_and_now_itself_is_not() {
             seed
         )
         .is_err());
+    // Extremes never reach the date arithmetic.
+    for ms in [i64::MIN, i64::MIN + 1, -62_135_596_800_001] {
+        assert!(phone
+            .begin_write_claimed(LISTEN, "addNote", note(), Level::Write, Some(ms), seed)
+            .is_err());
+    }
+    let year_one = phone
+        .begin_write_claimed(
+            LISTEN,
+            "addNote",
+            note(),
+            Level::Write,
+            Some(-62_135_596_800_000),
+            seed,
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(header(&year_one)["created"], json!("0001-01-01T00:00:00Z"));
     let at_now = phone
         .begin_write_claimed(LISTEN, "addNote", note(), Level::Write, Some(NOW), seed)
         .unwrap()

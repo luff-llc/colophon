@@ -1060,7 +1060,7 @@ actor SessionWorker {
     // MARK: Writes and queries
 
     func write(_ command: DomainCommand, observed: UInt64, ingress: IngressEnvelope? = nil, claimed: Date? = nil) async throws -> (WriteReceipt, SessionSnapshot) {
-        if let claimed, claimed > now { throw SessionError.invalidCommand }
+        if let claimed, !Self.claimable(claimed, now: now) { throw SessionError.invalidCommand }
         return try await gated {
             let fresh = try await reconcile()
             guard fresh.phase == .ready, let engine, let custody = memberCustody else { throw SessionRefusal(snapshot: fresh, error: .notReady) }
@@ -1092,6 +1092,12 @@ actor SessionWorker {
             }
             return (.saved(operationID: operation), try await build())
         }
+    }
+    /// A claimed date a write may carry: finite, no later than `now`, and within the years 0001–9999 (spec §2.2), so the
+    /// conversion to milliseconds can never trap.
+    static func claimable(_ claimed: Date, now: Date) -> Bool {
+        let seconds = claimed.timeIntervalSince1970
+        return seconds.isFinite && seconds >= -62_135_596_800 && seconds < 253_402_300_800 && claimed <= now
     }
     /// `ops/<author>/<namespace>/<clock>-<id>.json`: the operation ID is the part after the clock.
     static func operationID(in stores: [Store]) -> String? {

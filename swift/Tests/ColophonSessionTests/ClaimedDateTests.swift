@@ -45,6 +45,19 @@ import ColophonSession
         }
         #expect(device.medium.snapshot().count == files)
 
+        // Dates that are not finite or fall outside the years 0001–9999 are refused before any conversion, and write nothing.
+        for bad in [Date(timeIntervalSince1970: .nan), Date(timeIntervalSince1970: .infinity), Date(timeIntervalSince1970: -.infinity),
+                    Date(timeIntervalSince1970: -62_135_596_801), Date(timeIntervalSince1970: -1e300), Date(timeIntervalSince1970: 1e300)] {
+            await #expect(throws: SessionError.invalidCommand) {
+                try await device.session.perform(try addNote("bad"), observed: device.session.observedRevision, claimed: bad)
+            }
+        }
+        #expect(device.medium.snapshot().count == files)
+        // The first instant of year 1 is a date.
+        try await device.session.perform(try addNote("first"), observed: device.session.observedRevision,
+                                         claimed: Date(timeIntervalSince1970: -62_135_596_800))
+        #expect(try await created(device.session, note: "first") == "0001-01-01T00:00:00Z")
+
         // A relaunch over the same medium reads the claimed date from the stored records.
         let again = device.relaunch()
         await again.restore()

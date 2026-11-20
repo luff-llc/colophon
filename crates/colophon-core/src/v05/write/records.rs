@@ -802,6 +802,12 @@ pub(crate) fn prepare_operation_fast_claimed(
         None => now_ms,
         Some(ms) => {
             require(ms <= now_ms, "a claimed date later than now is refused")?;
+            // Years 0001-9999 (§2.2): checked before formatting, so no arithmetic sees an
+            // extreme value.
+            require(
+                (-62_135_596_800_000..253_402_300_800_000).contains(&ms),
+                "a claimed date must be a date in the years 0001-9999",
+            )?;
             require(
                 crate::v05::encoding::parse_date(&format_date(ms)) == Some(ms),
                 "a claimed date must be a date in the years 0001-9999",

@@ -874,7 +874,7 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
     // Writes and queries
 
     suspend fun write(command: DomainCommand, observed: Long, claimedMs: Long? = null): Pair<WriteReceipt, SessionSnapshot> = gated {
-        if (claimedMs != null && claimedMs > nowMs) throw SessionError.InvalidCommand()
+        if (claimedMs != null && !claimable(claimedMs, nowMs)) throw SessionError.InvalidCommand()
         val fresh = reconcile()
         val engine = engine; val custody = memberCustody
         if (fresh.phase != SessionPhase.Ready || engine == null || custody == null) throw SessionRefusal(fresh, SessionError.NotReady())
@@ -1231,6 +1231,9 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
             }
             return null
         }
+        /** A claimed date (ms) a write may carry: no later than [nowMs] and within the years 0001–9999 (spec §2.2). */
+        fun claimable(claimedMs: Long, nowMs: Long): Boolean =
+            claimedMs >= -62_135_596_800_000L && claimedMs < 253_402_300_800_000L && claimedMs <= nowMs
         /** `ops/<author>/<namespace>/<clock>-<id>.json`: the operation ID is the part after the clock. */
         fun operationId(stores: List<Store>): String? {
             for (s in stores) {
