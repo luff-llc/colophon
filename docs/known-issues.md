@@ -1,4 +1,4 @@
-# Known issues in 0.5.0
+# Known issues in 0.5.1
 
 What 0.5.0 does not do as a protocol is [spec §21.1](../spec/colophon-0.5.md#211-what-050-does-not-do),
 and the freeze conditions still open are in [§21](../spec/colophon-0.5.md#21-conformance-and-freeze).
@@ -56,6 +56,10 @@ in 0.5.x or in a host.
 
 ## Platforms and performance
 
+- On a device, opening an account that holds many vetoes is quadratic in their number
+  (`derived::effective_objects` calls `check_pending_veto` for each). Not fixed in 0.5.1.
+- At head quorum two, a device one forward ahead of a home can get one refused sync pass before
+  the next one succeeds.
 - Phones, the wasm build and the FFI boundary are not measured, and nothing is proven on a
   physical device (§21.1 items 10 and 11). Sync makes one request per record.
 - Libraries of the shipped Swift apps move to 0.5 by a verified succession (`SwiftMove` in
