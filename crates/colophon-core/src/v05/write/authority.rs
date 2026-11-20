@@ -1268,18 +1268,58 @@ pub fn prepare_activate(
     now_ms: i64,
     transition_digest: &str,
 ) -> Result<PendingBatch> {
+    prepare_activate_verified(objects, &VerifiedHead::new(objects, now_ms), now_ms, transition_digest)
+}
+
+/// The held objects verified once at one clock reading, for building several recording entries
+/// over the same objects and clock: [`prepare_activate_verified`], [`prepare_vetoed_verified`]
+/// and [`prepare_final_verified`] give exactly what [`prepare_activate`], [`prepare_vetoed`] and
+/// [`prepare_final`] give over those objects, without verifying the history again each time.
+#[derive(Debug)]
+pub struct VerifiedHead {
+    fork: bool,
+    head: Result<State>,
+}
+
+impl VerifiedHead {
+    /// Run the verifier over `objects` at `now_ms`.
+    pub fn new(objects: &Objects, now_ms: i64) -> Self {
+        let verdict = verify_history(objects, &Persisted::default(), now_ms);
+        let fork = matches!(verdict.stop, Some(Stop::Fork { .. }));
+        let head = stop_to_error(&verdict.stop).and_then(|()| {
+            verdict
+                .state
+                .ok_or_else(|| malformed("the held objects hold no genesis"))
+        });
+        Self { fork, head }
+    }
+    /// The verified state at the head, or why there is none (as [`prepare_vetoed`] reports it).
+    pub fn state(&self) -> Result<&State> {
+        self.head.as_ref().map_err(Clone::clone)
+    }
+    /// Whether the verifier stopped at an unresolved fork.
+    pub fn fork(&self) -> bool {
+        self.fork
+    }
+}
+
+/// [`prepare_activate`] over objects already verified at `now_ms` (`verified` must be
+/// [`VerifiedHead::new`] of the same `objects` and `now_ms`).
+pub fn prepare_activate_verified(
+    objects: &Objects,
+    verified: &VerifiedHead,
+    now_ms: i64,
+    transition_digest: &str,
+) -> Result<PendingBatch> {
     // At an unresolved fork the one entry that can be recorded is the `activate` of a due
     // `resolve` on the branch it is anchored on (§8.6 rule 3).
-    if matches!(
-        verify_history(objects, &Persisted::default(), now_ms).stop,
-        Some(Stop::Fork { .. })
-    ) {
+    if verified.fork() {
         return prepare_activate_resolve(objects, now_ms, transition_digest);
     }
-    let state = head_state(objects, now_ms)?;
+    let state = verified.state()?;
     let t_bytes = find_pending(objects, transition_digest, "colophon/transition/5")?.clone();
-    let receipts = choose_transition_receipts(&state, &objects.pending, &t_bytes)?;
-    let timing = transition_timing(&state, &t_bytes, &receipts)?;
+    let receipts = choose_transition_receipts(state, &objects.pending, &t_bytes)?;
+    let timing = transition_timing(state, &t_bytes, &receipts)?;
     if timing.due_ms > now_ms {
         return Err(unavailable(format!(
             "held: the transition is due at {}",
@@ -1289,7 +1329,7 @@ pub fn prepare_activate(
     let issued = timing.due_ms.max(state.last_issued_ms());
     recording_batch(
         objects,
-        &state,
+        state,
         now_ms,
         Kind::Activate {
             transition: t_bytes,
@@ -1417,7 +1457,18 @@ pub fn prepare_vetoed(
     transition_digest: &str,
     veto_digest: &str,
 ) -> Result<PendingBatch> {
-    let state = head_state(objects, now_ms)?;
+    prepare_vetoed_verified(objects, &VerifiedHead::new(objects, now_ms), now_ms, transition_digest, veto_digest)
+}
+
+/// [`prepare_vetoed`] over objects already verified at `now_ms` (see [`VerifiedHead`]).
+pub fn prepare_vetoed_verified(
+    objects: &Objects,
+    verified: &VerifiedHead,
+    now_ms: i64,
+    transition_digest: &str,
+    veto_digest: &str,
+) -> Result<PendingBatch> {
+    let state = verified.state()?;
     let t_bytes = find_pending(objects, transition_digest, "colophon/transition/5")?.clone();
     let v_bytes = find_pending(objects, veto_digest, "colophon/veto/5")?.clone();
     let t = AuthEnvelope::parse(
@@ -1427,12 +1478,12 @@ pub fn prepare_vetoed(
         true,
     )?;
     let v = AuthEnvelope::parse(&v_bytes, bounds::VETO_BODY, bounds::VETO_ENVELOPE, true)?;
-    let t_receipts = choose_receipts(&state, &objects.pending, &t.digest, issued_of(&t)?, None)?;
+    let t_receipts = choose_receipts(state, &objects.pending, &t.digest, issued_of(&t)?, None)?;
     // The veto's receipts are those before the transition's veto deadline (§8.7): a later
     // receipt is skipped, so one late receipt cannot block a valid `vetoed`.
-    let deadline = transition_timing(&state, &t_bytes, &t_receipts)?.deadline_ms;
+    let deadline = transition_timing(state, &t_bytes, &t_receipts)?.deadline_ms;
     let v_receipts = choose_receipts(
-        &state,
+        state,
         &objects.pending,
         &v.digest,
         issued_of(&v)?,
@@ -1440,7 +1491,7 @@ pub fn prepare_vetoed(
     )?;
     let mut latest = i64::MIN;
     for r in &v_receipts {
-        latest = latest.max(receipt_received(&state, r)?);
+        latest = latest.max(receipt_received(state, r)?);
     }
     if v_receipts.is_empty() {
         latest = issued_of(&v)?;
@@ -1449,7 +1500,7 @@ pub fn prepare_vetoed(
     let by = by_of(&v)?;
     recording_batch(
         objects,
-        &state,
+        state,
         now_ms,
         Kind::Vetoed {
             transition: t_bytes,
@@ -1468,7 +1519,17 @@ pub fn prepare_vetoed(
 /// the preceding entry's `issued`). When a witness has several covering heads the one with the
 /// lowest body digest is taken: §8.7 does not say which (reported as a spec question).
 pub fn prepare_final(objects: &Objects, now_ms: i64, activation_seq: u64) -> Result<PendingBatch> {
-    let state = head_state(objects, now_ms)?;
+    prepare_final_verified(objects, &VerifiedHead::new(objects, now_ms), now_ms, activation_seq)
+}
+
+/// [`prepare_final`] over objects already verified at `now_ms` (see [`VerifiedHead`]).
+pub fn prepare_final_verified(
+    objects: &Objects,
+    verified: &VerifiedHead,
+    now_ms: i64,
+    activation_seq: u64,
+) -> Result<PendingBatch> {
+    let state = verified.state()?;
     let act = state
         .activations()
         .iter()
@@ -1547,7 +1608,7 @@ pub fn prepare_final(objects: &Objects, now_ms: i64, activation_seq: u64) -> Res
     let heads: Vec<Vec<u8>> = best.into_values().map(|(_, _, b)| b).collect();
     recording_batch(
         objects,
-        &state,
+        state,
         now_ms,
         Kind::Final {
             activation_seq: act.seq,
