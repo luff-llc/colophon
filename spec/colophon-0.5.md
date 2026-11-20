@@ -1650,15 +1650,18 @@ A verifier MUST, in order (the pipeline of §1):
 9. Otherwise `ok`, recorded in the replay store as §12.4 says.
 
 **The signer's own check.** A host judges every call it builds by these steps before it sends
-it, with a replay store of its own, and sends nothing that fails. For a call to a home whose
-fresh head it holds and verifies but that names an entry beyond its own history (the signer is
-behind that home), two things differ, and nothing else:
+it, with a replay store of its own, and sends nothing that fails. Three things differ, and nothing
+else. The first two are for a call to a home whose fresh head it holds and verifies but that names
+an entry beyond its own history (the signer is behind that home):
 - Step 4: such a head counts as covering through the signer's highest held seq, not refused
   because the signer has not fetched; S is then computed as usual from the `headQuorum` heads,
   so it never exceeds the held seq.
 - Step 5: a member that does not find itself in the history it holds (an approval it has not
   fetched) may still sign `colophon.home.read` or `colophon.history.read` with its own key and no
   links, and the home, which holds the history, decides.
+- A member that holds no history of the account (§13.4, asking first) may sign
+  `colophon.history.read`, and nothing else, with its own key and no links, naming as `asOf` the
+  entry it was given. The home, which holds the history, decides.
 
 A signer that holds its own revocation, expiry, ended session or removal builds nothing. A
 verifier, and so a home, never applies this leniency: it fetches first (step 4).
@@ -1931,8 +1934,20 @@ under `members` only the head and `GET {base}`. Everything else needs a call. In
 serves nothing more to a key it does not know: under `members` the approving device hands the new
 device the authority history out of band (the reference SDKs carry it in the join invite, over the
 pairing channel, §7.3, §9.1), the new device verifies it from seq 1 against the account ID, and once
-approved it calls the home. The history of a new account is about 10 KB, more than one QR code
-holds, so joining by camera alone does not carry it in 0.5 (a limit, §20).
+approved it calls the home, or the new device fetches it after approval as below. The history of a
+new account is about 10 KB, more than one QR code holds, so joining by camera alone does not carry
+it in 0.5 (a limit, §20).
+
+A new device MAY instead ask first and fetch after. Given out of band only the account ID, a
+home's base and one entry of the history (its `seq` and digest), it makes its request (§9.1), and
+once a grant names it, it reads the history paths at that home with `colophon.history.read` calls
+signed by its member key, naming that entry as `asOf`. It MUST verify what it fetches from seq 1
+against the account ID, and MUST accept it only if it contains that entry at that seq, holds a
+current grant of this member made from its exact request, and ends at a fresh head signed by a
+current home whose endpoints name that base. Until then it treats nothing that home serves as the
+account's. Before a grant names its key the home answers `refused:revoked`, as it does after a
+revocation; the device waits on that answer and treats it as final only when a history it has
+verified revokes it.
 
 ### 13.5 Receipt
 
@@ -2710,8 +2725,9 @@ authority before the raise.
   is outside the confirmed-pairing rule (§9.1).
 - **Successions:** two successors of one predecessor can each verify (§15.1).
 - **No home:** no witness of time or order (§13.1).
-- **Joining:** under `members` a new device gets the authority history only from the approving
-  device, out of band (§13.4); it does not fit one QR code.
+- **Joining:** under `members` a new device gets the authority history from the approving device,
+  out of band, or fetches it from a home after approval (§13.4); the history does not fit one QR
+  code.
 
 What is not in this version is listed in the guide §6; what revision 16 designed and revision 17
 deferred to 0.6 is in changes §A.12 and the design's "Deferred to 0.6".
@@ -2817,7 +2833,9 @@ The one list. The README, the changelog and §18 point here.
 5. **No notices.** Delivering notices is not part of 0.5 (§17.5): a change waiting out the
    recovery delay is seen when one of the person's devices next syncs.
 6. **No invite object and no multi-part QR code** (F8 was withdrawn to 0.6): the history reaches a
-   new device by a link or a paste, and the approval is by camera scan.
+   new device by a link or a paste, or the device fetches it after approval (§13.4), and the
+   approval is by camera scan. What the device needs to fetch after approval (the account ID, a
+   home's base and one entry's `seq` and digest) fits one QR code.
 7. **The reference sessions do not give the §6.4 warnings before creation.** They expose
    `soleDevice` after the genesis is written. Until they do, an app checks the creation
    parameters (no home, which a host allows only for an account that syncs only through a shared
