@@ -17,7 +17,7 @@ function fakeCredentials() {
       this.requests.push(options);
       if (this.error) throw this.error;
       assert.equal(options.publicKey.pubKeyCredParams[0].alg, -7);
-      assert.equal(options.publicKey.authenticatorSelection.userVerification, 'required');
+      assert.deepEqual(options.publicKey.authenticatorSelection, { userVerification: 'required', residentKey: 'required', requireResidentKey: true });
       assert.deepEqual(options.publicKey.extensions, { prf: {} });
       return credential({ attestationObject: buf(f.registration) }, { prf: { results: { first: repeated(99).buffer } } });
     },
