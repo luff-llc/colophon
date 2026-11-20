@@ -37,7 +37,7 @@ language mode with strict concurrency and has no warnings on macOS, iOS and visi
   `userID` from `PasskeyProvider.userID(account:)`, keep the returned `KeyDescriptor` (public) and make a `PasskeyProvider(descriptor:)`
   each launch. Set `authorityOrigins` to the authority-ceremony origin, the bare `rp` origin and the app's platform origin (spec §18).
 * A host creates every account with a home, unless it syncs only through a shared folder (spec §18): pass `homes`, or, for a
-  folder-only library, `createWithoutHome: true` after warning the person (spec §6.4) and with no `recoveryKeys`;
+  folder-only library, `createWithoutHome: true` after warning the person (spec §6.4) and with no separate recovery unit (no `recoveryKeys`, no recover-only additional controller);
   `session.notices.noHome` repeats the warning. **`create()` needs a `HomeConfiguration`**: with `homes` empty and no opt-out it refuses
   with `SessionError.noHome`, and with an endpoint that is not `https` it refuses with `SessionError.insecureHome`.
 

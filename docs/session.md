@@ -45,9 +45,12 @@ let session = ColophonSession(configuration: .init(
 * **Folder-only libraries.** `createWithoutHome` is the supported path for a library that syncs only through a shared
   folder; it keeps working until the person wants the library on another platform, and a hosted home can be appointed
   then. A host that creates an account this way MUST warn the person before it does (spec §6.4: with no home there is no
-  witness of time or order; `notices.noHome` repeats it afterwards), MUST NOT pass `recoveryKeys` or give the account any
-  other `recover` controller without also appointing a home, and SHOULD offer a second unit when a home is later
-  appointed. The session does not enforce these yet: the app does. A verifier judges a call on an account with no home
+  witness of time or order; `notices.noHome` repeats it afterwards), MUST NOT add a separate recovery unit (a controller with
+  `recover` and not `control`: `recoveryKeys`, or an `additionalControllers` entry with `recover` and not `control`) without
+  also appointing a home, and SHOULD offer a second unit when a home is later
+  appointed. The owner controller `create()` makes always holds `approve`, `control` and
+  `recover`; that is not a separate recovery unit and is allowed. The session does not enforce these rules yet: `create()`
+  still accepts `recoveryKeys` or a recover-only additional controller together with `createWithoutHome`, so the app checks. A verifier judges a call on an account with no home
   `unavailable` (spec §12.3 step 4), so `signCall` and grants to services need a home.
 * A home's signed member request names the account, which does not exist before creation, so `HomeConfiguration.request`
   is a closure the session calls with the new account ID; the home service answers with its request. The session appoints the home in a
