@@ -5,7 +5,7 @@
 //! settled transitions and vetoes and a few pending ones, and check the note against the
 //! original builder, which tried every held object and verified the history for each.
 #![allow(clippy::unwrap_used)]
-use super::{handle, held, load, view, waiting, WAITING_WORK};
+use super::{handle, held, load, view, waiting};
 use crate::support::{
     controller_engine, engine_finish, pending_path, Fixture, Host, MemSource, HOUR, T0,
 };
@@ -16,7 +16,7 @@ use colophon_core::v05::account::Change;
 use colophon_core::v05::encoding::bounds;
 use colophon_core::v05::history::envelope::AuthEnvelope;
 use colophon_core::v05::history::home::HomeState;
-use colophon_core::v05::history::Objects;
+use colophon_core::v05::history::{work, Objects};
 use colophon_core::v05::write::authority::TransitionRule;
 use serde_json::{json, Value};
 
@@ -271,16 +271,11 @@ fn at(k: i64) -> i64 {
     T0 + HOUR + k * 3 * HOUR
 }
 
-fn reset() {
-    WAITING_WORK.with(|c| c.set((0, 0)));
-}
-fn work() -> (usize, usize) {
-    WAITING_WORK.with(std::cell::Cell::get)
-}
-
 /// One `record_due` that records nothing, over 12 settled transitions (8 activated and final, 4
-/// vetoed, so 16 held transitions and vetoes) and 2 pending transitions: `waiting` verifies the
-/// history a constant number of times, and tries to build an entry only for what is not settled.
+/// vetoed, so 16 held transitions and vetoes) and 2 pending transitions. The core counts, on this
+/// thread, every `verify_history` run and every `prepare_*` attempt (feature `work-counters`, on
+/// for this crate's tests only), so whatever `waiting` calls is counted: it verifies the history a
+/// constant number of times and tries to build an entry only for what is not settled.
 #[test]
 fn waiting_work_is_bounded_by_what_is_unsettled_not_by_everything_held() {
     let mut w = World::new();
@@ -291,7 +286,7 @@ fn waiting_work_is_bounded_by_what_is_unsettled_not_by_everything_held() {
     // Two transitions proposed and receipted, not due yet (rounds with no veto).
     let a = w.round(settled, at(settled), false, &mut |_, _| {});
     let b = w.round(settled + 3, at(settled) + 600_000, false, &mut |_, _| {});
-    let (_, objects) = w.home.held();
+    let (h, objects) = w.home.held();
     let held_objects = objects
         .pending
         .iter()
@@ -299,19 +294,26 @@ fn waiting_work_is_bounded_by_what_is_unsettled_not_by_everything_held() {
         .count();
     assert_eq!(held_objects, 16 + 2, "every transition and veto ever held is kept");
     let now = at(settled) + 720_000;
-    reset();
+    // The whole call, as the relay makes it: nothing is due, so it builds the note.
     let before = w.home.entries().len();
+    work::reset();
     let r = w.home.due(now);
-    let (verifications, prepares) = work();
-    eprintln!(
-        "waiting over {held_objects} held transitions and vetoes, 2 unsettled: \
-         {verifications} history verifications, {prepares} prepare_* calls; note: {}",
-        r["note"]
-    );
+    let whole = work::get();
     assert_eq!(w.home.entries().len(), before, "nothing was due");
     let note = r["note"].as_str().unwrap();
     assert!(note.contains(&a[..8]) && note.contains(&b[..8]), "{note}");
-    // One verification of the held objects and one view of the home's history; one `prepare_*`
+    // The note alone, over the same held state and clock.
+    work::reset();
+    let again = waiting(&h, &objects, now);
+    let work::Work { verifications, prepares } = work::get();
+    assert_eq!(again, r["note"]);
+    eprintln!(
+        "waiting over {held_objects} held transitions and vetoes, 2 unsettled: \
+         {verifications} history verifications, {prepares} prepare_* calls \
+         (the whole record_due: {} and {}); note: {note}",
+        whole.verifications, whole.prepares
+    );
+    // One verification of the held objects and one `view` of the home's history; one `prepare_*`
     // per unsettled transition (no activation is provisional).
     assert!(verifications <= 2, "{verifications} history verifications in one waiting()");
     assert!(prepares <= 2, "{prepares} prepare_* calls in one waiting()");
@@ -327,14 +329,14 @@ fn waiting_work_is_bounded_by_what_is_unsettled_not_by_everything_held() {
 /// units` on every pass, about transitions recorded long before.
 #[test]
 fn the_waiting_note_is_the_original_without_parts_about_settled_transitions() {
-    use colophon_core::v05::write::authority::VerifiedHead;
+    use colophon_core::v05::write::authority::VerifiedObjects;
     let mut w = World::new();
     let (mut compared, mut notes, mut dropped) = (0usize, 0usize, 0usize);
     let mut example = None;
     let mut check = |home: &Home, now: i64| {
         let (h, objects) = home.held();
         for at in [now, now + 1, now + HOUR] {
-            let verified = VerifiedHead::new(&objects, at);
+            let verified = VerifiedObjects::new(&objects, at);
             let recorded = |t: &str| verified.state().is_ok_and(|s| s.is_recorded(t));
             let original = waiting_reference(&h, &objects, at);
             let kept: Vec<&str> = original

@@ -88,8 +88,10 @@ The measured invocation used `target/bench-05-20261116-b`; only that run is in t
 When nothing was due, `record_due` built its log note by trying every transition and veto the
 home had ever held, and verified the whole history again for each. An account's pending objects
 keep settled ones for ever, so the call grew with held objects × history: quadratic in the
-account's age. It now verifies once and skips transitions already recorded and their vetoes. A
-unit test counts the work in one such call over 12 settled transitions (16 held transitions and
+account's age. It now shares one verification across all its `prepare_*` attempts and skips
+transitions already recorded and their vetoes; it still parses the state and replays the history
+(linear in the state). A unit test counts the note's work (every `verify_history` run and
+`prepare_*` attempt, counted in the core) over 12 settled transitions (16 held transitions and
 vetoes) and 2 pending ones: 33 history verifications and 18 `prepare_*` calls before, 2 and 2 after.
 
 Times are one `record_due` call on a saved slot state that has nothing due, through the release

@@ -1268,22 +1268,26 @@ pub fn prepare_activate(
     now_ms: i64,
     transition_digest: &str,
 ) -> Result<PendingBatch> {
-    prepare_activate_verified(objects, &VerifiedHead::new(objects, now_ms), now_ms, transition_digest)
+    VerifiedObjects::new(objects, now_ms).prepare_activate(transition_digest)
 }
 
-/// The held objects verified once at one clock reading, for building several recording entries
-/// over the same objects and clock: [`prepare_activate_verified`], [`prepare_vetoed_verified`]
-/// and [`prepare_final_verified`] give exactly what [`prepare_activate`], [`prepare_vetoed`] and
-/// [`prepare_final`] give over those objects, without verifying the history again each time.
+/// The held objects verified once at one clock reading, bound to those objects and that clock,
+/// for building several recording entries over them: [`VerifiedObjects::prepare_activate`],
+/// [`VerifiedObjects::prepare_vetoed`] and [`VerifiedObjects::prepare_final`] give exactly what
+/// [`prepare_activate`], [`prepare_vetoed`] and [`prepare_final`] give over the same objects and
+/// clock (those functions are these methods), without verifying the history again each time.
+/// It borrows the objects it verified, so it cannot be used with other or changed objects.
 #[derive(Debug)]
-pub struct VerifiedHead {
+pub struct VerifiedObjects<'a> {
+    objects: &'a Objects,
+    now_ms: i64,
     fork: bool,
     head: Result<State>,
 }
 
-impl VerifiedHead {
+impl<'a> VerifiedObjects<'a> {
     /// Run the verifier over `objects` at `now_ms`.
-    pub fn new(objects: &Objects, now_ms: i64) -> Self {
+    pub fn new(objects: &'a Objects, now_ms: i64) -> Self {
         let verdict = verify_history(objects, &Persisted::default(), now_ms);
         let fork = matches!(verdict.stop, Some(Stop::Fork { .. }));
         let head = stop_to_error(&verdict.stop).and_then(|()| {
@@ -1291,7 +1295,15 @@ impl VerifiedHead {
                 .state
                 .ok_or_else(|| malformed("the held objects hold no genesis"))
         });
-        Self { fork, head }
+        Self { objects, now_ms, fork, head }
+    }
+    /// The objects it verified.
+    pub fn objects(&self) -> &'a Objects {
+        self.objects
+    }
+    /// The clock it verified them at.
+    pub fn now_ms(&self) -> i64 {
+        self.now_ms
     }
     /// The verified state at the head, or why there is none (as [`prepare_vetoed`] reports it).
     pub fn state(&self) -> Result<&State> {
@@ -1301,16 +1313,25 @@ impl VerifiedHead {
     pub fn fork(&self) -> bool {
         self.fork
     }
+    /// [`prepare_activate`] over these objects and this clock.
+    pub fn prepare_activate(&self, transition_digest: &str) -> Result<PendingBatch> {
+        crate::v05::history::work::prepare();
+        activate_over(self, transition_digest)
+    }
+    /// [`prepare_vetoed`] over these objects and this clock.
+    pub fn prepare_vetoed(&self, transition_digest: &str, veto_digest: &str) -> Result<PendingBatch> {
+        crate::v05::history::work::prepare();
+        vetoed_over(self, transition_digest, veto_digest)
+    }
+    /// [`prepare_final`] over these objects and this clock.
+    pub fn prepare_final(&self, activation_seq: u64) -> Result<PendingBatch> {
+        crate::v05::history::work::prepare();
+        final_over(self, activation_seq)
+    }
 }
 
-/// [`prepare_activate`] over objects already verified at `now_ms` (`verified` must be
-/// [`VerifiedHead::new`] of the same `objects` and `now_ms`).
-pub fn prepare_activate_verified(
-    objects: &Objects,
-    verified: &VerifiedHead,
-    now_ms: i64,
-    transition_digest: &str,
-) -> Result<PendingBatch> {
+fn activate_over(verified: &VerifiedObjects<'_>, transition_digest: &str) -> Result<PendingBatch> {
+    let (objects, now_ms) = (verified.objects, verified.now_ms);
     // At an unresolved fork the one entry that can be recorded is the `activate` of a due
     // `resolve` on the branch it is anchored on (§8.6 rule 3).
     if verified.fork() {
@@ -1457,17 +1478,15 @@ pub fn prepare_vetoed(
     transition_digest: &str,
     veto_digest: &str,
 ) -> Result<PendingBatch> {
-    prepare_vetoed_verified(objects, &VerifiedHead::new(objects, now_ms), now_ms, transition_digest, veto_digest)
+    VerifiedObjects::new(objects, now_ms).prepare_vetoed(transition_digest, veto_digest)
 }
 
-/// [`prepare_vetoed`] over objects already verified at `now_ms` (see [`VerifiedHead`]).
-pub fn prepare_vetoed_verified(
-    objects: &Objects,
-    verified: &VerifiedHead,
-    now_ms: i64,
+fn vetoed_over(
+    verified: &VerifiedObjects<'_>,
     transition_digest: &str,
     veto_digest: &str,
 ) -> Result<PendingBatch> {
+    let (objects, now_ms) = (verified.objects, verified.now_ms);
     let state = verified.state()?;
     let t_bytes = find_pending(objects, transition_digest, "colophon/transition/5")?.clone();
     let v_bytes = find_pending(objects, veto_digest, "colophon/veto/5")?.clone();
@@ -1519,16 +1538,11 @@ pub fn prepare_vetoed_verified(
 /// the preceding entry's `issued`). When a witness has several covering heads the one with the
 /// lowest body digest is taken: §8.7 does not say which (reported as a spec question).
 pub fn prepare_final(objects: &Objects, now_ms: i64, activation_seq: u64) -> Result<PendingBatch> {
-    prepare_final_verified(objects, &VerifiedHead::new(objects, now_ms), now_ms, activation_seq)
+    VerifiedObjects::new(objects, now_ms).prepare_final(activation_seq)
 }
 
-/// [`prepare_final`] over objects already verified at `now_ms` (see [`VerifiedHead`]).
-pub fn prepare_final_verified(
-    objects: &Objects,
-    verified: &VerifiedHead,
-    now_ms: i64,
-    activation_seq: u64,
-) -> Result<PendingBatch> {
+fn final_over(verified: &VerifiedObjects<'_>, activation_seq: u64) -> Result<PendingBatch> {
+    let (objects, now_ms) = (verified.objects, verified.now_ms);
     let state = verified.state()?;
     let act = state
         .activations()

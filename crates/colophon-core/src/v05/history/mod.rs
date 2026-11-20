@@ -14,6 +14,7 @@ pub mod keyring;
 mod state;
 pub(crate) mod succession;
 pub mod swift;
+pub mod work;
 pub(crate) mod upgrade;
 
 pub use state::{
@@ -521,6 +522,7 @@ fn parse_entry(bytes: &[u8]) -> Result<Entry, Failure> {
 
 /// Verify an account's history from its object set, the persisted state and the clock.
 pub fn verify_history(objects: &Objects, persisted: &Persisted, now_ms: i64) -> Verdict {
+    work::verification();
     let incoming = objects;
     let all_objects = merged_objects(objects, persisted);
     let objects = &all_objects;
