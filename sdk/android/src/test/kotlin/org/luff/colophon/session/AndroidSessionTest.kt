@@ -85,7 +85,10 @@ class AndroidSessionTest {
             second.restore()
             assertTrue("${second.phase}", second.phase is SessionPhase.WaitingForApproval)
             first.refresh()
-            first.approve(first.requests.single())
+            // Approval spends a confirmed pairing (spec §7.3, §9.1): the owner scans the request the new device shows.
+            assertEquals(1, first.requests.size)
+            val scanned = first.scanRequest(second.exportRequest())
+            first.approve(scanned.request, scanned.pairing)
             assertTrue("approving opened the owner's PRF slot and signed with an assertion", credentials.prfGets >= 2 && credentials.gets >= atCreation + 2)
             second.refresh()
             assertEquals("${second.state.value}", SessionPhase.Ready, second.phase)
@@ -110,7 +113,10 @@ class AndroidSessionTest {
             assertEquals("${first.state.value}", SessionPhase.Ready, first.phase)
             second.restore()
             first.refresh()
-            first.approve(first.requests.single())
+            // Approval spends a confirmed pairing (spec §7.3, §9.1): the owner scans the request the new device shows.
+            assertEquals(1, first.requests.size)
+            val scanned = first.scanRequest(second.exportRequest())
+            first.approve(scanned.request, scanned.pairing)
             second.refresh()
             assertEquals("${second.state.value}", SessionPhase.Ready, second.phase)
         } finally { first.shutdown(); second.shutdown() }
