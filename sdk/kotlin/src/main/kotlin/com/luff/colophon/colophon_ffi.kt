@@ -1171,6 +1171,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_colophon_ffi_checksum_method_accountengine_begin_write(
     ): Int
+    external fun uniffi_colophon_ffi_checksum_method_accountengine_begin_write_claimed(
+    ): Int
     external fun uniffi_colophon_ffi_checksum_method_accountengine_blob_availability(
     ): Int
     external fun uniffi_colophon_ffi_checksum_method_accountengine_blob_chunk(
@@ -1868,6 +1870,8 @@ internal object UniffiLib {
     external fun uniffi_colophon_ffi_fn_method_accountengine_begin_veto(`ptr`: Long,`transition`: RustBuffer.ByValue,`signers`: RustBuffer.ByValue,`entropy`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
     external fun uniffi_colophon_ffi_fn_method_accountengine_begin_write(`ptr`: Long,`namespace`: RustBuffer.ByValue,`kind`: RustBuffer.ByValue,`payloadJson`: RustBuffer.ByValue,`entropy`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun uniffi_colophon_ffi_fn_method_accountengine_begin_write_claimed(`ptr`: Long,`namespace`: RustBuffer.ByValue,`kind`: RustBuffer.ByValue,`payloadJson`: RustBuffer.ByValue,`claimedMs`: Long,`entropy`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
     external fun uniffi_colophon_ffi_fn_method_accountengine_blob_availability(`ptr`: Long,`namespace`: RustBuffer.ByValue,`digest`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -2860,6 +2864,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_colophon_ffi_checksum_method_accountengine_begin_write() and 0xFFFF) != 50503) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_colophon_ffi_checksum_method_accountengine_begin_write_claimed() and 0xFFFF) != 39144) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_colophon_ffi_checksum_method_accountengine_blob_availability() and 0xFFFF) != 63667) {
@@ -5367,6 +5374,14 @@ public interface AccountEngineInterface {
     fun `beginWrite`(`namespace`: kotlin.String, `kind`: kotlin.String, `payloadJson`: kotlin.String, `entropy`: kotlin.ByteArray): AccountAction
     
     /**
+     * A record write whose signed `created` is `claimed_ms` (ms since the Unix epoch) instead
+     * of the engine's clock: an app importing old data keeps each item's original date. Only
+     * `created` changes; a claimed date later than the engine's clock is refused, and so is a
+     * write by a member whose grant has expired by the engine's clock. 32 bytes of entropy.
+     */
+    fun `beginWriteClaimed`(`namespace`: kotlin.String, `kind`: kotlin.String, `payloadJson`: kotlin.String, `claimedMs`: kotlin.Long, `entropy`: kotlin.ByteArray): AccountAction
+    
+    /**
      * How much of a blob is held.
      */
     fun `blobAvailability`(`namespace`: kotlin.String, `digest`: kotlin.String): BlobAvailability
@@ -6522,6 +6537,31 @@ open class AccountEngine: Disposable, AutoCloseable, AccountEngineInterface
         FfiConverterString.lower(`namespace`),
         FfiConverterString.lower(`kind`),
         FfiConverterString.lower(`payloadJson`),
+        FfiConverterByteArray.lower(`entropy`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * A record write whose signed `created` is `claimed_ms` (ms since the Unix epoch) instead
+     * of the engine's clock: an app importing old data keeps each item's original date. Only
+     * `created` changes; a claimed date later than the engine's clock is refused, and so is a
+     * write by a member whose grant has expired by the engine's clock. 32 bytes of entropy.
+     */
+    @Throws(AccountException::class)override fun `beginWriteClaimed`(`namespace`: kotlin.String, `kind`: kotlin.String, `payloadJson`: kotlin.String, `claimedMs`: kotlin.Long, `entropy`: kotlin.ByteArray): AccountAction {
+            return FfiConverterTypeAccountAction.lift(
+    callWithHandle {
+    uniffiRustCallWithError(AccountException) { _status ->
+    UniffiLib.uniffi_colophon_ffi_fn_method_accountengine_begin_write_claimed(
+        it,
+        
+        FfiConverterString.lower(`namespace`),
+        FfiConverterString.lower(`kind`),
+        FfiConverterString.lower(`payloadJson`),
+        FfiConverterLong.lower(`claimedMs`),
         FfiConverterByteArray.lower(`entropy`),_status)
 }
     }

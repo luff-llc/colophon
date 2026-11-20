@@ -122,7 +122,7 @@ are shared by this service. `captureThought` is an extension on note.add:
 voicePlain:Digest|null,voiceMimeType:Text|null,targetAgentID:ID|null}`. Surrounding text≤2k UTF-16,
 thought≤10k, voice≤6 MiB. Original note text remains original; responses are separate.
 
-Note rows and details carry `created`, the signer's claimed date of the `addNote` operation (wall-clock display; order stays logical). Derived: following sorted by title; episode fraction capped to 1; note time/sequence order;
+Note rows and details carry `created`, the signer's claimed date of the `addNote` operation (wall-clock display; order stays logical). An importer keeps a note's original date by passing it as the claimed date when it performs `addNote` (`perform(_:observed:claimed:)`, [the session](../session.md)); an episode's `updated` and `stateUpdated` likewise come from the claimed date of the operation that set them. Derived: following sorted by title; episode fraction capped to 1; note time/sequence order;
 active playlists; transcript rank; skip/chapter lookups by recording; latest episode state
 history. `L/SeekHistory.swift`, `PlaybackProgressJournal.swift`, `PlaybackAudioOwnership.swift`,
 `TranscriptPreparationJournal.swift` are device-local recovery/ownership, not extra shared opcodes.

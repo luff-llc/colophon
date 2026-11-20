@@ -1538,6 +1538,14 @@ public protocol AccountEngineProtocol: AnyObject, Sendable {
     func beginWrite(namespace: String, kind: String, payloadJson: String, entropy: Data) throws  -> AccountAction
     
     /**
+     * A record write whose signed `created` is `claimed_ms` (ms since the Unix epoch) instead
+     * of the engine's clock: an app importing old data keeps each item's original date. Only
+     * `created` changes; a claimed date later than the engine's clock is refused, and so is a
+     * write by a member whose grant has expired by the engine's clock. 32 bytes of entropy.
+     */
+    func beginWriteClaimed(namespace: String, kind: String, payloadJson: String, claimedMs: Int64, entropy: Data) throws  -> AccountAction
+    
+    /**
      * How much of a blob is held.
      */
     func blobAvailability(namespace: String, digest: String) throws  -> BlobAvailability
@@ -2525,6 +2533,26 @@ open func beginWrite(namespace: String, kind: String, payloadJson: String, entro
         FfiConverterString.lower(namespace),
         FfiConverterString.lower(kind),
         FfiConverterString.lower(payloadJson),
+        FfiConverterData.lower(entropy),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * A record write whose signed `created` is `claimed_ms` (ms since the Unix epoch) instead
+     * of the engine's clock: an app importing old data keeps each item's original date. Only
+     * `created` changes; a claimed date later than the engine's clock is refused, and so is a
+     * write by a member whose grant has expired by the engine's clock. 32 bytes of entropy.
+     */
+open func beginWriteClaimed(namespace: String, kind: String, payloadJson: String, claimedMs: Int64, entropy: Data)throws  -> AccountAction  {
+    return try  FfiConverterTypeAccountAction_lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_accountengine_begin_write_claimed(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(namespace),
+        FfiConverterString.lower(kind),
+        FfiConverterString.lower(payloadJson),
+        FfiConverterInt64.lower(claimedMs),
         FfiConverterData.lower(entropy),uniffiCallStatus
     )
 })
@@ -26657,6 +26685,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_colophon_ffi_checksum_method_accountengine_begin_write() != 50503) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_accountengine_begin_write_claimed() != 39144) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_colophon_ffi_checksum_method_accountengine_blob_availability() != 63667) {
