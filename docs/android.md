@@ -78,17 +78,19 @@ session.state.collect { render(it.phase, it.notices) }                    // pen
   (<https://developer.android.com/identity/passkeys/create-passkeys>). Until this release it sent `"preferred"`. On a
   Galaxy Z Fold5 (Android 17, Google Password Manager), creation reported success but no passkey for the relying party
   was ever listed, and the first sign-in failed with "No available sign-in". The cause is not yet proven:
-  `"required"` is the likely fix, and it still needs a test on the device.
+  `"required"` is the likely fix, and it still needs a test on the device. **This is a deliberate change in
+  behaviour:** a security key that cannot store a discoverable credential is now refused at creation instead of making
+  a server-side credential. A Colophon passkey needs PRF and must be one a provider lists, so such keys were never a
+  good fit.
 * **The wait before the first get.** Separately, `CredentialManagerAdapter` waits before the first get for a passkey
   created in this process (through any adapter instance), in case a provider saves new passkeys asynchronously. On
   Android 14 and later it polls `prepareGetCredential` with no UI, checking `hasCredentialResults(TYPE_PUBLIC_KEY_CREDENTIAL)`
   for that credential, every 400 ms for up to 15 s, then runs the get whatever the answer; before Android 14 it waits a
-  fixed 2.5 s. **The wait did not fix the failure above.** On that phone a plain probe answered true at once, because
-  the hybrid "use another device" entry counts as a result, so the wait ended immediately. The probe now sets
-  `preferImmediatelyAvailableCredentials`, which is documented to skip remote options, so that only a stored passkey
-  should count; whether `hasCredentialResults` honours it is not proven on a device. If it does not, the probe cannot
-  tell a stored passkey from the hybrid entry, and the wait does nothing on such a provider. That costs nothing, so the
-  wait stays.
+  fixed 2.5 s. **The wait did not fix the failure above.** The probe cannot tell a stored passkey from the hybrid "use
+  another device" entry, which also counts as a credential result. So on a phone that offers hybrid sign-in (the tested
+  Fold5 does) it answers true on the first poll, and the wait ends at once without waiting for the save. It helps only
+  where the provider lists nothing for the new credential until it is saved. The wait stays because, where it does
+  nothing, it only adds the first poll's round trip.
   The timeout bounds the whole wait, including a stuck poll. A get for any other passkey is not delayed, two gets for
   the same new passkey share one wait, and cancelling the caller cancels the wait. A created passkey that is never
   asserted is forgotten a minute after the timeout, and at most 16 are remembered. The poll needs
