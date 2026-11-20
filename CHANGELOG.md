@@ -1,8 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.5.1 — 2026-11-20
 
-On main, not in v0.5.0.
+0.5.0 plus the fixes and additions below, with no format or reader-rule change: 0.5.0 homes and
+apps interoperate with 0.5.1. The spec stays Colophon 0.5, revision 18.
 
 - **Provisioning by grant** (reference home, `relay/`): the new gate `grant` provisions a slot when the request carries a 0.5 call (`Authorization: Colophon <call>`, purpose `home.provision`) signed by a member of an operator account held in one of the home's own slots. No shared secret is needed.
   - Revoking or expiring the member stops it at once.
@@ -11,9 +12,18 @@ On main, not in v0.5.0.
   - Provisioned rows record `by`, and `bun relay/server.js provisioned <config>` lists them.
   - No format and no reader rule changes. Core gains `Call::verify_possession`, the existing possession step moved out unchanged.
   - Settings and the issuing and revoking steps are in [relay/README.md](relay/README.md).
-- **Fixed:** the home module's `record_due` grew quadratically slower with an account's history (reference home, `relay/`): when nothing was due, building its log note tried every transition and veto ever held, and verified the whole history again for each. It now shares one verification across all its `prepare_*` attempts and skips transitions already recorded and their vetoes; what remains is the linear parsing and replay of the state every call does (see [docs/performance.md](docs/performance.md)). The note no longer has parts about recorded transitions; what the home records, answers and refuses is unchanged, and no format or reader rule changes. Core gains `VerifiedObjects` (the held objects verified once, bound to them and the clock, with `prepare_activate`, `prepare_vetoed` and `prepare_final` methods), `State::is_recorded`, and a `work-counters` feature for tests. Present in 0.5.0.
+- **Fixed:** the home module's `record_due` grew quadratically slower with an account's history (reference home, `relay/`): when nothing was due, building its log note tried every transition and veto ever held, and verified the whole history again for each. It now shares one verification across all its `prepare_*` attempts and skips transitions already recorded and their vetoes; what remains is the linear parsing and replay of the state every call does (see [docs/performance.md](docs/performance.md)). The note no longer has parts about recorded transitions; what the home records, answers and refuses is unchanged, and no format or reader rule changes. Core gains `VerifiedObjects` (the held objects verified once, bound to them and the clock, with `prepare_activate`, `prepare_vetoed` and `prepare_final` methods), `State::is_recorded`, and a `work-counters` feature for tests. The bug is in 0.5.0.
 - **Sessions use a grant** (JS, Swift, Kotlin): `SessionConfiguration.services` asks for service terms (§10.1), approving with a `ServiceGrant` can only narrow them, `signCall(audience, purpose, args)` signs a call with the member's own key, and `provisionRequest(door, audience, slot, base, account)` provisions a slot by grant and plugs into `HomeConfiguration.request`. A grant's slot condition must also allow calls naming no slot, since conditions bind the member's own history reads (see the session guides). No format, binding or core change.
-- **Fixed:** a session could stay in the `refreshing` phase after a cancelled refresh (Swift, Kotlin) or a cancelled key prompt during one (JS), and an older refresh finishing late could overwrite a newer one's result. A refresh now restores `ready` on every exit and publishes only while it is the newest; a command failure that set a phase keeps it. Present in 0.5.0.
+- **Fixed:** a session could stay in the `refreshing` phase after a cancelled refresh (Swift, Kotlin) or a cancelled key prompt during one (JS), and an older refresh finishing late could overwrite a newer one's result. A refresh now restores `ready` on every exit and publishes only while it is the newest; a command failure that set a phase keeps it. The bug is in 0.5.0.
+
+### Known issues
+
+- On a device, opening an account that holds many vetoes is quadratic in their number
+  (`derived::effective_objects` calls `check_pending_veto` for each). Not fixed.
+- At head quorum two, a device one forward ahead of a home can get one refused sync pass before
+  the next one succeeds.
+
+The rest are in [docs/known-issues.md](docs/known-issues.md).
 
 ## 0.5.0 — 2026-11-19
 
