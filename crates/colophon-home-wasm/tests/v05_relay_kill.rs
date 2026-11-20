@@ -347,7 +347,7 @@ fn check(
 }
 
 #[test]
-#[ignore = "about 16 minutes (quadratic in rounds while record_due is): scripts/test-home.sh runs it (cargo test --test v05_relay_kill -- --ignored)"]
+#[ignore = "about 5 minutes: scripts/test-home.sh runs it (cargo test --test v05_relay_kill -- --ignored)"]
 fn the_relay_killed_at_random_points_loses_nothing_and_receipts_nothing_twice() {
     if prerequisites().is_none() {
         return;
