@@ -50,9 +50,15 @@ class CredentialManagerAdapter(private val context: Context,
     /** No UI: does the provider offer a credential for this get yet? Null before Android 14. */
     private fun readyProbe(requestJson: String): (suspend () -> Boolean)? =
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) ({ offers(requestJson) }) else null
+    /**
+     * Asks with `preferImmediatelyAvailableCredentials`, documented as not "falling back to discovering remote
+     * options", so that the hybrid "use another device" entry, which satisfied a plain probe at once on a tested
+     * phone, should not count. Whether `hasCredentialResults` honours it is not yet proven on a device.
+     */
     @RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
     private suspend fun offers(requestJson: String): Boolean =
-        manager.prepareGetCredential(getRequest(requestJson))
+        manager.prepareGetCredential(GetCredentialRequest(listOf(GetPublicKeyCredentialOption(requestJson)),
+                                                          preferImmediatelyAvailableCredentials = true))
             .hasCredentialResults(PublicKeyCredential.TYPE_PUBLIC_KEY_CREDENTIAL)
     private suspend fun <T> ceremony(block: suspend () -> T): T = try { block() } catch (error: Exception) {
         if (keyOutcome(error) != null) throw error
