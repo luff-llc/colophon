@@ -77,8 +77,10 @@ session.state.collect { render(it.phase, it.notices) }                    // pen
   create can find nothing ("No available sign-in"). `CredentialManagerAdapter` therefore waits before the first get for a
   passkey created in this process (through any adapter instance): on Android 14 and later it polls `prepareGetCredential` with no UI, checking
   `hasCredentialResults(TYPE_PUBLIC_KEY_CREDENTIAL)` for that credential, every 400 ms for up to 15 s, then runs the get
-  whatever the answer; before Android 14 it waits a fixed 2.5 s. A get for any other passkey is not delayed, and
-  cancelling the caller cancels the wait. The poll needs `android.permission.CREDENTIAL_MANAGER_QUERY_CANDIDATE_CREDENTIALS`
+  whatever the answer; before Android 14 it waits a fixed 2.5 s. The timeout bounds the whole wait, a stuck poll
+  included. A get for any other passkey is not delayed, two gets for the same new passkey share one wait, and
+  cancelling the caller cancels the wait. A created passkey that is never asserted is forgotten a minute after the
+  timeout, and at most 16 are remembered. The poll needs `android.permission.CREDENTIAL_MANAGER_QUERY_CANDIDATE_CREDENTIALS`
   (a normal permission), which the AAR's manifest declares and the app's manifest merges in; without it the adapter
   waits the fixed time. Change the timings, or turn the wait off with `PasskeyReadyWait.NONE`, through the adapter's
   `readyWait` parameter. Tests: `PasskeyReadinessTest` (`sdk/kotlin`, JVM, fake clock); the adapter's Credential Manager
