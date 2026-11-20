@@ -49,17 +49,24 @@ class ColophonJoinTest {
         Json.write(mapOf("entries" to entries.map { Json.parse(it.toString(Charsets.UTF_8)) }, "receipts" to listOf<Any>(), "more" to false)).toByteArray()
     private fun entriesOf(body: ByteArray): List<ByteArray> =
         (Json.obj(body.toString(Charsets.UTF_8))!!["entries"] as List<*>).map { Json.write(it).toByteArray() }
+    /** A head envelope for `(seq, digest)` signed by `keys` as `by` (canonical: keys sorted). */
+    private suspend fun forgedHead(account: String, seq: Long, digest: String, by: String, keys: AsyncKeyProvider): ByteArray {
+        val issued = com.luff.colophon.accountFormatDate(System.currentTimeMillis() - 1000)
+        val body = "{\"account\":\"$account\",\"authority\":{\"digest\":\"$digest\",\"seq\":$seq},\"by\":\"$by\",\"issued\":\"$issued\",\"protocol\":\"colophon/head/5\"}".toByteArray()
+        val b64 = java.util.Base64.getEncoder()
+        return "{\"body\":\"${b64.encodeToString(body)}\",\"signature\":\"${b64.encodeToString(keys.sign(body))}\"}".toByteArray()
+    }
     private fun isAuthority(r: HttpRequest) = r.url.contains("/authority")
     private fun ok(body: ByteArray) = HttpAnswer(200u, listOf(), body)
 
     private suspend fun until(join: ColophonJoin, tries: Int = 60): JoinHistory.Admitted {
         repeat(tries) {
-            when (val h = join.fetchHistory()) { is JoinHistory.Admitted -> return h; JoinHistory.Waiting -> delay(150) }
+            when (val h = join.fetchHistory()) { is JoinHistory.Admitted -> return h; JoinHistory.NotAdmitted -> delay(150) }
         }
         fail("the joiner was not admitted")
     }
     private suspend fun rejected(code: String, block: suspend () -> Unit) {
-        try { block(); fail("expected $code") } catch (e: JoinError.Rejected) { assertEquals(code, e.code, e.message) }
+        try { block(); fail("expected $code") } catch (e: JoinError.Rejected) { assertTrue(e.code == code || e.code.startsWith("$code:"), "expected $code, got ${e.message}") }
     }
     private suspend fun refusedByHome(code: String, block: suspend () -> Unit) {
         try { block(); fail("expected the home to refuse with $code") } catch (e: JoinError.Refused) { assertEquals(403, e.status); assertEquals(code, e.code) }
@@ -75,8 +82,9 @@ class ColophonJoinTest {
         val other = RelayHome("https://home-other.test/v1/accounts/kotlin")
         val devices = ArrayList<Device>()
         try {
+            val passkey = TestPasskey()
             val owner = Device(homes = listOf(HomeConfiguration("$base/", request = { a -> relay.start(a); relay.memberRequest(a) }, transport = relay.transport())),
-                createWithoutHome = false, history = HistoryAccess.MEMBERS).also { devices.add(it) }
+                createWithoutHome = false, history = HistoryAccess.MEMBERS, additional = listOf(AdditionalController(passkey, "Passkey"))).also { devices.add(it) }
             owner.session.create(); owner.session.stopSync()
             note(owner.session, "a")
             settle(owner)
@@ -93,7 +101,7 @@ class ColophonJoinTest {
             val request = join.request()
             assertContentEquals(request, join.request(), "the request is made once and reused")
             assertContentEquals(request, joiner.medium.read("requests/${join.memberId()}.json"), "stored where the session looks")
-            assertEquals(JoinHistory.Waiting, join.fetchHistory())
+            assertEquals(JoinHistory.NotAdmitted, join.fetchHistory())
             assertEquals(listOf("refused:revoked"), refusals.all, "a key no grant names is refused:revoked")
 
             // An invite head the home does not hold: the home refuses (before and after approval alike).
@@ -109,7 +117,17 @@ class ColophonJoinTest {
             settle(owner)
             val admitted = until(join)
             assertTrue(admitted.files.keys.all { it.startsWith("authority/") } && admitted.files.size > seq)
-            assertNull(ColophonJoin.ownerDescriptor(admitted.files, "00".repeat(16)), "no controller with this ID")
+            // The owner's passkey, read only from the accepted history (an Admitted value, which only fetchHistory makes).
+            assertNull(admitted.ownerDescriptor("00".repeat(16)), "no controller with this ID")
+            assertNull(admitted.ownerDescriptor(KeyCustody.keyId(owner.owner)), "a raw controller has no WebAuthn descriptor")
+            val descriptor = admitted.ownerDescriptor(KeyCustody.keyId(passkey)) ?: fail("the passkey controller's descriptor")
+            assertEquals(passkey.rp, descriptor.rp)
+            assertContentEquals(passkey.credential, descriptor.credential)
+            assertContentEquals(passkey.publicKeys().signing, descriptor.signing)
+            val restored = Json.obj(webauthnDescriptor(descriptor)!!.toString(Charsets.UTF_8))!!
+            assertEquals("webauthn", restored["form"]); assertEquals(passkey.rp, restored["rp"])
+            assertEquals(java.util.Base64.getEncoder().encodeToString(passkey.credential), restored["credential"])
+            assertNull(webauthnDescriptor(owner.owner.keyDescriptor()), "a raw key is no passkey descriptor")
 
             // A home that serves a history truncated at the invite's head, or before the grant: the tip is not its head.
             val full = admitted.files.toSortedMap().values.toList()
@@ -117,6 +135,30 @@ class ColophonJoinTest {
                 tamper.answer = { r, a -> if (isAuthority(r) && a.status.toInt() == 200) ok(page(full.take(cut))) else a }
                 rejected("refused:rollback") { join.fetchHistory() }
             }
+            // A head that moved past what was served once (the home recorded meanwhile): read again, then accepted.
+            var once = true
+            tamper.answer = { r, a -> if (once && isAuthority(r) && a.status.toInt() == 200) { once = false; ok(page(full.take(full.size - 1))) } else a }
+            assertIs<JoinHistory.Admitted>(join.fetchHistory())
+            // A head signed by a key the verified history names, but not as a current home (this member's own key).
+            val tip = invite(MemoryMedium(admitted.files.toMutableMap()))
+            val forged = forgedHead(account, tip.first, tip.second, join.memberId(), joiner.member)
+            tamper.answer = { r, a -> if (r.url.endsWith("/head")) ok(forged) else a }
+            rejected("badSignature") { join.fetchHistory() }
+            // A home that pages forever: an error at the byte bound, not memory growth (lowered to 4 MiB here so the test
+            // stays small; the shipped bound is 256 MiB).
+            val pad = Json.write(mapOf("pad" to "a".repeat(100_000))).toByteArray()
+            val big = Json.write(mapOf("entries" to List(16) { Json.parse(pad.toString(Charsets.UTF_8)) }, "receipts" to listOf<Any>(), "more" to true)).toByteArray()
+            tamper.answer = { r, a -> if (isAuthority(r) && a.status.toInt() == 200) ok(big) else a }
+            join.historyByteLimit = 4L * 1024 * 1024
+            rejected("unavailable") { join.fetchHistory() }
+            join.historyByteLimit = ColophonJoin.MAX_HISTORY_BYTES
+            // One entry over the authority envelope bound: malformed.
+            val huge = Json.write(mapOf("entries" to listOf(mapOf("pad" to "a".repeat(2_200_000))), "more" to false)).toByteArray()
+            tamper.answer = { r, a -> if (isAuthority(r) && a.status.toInt() == 200) ok(huge) else a }
+            rejected("malformed") { join.fetchHistory() }
+            // A page that says more follows but brings nothing.
+            tamper.answer = { r, a -> if (isAuthority(r) && a.status.toInt() == 200) ok("{\"entries\":[],\"more\":true}".toByteArray()) else a }
+            rejected("malformed") { join.fetchHistory() }
             // A signed head behind the history served (the head from the time of the invite).
             tamper.answer = { r, a -> if (r.url.endsWith("/head")) ok(headAtInvite) else a }
             rejected("unavailable") { join.fetchHistory() }
@@ -156,11 +198,11 @@ class ColophonJoinTest {
             assertTrue(until(theirs).files.isNotEmpty())
             rejected("refused:conflict") { mine.fetchHistory() }
 
-            // A revoked member: the home's answer is the same refused:revoked as before approval, so the joiner waits.
+            // A revoked member: the home's answer is the same refused:revoked as before approval: not admitted (no longer).
             owner.session.revoke(join.memberId())
             settle(owner)
             var waiting = false
-            repeat(40) { if (!waiting) { waiting = join.fetchHistory() == JoinHistory.Waiting; if (!waiting) delay(150) } }
+            repeat(40) { if (!waiting) { waiting = join.fetchHistory() == JoinHistory.NotAdmitted; if (!waiting) delay(150) } }
             assertTrue(waiting, "a revoked member is not admitted")
             assertEquals("refused:revoked", refusals.all.last())
             println("join: waiting code ${ColophonJoin.WAITING_CODE}; revoked gives ${refusals.all.last()}")

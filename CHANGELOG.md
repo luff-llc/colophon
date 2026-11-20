@@ -12,22 +12,25 @@ No format, reader-rule or version change. The spec stays Colophon 0.5, revision 
   - `ColophonJoin` (Kotlin and Swift) is built from the session configuration, the account ID, the home and the head.
     `request()` makes and stores the member's signed request at `requests/<member ID>.json` by the session's own code,
     so the session opened afterwards finds and reuses it. `fetchHistory()` reads `GET {base}/authority` with a
-    `colophon.history.read` call signed by the member key, `asOf` the head, and `GET {base}/head`. It returns `waiting`
-    while the home refuses the call with `403 refused:revoked` (no grant names the key; 0.5 gives the same result after
-    a revocation) or the history names no such member. It returns the files only when the history verifies `ok`, is the
-    account's, holds the head at `seq`, ends at the home's fresh signed head, and grants this member from exactly the
-    stored request, still current. Any other refusal or check is an error: `refused:fork` (another account or digest),
-    `refused:rollback` (a history shorter than the signed head), `refused:revoked` / `refused:expired`,
-    `refused:conflict` (a grant of another request), `unavailable` (a history short of the head, a head behind).
-    `ColophonJoin.ownerDescriptor` reads a current WebAuthn controller's descriptor (`rp`, credential, origins) from the
-    verified history by key ID.
-  - Core: `write::calls::prepare_history_read` / `finish_history_read` (a history read with no engine or held history,
-    only at a path that serves the history, `args` bound as a home checks them) and `v05::join` (`history_page_path`,
-    `parse_history_page`, `verify_at_head`, `current_webauthn_controller`). FFI: `AccountHistoryRead`,
-    `account_history_page_path`, `account_history_page`, `account_verify_at_head`,
+    `colophon.history.read` call signed by the member key, no links, `asOf` the head, and `GET {base}/head`.
+  - It returns `NotAdmitted` / `.notAdmitted` while the home refuses the call with `403 refused:revoked` or the
+    history names no such member: not yet admitted, or no longer admitted, since 0.5 gives the same answer for both.
+  - It returns `Admitted` only when the history verifies `ok` from seq 1, is the account's, holds the head at `seq`,
+    ends at a fresh head signed by a current home whose endpoints name the base, and grants this member from exactly
+    the stored request, still current. Any other refusal or check is an error: `refused:fork` (another account or
+    digest), `refused:rollback` (a history shorter than the signed head, after three reads), `refused:revoked` /
+    `refused:expired`, `refused:conflict` (a grant of another request), `unavailable` (a history short of the head,
+    a head behind, or past the bounds), `badSignature` (a head no current home signed).
+  - A joining device holds at most 256 MiB of entries and 2^18 entries (spec §2.4's portability floor), each entry
+    at most the authority envelope bound, checked while paging and again in the core.
+  - `Admitted.ownerDescriptor(keyId)` reads a current WebAuthn controller's descriptor (`rp`, credential, origins)
+    from the accepted history only. Swift's `KeyDescriptor(view:)` and Kotlin's `webauthnDescriptor(view)` turn it
+    into what a passkey provider takes.
+  - Core: `write::calls::prepare_history_read` / `finish_history_read` and `v05::join` (`history_page_path`,
+    `parse_history_page`, `check_history_size`, `verify_at_head`, `current_webauthn_controller`). FFI:
+    `AccountHistoryRead`, `account_history_page_path`, `account_history_page`, `account_verify_at_head`,
     `account_current_webauthn_controller`.
   - The session's own request moved, unchanged, to one helper the join shares (`OwnRequest`).
-
 
 ## 0.5.1 — 2026-11-20
 

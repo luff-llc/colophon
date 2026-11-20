@@ -8,7 +8,8 @@ use super::Cell;
 use colophon_core::v05::encoding::{encode_base64url, is_digest};
 use colophon_core::v05::ids::AccountId;
 use colophon_core::v05::join::{
-    current_webauthn_controller, history_page_path, parse_history_page, verify_at_head, AtHead,
+    check_history_size, current_webauthn_controller, history_page_path, parse_history_page,
+    verify_at_head, AtHead, MAX_ENTRY_BYTES,
 };
 use colophon_core::v05::write::calls::{
     finish_history_read, prepare_history_read, HistoryReadSpec as CoreSpec, PreparedHistoryRead,
@@ -47,15 +48,16 @@ free_fn! {
         })
     }
 }
+/// The entries, moved (never copied), after the joining device's bounds (core `v05::join`): each
+/// at most the authority envelope bound, together at most 2^18 entries and 256 MiB.
 fn entry_bytes(entries: Vec<ByteString>) -> R<Vec<Vec<u8>>> {
-    list_len(&entries, "entries")?;
-    entries
-        .into_iter()
-        .map(|b| {
-            bytes_ok(&b.bytes, MAX_BYTES, "an entry")?;
-            Ok(b.bytes)
-        })
-        .collect()
+    let mut total = 0usize;
+    for b in &entries {
+        bytes_ok(&b.bytes, MAX_ENTRY_BYTES, "an entry")?;
+        total = total.saturating_add(b.bytes.len());
+    }
+    check_history_size(entries.len(), total)?;
+    Ok(entries.into_iter().map(|b| b.bytes).collect())
 }
 
 free_fn! {
@@ -76,7 +78,7 @@ free_fn! {
             bytes_ok(&request, 1 << 22, "a request")?;
             bytes_ok(&signed_head, 1 << 16, "a head")?;
             let entries = entry_bytes(entries)?;
-            Ok(match verify_at_head(&account, seq, &head, &request, &base, &signed_head, &entries, now_ms)? {
+            Ok(match verify_at_head(&account, seq, &head, &request, &base, &signed_head, entries, now_ms)? {
                 AtHead::Admitted(files) => JoinedHistory {
                     admitted: true,
                     stores: files.into_iter().map(|(path, bytes)| Store { path, bytes }).collect(),
@@ -93,7 +95,7 @@ free_fn! {
     pub fn account_current_webauthn_controller(entries: Vec<ByteString>, id: String, now_ms: i64) -> Result<Option<KeyDescriptorView>, AccountError> {
         guard(|| {
             let entries = entry_bytes(entries)?;
-            Ok(current_webauthn_controller(&entries, &id, now_ms)?.as_ref().map(cv::descriptor_view))
+            Ok(current_webauthn_controller(entries, &id, now_ms)?.as_ref().map(cv::descriptor_view))
         })
     }
 }

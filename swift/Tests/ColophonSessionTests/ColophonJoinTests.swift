@@ -1,19 +1,27 @@
+import CryptoKit
 import Foundation
 import Testing
 import ColophonKit
-import ColophonSession
+import ColophonKeys
+@testable import ColophonSession
 
 /// Joining at an invite's head (0.5.2) against the REAL relay as the home (`relay/server.js` with the Rust home module,
 /// history for members only): the joiner holds only the account ID, the home's base, the invite's head and its own keys.
 /// It waits before approval, gets the history after, and the session opened from that history reuses the same request
 /// and member. Refused: an invite head the home does not hold (another digest at the seq, a seq beyond), another account,
 /// a history truncated at the invite's head or before the grant (the tip is not the signed head), a grant made from
-/// another request, a signed head behind the history. A revoked member gets the home's same `refused:revoked`: waiting.
+/// another request, a signed head behind the history. A revoked member gets the home's same `refused:revoked`: not admitted.
 /// The same journey runs in Kotlin (`ColophonJoinTest.kt`).
 @MainActor @Suite(.serialized) struct ColophonJoinTests {
     private let base = "https://home-join.test/v1/accounts/swift"
     private let otherBase = "https://home-other.test/v1/accounts/swift"
 
+    /// True the first time only.
+    final class Once: @unchecked Sendable {
+        private let lock = NSLock()
+        private var used = false
+        func take() -> Bool { lock.withLock { defer { used = true }; return !used } }
+    }
     /// A home transport that lets a test rewrite what the home answers.
     final class Tamper: HomeTransport, @unchecked Sendable {
         let inner: any HomeTransport
@@ -50,17 +58,17 @@ import ColophonSession
         }
         Issue.record("the device did not settle: \(device.session.phase) \(device.session.homeIssues)")
     }
-    private func admitted(_ join: ColophonJoin) async throws -> [String: Data] {
+    private func admitted(_ join: ColophonJoin) async throws -> AdmittedHistory? {
         for _ in 0..<60 {
-            if case .admitted(let files) = try await join.fetchHistory() { return files }
+            if case .admitted(let history) = try await join.fetchHistory() { return history }
             try await Task.sleep(for: .milliseconds(150))
         }
         Issue.record("the joiner was not admitted")
-        return [:]
+        return nil
     }
     private func rejected(_ code: String, _ body: () async throws -> Void) async {
         do { try await body(); Issue.record("expected \(code)") }
-        catch let JoinError.rejected(c, d) { #expect(c == code, "\(d)") }
+        catch let JoinError.rejected(c, d) { #expect(c == code || c.hasPrefix(code + ":"), "\(c) \(d)") }
         catch { Issue.record("expected \(code), got \(error)") }
     }
     private func refusedByHome(_ code: String, _ body: () async throws -> Void) async {
@@ -68,18 +76,27 @@ import ColophonSession
         catch let JoinError.refused(status, c) { #expect(status == 403 && c == code, "\(status) \(c ?? "-")") }
         catch { Issue.record("expected \(code), got \(error)") }
     }
-    private func makeOwner(_ relay: RelayHome, _ base: String) -> Device {
+    private func makeOwner(_ relay: RelayHome, _ base: String, passkey: TestPasskey? = nil) -> Device {
         Device(homes: [HomeConfiguration(endpoint: URL(string: base + "/")!, request: { account in
             try relay.start(account: account)
             return try relay.memberRequest(account: account)
-        }, transport: relay.transport())], createWithoutHome: false, history: .members)
+        }, transport: relay.transport())], createWithoutHome: false,
+               additional: passkey.map { [AdditionalController(provider: $0, label: "Passkey")] } ?? [], history: .members)
+    }
+    /// A head envelope for `(seq, digest)` signed by `keys` as `by` (canonical: keys sorted).
+    private func forgedHead(account: String, seq: UInt64, digest: String, by: String, keys: any AsyncKeyProvider) async throws -> Data {
+        let issued = try accountFormatDate(ms: RelayHome.nowMs() - 1000)
+        let body = Data("{\"account\":\"\(account)\",\"authority\":{\"digest\":\"\(digest)\",\"seq\":\(seq)},\"by\":\"\(by)\",\"issued\":\"\(issued)\",\"protocol\":\"colophon/head/5\"}".utf8)
+        let signature = try await keys.sign(body: body)
+        return Data("{\"body\":\"\(body.base64EncodedString())\",\"signature\":\"\(signature.base64EncodedString())\"}".utf8)
     }
 
     @Test(.timeLimit(.minutes(10))) func joinAtTheInviteHead() async throws {
         let relay = RelayHome(base: base, port: RelayHome.freePort())
         let other = RelayHome(base: otherBase, port: RelayHome.freePort())
         defer { relay.stop(); other.stop() }
-        let owner = makeOwner(relay, base)
+        let passkey = TestPasskey()
+        let owner = makeOwner(relay, base, passkey: passkey)
         await owner.session.create()
         owner.session.stopSync()
         try #require(owner.session.phase == .ready)
@@ -101,7 +118,7 @@ import ColophonSession
         #expect(again == request, "the request is made once and reused")
         #expect(try joiner.medium.read("requests/\(memberID).json") == request, "stored where the session looks")
         let first = try await join.fetchHistory()
-        #expect(first == .waiting)
+        #expect(first == .notAdmitted)
         #expect(refusals.all == ["refused:revoked"], "a key no grant names is refused:revoked")
 
         // An invite head the home does not hold, and another account: the home refuses.
@@ -115,9 +132,19 @@ import ColophonSession
         let scanned = try await owner.session.scanRequest(request)
         try await owner.session.approve(scanned.request, pairing: scanned.pairing)
         try await settle(owner)
-        let files = try await admitted(join)
+        let history = try #require(try await admitted(join))
+        let files = history.files
         #expect(files.keys.allSatisfy { $0.hasPrefix("authority/") } && UInt64(files.count) > seq)
-        #expect(try ColophonJoin.ownerDescriptor(files: files, keyID: String(repeating: "00", count: 16)) == nil, "no controller with this ID")
+        // The owner's passkey, read only from the accepted history (an AdmittedHistory, which only fetchHistory makes).
+        #expect(try history.ownerDescriptor(keyID: String(repeating: "00", count: 16)) == nil, "no controller with this ID")
+        #expect(try history.ownerDescriptor(keyID: try await KeyCustody.keyID(of: owner.owner)) == nil, "a raw controller is no passkey")
+        let view = try #require(try history.ownerDescriptor(keyID: try await KeyCustody.keyID(of: passkey)))
+        let descriptor = try KeyDescriptor(view: view)
+        #expect(descriptor.relyingParty == passkey.rp && descriptor.credential == passkey.credential)
+        #expect(descriptor.signing == passkey.key.publicKey.x963Representation)
+        #expect(descriptor.view == view)
+        let rawView = try await owner.owner.keyDescriptor()
+        #expect(throws: KeyProviderError.self) { try KeyDescriptor(view: rawView) }
 
         // A history truncated at the invite's head, or before the grant: the tip is not the home's signed head.
         let full = files.sorted { $0.key < $1.key }.map(\.value)
@@ -126,6 +153,31 @@ import ColophonSession
             tamper.set { r, a in Self.isAuthority(r) && a.status == 200 ? Self.ok(truncated) : a }
             await rejected("refused:rollback") { _ = try await join.fetchHistory() }
         }
+        // A head that moved past what was served once (the home recorded meanwhile): read again, then accepted.
+        let shorter = Self.page(Array(full.prefix(full.count - 1)))
+        let once = Once()
+        tamper.set { r, a in Self.isAuthority(r) && a.status == 200 && once.take() ? Self.ok(shorter) : a }
+        if case .admitted = try await join.fetchHistory() {} else { Issue.record("a head that moved once is read again") }
+        // A head signed by a key the verified history names, but not as a current home (this member's own key).
+        let tip = try invite(MemoryMedium(files: files))
+        let forged = try await forgedHead(account: account, seq: tip.0, digest: tip.1, by: memberID, keys: joiner.member)
+        tamper.set { r, a in r.url.hasSuffix("/head") ? Self.ok(forged) : a }
+        await rejected("badSignature") { _ = try await join.fetchHistory() }
+        // A home that pages forever: an error at the byte bound, not memory growth (the bound is lowered to 4 MiB here
+        // so the test stays small; the shipped bound is 256 MiB).
+        let pad = String(repeating: "a", count: 100_000)
+        let big = try JSONSerialization.data(withJSONObject: ["entries": Array(repeating: ["pad": pad], count: 16), "more": true])
+        tamper.set { r, a in Self.isAuthority(r) && a.status == 200 ? Self.ok(big) : a }
+        var bounded = join
+        bounded.historyByteLimit = 4 * 1024 * 1024
+        await rejected("unavailable") { _ = try await bounded.fetchHistory() }
+        // One entry over the authority envelope bound: malformed.
+        let huge = try JSONSerialization.data(withJSONObject: ["entries": [["pad": String(repeating: "a", count: 2_200_000)]], "more": false])
+        tamper.set { r, a in Self.isAuthority(r) && a.status == 200 ? Self.ok(huge) : a }
+        await rejected("malformed") { _ = try await join.fetchHistory() }
+        // A page that says more follows but brings nothing.
+        tamper.set { r, a in Self.isAuthority(r) && a.status == 200 ? Self.ok(Data("{\"entries\":[],\"more\":true}".utf8)) : a }
+        await rejected("malformed") { _ = try await join.fetchHistory() }
         // A signed head behind the history served (the head from the time of the invite).
         tamper.set { r, a in r.url.hasSuffix("/head") ? Self.ok(headAtInvite) : a }
         await rejected("unavailable") { _ = try await join.fetchHistory() }
@@ -169,19 +221,19 @@ import ColophonSession
         let decoyScan = try await owner.session.scanRequest(try await theirs.request())
         try await owner.session.approve(decoyScan.request, pairing: decoyScan.pairing)
         try await settle(owner)
-        let theirFiles = try await admitted(theirs)
-        #expect(!theirFiles.isEmpty)
+        let theirs1 = try await admitted(theirs)
+        #expect(theirs1 != nil)
         await rejected("refused:conflict") { _ = try await mine.fetchHistory() }
 
         // A revoked member: the home's answer is the same refused:revoked as before approval, so the joiner waits.
         try await owner.session.revoke(memberID: memberID)
         try await settle(owner)
-        var waiting = false
-        for _ in 0..<40 where !waiting {
-            waiting = try await join.fetchHistory() == .waiting
-            if !waiting { try await Task.sleep(for: .milliseconds(150)) }
+        var notAdmitted = false
+        for _ in 0..<40 where !notAdmitted {
+            notAdmitted = try await join.fetchHistory() == .notAdmitted
+            if !notAdmitted { try await Task.sleep(for: .milliseconds(150)) }
         }
-        #expect(waiting, "a revoked member is not admitted")
+        #expect(notAdmitted, "a revoked member is not admitted (no longer)")
         #expect(refusals.all.last == "refused:revoked")
     }
 }

@@ -32,6 +32,25 @@ public struct KeyDescriptor: Sendable, Equatable {
         self.origins = Set(origins).sorted { Array($0.utf8).lexicographicallyPrecedes(Array($1.utf8)) }
     }
 
+    /// A WebAuthn descriptor as a verified history names it (the `KeyDescriptorView` a 0.5 export returns, for example
+    /// `AdmittedHistory.ownerDescriptor`), so a device that did not register the passkey can use it. `json` is the
+    /// registration parser's form of the same fields (`form`, `signing`, `rp`, `credential`, `origins` when present).
+    /// A raw key, or a view without `rp` or `credential`, is `KeyProviderError.unsupportedHere`.
+    public init(view: KeyDescriptorView) throws {
+        guard view.form == .webauthn, let rp = view.rp, let credential = view.credential, view.signing.count == 65 else {
+            throw KeyProviderError.unsupportedHere
+        }
+        var fields: [String: Any] = ["form": "webauthn", "signing": view.signing.base64EncodedString(), "rp": rp,
+                                     "credential": credential.base64EncodedString()]
+        if !view.origins.isEmpty { fields["origins"] = view.origins }
+        json = try JSONSerialization.data(withJSONObject: fields, options: [.sortedKeys, .withoutEscapingSlashes])
+        signing = view.signing
+        relyingParty = rp
+        self.credential = credential
+        authorityOrigins = view.authorityOrigins
+        origins = view.origins
+    }
+
     /// The descriptor in the protocol form every 0.5 export takes (`ControllerSpec.key`).
     public var view: KeyDescriptorView {
         KeyDescriptorView(form: .webauthn, signing: signing, agreement: nil, rp: relyingParty, credential: credential,

@@ -20,16 +20,36 @@ import kotlinx.coroutines.withContext
 /** What [ColophonJoin.fetchHistory] found. */
 sealed class JoinHistory {
     /**
-     * Not admitted yet: the home refused the read with `403 refused:revoked` (no grant names this key), or its history
-     * names no member with this ID. Spec 0.5 gives the same result after a revocation, so this also covers a member
-     * revoked before its first fetch: show "Waiting for approval", and at a deadline "Not approved, or no longer allowed".
+     * Not yet admitted, or no longer admitted; the home's answer is the same for both by design. The home refused the
+     * read with `403 refused:revoked` (the result spec 0.5 gives a key no current grant names, before an approval and
+     * after a revocation alike), or the history it served names no member with this ID. A host shows that it is
+     * waiting for approval and, at its own deadline, that the device was not approved or is no longer allowed.
      */
-    object Waiting : JoinHistory() { override fun toString() = "Waiting" }
+    object NotAdmitted : JoinHistory() { override fun toString() = "NotAdmitted" }
     /** The verified history, as files to store (`authority/<seq, eight digits>.json`), before the session is opened. */
-    class Admitted(val files: Map<String, ByteArray>) : JoinHistory()
+    /**
+     * The accepted history: it verified from seq 1 as the account's, holds the given entry at its seq, ends at a fresh
+     * head signed by a current home serving at the base, and grants this member from its exact request. Only
+     * [ColophonJoin.fetchHistory] makes one, after every acceptance condition held.
+     */
+    class Admitted internal constructor(files: Map<String, ByteArray>) : JoinHistory() {
+        private val held: Map<String, ByteArray> = files.mapValues { it.value.copyOf() }
+        /** The files to store (`authority/<seq, eight digits>.json`) before the session is opened (copies). */
+        val files: Map<String, ByteArray> get() = held.mapValues { it.value.copyOf() }
+
+        /**
+         * The WebAuthn descriptor (`rp`, credential, origins) of controller [keyId] in this accepted history, when it is a
+         * current WebAuthn controller; null for a removed, provisional, suspended or raw controller, or one the keyring
+         * does not hold. [webauthnDescriptor] turns it into the descriptor JSON a passkey provider restores from.
+         */
+        fun ownerDescriptor(keyId: String, nowMs: Long = System.currentTimeMillis()): KeyDescriptorView? {
+            val entries = held.filterKeys { it.startsWith("authority/") }.toSortedMap().values.map { ByteString(it.copyOf()) }
+            return accountCurrentWebauthnController(entries, keyId, nowMs)
+        }
+    }
 }
 
-/** Why a join at an invite's head failed. Anything here is an error, never "waiting". */
+/** Why a join at an invite's head failed. Anything here is an error, never "not admitted". */
 sealed class JoinError(message: String) : Exception(message) {
     /** The home refused the read for another reason than "not a member" ([status], and the `result` it gave, validated). */
     class Refused(val status: Int, val code: String?) : JoinError("the home refused the history read: $status ${code ?: ""}")
@@ -71,6 +91,8 @@ class ColophonJoin(
     private val homeConfiguration: HomeConfiguration = configuration.homes.firstOrNull { it.endpoint.trimEnd('/') == base }
         ?: HomeConfiguration("$base/")
     private val now: Long get() = configuration.now()
+    /** The entry-byte bound while paging ([MAX_HISTORY_BYTES]); tests lower it to exercise the bound cheaply. */
+    internal var historyByteLimit: Long = MAX_HISTORY_BYTES
 
     /** This device's member ID (the key ID of its member signing key). */
     suspend fun memberId(): String = KeyCustody.keyId(keys)
@@ -84,9 +106,11 @@ class ColophonJoin(
     }
 
     /**
-     * Fetch and verify the history. [JoinHistory.Waiting] while this member is not admitted; [JoinError] for any other
-     * refusal or a history that is not accepted; a transport failure is thrown as it came ([HomeTransportException]).
-     * A home whose signed head moved while the history was read is read again, at most three times.
+     * Fetch and verify the history. [JoinHistory.NotAdmitted] while this member is not (or no longer) admitted;
+     * [JoinError] for any other refusal or a history that is not accepted; a transport failure is thrown as it came
+     * ([HomeTransportException]). A home whose signed head moved while the history was read (`unavailable`: behind;
+     * `refused:rollback`: beyond what was served) is read again, at most [ATTEMPTS] times in all; a home that keeps
+     * serving less than it signed then fails with `refused:rollback`.
      */
     suspend fun fetchHistory(): JoinHistory = withContext(Dispatchers.IO) { fetch() }
 
@@ -96,7 +120,7 @@ class ColophonJoin(
         while (true) {
             attempt++
             val entries = when (val read = readHistory()) {
-                null -> return JoinHistory.Waiting
+                null -> return JoinHistory.NotAdmitted
                 else -> read
             }
             val signedHead = get("/head", null)
@@ -104,10 +128,10 @@ class ColophonJoin(
             val verdict = try {
                 accountVerifyAtHead(account, seq.toULong(), head, request, base, signedHead.body, entries, now)
             } catch (e: com.luff.colophon.AccountException) {
-                if (e.code == "unavailable" && attempt < 3) continue
+                if ((e.code == "unavailable" || e.code == "refused:rollback") && attempt < ATTEMPTS) continue
                 throw JoinError.Rejected(e.code, e.message ?: "")
             }
-            if (!verdict.admitted) return JoinHistory.Waiting
+            if (!verdict.admitted) return JoinHistory.NotAdmitted
             return JoinHistory.Admitted(verdict.stores.associate { it.path to it.bytes })
         }
     }
@@ -118,6 +142,7 @@ class ColophonJoin(
         val entries = ArrayList<ByteString>()
         var after = 0uL
         var pages = 0
+        var bytes = 0L
         while (true) {
             if (++pages > MAX_PAGES) throw JoinError.Rejected("malformed", "the history has too many pages")
             val path = accountHistoryPagePath(after)
@@ -132,6 +157,12 @@ class ColophonJoin(
                 throw JoinError.Rejected(e.code, e.message ?: "")
             }
             if (page.more && page.entries.isEmpty()) throw JoinError.Rejected("malformed", "a history page made no progress")
+            // The joining device's bounds, checked while paging (the core checks them again): spec §2.4's portability
+            // floor of 256 MiB of envelopes, and 2^18 entries (4,096 pages of 64).
+            bytes += page.entries.sumOf { it.bytes.size.toLong() }
+            if (bytes > historyByteLimit || entries.size + page.entries.size > MAX_ENTRIES) {
+                throw JoinError.Rejected("unavailable", "the history passes what a joining device holds (2^18 entries, 256 MiB)")
+            }
             entries.addAll(page.entries)
             after += page.entries.size.toULong()
             if (!page.more) return entries
@@ -154,15 +185,29 @@ class ColophonJoin(
         /** The result a home gives a call from a key no grant names (spec 0.5 keeps it; `refused:notGranted` is reserved). */
         const val WAITING_CODE = "refused:revoked"
         private const val MAX_PAGES = 4096
+        /** Reads of the history and head in one [fetchHistory] when the signed head moved meanwhile. */
+        const val ATTEMPTS = 3
+        /** Spec §2.4's portability floor for envelopes: the most entry bytes a joining device holds. */
+        const val MAX_HISTORY_BYTES = 256L * 1024 * 1024
+        /** 4,096 pages of 64 entries. */
+        const val MAX_ENTRIES = 1 shl 18
 
-        /**
-         * The WebAuthn descriptor (`rp`, credential, origins) of controller [keyId] in the verified history [files] (as
-         * [JoinHistory.Admitted] gave them), when it is a current WebAuthn controller; null for a removed, provisional,
-         * suspended or raw controller, or one the keyring does not hold. An invite names the owner's key ID only.
-         */
-        fun ownerDescriptor(files: Map<String, ByteArray>, keyId: String, nowMs: Long = System.currentTimeMillis()): KeyDescriptorView? {
-            val entries = files.filterKeys { it.startsWith("authority/") }.toSortedMap().values.map { ByteString(it) }
-            return accountCurrentWebauthnController(entries, keyId, nowMs)
-        }
     }
+}
+
+/**
+ * The registration parser's descriptor JSON (`form`, `signing`, `rp`, `credential`, `origins` when present) for a WebAuthn
+ * [KeyDescriptorView] a verified history names, such as [JoinHistory.Admitted.ownerDescriptor]: the form a passkey provider
+ * restores from (Android: `PasskeyProvider.restore`). Null for a raw key or a view without `rp` or `credential`.
+ */
+fun webauthnDescriptor(view: KeyDescriptorView): ByteArray? {
+    if (view.form != com.luff.colophon.SignForm.WEBAUTHN || view.signing.size != 65) return null
+    val rp = view.rp ?: return null
+    val credential = view.credential ?: return null
+    val b64 = java.util.Base64.getEncoder()
+    val fields = linkedMapOf<String, Any?>("credential" to b64.encodeToString(credential), "form" to "webauthn")
+    if (view.origins.isNotEmpty()) fields["origins"] = view.origins
+    fields["rp"] = rp
+    fields["signing"] = b64.encodeToString(view.signing)
+    return Json.write(fields).toByteArray()
 }
