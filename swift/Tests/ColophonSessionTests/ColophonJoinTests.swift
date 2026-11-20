@@ -34,12 +34,12 @@ import ColophonSession
         try #require(report.code == "ok")
         return (UInt64(report.branch.count), report.branch.last!)
     }
-    private static func page(_ entries: [Data]) -> Data {
+    nonisolated private static func page(_ entries: [Data]) -> Data {
         let objects = entries.map { try! JSONSerialization.jsonObject(with: $0) }
         return try! JSONSerialization.data(withJSONObject: ["entries": objects, "receipts": [Any](), "more": false])
     }
-    private static func ok(_ body: Data) -> HttpAnswer { HttpAnswer(status: 200, headers: [], body: body) }
-    private static func isAuthority(_ r: HttpRequest) -> Bool { r.url.contains("/authority") }
+    nonisolated private static func ok(_ body: Data) -> HttpAnswer { HttpAnswer(status: 200, headers: [], body: body) }
+    nonisolated private static func isAuthority(_ r: HttpRequest) -> Bool { r.url.contains("/authority") }
     private func get(_ transport: any HomeTransport, _ url: String) async throws -> Data {
         try await transport.send(HttpRequest(ticket: 0, home: "", method: .get, url: url, headers: [], body: Data())).body
     }
