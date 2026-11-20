@@ -286,6 +286,11 @@ impl State {
     pub fn activations(&self) -> &[Activation] {
         &self.activations
     }
+    /// Whether the transition with this body digest is recorded on this branch (an `activate`
+    /// or a `vetoed` of it is in the history), so nothing more can be recorded of it (§8.7).
+    pub fn is_recorded(&self, transition_digest: &str) -> bool {
+        self.recorded.contains(transition_digest)
+    }
     /// Suspensions that remain in force at the caller's clock (§8.7 Clock).
     /// Expired records remain in the folded state for checks of historical entries.
     pub fn active_suspensions(&self, now_ms: i64) -> Vec<&Suspension> {

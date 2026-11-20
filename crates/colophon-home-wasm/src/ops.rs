@@ -1827,8 +1827,16 @@ fn genesis_receipt_request(h: &HomeState, home: &str, now_ms: i64) -> R<Option<V
 }
 
 /// Why nothing was recorded: what each held transition, veto and activation is waiting for.
+///
+/// Every entry is built over one verification of the held objects (`view` replays the home's
+/// history once more for the provisional activations). A transition already recorded on the branch, and a veto of one, is not tried: nothing more
+/// can be recorded of it, and `pending` keeps settled objects for ever, so trying them made
+/// this note cost O(everything held × history) on every pass. At an unresolved fork there is
+/// no verified head to say what is recorded, so every held object is tried as before.
 fn waiting(h: &HomeState, objects: &Objects, now_ms: i64) -> Value {
-    use colophon_core::v05::write::authority::{prepare_activate, prepare_final, prepare_vetoed};
+    use colophon_core::v05::write::authority::VerifiedObjects;
+    let verified = VerifiedObjects::new(objects, now_ms);
+    let settled = |transition: &str| verified.state().is_ok_and(|s| s.is_recorded(transition));
     let mut why: Vec<String> = objects
         .pending
         .iter()
@@ -1837,9 +1845,12 @@ fn waiting(h: &HomeState, objects: &Objects, now_ms: i64) -> Value {
                 .ok()
         })
         .filter_map(|e| match e.value.get("protocol").and_then(Value::as_str) {
-            Some("colophon/transition/5") => prepare_activate(objects, now_ms, &e.digest)
-                .err()
-                .map(|x| format!("activate {}: {x}", &e.digest[..8])),
+            Some("colophon/transition/5") if !settled(&e.digest) => {
+                verified
+                    .prepare_activate(&e.digest)
+                    .err()
+                    .map(|x| format!("activate {}: {x}", &e.digest[..8]))
+            }
             Some("colophon/veto/5") => {
                 let t = e
                     .value
@@ -1847,7 +1858,11 @@ fn waiting(h: &HomeState, objects: &Objects, now_ms: i64) -> Value {
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_string();
-                prepare_vetoed(objects, now_ms, &t, &e.digest)
+                if settled(&t) {
+                    return None;
+                }
+                verified
+                    .prepare_vetoed(&t, &e.digest)
                     .err()
                     .map(|x| format!("vetoed {}: {x}", &e.digest[..8]))
             }
@@ -1856,7 +1871,7 @@ fn waiting(h: &HomeState, objects: &Objects, now_ms: i64) -> Value {
         .collect();
     if let Ok(v) = view(h, now_ms) {
         for a in v.state.activations().iter().filter(|a| !a.final_) {
-            if let Err(e) = prepare_final(objects, now_ms, a.seq) {
+            if let Err(e) = verified.prepare_final(a.seq) {
                 why.push(format!("final {}: {e}", a.seq));
             }
         }
@@ -1867,6 +1882,9 @@ fn waiting(h: &HomeState, objects: &Objects, now_ms: i64) -> Value {
         json!(format!("waiting: {}", why.join("; ")))
     }
 }
+
+#[cfg(test)]
+mod waiting_tests;
 
 // ---------------------------------------------------------------------------------------------
 // Records, live values, blob chunks.

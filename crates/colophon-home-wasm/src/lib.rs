@@ -23,3 +23,12 @@ pub mod abi;
 mod ops;
 
 pub use ops::handle;
+
+// The core's engine fixture and the relay tests' account builders, for the unit tests of `ops`
+// that need a real history (`ops::waiting_tests`).
+#[cfg(test)]
+#[path = "../../colophon-core/tests/v05_engine_support/mod.rs"]
+mod support;
+#[cfg(test)]
+#[path = "../tests/support_relay/mod.rs"]
+mod support_relay;

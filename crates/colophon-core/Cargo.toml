@@ -8,6 +8,9 @@ rust-version.workspace = true
 [features]
 default = ["parallel"]
 parallel = []
+# Per-thread counts of history verifications and recording-entry builds, for tests that bound
+# work by counting (v05::history::work). Off in every shipped build.
+work-counters = []
 
 [dependencies]
 p256.workspace = true
