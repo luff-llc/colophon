@@ -39,7 +39,7 @@ use colophon_core::v05::write::succession::*;
 use colophon_core::v05::write::{format_date, SignatureResult};
 use serde_json::{json, Value};
 use support::MemSource;
-use support_relay::{eventually, http, prerequisites, HomeKeys, Relay, Scratch, BASE_A};
+use support_relay::{http, prerequisites, ticks_until, HomeKeys, Relay, Scratch, BASE_A};
 use swift::{body_digest, keyring_library_with, sha, Host, SwiftFixture};
 
 const T0: i64 = 1_794_384_000_000; // 2026-11-11T08:00:00Z
@@ -516,7 +516,7 @@ fn a_successor_home_records_successionvetoed_for_a_valid_veto() {
     let (s, out) = relay.post("/pending", &json!({"objects": [serde_json::from_slice::<Value>(&veto).unwrap()]}));
     assert_eq!(s, 200, "{out}");
     assert_eq!(out["receipts"].as_array().map(Vec::len), Some(1), "the home receipts the veto");
-    eventually("successionVetoed recorded", 20, || {
+    ticks_until("successionVetoed recorded", 5, &[&relay], || {
         let (s, _, b) = http(relay.port, "GET", &relay.url("/authority?after=0&limit=64"), &[], &[]);
         s == 200
             && serde_json::from_slice::<Value>(&b).unwrap()["entries"]

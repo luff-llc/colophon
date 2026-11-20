@@ -2,6 +2,10 @@
 //! activated and made final across two homes at `headQuorum` 2; primary-home ordering; a veto in
 //! time; a late object; forged and replayed objects; calls for another audience and no call; a
 //! head the guard refuses; a restart in the middle.
+//!
+//! No relay here runs a scheduler timer: a head read settles a home by itself, a test runs each
+//! other pass it needs (`tick`, `ticks_until`), and `eventually` waits only for forwarding
+//! between homes to finish (`forwarded`).
 #![allow(
     clippy::unwrap_used,
     clippy::too_many_arguments,
@@ -88,10 +92,24 @@ fn world_with(name: &str, history: &str, quorum: u64, two: bool, run_b: bool) ->
 }
 
 impl World {
+    /// The running homes.
+    fn homes(&self) -> Vec<&Relay> {
+        let mut v = vec![&self.a];
+        if let Some(b) = &self.b {
+            v.push(b);
+        }
+        v
+    }
     fn clocks(&self, ms: i64) {
         self.a.set_clock(ms);
         if let Some(b) = &self.b {
             b.set_clock(ms);
+        }
+    }
+    /// Each running home holds the other's head issued at `at` or later.
+    fn heads_exchanged(&self, at: i64) {
+        if let Some(b) = &self.b {
+            heads_exchanged(&self.a, &self.ha, b, &self.hb, at);
         }
     }
     fn wire(&self) -> RealRelay<'_> {
@@ -160,6 +178,7 @@ fn a_transition_is_receipted_due_activated_and_final_across_two_homes_at_quorum_
     let (ha, hb) = (w.ha.clone(), w.hb.clone());
     let mut ctl = w.controller(NOW);
     w.clocks(NOW);
+    w.heads_exchanged(NOW);
     // The transition is submitted to both homes; each receipts it.
     let d = w.f.d.clone();
     let digest = propose_by(&mut w, &mut ctl, 600, &[d]);
@@ -175,7 +194,7 @@ fn a_transition_is_receipted_due_activated_and_final_across_two_homes_at_quorum_
     assert_eq!(seen, both, "each home signed one receipt");
     // Before it is due: listed once, with one receipt per home, on each home.
     for r in [&w.a, w.b.as_ref().unwrap()] {
-        eventually("both receipts at a home", 20, || {
+        forwarded("both receipts at a home", &w.homes(), || {
             let l = pending_list(r);
             kinds_of(&l, "transition") == 1 && kinds_of(&l, "receipt") == 2
         });
@@ -188,13 +207,10 @@ fn a_transition_is_receipted_due_activated_and_final_across_two_homes_at_quorum_
     let later = NOW + 3_600_000 + 400_000;
     w.clocks(later);
     for r in [&w.a, w.b.as_ref().unwrap()] {
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        while std::time::Instant::now() < end && !{
+        ticks_until("the activate", 5, &[r], || {
             let k = kinds(r);
             k.len() > before && k[before] == "activate"
-        } {
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
+        });
         assert!(
             kinds(r)[before] == "activate",
             "a: {:?} b: {:?}",
@@ -204,10 +220,14 @@ fn a_transition_is_receipted_due_activated_and_final_across_two_homes_at_quorum_
     }
     // Each home appends the `final` once it holds both homes' heads over the activation.
     for r in [&w.a, w.b.as_ref().unwrap()] {
-        eventually("the final at both homes", 30, || kinds(r).len() > before + 1);
+        forwarded("the final at both homes", &w.homes(), || kinds(r).len() > before + 1);
         assert_eq!(kinds(r)[before + 1], "final");
     }
-    // The real client takes it from the homes and verifies it: the policy changed, no pending.
+    // The clocks move on, so each home signs its head over the `final` (§13.3: a later `issued`)
+    // and gives it to the other. The real client takes it from the homes and verifies it: the
+    // policy changed, no pending.
+    w.clocks(later + 2_000);
+    w.heads_exchanged(later + 2_000);
     let mut wire = w.wire();
     for h in [&ha, &hb] {
         let faults = relay_pass(&mut ctl, &w.src, h, &mut wire, &w.host, later + 2_000);
@@ -272,7 +292,7 @@ fn a_non_primary_home_answers_421_until_the_primary_head_covers_the_entry() {
     } else {
         assert!(body["head"].is_object(), "{body}");
     }
-    eventually("the second home to hold the primary's head over it", 20, || {
+    forwarded("the second home to hold the primary's head over it", &[&w.a], || {
         let r = b.post("/authority", &post);
         if r.0 != 421 {
             eprintln!("second home: {} {}", r.0, r.1);
@@ -309,10 +329,12 @@ fn a_veto_in_time_is_recorded_and_the_transition_never_activates() {
     engine_finish(&mut ctl, &w.host, &w.src, action);
     let faults = relay_pass(&mut ctl, &w.src, &ha, &mut wire, &w.host, NOW + 2_000);
     assert!(faults.is_empty(), "{faults:?}");
-    eventually("vetoed", 30, || kinds(&w.a).len() > before);
+    ticks_until("vetoed", 5, &[&w.a], || kinds(&w.a).len() > before);
     // Past the due time (issued + 300 s + the delay) the transition still does not activate.
     w.clocks(NOW + 3_600_000 + 600_000);
-    std::thread::sleep(std::time::Duration::from_millis(500));
+    for _ in 0..3 {
+        w.a.tick();
+    }
     let k = kinds(&w.a);
     assert_eq!(k[before..], ["vetoed"], "{k:?}");
 }
@@ -354,9 +376,10 @@ fn calls_an_unauthorized_read_a_replayed_call_and_a_call_for_another_audience() 
         return;
     };
     w.clocks(NOW);
-    // Wait for a head near NOW (the home signs one at least every headMaxAge / 2), and hold it.
+    // A head near NOW (a head read settles the home: it signs one at least every
+    // headMaxAge / 2), held.
     let mut head = Vec::new();
-    eventually("a fresh head", 20, || {
+    ticks_until("a fresh head", 3, &[&w.a], || {
         let (s, b) = w.a.get("/head");
         s == 200 && {
             let v: Value = serde_json::from_slice(&b).unwrap();
@@ -439,7 +462,7 @@ fn a_head_the_guard_refuses_is_not_signed() {
         let h: Value = serde_json::from_slice(&STANDARD.decode(v["body"].as_str().unwrap()).unwrap()).unwrap();
         (h["authority"]["seq"].as_u64().unwrap(), h["issued"].as_str().unwrap().to_string())
     };
-    eventually("a head at NOW", 20, || head_seq(&w.a).1.as_str() >= "2026-11-11T11:00:00Z");
+    ticks_until("a head at NOW", 3, &[&w.a], || head_seq(&w.a).1.as_str() >= "2026-11-11T11:00:00Z");
     let (seq0, issued0) = head_seq(&w.a);
     // The clock steps back by 10 s and a new entry arrives: the home takes the entry, but a head
     // for it would not have a larger `issued`, so the guard (§13.3) refuses and nothing is signed.
@@ -463,7 +486,9 @@ fn a_head_the_guard_refuses_is_not_signed() {
     w.a.set_clock(NOW - 10_000);
     let (status, body) = w.a.post("/authority", &json!({"from": seq, "entries": [entry], "receipts": []}));
     assert_eq!(status, 200, "{body}");
-    std::thread::sleep(std::time::Duration::from_millis(400)); // several ticks
+    for _ in 0..3 {
+        w.a.tick(); // several passes
+    }
     // No head was signed for the new entry, and the older one is not served in its place
     // (§13.3, revision 15: a due head that cannot be produced fails the read, retryably).
     let (s, hs, _) = http(w.a.port, "GET", &w.a.url("/head"), &[], &[]);
@@ -473,7 +498,7 @@ fn a_head_the_guard_refuses_is_not_signed() {
     let _ = (seq0, issued0);
     // The clock moves on: the next head is signed for it.
     w.a.set_clock(NOW + 5_000);
-    eventually("the head to move on", 20, || head_seq(&w.a).0 == seq);
+    ticks_until("the head to move on", 3, &[&w.a], || head_seq(&w.a).0 == seq);
 }
 
 #[test]
@@ -542,7 +567,7 @@ fn get_with(relay: &Relay, path: &str, call: Option<&[u8]>) -> (u16, Value) {
 }
 fn fresh_head(relay: &Relay, after: &str) -> Vec<u8> {
     let mut head = Vec::new();
-    eventually("a fresh head", 20, || {
+    ticks_until("a fresh head", 3, &[relay], || {
         let (s, b) = relay.get("/head");
         s == 200 && {
             let v: Value = serde_json::from_slice(&b).unwrap();
@@ -780,11 +805,19 @@ fn a10_an_object_a_peer_refused_for_now_is_forwarded_again() {
     let faults = relay_pass(&mut ctl, &w.src, &ha, &mut wire, &w.host, x + 1_000);
     assert!(faults.is_empty(), "{faults:?}");
     drop(wire);
-    std::thread::sleep(std::time::Duration::from_millis(800)); // A offers; B is not ready
+    // A offers; B is not ready and answers `unavailable`, so A keeps the objects to offer again
+    // (its saved forwarding state lists them for B).
+    let forward = w.scratch[0].path().join("data/home/forward.json");
+    let hb = kb.id.clone();
+    forwarded("A's refused offers kept for B", &[&w.a], || {
+        std::fs::read_to_string(&forward).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).is_some_and(|v| {
+            v["peers"][&hb]["retry"].as_array().is_some_and(|r| !r.is_empty())
+        })
+    });
     first_upload(&b, &w.f, x + 1_500);
     b.set_clock(x + 2_000);
     w.a.set_clock(x + 2_000);
-    eventually("B received the transition and A's receipt by forwarding", 20, || {
+    forwarded("B received the transition and A's receipt by forwarding", &[&w.a], || {
         let l = pending_list(&b);
         kinds_of(&l, "transition") == 1 && kinds_of(&l, "receipt") >= 1
     });
@@ -823,6 +856,7 @@ fn two_homes_at_quorum_2_append_identical_activate_vetoed_and_final() {
     // A transition that activates: `activate`, then `final`.
     let mut ctl = w.controller(NOW);
     w.clocks(NOW);
+    w.heads_exchanged(NOW);
     propose_by(&mut w, &mut ctl, 600, &[d.clone()]);
     let mut wire = w.wire();
     for (i, h) in [&ha, &hb].into_iter().enumerate() {
@@ -831,14 +865,23 @@ fn two_homes_at_quorum_2_append_identical_activate_vetoed_and_final() {
     }
     drop(wire);
     let b = w.b.as_ref().unwrap();
+    // Each home receipted it and gives the other its receipt: both hold both before it is due.
+    for r in [&w.a, b] {
+        forwarded("both receipts at each home", &w.homes(), || {
+            let l = pending_list(r);
+            kinds_of(&l, "transition") == 1 && kinds_of(&l, "receipt") == 2
+        });
+    }
     let before = kinds(&w.a).len();
     let later = NOW + 3_600_000 + 400_000;
     w.clocks(later);
-    eventually("activate and final at both", 60, || kinds(&w.a).len() >= before + 2 && kinds(b).len() >= before + 2);
+    forwarded("activate and final at both", &w.homes(), || kinds(&w.a).len() >= before + 2 && kinds(b).len() >= before + 2);
     // A second transition, vetoed in time: `vetoed`.
     let t2 = later + 10_000;
     let mut ctl = w.controller(t2);
     w.clocks(t2);
+    // The clocks moved on: each home signs its head over the `final` and gives it to the other.
+    w.heads_exchanged(t2);
     let mut wire = w.wire();
     for (i, h) in [&ha, &hb].into_iter().enumerate() {
         let faults = relay_pass(&mut ctl, &w.src, h, &mut wire, &w.host, t2 + i as i64);
@@ -851,6 +894,13 @@ fn two_homes_at_quorum_2_append_identical_activate_vetoed_and_final() {
         let faults = relay_pass(&mut ctl, &w.src, h, &mut wire, &w.host, t2 + 1_000 + i as i64);
         assert!(faults.is_empty(), "{faults:?}");
     }
+    // Both homes hold both receipts of it before it is vetoed.
+    for r in w.homes() {
+        forwarded("both receipts of the second transition at each home", &w.homes(), || {
+            let l = pending_list(r);
+            kinds_of(&l, "transition") == 1 && kinds_of(&l, "receipt") == 2
+        });
+    }
     let p = w.f.p.clone();
     let action = ctl.account().begin_veto(&vetoed, &[p]).unwrap();
     engine_finish(&mut ctl, &w.host, &w.src, action);
@@ -861,7 +911,7 @@ fn two_homes_at_quorum_2_append_identical_activate_vetoed_and_final() {
     drop(wire);
     w.clocks(t2 + 5_000);
     let b = w.b.as_ref().unwrap();
-    eventually("vetoed at both", 60, || kinds(&w.a).len() >= before + 3 && kinds(b).len() >= before + 3);
+    forwarded("vetoed at both", &w.homes(), || kinds(&w.a).len() >= before + 3 && kinds(b).len() >= before + 3);
     let (ea, eb) = (get(&w.a), get(b));
     let ka = kinds(&w.a);
     assert_eq!(&ka[before..before + 3], &["activate", "final", "vetoed"], "{ka:?}");

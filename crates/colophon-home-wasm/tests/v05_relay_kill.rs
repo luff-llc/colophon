@@ -3,6 +3,11 @@
 //! 200 times, some of them inside `record_due`. After each restart: nothing was receipted twice,
 //! no head is signed over an entry that is not served, state and storage agree, and in the end
 //! the journey completes.
+//!
+//! No outcome rests on how much real time passes. The relay runs no scheduler timer: the test
+//! asks for each scheduler pass (`tick` on its stdin) and waits for the answer, and an exchange
+//! waits for the relay's answer or its death, never for a deadline. Real time only places the
+//! random kills; where a kill lands never decides whether the test passes.
 #![allow(clippy::unwrap_used, clippy::too_many_arguments, dead_code)]
 #[path = "../../colophon-core/tests/v05_engine_support/mod.rs"]
 mod support;
@@ -12,21 +17,36 @@ use base64::Engine as _;
 use colophon_core::v05::account::Change;
 use colophon_core::v05::write::authority::TransitionRule;
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead, BufReader, Read, Write};
-use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::{Arc, Condvar, Mutex};
 use support::*;
 use support_relay::*;
 
 const NS: &str = "listening.podcasts";
 const HOUR_MS: i64 = 3_600_000;
 
-/// A relay whose stderr is collected (for the `record_due` trace markers).
+/// What a relay process has said so far: its stderr lines (with the `record_due` trace markers),
+/// how many scheduler passes it has answered on stdout, and whether each stream has closed.
+#[derive(Default)]
+struct Said {
+    lines: Vec<String>,
+    due_starts: usize,
+    ticked: usize,
+    out_closed: bool,
+    err_closed: bool,
+}
+type Watch = Arc<(Mutex<Said>, Condvar)>;
+
+/// A relay whose stdout and stderr are read as they come, and whose scheduler runs only when
+/// the test asks.
 struct Traced {
     child: Child,
     port: u16,
-    lines: Arc<Mutex<Vec<String>>>,
+    stdin: Option<ChildStdin>,
+    said: Watch,
+    readers: Vec<std::thread::JoinHandle<()>>,
 }
 fn start(keys: &HomeKeys, account: &str, dir: &std::path::Path, port: u16) -> Traced {
     let (relay, wasm) = prerequisites().expect("prerequisites");
@@ -44,45 +64,113 @@ fn start(keys: &HomeKeys, account: &str, dir: &std::path::Path, port: u16) -> Tr
         .env("COLOPHON_HOME_KEY", keys.jwk())
         .env("COLOPHON_HOME_WASM", wasm)
         .env("COLOPHON_RELAY_CLOCK_FILE", dir.join("clock"))
-        .env("COLOPHON_RELAY_TICK_MS", "20")
+        .env("COLOPHON_RELAY_TICK_MS", "0")
         .env("COLOPHON_RELAY_TRACE", "1")
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    let lines = Arc::new(Mutex::new(Vec::new()));
-    let sink = lines.clone();
-    let mut err = child.stderr.take().unwrap();
-    std::thread::spawn(move || {
-        let mut buf = String::new();
-        let _ = err.read_to_string(&mut buf);
-        let mut l = sink.lock().unwrap();
-        l.extend(buf.lines().map(str::to_string));
+    let said: Watch = Arc::default();
+    let err = child.stderr.take().unwrap();
+    let sink = said.clone();
+    let err_reader = std::thread::spawn(move || {
+        for line in BufReader::new(err).lines() {
+            let Ok(line) = line else { break };
+            let (m, cv) = &*sink;
+            let mut s = m.lock().unwrap();
+            if line == "trace record_due start" {
+                s.due_starts += 1;
+            }
+            s.lines.push(line);
+            cv.notify_all();
+        }
+        let (m, cv) = &*sink;
+        m.lock().unwrap().err_closed = true;
+        cv.notify_all();
     });
+    let mut out = BufReader::new(child.stdout.take().unwrap());
     let mut line = String::new();
-    BufReader::new(child.stdout.as_mut().unwrap()).read_line(&mut line).unwrap();
-    let v: Value = serde_json::from_str(&line).unwrap_or_else(|_| {
+    out.read_line(&mut line).unwrap();
+    let Ok(v) = serde_json::from_str::<Value>(&line) else {
         let _ = child.wait();
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        let said = lines.lock().unwrap().iter().filter(|l| !l.starts_with("trace ")).cloned().collect::<Vec<_>>().join("\n");
-        panic!("the listening line: {line:?}; the relay said: {said}")
+        let _ = err_reader.join();
+        let s = said.0.lock().unwrap();
+        let rest = s.lines.iter().filter(|l| !l.starts_with("trace ")).cloned().collect::<Vec<_>>().join("\n");
+        panic!("the listening line: {line:?}; the relay said: {rest}")
+    };
+    let sink = said.clone();
+    let out_reader = std::thread::spawn(move || {
+        for line in out.lines() {
+            let Ok(line) = line else { break };
+            if serde_json::from_str::<Value>(&line).ok() == Some(json!({"ticked": true})) {
+                let (m, cv) = &*sink;
+                m.lock().unwrap().ticked += 1;
+                cv.notify_all();
+            }
+        }
+        let (m, cv) = &*sink;
+        m.lock().unwrap().out_closed = true;
+        cv.notify_all();
     });
-    Traced { child, port: v["listening"]["port"].as_u64().unwrap() as u16, lines }
+    Traced {
+        port: v["listening"]["port"].as_u64().unwrap() as u16,
+        stdin: child.stdin.take(),
+        child,
+        said,
+        readers: vec![err_reader, out_reader],
+    }
 }
 impl Traced {
+    /// Wait (on what the relay says, not on a clock) until `done` holds.
+    fn wait_until(&self, mut done: impl FnMut(&Said) -> bool) {
+        let (m, cv) = &*self.said;
+        let mut s = m.lock().unwrap();
+        while !done(&s) {
+            s = cv.wait(s).unwrap();
+        }
+    }
+    /// Ask for one scheduler pass and do not wait for it. Returns how many passes had been
+    /// answered and how many `record_due` calls had started before it.
+    fn tick_start(&mut self) -> (usize, usize) {
+        let before = {
+            let s = self.said.0.lock().unwrap();
+            (s.ticked, s.due_starts)
+        };
+        // A relay killed meanwhile no longer reads: the pass is simply not run.
+        let _ = self.stdin.as_mut().unwrap().write_all(b"tick\n").and_then(|()| self.stdin.as_mut().unwrap().flush());
+        before
+    }
+    /// One scheduler pass (recording entries, heads), waited for.
+    fn tick(&mut self) {
+        let (ticked, _) = self.tick_start();
+        self.wait_until(|s| s.ticked > ticked || s.out_closed);
+        assert!(self.said.0.lock().unwrap().ticked > ticked, "the relay exited before it ticked");
+    }
+    /// A scheduler pass, and a kill as soon as its `record_due` has started (or, when the pass
+    /// runs none, once the pass is over).
+    fn kill_in_record_due(mut self) -> bool {
+        let (ticked, starts) = self.tick_start();
+        self.wait_until(|s| s.due_starts > starts || s.ticked > ticked || s.err_closed);
+        self.kill()
+    }
+    /// A scheduler pass, and a kill after `micros` of real time, wherever the pass then is.
+    fn kill_while_ticking(mut self, micros: u64) -> bool {
+        self.tick_start();
+        std::thread::sleep(std::time::Duration::from_micros(micros));
+        self.kill()
+    }
     /// SIGKILL, wait, and say whether the last trace marker was inside `record_due`.
     fn kill(mut self) -> bool {
         let _ = self.child.kill();
         let _ = self.child.wait();
-        // The reader thread ends when the pipe closes.
-        for _ in 0..100 {
-            if Arc::strong_count(&self.lines) == 1 {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(5));
+        self.stdin = None;
+        // The readers end when the pipes close, which the process's death does.
+        for r in std::mem::take(&mut self.readers) {
+            let _ = r.join();
         }
-        let l = self.lines.lock().unwrap();
-        l.iter().rev().find(|s| s.starts_with("trace record_due")).is_some_and(|s| s.ends_with("start"))
+        let s = self.said.0.lock().unwrap();
+        s.lines.iter().rev().find(|l| l.starts_with("trace record_due")).is_some_and(|l| l.ends_with("start"))
     }
 }
 impl Drop for Traced {
@@ -92,10 +180,10 @@ impl Drop for Traced {
     }
 }
 
-/// An HTTP exchange that tolerates the process dying under it.
+/// An HTTP exchange that tolerates the process dying under it. It waits for the answer however
+/// long it takes: a killed relay closes the connection, and a slow one is not a failure.
 fn try_http(port: u16, method: &str, path: &str, body: &[u8]) -> Option<(u16, Vec<u8>)> {
     let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).ok()?;
-    s.set_read_timeout(Some(std::time::Duration::from_secs(20))).ok()?;
     let head = format!(
         "{method} /v1/libraries/home{path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
         body.len()
@@ -118,11 +206,16 @@ fn body_of(env: &Value) -> Value {
 fn digest_of(env: &Value) -> String {
     colophon_core::v05::encoding::digest(&STANDARD.decode(env["body"].as_str().unwrap()).unwrap())
 }
+/// The file the relay stores at a record path (`store`: the home slot's `records` directory).
+fn stored(store: &std::path::Path, path: &str) -> Value {
+    let bytes = std::fs::read(store.join(path)).unwrap_or_else(|e| panic!("{path} is stored: {e}"));
+    serde_json::from_slice(&bytes).unwrap_or_else(|e| panic!("{path} is stored whole: {e}"))
+}
 
 /// The digests a recording entry settles: an `activate`'s transition, a `vetoed`'s transition
 /// and veto.
-fn settled_by(entries: &[Value]) -> std::collections::BTreeSet<String> {
-    let mut out = std::collections::BTreeSet::new();
+fn settled_by(entries: &[Value]) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
     for e in entries {
         let b = body_of(e);
         for field in ["transition", "veto"] {
@@ -135,11 +228,32 @@ fn settled_by(entries: &[Value]) -> std::collections::BTreeSet<String> {
     out
 }
 
+/// What `check` has seen the relay serve at its record path: the entries up to `entries`, and
+/// the admitted objects in `admitted`. Every check compares every entry and every admitted
+/// object with storage on disk (cheap), and asks the relay for the files it has not yet seen
+/// served, the newest entry and one older entry and object in turn; a `full` check asks for
+/// every file again. So a check makes a bounded number of requests, not one per file the
+/// history has ever held.
+#[derive(Default)]
+struct Served {
+    entries: usize,
+    admitted: BTreeSet<String>,
+    checks: usize,
+}
+
 /// State and storage agree, no head is over an entry not served, one receipt per home and
 /// object, and every receipt is the one first seen (`receipts`: object -> body). Every
 /// transition and veto the home answered 200 for (`admitted`: digest -> `transitions` or
 /// `vetoes`) is kept: stored at its path, and listed until a recording entry settles it.
-fn check(port: u16, receipts: &mut BTreeMap<String, Value>, admitted: &BTreeMap<String, &str>) -> Vec<Value> {
+fn check(
+    port: u16,
+    store: &std::path::Path,
+    receipts: &mut BTreeMap<String, Value>,
+    admitted: &BTreeMap<String, &str>,
+    served: &mut Served,
+    full: bool,
+) -> Vec<Value> {
+    served.checks += 1;
     // The head first: entries only grow, so a head read before them must be over one of them.
     let (head_status, head) = get_json(port, "/head");
     let mut entries = Vec::new();
@@ -151,10 +265,22 @@ fn check(port: u16, receipts: &mut BTreeMap<String, Value>, admitted: &BTreeMap<
             break;
         }
     }
+    assert!(entries.len() >= served.entries, "no entry once served is lost: {} < {}", entries.len(), served.entries);
     for (i, e) in entries.iter().enumerate() {
-        let (s, file) = get_json(port, &format!("/records/authority/{:08}.json", i + 1));
-        assert_eq!((s, &file), (200, e), "entry {} is stored as served", i + 1);
+        let path = format!("authority/{:08}.json", i + 1);
+        assert_eq!(&stored(store, &path), e, "entry {} is stored as served", i + 1);
     }
+    let n = entries.len();
+    let mut ask: BTreeSet<usize> = if full { (0..n).collect() } else { (served.entries..n).collect() };
+    if n > 0 {
+        ask.insert(n - 1);
+        ask.insert(served.checks % n);
+    }
+    for i in ask {
+        let (s, file) = get_json(port, &format!("/records/authority/{:08}.json", i + 1));
+        assert_eq!((s, &file), (200, &entries[i]), "entry {} is served at its record path", i + 1);
+    }
+    served.entries = n;
     if head_status == 200 {
         let h = body_of(&head);
         let seq = h["authority"]["seq"].as_u64().unwrap() as usize;
@@ -173,7 +299,7 @@ fn check(port: u16, receipts: &mut BTreeMap<String, Value>, admitted: &BTreeMap<
     }
     let (s, pending) = get_json(port, "/pending?after=0&limit=64");
     assert_eq!(s, 200);
-    let mut pairs = std::collections::BTreeSet::new();
+    let mut pairs = BTreeSet::new();
     for o in pending["objects"].as_array().unwrap() {
         let env = &o["envelope"];
         let path = match o["kind"].as_str().unwrap() {
@@ -193,7 +319,7 @@ fn check(port: u16, receipts: &mut BTreeMap<String, Value>, admitted: &BTreeMap<
     }
     // Nothing admitted is dropped: stored, and listed until settled (the listing is read after
     // the entries, so an object settled in between is listed or settled by what was read).
-    let listed: std::collections::BTreeSet<String> = pending["objects"]
+    let listed: BTreeSet<String> = pending["objects"]
         .as_array()
         .unwrap()
         .iter()
@@ -206,16 +332,22 @@ fn check(port: u16, receipts: &mut BTreeMap<String, Value>, admitted: &BTreeMap<
         later.extend(page["entries"].as_array().unwrap().iter().cloned());
     }
     let settled = settled_by(&later);
-    for (d, dir) in admitted {
-        let (s, _) = get_json(port, &format!("/records/{dir}/{d}.json"));
-        assert_eq!(s, 200, "the admitted {dir} {d} is kept");
+    let turn = if admitted.is_empty() { 0 } else { served.checks % admitted.len() };
+    for (i, (d, dir)) in admitted.iter().enumerate() {
+        let path = format!("{dir}/{d}.json");
+        assert!(store.join(&path).is_file(), "the admitted {dir} {d} is kept");
+        if full || i == turn || !served.admitted.contains(d) {
+            let (s, _) = get_json(port, &format!("/records/{path}"));
+            assert_eq!(s, 200, "the admitted {dir} {d} is served");
+            served.admitted.insert(d.clone());
+        }
         assert!(listed.contains(d) || settled.contains(d), "the admitted {dir} {d} is listed until settled");
     }
     entries
 }
 
 #[test]
-#[ignore = "about 9 minutes: scripts/test-home.sh runs it (cargo test --test v05_relay_kill -- --ignored)"]
+#[ignore = "about 16 minutes (quadratic in rounds while record_due is): scripts/test-home.sh runs it (cargo test --test v05_relay_kill -- --ignored)"]
 fn the_relay_killed_at_random_points_loses_nothing_and_receipts_nothing_twice() {
     if prerequisites().is_none() {
         return;
@@ -227,6 +359,7 @@ fn the_relay_killed_at_random_points_loses_nothing_and_receipts_nothing_twice() 
     let scratch = Scratch::new("kill-loop");
     let dir = scratch.path().to_path_buf();
     std::fs::create_dir_all(&dir).unwrap();
+    let store = dir.join("data/home/records");
     let clock = |ms: i64| write_clock(&dir.join("clock"), ms);
     clock(T0 + 1_000);
     let mut relay = start(&keys, &account, &dir, 0);
@@ -241,6 +374,7 @@ fn the_relay_killed_at_random_points_loses_nothing_and_receipts_nothing_twice() 
     let d = f.d.clone();
     let p = f.p.clone();
     let mut admitted: BTreeMap<String, &str> = BTreeMap::new();
+    let mut served = Served::default();
     let mut want = 3usize;
     let mut vetoes = 0usize;
     let mut startup_kills = 0usize;
@@ -253,15 +387,21 @@ fn the_relay_killed_at_random_points_loses_nothing_and_receipts_nothing_twice() 
     };
     let (mut kills, mut inside) = (0usize, 0usize);
     let mut receipts = BTreeMap::new();
+    macro_rules! check {
+        ($full:expr) => {
+            check(relay.port, &store, &mut receipts, &admitted, &mut served, $full)
+        };
+    }
     let rounds = 25i64;
     let started = std::time::Instant::now();
     for k in 0..rounds {
         let t = T0 + HOUR_MS + k * 3 * HOUR_MS;
         clock(t);
-        // A kill right after start-up, before any scheduler tick: the home was serving at the
-        // round's clock reading (the relay answered), and the next start still records it.
+        // A kill inside the first `record_due` at the round's clock reading; then a kill right
+        // after start-up, before any scheduler pass: the home was serving at the round's clock
+        // reading (the relay answered), and the next start still records it.
         {
-            inside += usize::from(relay.kill());
+            inside += usize::from(relay.kill_in_record_due());
             kills += 1;
             relay = start(&keys, &account, &dir, 0);
             let _ = get_json(relay.port, "/head");
@@ -314,14 +454,14 @@ fn the_relay_killed_at_random_points_loses_nothing_and_receipts_nothing_twice() 
             kills += 1;
             let answered = sender.join().unwrap();
             relay = start(&keys, &account, &dir, 0);
-            check(relay.port, &mut receipts, &admitted);
+            check!(false);
             // The client retries until it has the home's answer.
-            if !answered.is_some_and(|(s, _)| s == 200) {
+            if answered.is_none_or(|(s, _)| s != 200) {
                 let retry = try_http(relay.port, "POST", "/pending", post.as_bytes());
                 assert_eq!(retry.map(|(s, _)| s), Some(200), "round {k}: the retry");
             }
             admitted.insert(digest.clone(), "transitions");
-            check(relay.port, &mut receipts, &admitted);
+            check!(false);
         }
         // Every third round the owner vetoes it in time, from the other unit (the passkey),
         // killed at a random point while the home admits and receipts the veto: the veto is kept,
@@ -358,45 +498,48 @@ fn the_relay_killed_at_random_points_loses_nothing_and_receipts_nothing_twice() 
             kills += 1;
             let answered = sender.join().unwrap();
             relay = start(&keys, &account, &dir, 0);
-            check(relay.port, &mut receipts, &admitted);
-            if !answered.is_some_and(|(s, _)| s == 200) {
+            check!(false);
+            if answered.is_none_or(|(s, _)| s != 200) {
                 let retry = try_http(relay.port, "POST", "/pending", post.as_bytes());
                 assert_eq!(retry.map(|(s, _)| s), Some(200), "round {k}: the veto's retry");
             }
             admitted.insert(veto_digest, "vetoes");
-            check(relay.port, &mut receipts, &admitted);
+            check!(false);
         }
         // Restarts before it is due: everything admitted is still kept and listed.
         clock(t + 60_000);
-        for _ in 0..2 {
-            std::thread::sleep(std::time::Duration::from_micros(rnd(40_000)));
-            inside += usize::from(relay.kill());
+        // The first inside the `record_due` of a scheduler pass at the new clock reading, the
+        // second at a random point of a pass.
+        for j in 0..2 {
+            inside += usize::from(if j == 0 { relay.kill_in_record_due() } else { relay.kill_while_ticking(rnd(40_000)) });
             kills += 1;
             relay = start(&keys, &account, &dir, 0);
-            check(relay.port, &mut receipts, &admitted);
+            check!(false);
         }
         // Due: the home records `activate`, signs a head, then records `final` (or, vetoed, the
-        // `vetoed`). Killed at random points while it does.
+        // `vetoed`). Killed first inside the `record_due` of the first pass at the due clock
+        // reading, then at random points of later passes.
         let due = t + HOUR_MS + 400_000;
         clock(due);
-        for _ in 0..5 {
-            std::thread::sleep(std::time::Duration::from_micros(rnd(120_000)));
-            inside += usize::from(relay.kill());
+        for j in 0..5 {
+            inside += usize::from(if j == 0 { relay.kill_in_record_due() } else { relay.kill_while_ticking(rnd(120_000)) });
             kills += 1;
             relay = start(&keys, &account, &dir, 0);
-            check(relay.port, &mut receipts, &admitted);
+            check!(false);
         }
         // A real clock moves on: a head over the `activate` needs an `issued` after the head
         // the home may have signed at the same clock reading (strictly increasing, §13.3).
         clock(due + 2_000);
         want += if vetoed { 1 } else { 2 };
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        // Scheduler passes until it has (a bounded number of passes, not a deadline).
+        let mut passes = 0;
         let entries = loop {
-            let e = check(relay.port, &mut receipts, &admitted);
-            if e.len() >= want || std::time::Instant::now() > end {
+            let e = check!(false);
+            if e.len() >= want || passes == 20 {
                 break e;
             }
-            std::thread::sleep(std::time::Duration::from_millis(50));
+            relay.tick();
+            passes += 1;
         };
         let kinds: Vec<String> = entries.iter().map(|e| body_of(e)["kind"].as_str().unwrap().to_string()).collect();
         assert_eq!(kinds.len(), want, "round {k}: {kinds:?}");
@@ -407,11 +550,11 @@ fn the_relay_killed_at_random_points_loses_nothing_and_receipts_nothing_twice() 
             assert_eq!(&kinds[want - 2..], &["activate".to_string(), "final".to_string()], "round {k}");
         }
         // Settled, and still kept: the transition (and its veto) stay stored after they leave
-        // the listing, across one more restart.
+        // the listing, across one more restart; and every file is asked for again.
         inside += usize::from(relay.kill());
         kills += 1;
         relay = start(&keys, &account, &dir, 0);
-        let entries = check(relay.port, &mut receipts, &admitted);
+        let entries = check!(true);
         assert!(settled_by(&entries).contains(&digest), "round {k}: settled");
         eprintln!("kill loop: round {k} done, {kills} kills so far ({inside} inside record_due), {:?}", started.elapsed());
     }

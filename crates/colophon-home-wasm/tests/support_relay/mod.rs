@@ -173,9 +173,10 @@ impl Relay {
     ) -> Self {
         Self::start_with(keys, account, base, dir, clock_ms, resolve, port, json!({}))
     }
-    /// The same with relay `limits` set in the config file. `tickMs` there sets the relay's timer
-    /// (default 50 ms); `"tickMs": 0` starts no timer, and the test runs each scheduler pass
-    /// itself with `tick`.
+    /// The same with relay `limits` set in the config file. No relay started here runs a scheduler
+    /// timer unless `tickMs` there asks for one: a head read settles a home by itself, and a test
+    /// runs each other scheduler pass it needs with `tick` (or `ticks_until`, `forwarded`), so no
+    /// outcome rests on how much real time passes between two requests.
     pub fn start_with(
         keys: &HomeKeys,
         account: &str,
@@ -207,7 +208,7 @@ impl Relay {
             .env("COLOPHON_RELAY_RESOLVE_FILE", dir.join("resolve.json"))
             .env(
                 "COLOPHON_RELAY_TICK_MS",
-                limits.get("tickMs").and_then(Value::as_u64).map_or("50".to_string(), |t| t.to_string()),
+                limits.get("tickMs").and_then(Value::as_u64).map_or("0".to_string(), |t| t.to_string()),
             )
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -517,6 +518,47 @@ pub fn write_resolve(path: &std::path::Path, resolve: &[(&str, u16)]) {
 /// to bind, so no test relay can take it. Every relay itself starts on port 0 and reports its
 /// port; homes learn one another's through `Relay::set_resolve`.
 pub const CLOSED_PORT: u16 = 1;
+
+/// One scheduler pass at each of `relays`, then `done`, at most `max` times; no waiting. For
+/// what a home's own passes produce (recording entries, heads), not for forwarding between homes.
+pub fn ticks_until(what: &str, max: usize, relays: &[&Relay], mut done: impl FnMut() -> bool) {
+    for _ in 0..max {
+        for r in relays {
+            r.tick();
+        }
+        if done() {
+            return;
+        }
+    }
+    panic!("{what}: not after {max} scheduler passes");
+}
+
+/// Forwarding between homes: each poll runs one pass at each of `relays` (which starts their
+/// forwarding and does not wait for it); the wait is only for that I/O to finish.
+pub fn forwarded(what: &str, relays: &[&Relay], mut done: impl FnMut() -> bool) {
+    eventually(what, 30, || {
+        for r in relays {
+            r.tick();
+        }
+        done()
+    });
+}
+
+/// Two running homes each hold the other's head, issued at `at` or later (`id_a`, `id_b`: their
+/// member ids): what a timer's passes used to forward before anything else. A home at
+/// `headQuorum` 2 answers calls only with both homes' fresh heads.
+pub fn heads_exchanged(a: &Relay, id_a: &str, b: &Relay, id_b: &str, at: i64) {
+    let since = colophon_core::v05::write::format_date(at);
+    let holds = |r: &Relay, id: &str| {
+        let (s, bytes) = r.get(&format!("/records/heads/{id}.json"));
+        s == 200 && serde_json::from_slice::<Value>(&bytes).ok().and_then(|v| {
+            let body = base64::engine::general_purpose::STANDARD.decode(v["body"].as_str()?).ok()?;
+            let h: Value = serde_json::from_slice(&body).ok()?;
+            Some(h["issued"].as_str()? >= since.as_str())
+        }) == Some(true)
+    };
+    forwarded("each home holds the other's fresh head", &[a, b], || holds(a, id_b) && holds(b, id_a));
+}
 
 /// Wait until `f` holds, polling; panics with `what` after `secs` seconds.
 pub fn eventually(what: &str, secs: u64, mut f: impl FnMut() -> bool) {

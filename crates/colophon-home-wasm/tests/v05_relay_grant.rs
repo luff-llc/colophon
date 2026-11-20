@@ -134,10 +134,8 @@ fn start(keys: &HomeKeys, dir: &std::path::Path, cfg: &Value, trace: &Trace) -> 
         .env("COLOPHON_HOME_KEY", keys.jwk())
         .env("COLOPHON_HOME_WASM", wasm)
         .env("COLOPHON_RELAY_CLOCK_FILE", dir.join("clock"))
-        .env(
-            "COLOPHON_RELAY_TICK_MS",
-            if trace.pause_at.is_some() { "0" } else { "50" },
-        )
+        // No scheduler timer: nothing here waits on one (the door settles a slot itself).
+        .env("COLOPHON_RELAY_TICK_MS", "0")
         .stdout(Stdio::piped());
     let traced = trace.crash_at.is_some() || trace.pause_at.is_some();
     if traced {

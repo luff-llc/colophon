@@ -61,7 +61,7 @@ fn start(
         .env("COLOPHON_HOME_KEY", keys.jwk())
         .env("COLOPHON_HOME_WASM", wasm)
         .env("COLOPHON_RELAY_CLOCK_FILE", dir.join("clock"))
-        .env("COLOPHON_RELAY_TICK_MS", "50")
+        .env("COLOPHON_RELAY_TICK_MS", "0")
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     if let Some(point) = crash_at {
