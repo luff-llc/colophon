@@ -198,8 +198,12 @@ builder refuses a member whose grant has no role.
 **An account with no home.** Tell the person: "Nothing keeps a record of when things happened on
 this account. Someone who once held one of your keys can later show a new device a different
 history, from before you removed that key, and nothing can tell the two apart. Add a home." Hosts
-MUST create accounts with at least one home (§18), MUST warn when an account has none, and MUST
-refuse and show a rollback a verifier with saved state reports (§13.1).
+create accounts with at least one home, unless the account syncs only through a shared folder, in
+which case it MAY have none (§18). Hosts MUST warn when an account has none (§6.4), MUST NOT give
+such an account a `recover` controller without also appointing a home, SHOULD offer a second unit
+when a home is later appointed, and MUST refuse and show a rollback a verifier with saved state
+reports (§13.1). A folder-only library keeps working this way until the person wants it on
+another platform; a hosted home can be appointed then.
 
 **One recovery unit.** Have none or at least two recovery units. A unit is a key when the account
 counts keys (the person reference does, so your two security keys are two units), and a holder

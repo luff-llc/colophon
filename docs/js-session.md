@@ -52,7 +52,9 @@ session.subscribe(state => render(state));
   is a controller of the account, asked only for owner operations: creation, approving a member, revoking, adding a
   controller, veto, seed transfer.
 * **One home** is the supported configuration in 0.5; more than one is experimental (spec §13.1).
-* **Homes (spec §18).** `create()` refuses with `noHome` unless `homes` is non-empty or `createWithoutHome` is set, and a
+* **Homes (spec §18).** `create()` refuses with `noHome` unless `homes` is non-empty or `createWithoutHome` is set
+  (`createWithoutHome` is the supported path for a library that syncs only through a shared folder; see the host rules in
+  [session.md](session.md)), and a
   home whose endpoint is not `https` is `insecureHome`. `HomeConfiguration.request` is called with the new account's ID
   and answers with the home's signed member request; the session appoints the home in a transition signed by the owner
   and records its activation at once.

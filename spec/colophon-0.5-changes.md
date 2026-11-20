@@ -404,6 +404,15 @@ moving an account to another home.
 
 No vector's expected verdict depends on notices or on §21.
 
+### A.15 0.5.x text clarifications
+
+Text only: no format, vector or reader rule changes, and no version change. Each row says what the
+text now states.
+
+| # | Change | Why |
+| --- | --- | --- |
+| 240 | §18 "Homes", §13.1, §6.4, guide §5: a host creates every account with at least one home, unless the account syncs only through a shared folder, in which case it MAY have none. A host that creates an account with no home MUST warn the person (§6.4 gains "the account has no home"), MUST NOT give it a `recover` controller without also appointing a home, and SHOULD offer a second unit when a home is later appointed. It read "a host MUST create every account with at least one". A host rule only: the verifier already judged an account with no home (§8.7 "No home", row 116) | the spec owner's ruling (2026-11-20): folder-only libraries keep working until the person wants another platform, and a hosted home can be added then; answers the open host-rule question in `docs/known-issues.md` |
+
 
 ## B. Galley's requirements
 
