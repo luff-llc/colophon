@@ -1572,7 +1572,7 @@ clock, and no verifier refuses a link for its value (it must still be a well-for
 
 | Field | Rule |
 | --- | --- |
-| `asOf` | An entry the signer had seen. |
+| `asOf` | An entry the signer had seen, or, for a member that holds no history and is asking first (§12.3, §13.4), the entry it was given. |
 | `signer` | `{"member":…}` or `{"controller":…}`. |
 | `key` | The acting key's signing point. |
 | `links` | 1–4 links (the most `depth` allows) from the member outward; absent for the member's own key and always for a controller. |
@@ -2083,7 +2083,8 @@ counts as delivered only when the peer answered 200, or refused it with `malform
 else, `unavailable` and the caps included, is offered again while the home lists the object.
 
 **A host's exchange.** A call to a home names as `asOf` the highest entry that the home's fresh
-head covers and the signer holds, so the home holds it. At `headQuorum` above 1 a host fetches
+head covers and the signer holds, so the home holds it; a member that holds no history and is
+asking first names the entry it was given (§12.3, §13.4). At `headQuorum` above 1 a host fetches
 each other current home's head from that home's own base, as the verified authority state names
 it, never through another home. A namespace-scoped change feed lists no blob chunk (chunks name
 no namespace): chunks are fetched by the names a verified manifest gives.
