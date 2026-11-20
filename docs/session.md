@@ -38,11 +38,23 @@ let session = ColophonSession(configuration: .init(
 * `keys` is the content member: it signs records and opens the member's epoch shares (an ECDH, silent for a Secure
   Enclave key). `ownerController` is a controller of the account (the person's passkey or an owner key). It is asked only for
   owner operations: creation, approving a member, revoking, adding a controller, veto, seed transfer.
-* **Homes (spec §18).** A host MUST create every account with at least one home and MUST warn when there is none.
-  One home is the supported configuration in 0.5; more than one is experimental (spec §13.1).
-  `create()` therefore refuses with `SessionError.noHome` unless `homes` is non-empty or `createWithoutHome` is set. A home's
-  signed member request names the account, which does not exist before creation, so `HomeConfiguration.request` is a closure
-  the session calls with the new account ID; the home service answers with its request. The session appoints the home in a
+* **Homes (spec §18).** A host creates every account with at least one home, unless the account syncs only through a
+  shared folder, in which case it may have none. One home is the supported configuration in 0.5; more than one is
+  experimental (spec §13.1). `create()` refuses with `SessionError.noHome` unless `homes` is non-empty or
+  `createWithoutHome` is set.
+* **Folder-only libraries.** `createWithoutHome` is the supported path for a library that syncs only through a shared
+  folder; it keeps working until the person wants the library on another platform, and a hosted home can be appointed
+  then. A host that creates an account this way MUST warn the person before it does (spec §6.4: with no home there is no
+  witness of time or order; `notices.noHome` repeats it afterwards) and SHOULD offer a second unit when a home is later
+  appointed. It SHOULD NOT add a separate recovery unit (a controller with `recover` but not `control`: `recoveryKeys`, or an
+  `additionalControllers` entry with `recover` and not `control`) without also appointing a home; if it does, it MUST give the
+  spec §6.4 warning (no theft safety: nothing delays a recovery key). `create()` accepts `recoveryKeys` with
+  `createWithoutHome`, which is allowed. The owner controller `create()` makes holds `recover` beside `control`; that is not a
+  separate recovery unit. The session gives these warnings only after creation (the known gap below), so the app warns
+  before it calls `create()`. A verifier judges a call on an account with no home
+  `unavailable` (spec §12.3 step 4), so `signCall` and grants to services need a home.
+* A home's signed member request names the account, which does not exist before creation, so `HomeConfiguration.request`
+  is a closure the session calls with the new account ID; the home service answers with its request. The session appoints the home in a
   transition signed by the owner and records its activation at once.
 * `additionalControllers` creates the account with more control keys (the §18 reference has several). `recoveryKeys` adds a
   `recover`-only controller with its own slot.
@@ -238,7 +250,7 @@ refused:revoked` at the door, or refused by its own check once it has synced the
 * `pending` carries `dueMs`: the session rebuilds `notices` after every sync, so each pending change is shown with its
   due time on every sync (spec §17.5 "Showing on sync"). 0.5 defines no notice delivery.
 
-**Known gap: the spec §6.4 warnings before creation.** This session does not yet give the §6.4 warnings before the genesis is written: it exposes `soleDevice` after creation. The warnings stay normative for a host (a person must see them before an account is created). Until the session gives them, an app checks the three conditions from the creation parameters (one home, every control key on one device, exactly one recovery unit) and warns before it calls create. Spec §21.1 lists this among what 0.5.0 does not do.
+**Known gap: the spec §6.4 warnings before creation.** This session does not yet give the §6.4 warnings before the genesis is written: it exposes `soleDevice` after creation. The warnings stay normative for a host (a person must see them before an account is created). Until the session gives them, an app checks these conditions from the creation parameters: no home, a separate recovery unit and no home, one home, every control key on one device, exactly one recovery unit and warns before it calls create. Spec §21.1 lists this among what 0.5.0 does not do.
 
 ## Lock
 

@@ -505,6 +505,9 @@ wording is in [colophon-0.5-guide.md](colophon-0.5-guide.md) §2):
 - losing any one key (or holder) leaves no control quorum, no recovery quorum the person chose, or
   no openable slot;
 - fewer recovery controllers exist than the person chose, or none has a slot;
+- the account has no home (no witness of time or order and no rollback protection for a new
+  verifier, §13.1; a host creates an account with no home only when it syncs only through a
+  shared folder, §18);
 - the account has a `recover` controller and no home (no theft safety, §8.7);
 - the account has one home;
 - every control key is on one device (for example a phone's device key and its synced passkey);
@@ -1783,9 +1786,14 @@ sequence conflicts and malformed entries keep their ordinary results (409, §8.5
   and nothing in the objects can tell the two apart. This is a limit, not a defence (§8.6, §8.7
   "No home"). Such an account has **no rollback protection for a new verifier**: only a verifier
   with persisted state detects one. A verifier with persisted state whose high-water entry is not on the branch it would
-  now follow reports `refused:rollback`, and a host MUST treat that as a refusal and show it. Hosts
-  MUST create accounts with at least one home by default (§18) and MUST warn when an account has
-  none.
+  now follow reports `refused:rollback`, and a host MUST treat that as a refusal and show it. A
+  host creates every account with at least one home, unless the account syncs only through a
+  shared folder, in which case it MAY have none (§18). A host MUST warn when an account has no home
+  (§6.4) and SHOULD offer a second unit when a home is later appointed. A host SHOULD NOT add a
+  separate recovery unit (a controller with `recover` but not `control`, such as a recovery kit) to
+  an account with no home without also appointing a home; when an account has a separate recovery
+  unit and no home, however it came to, the host MUST give the §6.4 warning (no theft safety:
+  nothing delays a recovery key).
 - **A new member at `headQuorum` ≥ 2.** A non-primary home stores an entry only once a primary
   head covers it (Ordering), and a call needs fresh heads from `headQuorum` homes (§12.3 step
   4). So a member granted after what another home covers can make no call anywhere until enough
@@ -2565,7 +2573,7 @@ ranges.
 | `policy.primaryHome` | absent | a current home | transition with consent |
 | `policy.rate` | signer 64 entries / 4 MiB, account 256 / 16 MiB, per 24 h | §6.3 | transition with consent, in either direction |
 | Member `expires`, `depth` | 7 days and 1 for `agent`; none and 0 otherwise | §10.1 | approver; `renew` extends |
-| Homes | **one; two or three are optional and experimental in 0.5 and a host SHOULD NOT offer them as the default; a host MUST create every account with at least one and MUST warn when an account has none (§13.1: without a home there is no witness of time or order and no rollback protection for a new verifier)**; each home is provisioned for its one account (§13.1) | 0–8 | transition with consent |
+| Homes | **one; two or three are optional and experimental in 0.5 and a host SHOULD NOT offer them as the default; a host creates every account with at least one, unless the account syncs only through a shared folder, in which case it MAY have none; a host that creates an account with no home MUST warn the person (§6.4; §13.1: without a home there is no witness of time or order and no rollback protection for a new verifier), and SHOULD offer a second unit when a home is later appointed (§21.1 item 1); a host SHOULD NOT add a separate recovery unit (a controller with `recover` but not `control`, such as a recovery kit) to an account with no home without also appointing a home, and when an account has a separate recovery unit and no home, however it came to, the host MUST give the §6.4 warning (no theft safety: nothing delays a recovery key)**; each home is provisioned for its one account (§13.1) | 0–8 | transition with consent |
 | Drain window | 7 days | 0–30 days | the copying host |
 
 **Reference setup for new accounts:**
@@ -2812,8 +2820,9 @@ The one list. The README, the changelog and §18 point here.
    new device by a link or a paste, and the approval is by camera scan.
 7. **The reference sessions do not give the §6.4 warnings before creation.** They expose
    `soleDevice` after the genesis is written. Until they do, an app checks the creation
-   parameters (one home, every control key on one device, exactly one recovery unit) and warns
-   before it calls create.
+   parameters (no home, which a host allows only for an account that syncs only through a shared
+   folder, §18; a separate recovery unit and no home; one home; every control key on one device;
+   exactly one recovery unit) and warns before it calls create.
 8. **One verifier implementation** (§21 condition 2).
 9. **No dry run on a real library** (§21 condition 4).
 10. **Nothing proven on physical devices.**
