@@ -14,7 +14,7 @@ wasm="$target/wasm32-unknown-unknown/release/colophon_home_wasm.wasm"
 echo "test-home: module $(wc -c < "$wasm" | tr -d ' ') bytes"
 export COLOPHON_HOME_WASM="$wasm"
 cargo test --locked -p colophon-home-wasm --no-fail-fast
-# The kill loop (at least 200 SIGKILLs, about 9 minutes): ignored in the workspace run, run here.
+# The kill loop (at least 200 SIGKILLs, about 16 minutes): ignored in the workspace run, run here.
 cargo test --locked -p colophon-home-wasm --test v05_relay_kill -- --ignored --nocapture 2>&1 | grep -v '^trace '
 cargo test --locked -p colophon-core --test v05_home --test v05_home_h1 --test v05_home_h2 --test v05_home_h2_succession --test v05_engine_home
 (cd relay && bun test)

@@ -519,7 +519,6 @@ pub fn write_resolve(path: &std::path::Path, resolve: &[(&str, u16)]) {
 /// port; homes learn one another's through `Relay::set_resolve`.
 pub const CLOSED_PORT: u16 = 1;
 
-/// Wait until `f` holds, polling; panics with `what` after `secs` seconds.
 /// One scheduler pass at each of `relays`, then `done`, at most `max` times; no waiting. For
 /// what a home's own passes produce (recording entries, heads), not for forwarding between homes.
 pub fn ticks_until(what: &str, max: usize, relays: &[&Relay], mut done: impl FnMut() -> bool) {
@@ -561,6 +560,7 @@ pub fn heads_exchanged(a: &Relay, id_a: &str, b: &Relay, id_b: &str, at: i64) {
     forwarded("each home holds the other's fresh head", &[a, b], || holds(a, id_b) && holds(b, id_a));
 }
 
+/// Wait until `f` holds, polling; panics with `what` after `secs` seconds.
 pub fn eventually(what: &str, secs: u64, mut f: impl FnMut() -> bool) {
     let end = std::time::Instant::now() + std::time::Duration::from_secs(secs);
     while std::time::Instant::now() < end {
