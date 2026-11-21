@@ -508,6 +508,10 @@ export class HomeSlot {
     if (!this.rate.take(this.deps.clientAddress(req), this.clock())) {
       throw new HttpError(429, 'Too many requests', { 'retry-after': '60' });
     }
+    // Batch reads have no home call format. Refuse uniformly, without inspecting the body.
+    if (section === 'records' && rest === 'batch') {
+      throw new HttpError(405, 'Method not allowed', { allow: 'GET' });
+    }
     const method = req.method;
     const writing = section === 'records' && method === 'PUT';
     const effectPath = writing ? rest : (section === 'predecessor' && method === 'PUT' ? `predecessor/${rest}` : null);
