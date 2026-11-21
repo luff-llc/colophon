@@ -496,23 +496,16 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
 
     // Requests
 
-    private fun requestPath(id: String) = "requests/$id.json"
+    private fun requestPath(id: String) = OwnRequest.path(id)
     private suspend fun ownRequestBytes(): ByteArray {
         val account = accountId ?: throw SessionError.NotReady()
         if (memberId == null) throw SessionError.NotReady()
-        val keys = memberKeys.publicKeys()
-        val spec = RequestSpec(account, keys.signing, keys.agreement, configuration.memberLabel, configuration.memberKind,
-            terms(configuration.namespaces, configuration.access, null, null, configuration.services), accountFormatDate(nowMs - 1000), null, null, listOf())
-        return AccountRequest.prepare(spec).use { request ->
-            val signature = memberKeys.sign(request.step().body)
-            request.finish(Signature(signature, null, null)).raw
-        }
+        return OwnRequest.make(configuration, memberKeys, account, nowMs)
     }
     private suspend fun ensureOwnRequest() {
         val id = memberId ?: return
-        val path = requestPath(id)
-        try { storage().read(path); return } catch (_: StorageException) {}
-        storage().write(listOf(MediumWrite(path, ownRequestBytes())))
+        val account = accountId ?: throw SessionError.NotReady()
+        OwnRequest.ensure(configuration, memberKeys, account, id, nowMs)
     }
     suspend fun exportRequest(): ByteArray = gated {
         loadJournal()

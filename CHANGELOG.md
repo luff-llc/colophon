@@ -9,6 +9,33 @@ No format, reader-rule or version change. The spec stays Colophon 0.5, revision 
 - **An account that syncs only through a shared folder may be created without a home** (spec §18, §13.1, §6.4, guide §5; changes row 240). It read "a host MUST create every account with at least one". A host that creates one MUST warn the person, and SHOULD offer a second unit when a home is later appointed. A host SHOULD NOT add a separate recovery unit (a `recover`-only controller such as a recovery kit) without also appointing a home, and MUST give the §6.4 warning (no theft safety) whenever an account has one and no home. `createWithoutHome` is the supported path for folder-only libraries ([docs/session.md](docs/session.md)); like the other §6.4 warnings, the sessions give these only after creation, so the app warns before `create()` (§21.1 item 7).
 - **A new device may ask first and fetch the history after approval** (spec §13.4, §12.3, §20, §21.1 item 6, guide §4; changes row 241). Under `members` it needs, out of band, only the account ID, a home's base and one entry's `seq` and digest, which fit one QR code. Once a grant names it, it reads the history from that home with `colophon.history.read` calls signed by its own key, verifies it from seq 1, and accepts it only if it contains that entry, its grant and a fresh head from that home. The out-of-band hand-over stays. No verifier, home or vector change.
 - **A claimed date on a write** (core, bindings, Swift, Kotlin): `perform(_:observed:claimed:)` (Kotlin `perform(command, observed, claimedMs)`; core `Engine::begin_write_claimed`, bindings `begin_write_claimed`) sets the operation's signed `created` to an earlier date, so an import keeps each note's original date. Later than now is refused; the clock, authority and every check keep the real time. No format or reader-rule change: `created` was always the signer's claim ([docs/session.md](docs/session.md)).
+- **Joining at a history head** (core, FFI, Kotlin, Swift; no home change): a device that holds only an account ID, a home's base, the
+  head of the history `(seq, entry digest)` and its own member keys can ask to join and, once approved, fetch the
+  history from the home. This lets an invite carry the head instead of the whole `authority/` history (small enough
+  for a QR code).
+  - `ColophonJoin` (Kotlin and Swift) is built from the session configuration, the account ID, the home and the head.
+    `request()` makes and stores the member's signed request at `requests/<member ID>.json` by the session's own code,
+    so the session opened afterwards finds and reuses it. `fetchHistory()` reads `GET {base}/authority` with a
+    `colophon.history.read` call signed by the member key, no links, `asOf` the head, and `GET {base}/head`.
+  - It returns `NotAdmitted` / `.notAdmitted` while the home refuses the call with `403 refused:revoked` or the
+    history names no such member: not yet admitted, or no longer admitted, since 0.5 gives the same answer for both.
+  - It returns `Admitted` only when the history verifies `ok` from seq 1, is the account's, holds the head at `seq`,
+    ends at a fresh head signed by a current home whose endpoints name the base, and grants this member from exactly
+    the stored request, still current. Any other refusal or check is an error: `refused:fork` (another account or
+    digest), `refused:rollback` (a history shorter than the signed head, after three reads), `refused:revoked` /
+    `refused:expired`, `refused:conflict` (a grant of another request), `unavailable` (a history short of the head,
+    a head behind, or past the bounds), `badSignature` (a head no current home signed).
+  - A joining device holds at most 256 MiB of entries and 2^18 entries (spec §2.4's portability floor), each entry
+    at most the authority envelope bound, checked while paging and again in the core.
+  - `Admitted.ownerDescriptor(keyId)` returns an `OwnerPasskey` for a current WebAuthn controller of the accepted
+    history (`rp`, credential, origins), and only an `Admitted` value, which only `fetchHistory()` makes, can give one.
+    Swift's `KeyDescriptor(passkey:)` and Kotlin's `OwnerPasskey.registrationDescriptor()` turn it into what a passkey
+    provider takes. The member whose grant is checked must be the key that signed the reads (else `refused:conflict`).
+  - Core: `write::calls::prepare_history_read` / `finish_history_read` and `v05::join` (`history_page_path`,
+    `parse_history_page`, `check_history_size`, `verify_at_head`, `current_webauthn_controller`). FFI:
+    `AccountHistoryRead`, `account_history_page_path`, `account_history_page`, `account_verify_at_head`,
+    `account_current_webauthn_controller`.
+  - The session's own request moved, unchanged, to one helper the join shares (`OwnRequest`).
 
 ## 0.5.1 — 2026-11-20
 

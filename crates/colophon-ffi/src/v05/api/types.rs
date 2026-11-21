@@ -775,6 +775,46 @@ record! {
     }
 }
 record! {
+    /// A history read (`colophon.history.read`) by a member that holds no history yet: the
+    /// account, the entry it was given as `asOf`, its signing point, the home's base (the
+    /// audience) and the path relative to it, which must serve the history. `request_id` is 32
+    /// random bytes.
+    pub struct HistoryReadSpec {
+        pub account: String,
+        pub as_of_seq: u64,
+        pub as_of_digest: String,
+        pub signing: Vec<u8>,
+        pub audience: String,
+        pub path: String,
+        pub request_id: Vec<u8>,
+        pub created: String,
+    }
+}
+record! {
+    /// A finished history read: the URL it is bound to, the `Authorization` header value and
+    /// the envelope.
+    pub struct HistoryReadCall {
+        pub url: String,
+        pub authorization: String,
+        pub envelope: Vec<u8>,
+    }
+}
+record! {
+    /// What a joining device accepted: `admitted` with the entries to store, or not admitted
+    /// yet (the history names no member with its ID), with nothing to store.
+    pub struct JoinedHistory {
+        pub admitted: bool,
+        pub stores: Vec<Store>,
+    }
+}
+record! {
+    /// One page of a home's history: entries as canonical bytes, and whether more follow.
+    pub struct HistoryPage {
+        pub entries: Vec<ByteString>,
+        pub more: bool,
+    }
+}
+record! {
     /// A verified request as an approver sees it.
     pub struct RequestInfo {
         pub raw: Vec<u8>,

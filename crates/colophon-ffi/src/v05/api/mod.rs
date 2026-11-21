@@ -24,6 +24,7 @@ mod convert;
 mod create;
 mod engine;
 mod fault;
+mod join;
 mod moving;
 mod pairing;
 mod session;
@@ -35,6 +36,7 @@ pub use action::AccountAction;
 pub use create::{account_default_policy, AccountCreation};
 pub use engine::{AccountBlobWriter, AccountEngine, AccountLiveWrite};
 pub use fault::{AccountError, REFUSAL_REASONS};
+pub use join::*;
 pub use moving::AccountMove;
 pub use pairing::{AccountPairing, PairingFailureLimiter, PairingTransferKey};
 pub use session::{

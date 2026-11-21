@@ -587,24 +587,15 @@ actor SessionWorker {
 
     // MARK: Requests (a member asking, an owner approving)
 
-    private func requestPath(_ id: String) -> String { "requests/\(id).json" }
+    private func requestPath(_ id: String) -> String { OwnRequest.path(id) }
     private func ownRequestBytes() async throws -> Data {
-        guard let account = accountID, let id = memberID else { throw SessionError.notReady }
-        let keys = try await memberKeys.publicKeys()
-        let spec = RequestSpec(account: account, signing: keys.signing, agreement: keys.agreement, label: configuration.memberLabel,
-            kind: Self.accountKind(configuration.memberKind), termsJson: Self.terms(namespaces: configuration.namespaces, access: configuration.access, expires: nil, budget: nil, services: configuration.services),
-            created: try accountFormatDate(ms: nowMs - 1000), custody: nil, operator: nil, endpoints: [])
-        let request = try AccountRequest.prepare(spec: spec)
-        let step = try request.step()
-        let signature = try await memberKeys.sign(body: step.body)
-        _ = id
-        return try request.finish(signature: Signature(signature: signature, authenticatorData: nil, clientData: nil)).raw
+        guard let account = accountID, memberID != nil else { throw SessionError.notReady }
+        return try await OwnRequest.make(configuration, keys: memberKeys, account: account, nowMs: nowMs)
     }
     private func ensureOwnRequest() async throws {
         guard let id = memberID else { return }
-        let path = requestPath(id)
-        if (try? storage().read(path)) != nil { return }
-        try storage().write([MediumWrite(path: path, bytes: try await ownRequestBytes())])
+        guard let account = accountID else { throw SessionError.notReady }
+        _ = try await OwnRequest.ensure(configuration, medium: try storage(), keys: memberKeys, account: account, memberID: id, nowMs: nowMs)
     }
     func exportRequest() async throws -> Data {
         try await gated {

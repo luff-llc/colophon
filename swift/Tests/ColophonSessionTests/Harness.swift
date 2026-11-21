@@ -12,6 +12,7 @@ import ColophonSession
     let owner: SoftwareKeys
     let session: ColophonSession
     let secrets: MemoryDeviceSecrets
+    let configuration: SessionConfiguration
     private let makeSession: @MainActor () -> ColophonSession
     init(medium: MemoryMedium = MemoryMedium(), member: SoftwareKeys = SoftwareKeys(), owner: SoftwareKeys = SoftwareKeys(),
          homes: [HomeConfiguration] = [], createWithoutHome: Bool = true, recovery: SoftwareKeys? = nil, additional: [AdditionalController] = [], namespaces: [String] = ["reading.saved"], services: [ServiceTerms] = [], libraryNamespaces: [String]? = nil,
@@ -19,11 +20,11 @@ import ColophonSession
         self.medium = medium; self.member = member; self.owner = owner
         let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString), secrets = MemoryDeviceSecrets()
         self.home = home; self.secrets = secrets
-        makeSession = {
-            ColophonSession(configuration: .init(memberLabel: "Test device", namespaces: namespaces, services: services, libraryNamespaces: libraryNamespaces, location: .memory(medium),
-                privateContainer: home, keys: keys ?? member, ownerController: owner, recoveryKeys: recovery, homes: homes, createWithoutHome: createWithoutHome, additionalControllers: additional,
-                deviceSecrets: secrets, history: history, headQuorum: headQuorum, now: clock))
-        }
+        let configuration = SessionConfiguration(memberLabel: "Test device", namespaces: namespaces, services: services, libraryNamespaces: libraryNamespaces, location: .memory(medium),
+            privateContainer: home, keys: keys ?? member, ownerController: owner, recoveryKeys: recovery, homes: homes, createWithoutHome: createWithoutHome, additionalControllers: additional,
+            deviceSecrets: secrets, history: history, headQuorum: headQuorum, now: clock)
+        self.configuration = configuration
+        makeSession = { ColophonSession(configuration: configuration) }
         session = makeSession()
     }
     /// Another session over this device's medium, private container and device secrets: a relaunch.
