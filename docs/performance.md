@@ -1,3 +1,47 @@
+# Build profiles
+
+Native Apple, Android and Rust server builds use `--release`: LTO with `opt-level = 3`.
+The server-side Bun module, `colophon-home-wasm`, also uses this speed-focused profile.
+The browser `@colophon/core` module uses `--profile release-wasm`, which inherits release
+and sets `opt-level = "s"`; its artifact is
+`target/wasm32-unknown-unknown/release-wasm/colophon_wasm.wasm`.
+`js/scripts/build.sh` (also called by `scripts/package-release.sh`) and `scripts/test-js.sh`
+select that browser profile. Native session benchmarks no longer need an optimization override.
+Historical measurements below retain the optimization settings used at the time.
+
+## Profile comparison (20 November 2026)
+
+Quick local check on arm64 macOS 27.0.1, Rust 1.91.1, with default features, LTO and the
+repository ARM AES/POLYVAL flags. The browser artifact is byte-for-byte identical under
+the former `release` profile and the new `release-wasm` profile:
+
+| Browser artifact | Former release (`s`) | release-wasm (`s`) |
+| --- | ---: | ---: |
+| Raw `colophon_wasm.wasm` | 10,078,708 bytes | 10,078,708 bytes |
+| After wasm-bindgen 0.2.130 (`--target web`) | 8,911,168 bytes | 8,911,168 bytes |
+
+Native `keys_performance` checks ran sequentially with `--ignored --nocapture --test-threads=1`:
+
+| Check | Release overridden to `s` | Default release (`3`) |
+| --- | ---: | ---: |
+| Raw P-256 verification, median of three runs | 389.017 µs | 286.446 µs |
+| WebAuthn verification, one run | 237.902 µs | 177.294 µs |
+| 200-entry, 20-controller keyring replay, one run | 60.079 ms | 44.764 ms |
+
+The raw P-256 comparison used three alternating runs of each compiled test binary, each
+timing 2,000 verifications: `s` samples were 389.017, 425.347 and 379.545 µs; `3` samples
+were 284.481, 884.974 and 286.446 µs. The median is 1.36× faster (26.4% less time), but the
+large outlier shows host noise. These are local microbenchmarks, not mobile-device claims;
+the keyring's original 20 ms budget remains unmet. All three performance checks passed
+their existing regression limits at both optimization levels.
+
+Rebuild each native variant with:
+
+```sh
+CARGO_PROFILE_RELEASE_OPT_LEVEL=s cargo test --release --locked -p colophon-core --test keys_performance -- --ignored --nocapture --test-threads=1
+cargo test --release --locked -p colophon-core --test keys_performance -- --ignored --nocapture --test-threads=1
+```
+
 # Colophon 0.5 (16 November 2026)
 
 Native Rust `v05::engine::Engine`, the engine behind the 0.5 `AccountEngine` exports, with software keys.
@@ -5,7 +49,7 @@ Measured base commit: `25027b0a15960f436b95cb21accc01ca921999a0`, with the then-
 The benchmark source and results are published in the commit that adds this file.
 Apple M3 Max MacBook Pro (Mac15,9), arm64,
 16 cores (12 performance, 4 efficiency), 64 GB RAM, macOS 27.0.1, Rust 1.91.1.
-Workspace release profile: LTO, `opt-level = "s"`, default features and repository ARM AES/POLYVAL flags.
+Then-current workspace release profile: LTO, `opt-level = "s"`, default features and repository ARM AES/POLYVAL flags.
 Pressroom was asked for four threads and 8 GB and granted two threads; its normal lane worked without
 the local-target fallback. Runs were sequential, after compilation. Fixtures, saved states,
 software key objects and the expected account ID were prepared before timing.
@@ -224,7 +268,7 @@ records and pending-publication receipts are durable before `perform()` complete
 Reproduce after building the native artifacts (use the environment paths from the handoff/task):
 
 ```sh
-CARGO_PROFILE_RELEASE_OPT_LEVEL=3 SKIP_VISIONOS=1 bash scripts/build-apple.sh
+SKIP_VISIONOS=1 bash scripts/build-apple.sh
 bash scripts/bench-sessions.sh
 ```
 
@@ -525,7 +569,7 @@ The compatibility `Library::records() -> &Records` contract still retains comple
 
 - Apple M3 Max, 16 CPU cores (12 performance, 4 efficiency), 64 GB RAM; macOS 27.0.1, arm64.
   rustc 1.91.1 (`ed61e7d7e`), release/LTO and `CARGO_PROFILE_RELEASE_OPT_LEVEL=3`. No target-CPU
-  override. The repository's default size-focused WASM release profile is unchanged.
+  override. At the time, the workspace release profile was size-focused for WASM as well.
 - Historical 100,000-operation fixture used at `302db73`: 89,999 podcast positions, 4,000 episode
   updates, 4,000 saved links, 1,999 note edits, one notebook and one initial note. Four writers,
   three grants and one revocation preserving 25,000 writes, with rotations of all namespaces.
@@ -684,7 +728,7 @@ hardware/power/tail latency remain host integration work. See [engine.md](engine
 
 Measured November 6, 2026 on the arm64 macOS host in the `ffi` worktree. Rust stable 1.91.1,
 Swift 6.4.2 / Xcode 27.2, JDK 17, Kotlin 2.2.21, JNA 5.18.1, UniFFI 0.32.2. CPU model access
-is denied by this sandbox. Rust uses the workspace release profile (`opt-level = "s"`, LTO);
+is denied by this sandbox. Rust used the then-current workspace release profile (`opt-level = "s"`, LTO);
 Swift uses `-c release`. These historical measurements used the pre-incremental public core of the
 `ffi` worktree; they were not remeasured during the engine/domain merge.
 

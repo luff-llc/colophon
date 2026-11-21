@@ -3,7 +3,6 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 export PATH="/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:$PATH"
-export CARGO_PROFILE_RELEASE_OPT_LEVEL=3
 export COLOPHON_SESSION_FIXTURE="$PWD/target/engine-sessions"
 mkdir -p "$COLOPHON_SESSION_FIXTURE"
 if [[ ! -f "$COLOPHON_SESSION_FIXTURE/100k.records" ]]; then

@@ -1,7 +1,7 @@
 //! Colophon 0.4 keys performance (Galley F2 budgets): WebAuthn verification under 1 ms (met), and
 //! a 200-entry, 20-controller keyring history fold. Its 20 ms budget is NOT met: replay costs
 //! ~55 ms on an M-series host, dominated by ~0.3 ms per pure-Rust P-256 verification at the
-//! workspace's opt-level "s". That is a recorded deviation (Galley DEVIATIONS.md, D-F2-1); this
+//! former workspace opt-level "s". That is a recorded deviation (Galley DEVIATIONS.md, D-F2-1); this
 //! test guards against regression at 100 ms until faster verification lands.
 //! Run explicitly: `cargo test --release -p colophon-core --test keys_performance -- --ignored --nocapture`.
 #![allow(clippy::unwrap_used, clippy::expect_used)]

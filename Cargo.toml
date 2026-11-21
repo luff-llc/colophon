@@ -24,4 +24,8 @@ unwrap_used = "deny"
 
 [profile.release]
 lto = true
+opt-level = 3
+
+[profile.release-wasm]
+inherits = "release"
 opt-level = "s"
