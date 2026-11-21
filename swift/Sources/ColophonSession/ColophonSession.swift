@@ -39,10 +39,17 @@ import Observation
     public internal(set) var blobDownloads: [String: BlobAvailability] = [:]
     @ObservationIgnored let worker: SessionWorker
     @ObservationIgnored private var restoreTask: Task<Void, Never>?
-    @ObservationIgnored private var watchTask: Task<Void, Never>?
-    @ObservationIgnored private var batchTask: Task<Void, Never>?
-    @ObservationIgnored private var syncTask: Task<Void, Never>?
-    @ObservationIgnored private var dueTask: Task<Void, Never>?
+    @ObservationIgnored private(set) var watchTask: Task<Void, Never>?
+    @ObservationIgnored private(set) var batchTask: Task<Void, Never>?
+    @ObservationIgnored private(set) var syncTask: Task<Void, Never>?
+    @ObservationIgnored private(set) var dueTask: Task<Void, Never>?
+    @ObservationIgnored private var stoppedSyncTask: Task<Void, Never>?
+    @ObservationIgnored private var stoppedDueTask: Task<Void, Never>?
+    @ObservationIgnored private var batchNeedsRefresh = false
+    @ObservationIgnored private var syncPaused = false
+    @ObservationIgnored private var suspended = false
+    @ObservationIgnored private var lockTask: Task<Void, Never>?
+    @ObservationIgnored private var lockGeneration: UInt64 = 0
     @ObservationIgnored private(set) var checkpointTask: Task<Void, Never>?
     @ObservationIgnored private var usable = false
     @ObservationIgnored private var caches: [UUID: @MainActor (Set<String>, Bool) -> Void] = [:]
@@ -65,6 +72,7 @@ import Observation
     var relayConfigured: Bool { homesConfigured }
 
     private func scheduleCheckpoint() {
+        guard !suspended else { return }
         checkpointTask?.cancel()
         checkpointTask = Task { [weak self] in
             do { try await Task.sleep(for: .seconds(1)); try await self?.worker.saveCheckpoint() }
@@ -93,6 +101,7 @@ import Observation
     public func refresh() async { await refresh(preservingCommandFailure: false) }
     private func refresh(preservingCommandFailure: Bool) async {
         await restore()
+        guard !suspended else { return }
         let lease = context
         let failureRevision = commandFailureRevision
         let marked = phase == .ready
@@ -279,7 +288,7 @@ import Observation
         await restore()
         invalidateContext(); phase = .opening
         let lease = context
-        do { let snapshot = try await worker.rejoin(keys: keys); guard lease == context else { return }; apply(snapshot); await startWatching(); startSyncLoop() }
+        do { let snapshot = try await worker.rejoin(keys: keys); guard lease == context else { return }; apply(snapshot); await startWatching(); startSync() }
         catch { if lease == context { fail(error) } }
     }
     /// This device's own signed membership request (its canonical envelope), to show as a QR code for the approving
@@ -466,20 +475,47 @@ import Observation
     /// Hides the content and drops every secret the engine holds: call it when the app enters the background.
     /// `unlock()` opens it again (`LibraryGate` calls it on foreground entry); `restore()` and `refresh()` leave a locked session locked.
     public func lock() async {
-        guard let snapshot = try? await worker.lock() else { return }
-        usable = false; apply(snapshot)
+        lockGeneration &+= 1
+        if let lockTask { await lockTask.value; return }
+        suspended = true
+        let watch = watchTask, batch = batchTask, checkpoint = checkpointTask
+        stopSyncLoops()
+        watch?.cancel(); watchTask = nil
+        batch?.cancel(); batchTask = nil; batchNeedsRefresh = false
+        checkpoint?.cancel(); checkpointTask = nil
+        let task = Task {
+            await watch?.value
+            await batch?.value
+            await checkpoint?.value
+            await drainSync()
+            if let snapshot = try? await worker.lock() {
+                usable = false; apply(snapshot)
+            }
+            lockTask = nil
+        }
+        lockTask = task
+        await task.value
     }
     public func unlock() async {
+        let generation = lockGeneration
+        await lockTask?.value
+        guard generation == lockGeneration else { return }
         let lease = context
-        do { let snapshot = try await worker.unlock(); guard lease == context else { return }; apply(snapshot); await startWatching() }
-        catch { if lease == context { fail(error) } }
+        do {
+            let snapshot = try await worker.unlock()
+            guard lease == context, generation == lockGeneration else { return }
+            suspended = false; apply(snapshot); await startWatching()
+            startSyncLoop(); startDueLoop()
+        } catch {
+            if lease == context, generation == lockGeneration { suspended = false; fail(error) }
+        }
     }
 
     // MARK: Exchange with the homes
 
     /// Runs one exchange pass with every home now and refreshes when something arrived. Returns false when it failed.
     @discardableResult public func syncNow() async -> Bool {
-        guard homesConfigured else { return false }
+        guard homesConfigured, !suspended else { return false }
         // Passes never overlap: a caller waits for the pass in flight, then runs its own.
         let previous = syncChain
         let task = Task { [weak self] () -> Bool in
@@ -492,6 +528,7 @@ import Observation
     @ObservationIgnored private var syncChain: Task<Bool, Never>?
     private func runSync() async -> Bool {
         await restore()
+        guard !suspended else { return false }
         // With no library there is nothing to exchange. A pass here would refresh to `noLibrary` and erase what a failed
         // `create()` just published (its `failed` phase and error), which an app would see as a missing error.
         guard libraryID != nil else { return false }
@@ -528,15 +565,44 @@ import Observation
     /// Wakes the background exchange loop, for example after a host learns the network returned.
     public func requestSync() { Task { await syncSignal.fire() } }
     /// Stops the background exchange. Local storage and the session keep working.
-    public func stopSync() { syncTask?.cancel(); syncTask = nil; dueTask?.cancel(); dueTask = nil }
+    public func stopSync() {
+        syncPaused = true
+        stopSyncLoops()
+    }
+
+    private func stopSyncLoops() {
+        if let syncTask { stoppedSyncTask = syncTask }
+        if let dueTask { stoppedDueTask = dueTask }
+        syncTask?.cancel(); syncTask = nil
+        dueTask?.cancel(); dueTask = nil
+    }
+
+    /// Restarts periodic exchange and due work for an active session.
+    public func startSync() {
+        guard !suspended, homesConfigured || libraryID != nil else { return }
+        syncPaused = false
+        startSyncLoop(); startDueLoop()
+    }
+
+    /// Waits for the exchange chain and any queued or running file-change refresh.
+    public func drainSync() async {
+        let sync = syncChain, batch = batchTask
+        let stoppedSync = stoppedSyncTask, stoppedDue = stoppedDueTask
+        _ = await sync?.value
+        await batch?.value
+        await stoppedSync?.value
+        await stoppedDue?.value
+    }
 
     private func startSyncLoop() {
-        guard homesConfigured, syncTask == nil else { return }
-        syncTask = Task { [weak self] in
+        guard homesConfigured, !syncPaused, !suspended, syncTask == nil else { return }
+        syncTask = Task { [weak self, previous = stoppedSyncTask] in
+            await previous?.value
             var failures = 0
             while !Task.isCancelled {
                 guard let self else { return }
                 let ok = await self.syncNow()
+                guard !Task.isCancelled else { return }
                 // Stopped: no timer and no backoff. Only an event (a refresh, lock, unlock, an explicit `requestSync`) wakes the
                 // loop, and each pass returns at once without contacting a home.
                 if self.phase.isStopped { await self.syncSignal.wait(); continue }
@@ -557,12 +623,13 @@ import Observation
     }
     /// `record_due` on a schedule: transitions that came due are recorded without waiting for a pass.
     private func startDueLoop() {
-        guard dueTask == nil else { return }
-        dueTask = Task { [weak self] in
+        guard !syncPaused, !suspended, dueTask == nil else { return }
+        dueTask = Task { [weak self, previous = stoppedDueTask] in
+            await previous?.value
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(60))
                 guard let self, !Task.isCancelled else { return }
-                if self.phase == .ready, let snapshot = try? await self.worker.recordDue() { self.apply(snapshot) }
+                if self.phase == .ready, let snapshot = try? await self.worker.recordDue(), !Task.isCancelled { self.apply(snapshot) }
             }
         }
     }
@@ -589,27 +656,46 @@ import Observation
     }
 
     private func startWatching() async {
-        guard watchTask == nil else { return }
-        do {
-            let stream = try await worker.changes()
-            watchTask = Task { [weak self] in
-                for await _ in stream { guard !Task.isCancelled else { break }; self?.externalChange() }
+        guard !suspended, watchTask == nil else { return }
+        await withCheckedContinuation { started in
+            watchTask = Task { [weak self, worker] in
+                guard !Task.isCancelled else { started.resume(); return }
+                do {
+                    let stream = try await worker.changes()
+                    started.resume()
+                    for await _ in stream {
+                        guard !Task.isCancelled else { return }
+                        self?.externalChange()
+                    }
+                } catch {
+                    started.resume()
+                    if !Task.isCancelled { self?.lastError = error.localizedDescription }
+                }
+                if !Task.isCancelled { self?.watchTask = nil }
             }
-        } catch { lastError = error.localizedDescription }
+        }
     }
     /// A bounded notification stream plus one trailing batch task coalesces file bursts.
     func externalChange() {
+        guard !suspended else { return }
+        batchNeedsRefresh = true
         guard batchTask == nil else { return }
         batchTask = Task { [weak self] in
-            do { try await Task.sleep(for: .milliseconds(75)) } catch { return }
-            guard let self else { return }
-            batchTask = nil
-            await refresh(preservingCommandFailure: true)
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .milliseconds(75)) } catch { return }
+                guard let self, !Task.isCancelled else { return }
+                batchNeedsRefresh = false
+                await refresh(preservingCommandFailure: true)
+                guard !Task.isCancelled else { return }
+                if !batchNeedsRefresh { batchTask = nil; return }
+            }
         }
     }
     /// Deterministic batch barrier for hosts/tests; no timing-based polling is required.
     public func flushExternalChanges() async {
-        batchTask?.cancel(); batchTask = nil
+        let batch = batchTask
+        batch?.cancel(); batchTask = nil; batchNeedsRefresh = false
+        await batch?.value
         await refresh(preservingCommandFailure: true)
     }
     public var hasUsableContent: Bool { usable && ([.ready, .refreshing, .waitingForDownload, .retry].contains(phase) || phase.isStopped) }

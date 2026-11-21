@@ -21,7 +21,7 @@ import ColophonSession
     let issued = try accountFormatDate(ms: nowMs)
     let body = Data(("{\"account\":\"\(account)\",\"anchor\":{\"digest\":\"\(hex(headBody))\",\"seq\":\(seq)},\"by\":\"\(owner)\","
         + "\"change\":{\"layout\":\(layout)},\"issued\":\"\(issued)\",\"protocol\":\"colophon/transition/5\",\"signers\":[\"\(owner)\"]}").utf8)
-    let signature = try await device.owner.sign(body: body)
+    let signature = try device.owner.sign(body: body)
     let transition = Data("{\"body\":\"\(body.base64EncodedString())\",\"signature\":\"\(signature.base64EncodedString())\"}".utf8)
     try device.medium.write([MediumWrite(path: "transitions/\(hex(body)).json", bytes: transition)])
 }
@@ -198,6 +198,7 @@ func hex(_ data: Data) -> String { SHA256.hash(data: data).map { String(format: 
             try await device.session.perform(try .saveLink(url: URL(string: "https://example.org/\(status)")!, title: "Refused"),
                                              observed: device.session.observedRevision)
             _ = await device.session.syncNow()
+            await device.session.drainSync()
             #expect(device.session.homeIssues.contains { $0.problem == .remoteCallRefused(code: code) }, "\(code): \(device.session.homeIssues)")
             #expect(!device.session.homeIssues.description.contains("SECRET"), "the body is never echoed")
             #expect(device.session.phase == .ready, "\(code) is not a state of the account: \(device.session.phase)")

@@ -42,6 +42,7 @@ public protocol RecordMedium: Sendable {
     /// Every path held, with versions, in one batch. A listing that cannot be completed throws: an
     /// error is never an empty store.
     func listing() throws -> [MediumEntry]
+    func listing(prefix: String) throws -> [MediumEntry]
     /// The exact bytes at `path`. Missing or unreadable throws `StorageError.unavailable`.
     func read(_ path: String) throws -> Data
     /// A blob chunk's ciphertext; empty means "not held here" (the engine fetches it from a home).
@@ -53,6 +54,12 @@ public protocol RecordMedium: Sendable {
     /// Wake-up hints when something changes (including this process's own writes). A hint carries
     /// nothing: the consumer lists again.
     func changes() -> AsyncStream<Void>
+}
+
+public extension RecordMedium {
+    func listing(prefix: String) throws -> [MediumEntry] {
+        try listing().filter { $0.path.hasPrefix(prefix) }
+    }
 }
 
 public enum RecordPaths {

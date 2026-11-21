@@ -30,7 +30,7 @@ import Foundation
 ///
 /// **Links are never followed.** Every path is resolved one component at a time from a directory handle with
 /// `openat(…, O_NOFOLLOW)`; a symbolic link anywhere below the folder is `invalidPath`, and because the check is
-/// the open there is no gap in which one can be swapped in. iCloud placeholders and non-current ubiquitous items
+/// the open there is no gap in which one can be swapped in. iCloud placeholders and dataless ubiquitous items
 /// start a download and answer `unavailable` (never absence); an `NSFilePresenter` gives wake-up hints.
 public final class FolderMedium: RecordMedium, @unchecked Sendable {
     public let folder: URL
@@ -86,10 +86,32 @@ public final class FolderMedium: RecordMedium, @unchecked Sendable {
     // MARK: Reading
 
     public func listing() throws -> [MediumEntry] {
+        try listing(prefix: "")
+    }
+
+    /// A directory prefix opens that subtree directly. Other prefixes match the start of each record path.
+    public func listing(prefix: String) throws -> [MediumEntry] {
+        try checkAvailability(folder)
+        let directoryPrefix = prefix.hasSuffix("/") ? String(prefix.dropLast()) : prefix
+        let validDirectory = (try? RecordPaths.validate(directoryPrefix)) != nil
         let entries = try reading { root -> [MediumEntry] in
-            try checkAvailability(folder)
             var result: [MediumEntry] = []
+            if validDirectory {
+                // Walk only the requested directory. Each component is checked without following links.
+                let (parent, leaf) = try resolveParent(root, directoryPrefix, create: false, allowNonDirectory: true)
+                if let parent, let child = try childDirectory(parent, leaf, path: directoryPrefix, create: false, allowNonDirectory: true) {
+                    // APFS may open a differently cased name. Report paths with their stored spelling.
+                    let componentCount = directoryPrefix.split(separator: "/").count
+                    let actual = child.openPath()?.split(separator: "/").suffix(componentCount).joined(separator: "/")
+                    if actual == nil || actual == directoryPrefix {
+                        try list(child, prefix: (actual ?? directoryPrefix) + "/", into: &result)
+                        return result.sorted { $0.path < $1.path }
+                    }
+                }
+                if prefix.hasSuffix("/") { return [] }
+            }
             try list(root, prefix: "", into: &result)
+            if !prefix.isEmpty { result = result.filter { $0.path.hasPrefix(prefix) } }
             return result.sorted { $0.path < $1.path }
         }
         return entries ?? []
@@ -100,23 +122,23 @@ public final class FolderMedium: RecordMedium, @unchecked Sendable {
             let name = entry.name
             if name.hasPrefix(".") {
                 if name.hasSuffix(".icloud") {
-                    let real = folder.appendingPathComponent(prefix).appendingPathComponent(String(name.dropFirst().dropLast(7)))
-                    try? FileManager.default.startDownloadingUbiquitousItem(at: real)
-                    throw StorageError.unavailable("iCloud download pending: \(name)")
+                    let path = prefix + String(name.dropFirst().dropLast(7))
+                    throw DownloadPending(url: folder.appendingPathComponent(path), name: name)
                 }
                 continue // the journal, Finder's files, a 0.4 stage file: never records
             }
             let path = prefix + name
             if entry.isSymlink { throw StorageError.invalidPath(path) }
             if entry.isDirectory {
+                try checkDataless(entry.info, path)
                 guard let child = try directory.directory(name, create: false) else { continue }
                 try list(child, prefix: path + "/", into: &result)
                 continue
             }
             guard entry.isRegular else { continue }
             try RecordPaths.validate(path)
-            if ubiquitous { try checkAvailability(folder.appendingPathComponent(path)) }
             let info = entry.info
+            try checkDataless(info, path)
             let modified = Double(info.st_mtimespec.tv_sec) + Double(info.st_mtimespec.tv_nsec) / 1e9
             result.append(MediumEntry(path: path, version: "\(info.st_ino):\(info.st_size):\(modified)"))
         }
@@ -140,13 +162,24 @@ public final class FolderMedium: RecordMedium, @unchecked Sendable {
         let (parent, leaf) = try resolveParent(root, path, create: false)
         guard let parent else { return nil }
         try checkPlaceholder(parent, leaf, path)
-        if ubiquitous { try checkAvailability(folder.appendingPathComponent(path)) }
+        return try readRecord(parent, leaf, path, maximumBytes: maximumBytes)
+    }
+
+    private func readRecord(_ parent: DirectoryHandle, _ leaf: String, _ path: String, maximumBytes: Int) throws -> Data? {
+        if ubiquitous, let info = try parent.info(leaf) {
+            if info.st_mode & S_IFMT == S_IFLNK { throw StorageError.invalidPath(path) }
+            try checkDataless(info, path)
+        }
         return try parent.read(leaf, maximumBytes: maximumBytes)
     }
 
     /// Runs `body` with the folder's handle under the shared lock, after completing any batch left behind. Nil when
     /// the folder does not exist yet (an empty store).
     private func reading<T>(_ body: (DirectoryHandle) throws -> T) throws -> T? {
+        try downloadAfterUnlock { try lockedRead(body) }
+    }
+
+    private func lockedRead<T>(_ body: (DirectoryHandle) throws -> T) throws -> T? {
         guard let root = try DirectoryHandle.open(folder.path) else { return nil }
         let journal = try openJournal(root)
         do {
@@ -172,14 +205,16 @@ public final class FolderMedium: RecordMedium, @unchecked Sendable {
             try RecordPaths.validate(item.path)
         }
         guard !writes.isEmpty else { return }
-        try coordinate {
-            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-            guard let root = try DirectoryHandle.open(folder.path) else { throw StorageError.unavailable("Cannot open the library folder") }
-            let journal = try openJournal(root)
-            let exclusive = try FolderFiles.Lock(journal, exclusive: true)
-            try withExtendedLifetime(exclusive) {
-                try recover(root, journal)
-                try publish(writes, root: root, journal: journal)
+        try downloadAfterUnlock {
+            try coordinate {
+                try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+                guard let root = try DirectoryHandle.open(folder.path) else { throw StorageError.unavailable("Cannot open the library folder") }
+                let journal = try openJournal(root)
+                let exclusive = try FolderFiles.Lock(journal, exclusive: true)
+                try withExtendedLifetime(exclusive) {
+                    try recover(root, journal)
+                    try publish(writes, root: root, journal: journal)
+                }
             }
         }
         signal()
@@ -231,6 +266,7 @@ public final class FolderMedium: RecordMedium, @unchecked Sendable {
         try step(.recorded)
         do { try complete(id, record, root: root, journal: journal) }
         catch StorageError.conflict(let path) { throw StorageError.conflict(path) }
+        catch let pending as DownloadPending { throw pending }
         catch { throw StorageError.unavailable("The batch is recorded and will be completed on the next open: \(Self.describe(error))") }
     }
 
@@ -252,7 +288,14 @@ public final class FolderMedium: RecordMedium, @unchecked Sendable {
                 linked.append((parent, leaf))
             } else {
                 guard errno == EEXIST else { throw FolderFiles.failure(errno, entry.path) }
-                let present = try? parent.read(leaf, maximumBytes: RecordPaths.maximumBytes)
+                let present: Data?
+                do {
+                    present = try readRecord(parent, leaf, entry.path, maximumBytes: RecordPaths.maximumBytes)
+                } catch let pending as DownloadPending {
+                    throw pending
+                } catch {
+                    present = nil
+                }
                 guard let bytes = present, bytes.count == entry.size, Self.digest(bytes) == entry.digest else {
                     for (directory, name) in linked.reversed() { try directory.remove(name); try directory.sync() }
                     try journal.remove(id + ".record")
@@ -323,23 +366,63 @@ public final class FolderMedium: RecordMedium, @unchecked Sendable {
     }
 
     /// The directory that holds `path` and the last component, walked from `root` without following any link.
-    private func resolveParent(_ root: DirectoryHandle, _ path: String, create: Bool) throws -> (DirectoryHandle?, String) {
+    private func resolveParent(
+        _ root: DirectoryHandle, _ path: String, create: Bool, allowNonDirectory: Bool = false
+    ) throws -> (DirectoryHandle?, String) {
         let components = path.split(separator: "/").map(String.init)
         guard let leaf = components.last else { throw StorageError.invalidPath(path) }
         var current = root
+        var prefix = ""
         for component in components.dropLast() {
-            try checkPlaceholder(current, component, path)
-            guard let next = try current.directory(component, create: create) else { return (nil, leaf) }
+            let componentPath = prefix + component
+            guard let next = try childDirectory(current, component, path: componentPath, create: create, allowNonDirectory: allowNonDirectory) else {
+                return (nil, leaf)
+            }
             current = next
+            prefix = componentPath + "/"
         }
         return (current, leaf)
     }
 
+    private func childDirectory(
+        _ parent: DirectoryHandle, _ name: String, path: String, create: Bool, allowNonDirectory: Bool
+    ) throws -> DirectoryHandle? {
+        try checkPlaceholder(parent, name, path)
+        if ubiquitous || allowNonDirectory, let info = try parent.info(name) {
+            let kind = info.st_mode & S_IFMT
+            if kind == S_IFLNK { throw StorageError.invalidPath(path) }
+            if allowNonDirectory && kind != S_IFDIR { return nil }
+            try checkDataless(info, path)
+        }
+        return try parent.directory(name, create: create)
+    }
+
     private func checkPlaceholder(_ directory: DirectoryHandle, _ name: String, _ path: String) throws {
+        let placeholder = "." + name + ".icloud"
         var info = stat()
-        if fstatat(directory.fd, "." + name + ".icloud", &info, AT_SYMLINK_NOFOLLOW) == 0 {
-            try? FileManager.default.startDownloadingUbiquitousItem(at: folder.appendingPathComponent(path))
-            throw StorageError.unavailable("iCloud download pending: .\(name).icloud")
+        if fstatat(directory.fd, placeholder, &info, AT_SYMLINK_NOFOLLOW) == 0 {
+            throw DownloadPending(url: folder.appendingPathComponent(path), name: placeholder)
+        }
+    }
+
+    private func checkDataless(_ info: stat, _ path: String) throws {
+        if ubiquitous, info.st_flags & UInt32(SF_DATALESS) != 0 {
+            let url = folder.appendingPathComponent(path)
+            throw DownloadPending(url: url, name: url.lastPathComponent)
+        }
+    }
+
+    private struct DownloadPending: Error {
+        let url: URL
+        let name: String
+    }
+
+    /// The lock and any file coordination have unwound before a download request reaches FileProvider.
+    private func downloadAfterUnlock<T>(_ body: () throws -> T) throws -> T {
+        do { return try body() }
+        catch let pending as DownloadPending {
+            try? FileManager.default.startDownloadingUbiquitousItem(at: pending.url)
+            throw StorageError.unavailable("iCloud download pending: \(pending.name)")
         }
     }
 

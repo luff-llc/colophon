@@ -673,7 +673,7 @@ actor SessionWorker {
     private func pendingRequests(members: [AccountMember]) async throws -> [AccessRequest] {
         let known = Set(members.map(\.id))
         var out: [AccessRequest] = []
-        for entry in try storage().listing() where entry.path.hasPrefix("requests/") {
+        for entry in try storage().listing(prefix: "requests/") {
             guard let bytes = try? storage().read(entry.path), let info = try? accountRequestInfo(raw: bytes),
                   !known.contains(info.member), info.member != memberID else { continue }
             out.append(Self.accessRequest(info))
