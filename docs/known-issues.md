@@ -57,8 +57,6 @@ in 0.5.x or in a host.
 
 ## Platforms and performance
 
-- On a device, opening an account that holds many vetoes is quadratic in their number
-  (`derived::effective_objects` calls `check_pending_veto` for each). Not fixed in 0.5.1.
 - At head quorum two, a device one forward ahead of a home can get one refused sync pass before
   the next one succeeds.
 - Phones, the wasm build and the FFI boundary are not measured, and nothing is proven on a

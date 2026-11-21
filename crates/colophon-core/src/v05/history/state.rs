@@ -9,7 +9,7 @@ use crate::v05::members::{
     AuthorityHeader, Grant, GrantContext, MemberKind, Renew, Request, Revoke,
 };
 use crate::v05::signature::{
-    verify_authority_signature, verify_raw, AuthorityRule, Checked, RawEnvelope,
+    verify_authority_signature_with, AuthorityRule, Checked, PreparedKeys, RawEnvelope,
 };
 use crate::v05::terms::{Terms, TermsKind};
 use crate::v05::{bad_signature, malformed, Failure, Result};
@@ -140,6 +140,8 @@ struct Retiring {
 /// The folded state of §17.2 at one entry.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct State {
+    #[serde(skip)]
+    pub(super) prepared: PreparedKeys,
     pub(crate) account: AccountId,
     pub(crate) digests: Vec<String>,
     pub(crate) issued: Vec<i64>,
@@ -403,11 +405,7 @@ impl State {
                 roles,
                 suspended_ok,
             } => {
-                let c = self
-                    .keyring
-                    .controllers
-                    .get(id)
-                    .ok_or(NotCurrent::Absent)?;
+                let c = self.keyring.controllers.get(id).ok_or(NotCurrent::Absent)?;
                 if self.meta.get(id).is_some_and(|m| m.provisional.is_some()) {
                     return Err(NotCurrent::Provisional);
                 }
@@ -586,8 +584,16 @@ fn check_item(
     item: &SigItem,
     rule: AuthorityRule,
     undecidable: &mut bool,
+    prepared: &PreparedKeys,
 ) -> Result<()> {
-    match verify_authority_signature(c, body, &item.signature, item.assertion_bytes(), rule)? {
+    match verify_authority_signature_with(
+        c,
+        body,
+        &item.signature,
+        item.assertion_bytes(),
+        rule,
+        Some(prepared),
+    )? {
         Checked::Verified => Ok(()),
         Checked::UndecidableForm => {
             *undecidable = true;
@@ -614,7 +620,12 @@ fn all_units(k: &Keyring, ids: &[String]) -> BTreeSet<String> {
 // ---------------------------------------------------------------------------------------------
 // Genesis.
 
-pub(crate) fn genesis(e: &Entry, now_ms: i64, predecessor: &[Vec<u8>]) -> Step<State> {
+pub(crate) fn genesis(
+    e: &Entry,
+    now_ms: i64,
+    predecessor: &[Vec<u8>],
+    prepared: &PreparedKeys,
+) -> Step<State> {
     if e.seq != 1 || e.kind != "genesis" {
         return Err(malformed("seq 1 must be a genesis").into());
     }
@@ -641,13 +652,21 @@ pub(crate) fn genesis(e: &Entry, now_ms: i64, predecessor: &[Vec<u8>]) -> Step<S
         primary,
         AuthorityRule::Control,
         &mut undecidable,
+        prepared,
     )?;
     for c in &e.env.cosignatures {
         let k = keyring
             .controllers
             .get(&c.signer)
             .ok_or_else(|| bad_signature("foreign cosigner"))?;
-        check_item(k, &e.env.body, c, AuthorityRule::Control, &mut undecidable)?;
+        check_item(
+            k,
+            &e.env.body,
+            c,
+            AuthorityRule::Control,
+            &mut undecidable,
+            prepared,
+        )?;
     }
     for a in &e.env.additions {
         let k = keyring
@@ -665,6 +684,7 @@ pub(crate) fn genesis(e: &Entry, now_ms: i64, predecessor: &[Vec<u8>]) -> Step<S
             a,
             AuthorityRule::Possession,
             &mut undecidable,
+            prepared,
         )?;
     }
     // Control rule over its keyring; possession by every other controller (§8.4).
@@ -781,6 +801,7 @@ pub(crate) fn genesis(e: &Entry, now_ms: i64, predecessor: &[Vec<u8>]) -> Step<S
     let policy = keyring.policy.clone();
     let epochs = namespaces.iter().map(|n| (n.clone(), 0)).collect();
     Ok(State {
+        prepared: prepared.clone(),
         account: AccountId::of_genesis(&e.env.body),
         digests: vec![e.env.digest.clone()],
         issued: vec![e.issued],
@@ -1218,6 +1239,11 @@ pub(crate) fn check_transition(
     with_receipts: bool,
     embedded: bool,
 ) -> Result<TCheck> {
+    #[cfg(test)]
+    super::work::PENDING_CHECKS.with(|c| {
+        let (t, r) = c.get();
+        c.set((t + 1, r));
+    });
     let env = AuthEnvelope::parse(
         t_bytes,
         bounds::TRANSITION_ENVELOPE,
@@ -1278,6 +1304,7 @@ pub(crate) fn check_transition(
             item,
             AuthorityRule::Transition,
             &mut undecidable,
+            &s.prepared,
         )?;
     }
     let cls = classify(s, &change)?;
@@ -1305,6 +1332,7 @@ pub(crate) fn check_transition(
             item,
             AuthorityRule::Possession,
             &mut undecidable,
+            &s.prepared,
         )?;
     }
     for id in cls.added_ids.iter().chain(&cls.holder_set_ids) {
@@ -1353,8 +1381,7 @@ pub(crate) fn check_transition(
         && every(&Role::Control)
         && (!cls.consent || every(&Role::Recover));
     let control_permits = control_met && cls.control_ok && consent_met;
-    let recovery_permits =
-        recovery_met && (cls.recovery_ok || (full_a && cls.recovery_ok_if_full));
+    let recovery_permits = recovery_met && (cls.recovery_ok || (full_a && cls.recovery_ok_if_full));
     let rule = if control_permits {
         Rule::Control
     } else if recovery_permits {
@@ -1524,7 +1551,13 @@ pub(super) fn check_receipt(
     let key = s
         .home_key(&by)
         .ok_or_else(|| malformed("receipt by a key that is not a current home"))?;
-    env.verify(&key)
+    #[cfg(test)]
+    super::work::PENDING_CHECKS.with(|c| {
+        let (t, r) = c.get();
+        c.set((t, r + 1));
+    });
+    s.prepared
+        .verify_raw(&key, &env.body, &env.signature)
         .map_err(|e| bad_signature(format!("receipt: {e}")))?;
     crate::v05::require(obj == object, "receipt names another object")?;
     crate::v05::require(
@@ -1764,7 +1797,9 @@ pub(super) fn apply_delta(s: &State, t: &TCheck, act_seq: u64) -> Result<State> 
                 .as_u64()
                 .ok_or_else(|| malformed("layout must be an integer"))?;
             if to <= s.layout {
-                return Err(malformed("void: the layout component does not raise the layout"));
+                return Err(malformed(
+                    "void: the layout component does not raise the layout",
+                ));
             }
             changed = true;
             Some(to)
@@ -1853,7 +1888,11 @@ pub(super) fn apply_delta(s: &State, t: &TCheck, act_seq: u64) -> Result<State> 
 /// §3.3 rule 2 within one transition: a member point equals a keyring point, or the two have
 /// the same key ID under `kid` (a parameter so a test can substitute a colliding function; a
 /// real collision needs 128 bits of work).
-fn member_collides(keyring: &[Vec<u8>], member: &[&Vec<u8>], kid: impl Fn(&[u8]) -> String) -> bool {
+fn member_collides(
+    keyring: &[Vec<u8>],
+    member: &[&Vec<u8>],
+    kid: impl Fn(&[u8]) -> String,
+) -> bool {
     let ids: BTreeSet<String> = keyring.iter().map(|p| kid(p)).collect();
     member
         .iter()
@@ -2389,7 +2428,14 @@ fn check_veto(
             .controllers
             .get(&item.signer)
             .ok_or_else(|| bad_signature("veto signer is not a controller"))?;
-        check_item(c, &veto.body, item, AuthorityRule::Veto, &mut undecidable)?;
+        check_item(
+            c,
+            &veto.body,
+            item,
+            AuthorityRule::Veto,
+            &mut undecidable,
+            &s.prepared,
+        )?;
     }
     if s.recorded.contains(&t.digest) {
         return Err(malformed("the transition is already recorded on this branch").into());
@@ -2546,8 +2592,8 @@ fn final_entry(s: &State, e: &Entry, all: &[&Entry]) -> Step<State> {
         let rh = parse_head(h, true)?;
         let key = before_key(&rh.by)
             .ok_or_else(|| malformed("final: a head by a key that was not a home"))?;
-        rh.env
-            .verify(&key)
+        s.prepared
+            .verify_raw(&key, &rh.env.body, &rh.env.signature)
             .map_err(|x| bad_signature(format!("final: head signature: {x}")))?;
         if !s.on_branch(rh.seq, &rh.digest) || rh.seq < a.seq {
             return Err(
@@ -2627,6 +2673,7 @@ fn suspend(s: &State, e: &Entry) -> Step<State> {
         primary,
         AuthorityRule::Suspend,
         &mut undecidable,
+        &s.prepared,
     )?;
     crate::v05::require(
         e.env.cosignatures.is_empty() && e.env.additions.is_empty(),
@@ -2742,6 +2789,7 @@ fn vault_entry(s: &State, e: &Entry) -> Step<State> {
         primary,
         AuthorityRule::KeyringEntry,
         &mut undecidable,
+        &s.prepared,
     )?;
     let claim = Claim::Controller {
         roles: &[Role::Control, Role::Recover],
@@ -2873,7 +2921,8 @@ fn immediate(s: &State, e: &Entry) -> Step<State> {
                 "member rule: raw, one signer",
             )
             .map_err(|_| bad_signature("member rule"))?;
-            verify_raw(&m.request.signing, &e.env.body, &primary.signature)
+            s.prepared
+                .verify_raw(&m.request.signing, &e.env.body, &primary.signature)
                 .map_err(|x| bad_signature(x.to_string()))?;
             super::prescan("endSessions", v).check()?;
             let (_, mut o) = AuthorityHeader::split(v.clone())?;
@@ -2909,14 +2958,28 @@ fn immediate(s: &State, e: &Entry) -> Step<State> {
         }
         _ => AuthorityRule::Control,
     };
-    check_item(by, &e.env.body, primary, rule_for_sig, &mut undecidable)?;
+    check_item(
+        by,
+        &e.env.body,
+        primary,
+        rule_for_sig,
+        &mut undecidable,
+        &s.prepared,
+    )?;
     for c in &e.env.cosignatures {
         let k = s
             .keyring
             .controllers
             .get(&c.signer)
             .ok_or_else(|| bad_signature("foreign cosigner"))?;
-        check_item(k, &e.env.body, c, rule_for_sig, &mut undecidable)?;
+        check_item(
+            k,
+            &e.env.body,
+            c,
+            rule_for_sig,
+            &mut undecidable,
+            &s.prepared,
+        )?;
     }
     let signers = e.env.signer_ids();
     for id in &signers {
@@ -3438,7 +3501,14 @@ fn keyring_entry(
             .iter()
             .find(|a| a.signer == c.id())
             .ok_or_else(|| bad_signature("keyring: possession proof missing"))?;
-        check_item(c, &e.env.body, item, AuthorityRule::Possession, undecidable)?;
+        check_item(
+            c,
+            &e.env.body,
+            item,
+            AuthorityRule::Possession,
+            undecidable,
+            &s.prepared,
+        )?;
     }
     crate::v05::require(
         new.controllers.len() <= 56,
@@ -3639,7 +3709,9 @@ pub(super) fn covered_by_home_head(
             && h.seq >= y.seq
             && m.expires_ms.is_none_or(|e| h.issued <= e)
             && branch.contains(&h.digest)
-            && h.env.verify(&m.request.signing).is_ok()
+            && s.prepared
+                .verify_raw(&m.request.signing, &h.env.body, &h.env.signature)
+                .is_ok()
             && home_current_at(s, all, y, home, &h.digest)
     })
 }
@@ -3650,7 +3722,8 @@ pub(super) fn covered_by_home_head(
 /// (nothing is held for time), so the answer depends only on the entries. An entry on the way
 /// that does not apply leaves the head counting for nothing.
 fn home_current_at(s: &State, all: &[&Entry], y: &Entry, home: &str, head: &str) -> bool {
-    let by_digest: BTreeMap<&str, &Entry> = all.iter().map(|e| (e.env.digest.as_str(), *e)).collect();
+    let by_digest: BTreeMap<&str, &Entry> =
+        all.iter().map(|e| (e.env.digest.as_str(), *e)).collect();
     let mut path: Vec<&Entry> = Vec::new();
     let mut d = head;
     loop {
@@ -3668,12 +3741,21 @@ fn home_current_at(s: &State, all: &[&Entry], y: &Entry, home: &str, head: &str)
     }
     let mut st = s.clone();
     for e in path.into_iter().rev() {
-        match apply(&st, e, &Pending::default(), &HeadSet::default(), all.to_vec(), i64::MAX) {
+        match apply(
+            &st,
+            e,
+            &Pending::default(),
+            &HeadSet::default(),
+            all.to_vec(),
+            i64::MAX,
+        ) {
             Ok(n) => st = n,
             Err(_) => return false,
         }
     }
-    st.current_homes().iter().any(|m| m.request.member_id() == home)
+    st.current_homes()
+        .iter()
+        .any(|m| m.request.member_id() == home)
 }
 
 /// Decide a conflict among valid candidates at one seq (§8.6). `None` is a fork.
@@ -3792,8 +3874,12 @@ pub fn check_pending_veto(
     bytes: &[u8],
 ) -> Result<()> {
     let t = check_transition(s, transition, transition_receipts, true, false)?;
+    check_pending_veto_with(s, &t, bytes)
+}
+
+pub(crate) fn check_pending_veto_with(s: &State, t: &TCheck, bytes: &[u8]) -> Result<()> {
     let veto = AuthEnvelope::parse(bytes, bounds::VETO_BODY, bounds::VETO_ENVELOPE, false)?;
-    let (_, undecidable) = check_veto(s, &t, &veto, &[], false).map_err(|o| match o {
+    let (_, undecidable) = check_veto(s, t, &veto, &[], false).map_err(|o| match o {
         Outcome::Fail(f) => f,
         Outcome::Held(why) => malformed(why),
     })?;
@@ -3982,6 +4068,7 @@ pub(super) fn from_upgrade(
         .collect();
     let len = digests.len();
     Ok(State {
+        prepared: PreparedKeys::default(),
         account,
         digests,
         issued,

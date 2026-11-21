@@ -58,10 +58,90 @@ impl std::fmt::Display for SigFailure {
 impl std::error::Error for SigFailure {}
 
 fn verifying_key(signing: &[u8]) -> Result<VerifyingKey, SigFailure> {
-    if !super::descriptor::valid_point(signing) {
+    if signing.len() != 65 || signing[0] != 4 {
         return Err(SigFailure::Point);
     }
     VerifyingKey::from_sec1_bytes(signing).map_err(|_| SigFailure::Point)
+}
+
+/// A validated uncompressed signing point with a lazily prepared public-point table.
+#[derive(Debug)]
+pub(crate) struct PreparedVerifyKey(crate::verification::PreparedKey);
+impl PreparedVerifyKey {
+    pub(crate) fn new(signing: &[u8]) -> Result<Self, SigFailure> {
+        if signing.len() != 65 || signing[0] != 4 {
+            return Err(SigFailure::Point);
+        }
+        crate::verification::PreparedKey::new(signing)
+            .map(Self)
+            .map_err(|_| SigFailure::Point)
+    }
+    pub(crate) fn verify_raw(&self, body: &[u8], signature: &[u8]) -> Result<(), SigFailure> {
+        if signature.len() != 64 {
+            return Err(SigFailure::RawLength);
+        }
+        let sig = Signature::from_slice(signature).map_err(|_| SigFailure::Scalar)?;
+        self.verify_body(body, &sig)
+    }
+    fn verify_body(&self, body: &[u8], sig: &Signature) -> Result<(), SigFailure> {
+        if self.0.verify_body(body, sig) {
+            Ok(())
+        } else {
+            Err(SigFailure::Verify)
+        }
+    }
+}
+
+/// Maximum retained public-point tables (about 24 MiB), shared by replay and judgement.
+pub(crate) const MAX_PREPARED_KEYS: usize = 256;
+
+/// Public-key tables shared by the states of one history replay. Never serialized.
+/// Once full, new keys use uncached verification so historical key churn stays bounded.
+#[derive(Clone, Default)]
+pub(crate) struct PreparedKeys(
+    std::sync::Arc<
+        std::sync::Mutex<std::collections::BTreeMap<Vec<u8>, std::sync::Arc<PreparedVerifyKey>>>,
+    >,
+);
+impl std::fmt::Debug for PreparedKeys {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PreparedKeys")
+    }
+}
+impl PreparedKeys {
+    fn get(&self, signing: &[u8]) -> Result<Option<std::sync::Arc<PreparedVerifyKey>>, SigFailure> {
+        let mut keys = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(key) = keys.get(signing) {
+            return Ok(Some(key.clone()));
+        }
+        if keys.len() >= MAX_PREPARED_KEYS {
+            return Ok(None);
+        }
+        let key = std::sync::Arc::new(PreparedVerifyKey::new(signing)?);
+        keys.insert(signing.to_vec(), key.clone());
+        Ok(Some(key))
+    }
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
+    }
+    pub(crate) fn verify_raw(
+        &self,
+        signing: &[u8],
+        body: &[u8],
+        signature: &[u8],
+    ) -> Result<(), SigFailure> {
+        match self.get(signing)? {
+            Some(key) => key.verify_raw(body, signature),
+            None => verify_raw(signing, body, signature),
+        }
+    }
 }
 
 /// Verify a `raw` signature: exactly 64 bytes `r ‖ s`, both in [1, n − 1], ES256 over the
@@ -216,13 +296,29 @@ fn check_der_signature(
     assertion: AssertionBytes<'_>,
     der: &[u8],
 ) -> Result<(), SigFailure> {
+    check_der_signature_with(signing, assertion, der, None)
+}
+fn check_der_signature_with(
+    signing: &[u8],
+    assertion: AssertionBytes<'_>,
+    der: &[u8],
+    prepared: Option<&PreparedKeys>,
+) -> Result<(), SigFailure> {
     let sig = parse_der(der)?;
     let sig = sig.normalize_s().unwrap_or(sig);
-    let key = verifying_key(signing)?;
     let mut message = Vec::with_capacity(assertion.authenticator_data.len() + 32);
     message.extend_from_slice(assertion.authenticator_data);
     message.extend_from_slice(&Sha256::digest(assertion.client_data));
-    key.verify(&message, &sig).map_err(|_| SigFailure::Verify)
+    match prepared
+        .map(|keys| keys.get(signing))
+        .transpose()?
+        .flatten()
+    {
+        Some(key) => key.verify_body(&message, &sig),
+        None => verifying_key(signing)?
+            .verify(&message, &sig)
+            .map_err(|_| SigFailure::Verify),
+    }
 }
 
 /// Verify a WebAuthn signature under all of §4.3, in order. `uv_required` is the controller's
@@ -237,6 +333,30 @@ pub(crate) fn verify_webauthn(
     uv_required: bool,
     rule: OriginRule<'_>,
     strictness: Strictness,
+) -> Result<WebAuthnOk, SigFailure> {
+    verify_webauthn_with(
+        signing,
+        key,
+        body,
+        der_signature,
+        assertion,
+        uv_required,
+        rule,
+        strictness,
+        None,
+    )
+}
+#[allow(clippy::too_many_arguments)]
+fn verify_webauthn_with(
+    signing: &[u8],
+    key: &WebAuthnKey,
+    body: &[u8],
+    der_signature: &[u8],
+    assertion: AssertionBytes<'_>,
+    uv_required: bool,
+    rule: OriginRule<'_>,
+    strictness: Strictness,
+    prepared: Option<&PreparedKeys>,
 ) -> Result<WebAuthnOk, SigFailure> {
     let client = check_client(body, assertion.client_data)?;
     let origin_ok = match strictness {
@@ -264,7 +384,7 @@ pub(crate) fn verify_webauthn(
         return Err(SigFailure::UserVerification);
     }
     let counter = u32::from_be_bytes([data[33], data[34], data[35], data[36]]);
-    check_der_signature(signing, assertion, der_signature)?;
+    check_der_signature_with(signing, assertion, der_signature, prepared)?;
     if let OriginRule::Call(origins) = rule {
         if !origins.iter().any(|o| o == &client.origin) {
             return Err(SigFailure::CallOrigin);
@@ -428,6 +548,16 @@ pub fn verify_authority_signature(
     assertion: Option<AssertionBytes<'_>>,
     rule: AuthorityRule,
 ) -> super::Result<Checked> {
+    verify_authority_signature_with(controller, body, signature, assertion, rule, None)
+}
+pub(crate) fn verify_authority_signature_with(
+    controller: &Controller,
+    body: &[u8],
+    signature: &[u8],
+    assertion: Option<AssertionBytes<'_>>,
+    rule: AuthorityRule,
+    prepared: Option<&PreparedKeys>,
+) -> super::Result<Checked> {
     let key = controller.key();
     let fail = |e: SigFailure| match e {
         SigFailure::ClientDataBound => super::malformed("clientData exceeds 8,192 bytes"),
@@ -435,7 +565,11 @@ pub fn verify_authority_signature(
     };
     match (key.form(), assertion) {
         (KeyForm::Unknown(_), _) => Ok(Checked::UndecidableForm),
-        (KeyForm::Raw { .. }, None) => verify_raw(key.signing(), body, signature)
+        (KeyForm::Raw { .. }, None) => prepared
+            .map_or_else(
+                || verify_raw(key.signing(), body, signature),
+                |keys| keys.verify_raw(key.signing(), body, signature),
+            )
             .map(|_| Checked::Verified)
             .map_err(fail),
         (KeyForm::WebAuthn(w), Some(a)) => {
@@ -445,7 +579,7 @@ pub fn verify_authority_signature(
                 OriginRule::Authority
             };
             let uv = controller.verification() || rule.requires_uv();
-            verify_webauthn(
+            verify_webauthn_with(
                 key.signing(),
                 w,
                 body,
@@ -454,6 +588,7 @@ pub fn verify_authority_signature(
                 uv,
                 origin_rule,
                 Strictness::Current,
+                prepared,
             )
             .map(|_| Checked::Verified)
             .map_err(fail)
@@ -651,5 +786,211 @@ mod tests {
         );
         // Small scalars are valid DER.
         parse_der(&[0x30, 0x06, 0x02, 0x01, 0x01, 0x02, 0x01, 0x01]).unwrap();
+    }
+    #[test]
+    fn prepared_keys_are_bounded_and_overflow_verifies_uncached() {
+        let cache = PreparedKeys::default();
+        let shared = cache.clone();
+        for i in 1..=MAX_PREPARED_KEYS + 8 {
+            let mut secret = [0; 32];
+            secret[24..].copy_from_slice(&(i as u64).to_be_bytes());
+            let key = SigningKey::from_slice(&secret).expect("signing key");
+            let point = key.verifying_key().to_encoded_point(false);
+            let sig: Signature = key.sign(b"body");
+            for (body, signature) in [
+                (b"body".as_slice(), sig.to_bytes().to_vec()),
+                (b"tampered".as_slice(), sig.to_bytes().to_vec()),
+                (b"body".as_slice(), vec![0; 64]),
+                (b"body".as_slice(), vec![]),
+            ] {
+                assert_eq!(
+                    shared.verify_raw(point.as_bytes(), body, &signature),
+                    verify_raw(point.as_bytes(), body, &signature)
+                );
+            }
+            assert_eq!(cache.len(), i.min(MAX_PREPARED_KEYS));
+        }
+        assert_eq!(
+            cache.verify_raw(&[4; 65], b"body", &[]),
+            Err(SigFailure::Point)
+        );
+        // Existing entries remain reusable after reaching capacity.
+        let mut secret = [0; 32];
+        secret[31] = 1;
+        let key = SigningKey::from_slice(&secret).expect("signing key");
+        assert!(cache
+            .get(key.verifying_key().to_encoded_point(false).as_bytes())
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn prepared_raw_matches_standard_and_preserves_failures() {
+        for seed in 1..=4 {
+            let k = SigningKey::from_slice(&[seed; 32]).expect("valid test fixture");
+            let point = k.verifying_key().to_encoded_point(false);
+            let prepared = PreparedVerifyKey::new(point.as_bytes()).expect("valid test fixture");
+            let cache = PreparedKeys::default();
+            for body in [b"".as_slice(), b"body", &[0xff; 256]] {
+                let sig: Signature = k.sign(body);
+                let low = sig.normalize_s().unwrap_or(sig);
+                let (r, s) = low.split_scalars();
+                let high = Signature::from_scalars(r.to_bytes(), (-*s).to_bytes())
+                    .expect("valid test fixture");
+                let mut tampered = low.to_bytes().to_vec();
+                tampered[0] ^= 0x80;
+                let mut zero = low.to_bytes().to_vec();
+                zero[..32].fill(0);
+                let mut overflow = low.to_bytes().to_vec();
+                overflow[32..].copy_from_slice(&N);
+                for bytes in [
+                    low.to_bytes().to_vec(),
+                    high.to_bytes().to_vec(),
+                    tampered,
+                    zero,
+                    overflow,
+                    vec![0; 64],
+                    vec![255; 64],
+                    vec![],
+                ] {
+                    for message in [body, b"tampered body".as_slice()] {
+                        let standard = Signature::from_slice(&bytes)
+                            .is_ok_and(|s| k.verifying_key().verify(message, &s).is_ok());
+                        assert_eq!(prepared.verify_raw(message, &bytes).is_ok(), standard);
+                        assert_eq!(
+                            prepared.verify_raw(message, &bytes),
+                            verify_raw(point.as_bytes(), message, &bytes)
+                        );
+                        assert_eq!(
+                            cache.verify_raw(point.as_bytes(), message, &bytes),
+                            verify_raw(point.as_bytes(), message, &bytes)
+                        );
+                    }
+                }
+            }
+            let compressed = k.verifying_key().to_encoded_point(true);
+            for invalid in [compressed.as_bytes(), &[4; 65], &[0; 65], &[]] {
+                assert!(matches!(
+                    PreparedVerifyKey::new(invalid),
+                    Err(SigFailure::Point)
+                ));
+                assert_eq!(verify_raw(invalid, b"body", &[]), Err(SigFailure::Point));
+                assert_eq!(
+                    cache.verify_raw(invalid, b"body", &[]),
+                    Err(SigFailure::Point)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn prepared_webauthn_matches_standard_and_exact_check_order() {
+        use serde_json::json;
+        let k = SigningKey::from_slice(&[7; 32]).expect("valid test fixture");
+        let point = k.verifying_key().to_encoded_point(false);
+        let descriptor = KeyDescriptor::parse(
+            json!({
+                "form": "webauthn", "rp": "example.com", "credential": "AQ==",
+                "signing": super::super::encoding::encode_base64(point.as_bytes())
+            }),
+            "key",
+        )
+        .expect("valid test fixture");
+        let key = descriptor.webauthn().expect("valid test fixture");
+        let body = b"authority body";
+        let client = serde_json::to_vec(&json!({"type": "webauthn.get", "challenge": challenge(body), "origin": "https://example.com"})).expect("valid test fixture");
+        let mut auth = Sha256::digest(b"example.com").to_vec();
+        auth.extend_from_slice(&[5, 0, 0, 0, 1]);
+        let assertion = AssertionBytes {
+            authenticator_data: &auth,
+            client_data: &client,
+        };
+        let mut message = auth.clone();
+        message.extend_from_slice(&Sha256::digest(&client));
+        let sig: Signature = k.sign(&message);
+        let low = sig.normalize_s().unwrap_or(sig);
+        let (r, s) = low.split_scalars();
+        let high =
+            Signature::from_scalars(r.to_bytes(), (-*s).to_bytes()).expect("valid test fixture");
+        let cache = PreparedKeys::default();
+        for sig in [low, high] {
+            let der = sig.to_der();
+            assert!(k.verifying_key().verify(&message, &sig).is_ok());
+            assert!(verify_webauthn_with(
+                point.as_bytes(),
+                key,
+                body,
+                der.as_bytes(),
+                assertion,
+                true,
+                OriginRule::Authority,
+                Strictness::Current,
+                Some(&cache)
+            )
+            .is_ok());
+            for (signing, message, der, assertion) in [
+                (point.as_bytes(), body.as_slice(), der.as_bytes(), assertion),
+                (
+                    point.as_bytes(),
+                    b"tampered".as_slice(),
+                    der.as_bytes(),
+                    assertion,
+                ),
+                (
+                    point.as_bytes(),
+                    body.as_slice(),
+                    b"bad DER".as_slice(),
+                    assertion,
+                ),
+                (&[4; 65], body.as_slice(), b"bad DER".as_slice(), assertion),
+                (&[4; 65], body.as_slice(), der.as_bytes(), assertion),
+                (
+                    point.as_bytes(),
+                    body.as_slice(),
+                    der.as_bytes(),
+                    AssertionBytes {
+                        authenticator_data: &auth[..36],
+                        client_data: &client,
+                    },
+                ),
+            ] {
+                assert_eq!(
+                    verify_webauthn_with(
+                        signing,
+                        key,
+                        message,
+                        der,
+                        assertion,
+                        true,
+                        OriginRule::Authority,
+                        Strictness::Current,
+                        Some(&cache)
+                    ),
+                    verify_webauthn(
+                        signing,
+                        key,
+                        message,
+                        der,
+                        assertion,
+                        true,
+                        OriginRule::Authority,
+                        Strictness::Current
+                    )
+                );
+            }
+        }
+        // DER grammar/scalar failures precede the point check, including under the cache.
+        assert_eq!(
+            check_der_signature_with(&[], assertion, b"bad DER", Some(&cache)),
+            Err(SigFailure::Der)
+        );
+        assert_eq!(
+            check_der_signature_with(&[], assertion, &der(&[0], &[1]), Some(&cache)),
+            Err(SigFailure::Scalar)
+        );
+        assert_eq!(
+            check_der_signature_with(&[], assertion, sig.to_der().as_bytes(), Some(&cache)),
+            Err(SigFailure::Point)
+        );
     }
 }

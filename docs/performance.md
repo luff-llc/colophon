@@ -60,8 +60,10 @@ At 100,000 records, opens take tens of seconds, durable catch-up takes 13.1–14
 writes exceed 100 ms, and process RSS reaches 7.19 GB. Saved state is 189,884,865 bytes.
 Resumed opens reread all N+65 authority/operation objects. They verify zero operation signatures;
 2,000/10,000 decrypt zero payloads, but 100,000 decrypt all 100,000. Source inspection points to
-[plaintext-memo pruning](../crates/colophon-core/src/v05/records.rs#L2245) during key installation
-over the empty pre-load record set, above 65,536 imported payloads. That is a follow-up, not a fix.
+[plaintext-memo pruning](../crates/colophon-core/src/v05/records.rs) during key installation
+over the empty pre-load record set, above 65,536 imported payloads. The imported-memo high-water
+mark now protects these payloads through empty and partial loads; the historical timings above
+have not been rerun with that fix.
 At 100,000, the write's refresh phase takes 157–172 ms; prepare/sign and finish each take about 2 ms.
 
 Catch-up is serial, with one request in flight. For the 2,000-record case, the 1,807 requests

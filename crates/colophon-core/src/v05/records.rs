@@ -1476,6 +1476,7 @@ fn stage_one(
     skip_signature: bool,
     sigs: &mut u64,
     known: Option<&BTreeSet<[u8; 32]>>,
+    prepared: Option<&super::signature::PreparedKeys>,
 ) -> Stage {
     let account = auth.account();
     let c = match parse_candidate(h) {
@@ -1504,8 +1505,15 @@ fn stage_one(
         known.is_some_and(|k| k.contains(&verified_key(&h.bytes, &member.request.signing)));
     if !skip_signature && !already {
         *sigs += 1;
-        let sig = RawEnvelope::parse(&h.bytes, bounds::OPERATION_HEADER_BODY, false)
-            .and_then(|env| OperationHeader::verify(&env, &member.request.signing));
+        let sig =
+            RawEnvelope::parse(&h.bytes, bounds::OPERATION_HEADER_BODY, false).and_then(|env| {
+                match prepared {
+                    Some(keys) => keys
+                        .verify_raw(&member.request.signing, &env.body, &env.signature)
+                        .map_err(|e| bad_signature(e.to_string())),
+                    None => OperationHeader::verify(&env, &member.request.signing),
+                }
+            });
         if let Err(f) = sig {
             return Stage::Bad(Box::new(Judged::invalid(&h.path, f)));
         }
@@ -1533,7 +1541,7 @@ pub fn live_caveated(member: &MemberRecord, namespace: &str) -> bool {
 /// path, and (when its author is a member) carries a valid signature. An author the verified
 /// history does not know yet is not junk (the grant may arrive later). Pure, one signature check.
 pub(crate) fn is_record_candidate(auth: &RecordAuthority, h: &HeldRecord) -> bool {
-    !matches!(stage_one(auth, h, false, &mut 0, None), Stage::Bad(_))
+    !matches!(stage_one(auth, h, false, &mut 0, None, None), Stage::Bad(_))
 }
 
 /// [`judge_records`], optionally skipping the signature check of the one held record at index
@@ -1900,6 +1908,7 @@ pub struct JudgeCache {
     account: Option<String>,
     stage: BTreeMap<(String, [u8; 32]), StageEntry>,
     opened: BTreeMap<String, Option<Value>>,
+    imported_floor: usize,
     /// `sha256(envelope bytes || signing key)` of every signature that verified.
     verified: BTreeSet<[u8; 32]>,
     last: Option<Last>,
@@ -1950,6 +1959,7 @@ impl JudgeCache {
             crate::v05::account::wipe_value(v);
         }
         self.opened.clear();
+        self.imported_floor = 0;
         if let Some(last) = self.last.as_mut() {
             for j in last.by_digest.values_mut() {
                 if let Some(p) = j.plaintext.as_mut() {
@@ -2017,6 +2027,7 @@ impl JudgeCache {
                 }
             }
         }
+        self.imported_floor = self.imported_floor.max(self.opened.len());
     }
     /// A new, empty cache.
     pub fn new() -> Self {
@@ -2059,16 +2070,34 @@ fn judge_impl(
     keys: &EpochKeys,
     held: &[HeldRecord],
     unsigned: Option<usize>,
+    cache: Option<(&mut JudgeCache, [u8; 32])>,
+) -> Judgement {
+    judge_with_prepared(
+        auth,
+        keys,
+        held,
+        unsigned,
+        cache,
+        &super::signature::PreparedKeys::default(),
+    )
+}
+
+fn judge_with_prepared(
+    auth: &RecordAuthority,
+    keys: &EpochKeys,
+    held: &[HeldRecord],
+    unsigned: Option<usize>,
     mut cache: Option<(&mut JudgeCache, [u8; 32])>,
+    prepared: &super::signature::PreparedKeys,
 ) -> Judgement {
     use sha2::{Digest, Sha256};
     let account = auth.account().clone();
     let mut run = JudgeStats::default();
     if let Some((c, _)) = cache.as_mut() {
-        if c.account.as_deref() != Some(account.as_str()) {
+        if c.account.as_deref().is_some_and(|a| a != account.as_str()) {
             **c = JudgeCache::default();
-            c.account = Some(account.as_str().to_string());
         }
+        c.account = Some(account.as_str().to_string());
     }
     // Stage one.
     let mut records: Vec<Option<Judged>> = vec![None; held.len()];
@@ -2078,7 +2107,10 @@ fn judge_impl(
     let mut aliases: Vec<(usize, String)> = Vec::new();
     let mut fresh_stage: Vec<((String, [u8; 32]), StageEntry)> = Vec::new();
     let mut fresh_verified: Vec<[u8; 32]> = Vec::new();
-    for (idx, h) in held.iter().enumerate() {
+    // Prepare only keys that reach signature verification on a stage-cache miss.
+    // The shared cache also bounds distinct authors in a single parallel batch.
+    let indexed: Vec<_> = held.iter().enumerate().collect();
+    let stages = crate::verification::parallel_map(&indexed, |&(idx, h)| {
         let memo_key = cache.as_ref().map(|_| {
             let d: [u8; 32] = Sha256::digest(&h.bytes).into();
             (h.path.clone(), d)
@@ -2087,55 +2119,64 @@ fn judge_impl(
             (Some((c, _)), Some(k)) => c.stage.get(k).filter(|e| match &e.author {
                 None => true,
                 Some(a) => {
-                    auth.member(a).map(|m| m.request.signing.clone()) == e.signing
+                    auth.member(a).map(|m| m.request.signing.as_slice()) == e.signing.as_deref()
                         && unsigned != Some(idx)
                 }
             }),
             _ => None,
         };
+        let mut work = JudgeStats::default();
         let stage = match hit {
             Some(e) => e.stage.clone(),
             None => {
-                run.parsed += 1;
-                let stage = stage_one(
+                work.parsed = 1;
+                stage_one(
                     auth,
                     h,
                     unsigned == Some(idx),
-                    &mut run.signatures,
+                    &mut work.signatures,
                     cache.as_ref().map(|(c, _)| &c.verified),
-                );
-                if let (Some(k), true) = (memo_key, unsigned.is_none()) {
-                    let (author, signing) = match &stage {
-                        Stage::Bad(_) => match parse_candidate(h) {
-                            Ok(c) => {
-                                let s = auth
-                                    .member(&c.header.author)
-                                    .map(|m| m.request.signing.clone());
-                                (Some(c.header.author), s)
-                            }
-                            Err(_) => (None, None),
-                        },
-                        Stage::Unknown(c) | Stage::Ready(c) => (
-                            Some(c.header.author.clone()),
-                            auth.member(&c.header.author)
-                                .map(|m| m.request.signing.clone()),
-                        ),
-                    };
-                    if let (Stage::Ready(_), Some(sk)) = (&stage, &signing) {
-                        fresh_verified.push(verified_key(&h.bytes, sk));
-                    }
-                    fresh_stage.push((
-                        k,
-                        StageEntry {
-                            author,
-                            signing,
-                            stage: stage.clone(),
-                        },
-                    ));
-                }
-                stage
+                    Some(prepared),
+                )
             }
         };
+        (memo_key, stage, work)
+    });
+    for (idx, (memo_key, stage, work)) in stages.into_iter().enumerate() {
+        let h = &held[idx];
+        run.parsed += work.parsed;
+        run.signatures += work.signatures;
+        if work.parsed != 0 {
+            if let (Some(k), true) = (memo_key, unsigned.is_none()) {
+                let (author, signing) = match &stage {
+                    Stage::Bad(_) => match parse_candidate(h) {
+                        Ok(c) => {
+                            let s = auth
+                                .member(&c.header.author)
+                                .map(|m| m.request.signing.clone());
+                            (Some(c.header.author), s)
+                        }
+                        Err(_) => (None, None),
+                    },
+                    Stage::Unknown(c) | Stage::Ready(c) => (
+                        Some(c.header.author.clone()),
+                        auth.member(&c.header.author)
+                            .map(|m| m.request.signing.clone()),
+                    ),
+                };
+                if let (Stage::Ready(_), Some(sk)) = (&stage, &signing) {
+                    fresh_verified.push(verified_key(&h.bytes, sk));
+                }
+                fresh_stage.push((
+                    k,
+                    StageEntry {
+                        author,
+                        signing,
+                        stage: stage.clone(),
+                    },
+                ));
+            }
+        }
         let (c, unknown) = match stage {
             Stage::Bad(j) => {
                 records[idx] = Some(*j);
@@ -2242,9 +2283,18 @@ fn judge_impl(
         // Forget what no held record names, so the cache stays the size of the held set.
         // Opened payloads of live candidates share this memo, so it is not pruned to the held
         // records; it is bounded by size instead.
-        if c.opened.len() > held.len().saturating_mul(4).saturating_add(65_536) {
+        if c.opened.len()
+            > held
+                .len()
+                .max(c.imported_floor)
+                .saturating_mul(4)
+                .saturating_add(65_536)
+        {
             let live: BTreeSet<&str> = by_digest.keys().map(String::as_str).collect();
             c.opened.retain(|d, _| live.contains(d.as_str()));
+        }
+        if !held.is_empty() && held.len() >= c.imported_floor {
+            c.imported_floor = 0;
         }
         if c.verified.len() > 1 << 20 {
             c.verified.clear();
@@ -2365,7 +2415,14 @@ pub(crate) fn judge_extend(
             Some(e) => e.stage.clone(),
             None => {
                 run.parsed += 1;
-                let stage = stage_one(auth, h, false, &mut run.signatures, Some(&cache.verified));
+                let stage = stage_one(
+                    auth,
+                    h,
+                    false,
+                    &mut run.signatures,
+                    Some(&cache.verified),
+                    None,
+                );
                 let (author, signing) = match &stage {
                     Stage::Bad(_) => return None,
                     Stage::Unknown(c) | Stage::Ready(c) => (
@@ -2752,7 +2809,7 @@ pub struct HeaderInfo {
 pub fn verified_headers(auth: &RecordAuthority, held: &[HeldRecord]) -> Vec<HeaderInfo> {
     let mut out = Vec::new();
     for h in held.iter() {
-        if let Stage::Ready(c) = stage_one(auth, h, false, &mut 0, None) {
+        if let Stage::Ready(c) = stage_one(auth, h, false, &mut 0, None, None) {
             out.push(HeaderInfo {
                 digest: c.digest.clone(),
                 author: c.header.author.clone(),
@@ -2846,5 +2903,207 @@ impl Outcome {
             Self::NewerFormat => Some(Failure::NewerFormat("unknown condition operator".into())),
             Self::Invalid(c) => Some(malformed(c.clone())),
         }
+    }
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+
+    fn assert_parallel_stage_parity(auth: &RecordAuthority, record: &HeldRecord) {
+        let held: Vec<_> = (0..256)
+            .map(|i| {
+                let mut h = record.clone();
+                match i % 4 {
+                    1 => h.path.push_str("bad"),
+                    2 => h.bytes = b"malformed".to_vec(),
+                    3 => {
+                        let mut env: Value = serde_json::from_slice(&h.bytes).expect("envelope");
+                        env["signature"] =
+                            Value::String(super::super::encoding::encode_base64(&[0; 64]));
+                        h.bytes = canonical(&env).expect("canonical");
+                    }
+                    _ => {}
+                }
+                h
+            })
+            .collect();
+        let prepared = super::super::signature::PreparedKeys::default();
+        let check = |h: &HeldRecord, prepared| {
+            let mut sigs = 0;
+            let stage = stage_one(auth, h, false, &mut sigs, None, prepared);
+            let result = match stage {
+                Stage::Ready(c) => format!("ready {}", c.digest),
+                Stage::Unknown(c) => format!("unknown {}", c.digest),
+                Stage::Bad(j) => format!("bad {j:?}"),
+            };
+            (sigs, result)
+        };
+        let serial: Vec<_> = held.iter().map(|h| check(h, None)).collect();
+        let parallel = crate::verification::parallel_map(&held, |h| check(h, Some(&prepared)));
+        assert_eq!(serial, parallel);
+        let keys = EpochKeys::new();
+        let mut cache = JudgeCache::new();
+        let first = judge_cached(auth, &keys, &held, &mut cache, [0; 32]);
+        assert_eq!(cache.last_run().parsed, held.len() as u64);
+        assert_eq!(
+            cache.last_run().signatures,
+            serial.iter().map(|r| r.0).sum::<u64>()
+        );
+        let again = judge_cached(auth, &keys, &held, &mut cache, [0; 32]);
+        assert_eq!(cache.last_run().parsed, 0);
+        assert_eq!(cache.last_run().signatures, 0);
+        assert_eq!(format!("{first:?}"), format!("{again:?}"));
+        assert_eq!(
+            format!("{first:?}"),
+            format!("{:?}", judge_core(auth, &keys, &held, None))
+        );
+    }
+
+    #[test]
+    fn judgement_prepares_only_uncached_verified_authors() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../conformance/0.5/records/proposal-missing");
+        let mut entries: Vec<_> = std::fs::read_dir(root.join("records/authority"))
+            .expect("authority")
+            .map(|e| e.expect("entry").path())
+            .collect();
+        entries.sort();
+        let objects = Objects {
+            entries: entries
+                .iter()
+                .map(|p| std::fs::read(p).expect("entry bytes"))
+                .collect(),
+            ..Objects::default()
+        };
+        let mut auth =
+            RecordAuthority::from_objects(&objects, 1_795_132_800_000).expect("authority");
+        let path = "ops/f17697d3f071101fdd021f98f624dcfb/notes/000000000002-fc58fdbeb049de584f32bc779e867cbe.json";
+        let held = HeldRecord {
+            path: path.into(),
+            bytes: std::fs::read(root.join(path)).expect("record"),
+        };
+        let author = parse_candidate(&held).expect("candidate").header.author;
+        let template = auth.member(&author).expect("author").clone();
+        for i in 1..=512u64 {
+            let mut member = template.clone();
+            let mut secret = [0; 32];
+            secret[24..].copy_from_slice(&i.to_be_bytes());
+            let key = p256::ecdsa::SigningKey::from_slice(&secret).expect("signing key");
+            member.request.signing = key
+                .verifying_key()
+                .to_encoded_point(false)
+                .as_bytes()
+                .to_vec();
+            member.revoked_seq = Some(auth.authority_seq);
+            auth.state.members.push(member);
+        }
+        let keys = EpochKeys::new();
+        let mut cache = JudgeCache::new();
+        for (batch, expected) in [
+            (&[][..], 0),
+            (std::slice::from_ref(&held), 1),
+            (std::slice::from_ref(&held), 0),
+        ] {
+            let prepared = super::super::signature::PreparedKeys::default();
+            judge_with_prepared(
+                &auth,
+                &keys,
+                batch,
+                None,
+                Some((&mut cache, [0; 32])),
+                &prepared,
+            );
+            assert_eq!(prepared.len(), expected);
+            assert_eq!(cache.last_run().signatures, expected as u64);
+        }
+        let prepared = super::super::signature::PreparedKeys::default();
+        judge_with_prepared(&auth, &keys, &[held], Some(0), None, &prepared);
+        assert_eq!(prepared.len(), 0, "unsigned records need no prepared key");
+    }
+
+    #[test]
+    fn imported_plaintexts_survive_empty_and_partial_reopen() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../conformance/0.5/records/proposal-missing");
+        let mut entries: Vec<_> = std::fs::read_dir(root.join("records/authority"))
+            .expect("authority")
+            .map(|e| e.expect("entry").path())
+            .collect();
+        entries.sort();
+        let objects = Objects {
+            entries: entries
+                .iter()
+                .map(|p| std::fs::read(p).expect("entry bytes"))
+                .collect(),
+            ..Objects::default()
+        };
+        let auth = RecordAuthority::from_objects(&objects, 1_795_132_800_000).expect("authority");
+        let path = "ops/f17697d3f071101fdd021f98f624dcfb/notes/000000000002-fc58fdbeb049de584f32bc779e867cbe.json";
+        let held = HeldRecord {
+            path: path.into(),
+            bytes: std::fs::read(root.join(path)).expect("record"),
+        };
+        assert_parallel_stage_parity(&auth, &held);
+        let c = parse_candidate(&held).expect("candidate");
+        let plaintext = json!({"id": c.header.id, "kind": "colophon.accept", "payload": {"proposals": ["eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"]}});
+        let mut memo: Vec<_> = (0..70_000)
+            .map(|i| RecordMemo {
+                path: String::new(),
+                sha256: String::new(),
+                verified: None,
+                body: Some(format!("{i:064x}")),
+                plaintext: Some(json!({"synthetic": i})),
+            })
+            .collect();
+        memo.push(RecordMemo {
+            path: path.into(),
+            sha256: String::new(),
+            verified: None,
+            body: Some(c.digest.clone()),
+            plaintext: Some(plaintext.clone()),
+        });
+        let mut cache = JudgeCache::new();
+        cache.import_memo(memo);
+        let mut keys = EpochKeys::new();
+        keys.insert(EpochKey::from_secret(
+            auth.account(),
+            "notes",
+            c.header.epoch,
+            [42; 32],
+        ))
+        .expect("epoch");
+        judge_cached(&auth, &keys, &[], &mut cache, [0; 32]);
+        assert_eq!(cache.opened.len(), 70_001);
+        assert_eq!(cache.imported_floor, 70_001);
+        // The same load pattern as an engine's first batch, without manufacturing 16k signatures.
+        let batch = vec![held.clone(); 16_384];
+        let got = judge_cached(&auth, &keys, &batch, &mut cache, [0; 32]);
+        assert_eq!(cache.last_run().opened, 0);
+        assert_eq!(cache.opened.len(), 70_001);
+        assert_eq!(got.records[0].plaintext, Some(plaintext));
+        let cold = judge_core(&auth, &keys, std::slice::from_ref(&held), None);
+        assert_ne!(
+            cold.records[0].plaintext, got.records[0].plaintext,
+            "without the memo the deliberately different epoch key cannot decrypt"
+        );
+        let complete = vec![held; 70_001];
+        judge_cached(&auth, &keys, &complete, &mut cache, [0; 32]);
+        assert_eq!(cache.last_run().opened, 0);
+        assert_eq!(cache.imported_floor, 0);
+        judge_cached(&auth, &keys, &[], &mut cache, [0; 32]);
+        assert!(
+            cache.opened.is_empty(),
+            "normal pruning resumes after the full load"
+        );
+        cache.import_memo(vec![RecordMemo {
+            path: String::new(),
+            sha256: String::new(),
+            verified: None,
+            body: Some(format!("{:064x}", 1)),
+            plaintext: Some(Value::Null),
+        }]);
+        cache.wipe_plaintext();
+        assert_eq!(cache.imported_floor, 0);
     }
 }

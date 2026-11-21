@@ -14,13 +14,14 @@ pub mod keyring;
 mod state;
 pub(crate) mod succession;
 pub mod swift;
-pub mod work;
 pub(crate) mod upgrade;
+pub mod work;
 
 pub use state::{
     check_pending_transition, check_pending_veto, Activation, Claim, HomeStatus, MemberRecord,
     NotCurrent, Principal, State, Suspension,
 };
+pub(crate) use state::{check_pending_veto_with, check_transition, TCheck};
 pub use succession::{succession_status, SuccessionStatus, SuccessionTiming};
 
 use crate::v05::{Failure, Unknown};
@@ -612,7 +613,12 @@ pub fn verify_history(objects: &Objects, persisted: &Persisted, now_ms: i64) -> 
             }
         }
     }
+    let prepared = crate::v05::signature::PreparedKeys::default();
+    if let Some(s) = &mut st {
+        s.prepared = prepared.clone();
+    }
     let folder = Folder {
+        prepared,
         by_seq: &by_seq,
         parse_failures: &parse_failures,
         pending: &pending,
@@ -661,6 +667,7 @@ fn stopped_at(stop: &Option<Stop>) -> Option<u64> {
 
 /// What a fold over the held entries needs: the candidates by seq, the held objects and the clock.
 struct Folder<'a> {
+    prepared: crate::v05::signature::PreparedKeys,
     by_seq: &'a BTreeMap<u64, Vec<Result<Entry, Failure>>>,
     parse_failures: &'a BTreeMap<u64, (String, Failure)>,
     pending: &'a state::Pending,
@@ -716,7 +723,7 @@ impl Folder<'_> {
                 let mut first_result: Option<(&Entry, state::Outcome)> = None;
                 for e in group {
                     let r = match &st {
-                        None => state::genesis(e, now_ms, self.predecessor),
+                        None => state::genesis(e, now_ms, self.predecessor, &self.prepared),
                         Some(s) => state::apply(
                             s,
                             e,
@@ -948,7 +955,11 @@ mod tests {
             assert_ne!(v.code(), "ok", "{name}");
             assert_eq!(v.stopped, None, "{name}");
         }
-        let ok = verify_history(&vector("f2-unknown-kind-single-approve"), &Persisted::default(), NOW);
+        let ok = verify_history(
+            &vector("f2-unknown-kind-single-approve"),
+            &Persisted::default(),
+            NOW,
+        );
         assert_eq!(ok.stopped, None);
     }
 
