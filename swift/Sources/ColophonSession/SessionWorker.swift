@@ -226,7 +226,63 @@ actor SessionWorker {
             throw error
         }
     }
-    private func persist(_ written: Written, on target: ColophonEngine? = nil) async throws { try await persist(written.stores, on: target) }
+    private func persist(_ written: Written, on target: ColophonEngine? = nil) async throws {
+        if let engine = target ?? engine { observeAuthorityChanges(written.changes, from: engine) }
+        try await persist(written.stores, on: target)
+    }
+
+    /// Call under the session gate as soon as a selected engine mutation returns. The flag is
+    /// relative to the previous engine state, so the next successful refresh may no longer report it.
+    func observeAuthorityChanges(_ changes: Changes, from target: ColophonEngine) {
+        if changes.reorganized, engine === target { reorganizedAuthority.insert(target.account) }
+    }
+
+    /// Compound core operations can commit an authority batch and then throw on a later batch.
+    /// If the operation lost its summary and the head changed or became unreadable, the worker
+    /// cannot prove continuity. An unchanged head leaves the original error and eligibility intact.
+    private func trackInterruptedAuthorityChange<T: Sendable>(
+        in engine: ColophonEngine, _ operation: () async throws -> T
+    ) async throws -> T {
+        let before = try? await engine.run { try $0.headDigest() }
+        do { return try await operation() }
+        catch {
+            let after = try? await engine.run { try $0.headDigest() }
+            if before != after, self.engine === engine { reorganizedAuthority.insert(engine.account) }
+            throw error
+        }
+    }
+
+    private func advance(_ engine: ColophonEngine, to time: Int64) async throws {
+        let changes = try await engine.run { try $0.advance(nowMs: time) }
+        observeAuthorityChanges(changes, from: engine)
+    }
+
+    private func refresh(_ engine: ColophonEngine, listing: [ListedPath]) async throws {
+        let changes = try await trackInterruptedAuthorityChange(in: engine) {
+            try await engine.run { try $0.refresh(listing: listing) }
+        }
+        observeAuthorityChanges(changes, from: engine)
+    }
+
+    private func load(_ engine: ColophonEngine) async throws {
+        let changes = try await trackInterruptedAuthorityChange(in: engine) {
+            try await engine.run { try $0.load() }
+        }
+        observeAuthorityChanges(changes, from: engine)
+    }
+
+    private func persistDueWrites(_ engine: ColophonEngine) async throws {
+        let writes = try await engine.run { try $0.recordDue() }
+        // The batch already ran in the engine. A failure persisting an earlier write must
+        // preserve the observation even if a later write is never persisted.
+        for written in writes { observeAuthorityChanges(written.changes, from: engine) }
+        for written in writes { try await persist(written.stores, on: engine) }
+    }
+
+    private func persist(_ report: Report, on engine: ColophonEngine) async throws {
+        observeAuthorityChanges(report.changes, from: engine)
+        try await persist(report.store, on: engine)
+    }
 
     // MARK: Opening
 
@@ -296,7 +352,7 @@ actor SessionWorker {
         engine = opened; accountID = account
         // A member that is not approved yet holds no keys; the records can still be read and the exchange can
         // still bring the approval in. A member opens its epoch shares in `unlockIfPossible`.
-        if try await opened.run({ try $0.me() }).kind != .member { _ = try await opened.run { try $0.load() } }
+        if try await opened.run({ try $0.me() }).kind != .member { try await load(opened) }
         if journal.account == nil { journal.account = account; try saveJournal() }
         try await unlockIfPossible()
     }
@@ -305,13 +361,9 @@ actor SessionWorker {
         guard let engine else { return }
         // A stopped account reads nothing new (spec §1 "A stop"): what it held when the stop was verified stays readable.
         if try await Self.isStopped(engine) { return }
-        let list = listed(entries)
-        let at = nowMs
-        let elapsed = try await engine.run { try $0.advance(nowMs: at) }
-        if elapsed.reorganized { reorganizedAuthority.insert(engine.account) }
-        let changes = try await engine.run { try $0.refresh(listing: list) }
-        if changes.reorganized { reorganizedAuthority.insert(engine.account) }
-        for written in try await engine.run({ try $0.recordDue() }) { try await persist(written) }
+        try await advance(engine, to: nowMs)
+        try await refresh(engine, listing: listed(entries))
+        try await persistDueWrites(engine)
         try await unlockIfPossible()
     }
 
@@ -325,11 +377,14 @@ actor SessionWorker {
         guard !agreements.isEmpty else {
             // A revoked member (or a member with no readable namespaces) has no shares. The
             // core still requires load before notices/exchange; no finish-unlock will do it.
-            if !memberOpened { _ = try await engine.run { try $0.load() }; memberOpened = true }
+            if !memberOpened { try await load(engine); memberOpened = true }
             return
         }
         let answers = try await custody.answer(epochs: agreements)
-        _ = try await engine.finishUnlockEpochs(answers: answers)
+        let changes = try await trackInterruptedAuthorityChange(in: engine) {
+            try await engine.finishUnlockEpochs(answers: answers)
+        }
+        observeAuthorityChanges(changes, from: engine)
         memberOpened = true
     }
 
@@ -1340,9 +1395,10 @@ actor SessionWorker {
             if let token = configured.bearerToken { _ = try await engine.run { try $0.exchangeSetBearer(home: home.id, token: token) } }
             // The pass starts from fresh local state.
             try await gated {
-                let entries = try storage().listing(); let list = listed(entries); let at = nowMs
-                _ = try await engine.run { try $0.advance(nowMs: at) }
-                _ = try await engine.run { try $0.refresh(listing: list) }
+                guard self.engine === engine else { throw SessionError.destinationChanged }
+                let entries = try storage().listing()
+                try await advance(engine, to: nowMs)
+                try await refresh(engine, listing: listed(entries))
                 try await unlockIfPossible()
             }
             // A stopped account runs no exchange pass (spec §1 "A stop": it accepts no head and asks no call).
@@ -1444,15 +1500,21 @@ actor SessionWorker {
                         }
                     }
                     let report = try await gated { () -> Report in
-                        let report = try await engine.run { try $0.exchangeAnswer(home: home.id, ticket: request.ticket, answer: answer) }
-                        try await persist(report.store)
+                        guard self.engine === engine else { throw SessionError.destinationChanged }
+                        let report = try await trackInterruptedAuthorityChange(in: engine) {
+                            try await engine.run { try $0.exchangeAnswer(home: home.id, ticket: request.ticket, answer: answer) }
+                        }
+                        try await persist(report, on: engine)
                         return report
                     }
                     for fault in report.faults {
                         result.faults.append(HomeFault(home: home.id, fault: fault))
                         if fault.kind == .unauthorized { result.unauthorized = true }
                     }
-                    if !report.store.isEmpty || report.changes.authorityToSeq != report.changes.authorityFromSeq || !report.changes.namespaces.isEmpty { result.changed = true; progress = true }
+                    if !report.store.isEmpty || report.changes.reorganized
+                        || report.changes.authorityToSeq != report.changes.authorityFromSeq || !report.changes.namespaces.isEmpty {
+                        result.changed = true; progress = true
+                    }
                     if let refusedCall { stopped = refusedCall; result.unauthorized = true; break homeLoop }
                 }
             }
@@ -1485,7 +1547,7 @@ actor SessionWorker {
     private func abortPass(_ engine: ColophonEngine, home: String) async {
         await enter(); defer { exit() }
         guard let report = try? await engine.run({ try $0.exchangeAbort(home: home) }) else { return }
-        try? await persist(report.store)
+        try? await persist(report, on: engine)
     }
 
     static func base(_ text: String) -> String { text.hasSuffix("/") ? String(text.dropLast()) : text }
@@ -1506,9 +1568,11 @@ actor SessionWorker {
         let written: Written
         do {
             written = try await gated {
-                try await engine.execute(custody: custody) { engine in
+                let written = try await engine.execute(custody: custody) { engine in
                     try withEntropy(32) { try engine.exchangeBeginCall(home: need.home, ticket: need.ticket, key: signing, entropy: $0) }
                 }
+                observeAuthorityChanges(written.changes, from: engine)
+                return written
             }
         } catch let error as ColophonError {
             switch error {
@@ -1534,12 +1598,12 @@ actor SessionWorker {
             }
             let signing = try await custody.provider(for: id).publicKeys().signing
             // Judged at the session's clock, not the time of the engine's last refresh.
-            let at = nowMs
-            _ = try await engine.run { try $0.advance(nowMs: at) }
+            try await advance(engine, to: nowMs)
             let target = CallTarget(audiences: [audience], callOrigins: [], controllerPurposes: [], homeEndpoints: [])
             let written = try await engine.execute(custody: custody) { engine in
                 try withEntropy(32) { try engine.beginCall(key: signing, links: [], audience: audience, purpose: purpose, argsJson: argsJSON, target: target, entropy: $0) }
             }
+            observeAuthorityChanges(written.changes, from: engine)
             guard let artifact = written.artifact else { throw ColophonError.internalFailure(code: "internal", detail: "a call returned no envelope") }
             return artifact
         }
@@ -1556,9 +1620,8 @@ actor SessionWorker {
     func recordDue() async throws -> SessionSnapshot {
         try await gated {
             guard let engine else { return try await reconcile() }
-            let at = nowMs
-            _ = try await engine.run { try $0.advance(nowMs: at) }
-            for written in try await engine.run({ try $0.recordDue() }) { try await persist(written) }
+            try await advance(engine, to: nowMs)
+            try await persistDueWrites(engine)
             return try await build()
         }
     }
