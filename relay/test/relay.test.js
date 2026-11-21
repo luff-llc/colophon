@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { createHash } from 'node:crypto';
 import { mkdtemp, readFile, rm, symlink, writeFile, mkdir, appendFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -230,6 +231,13 @@ describe('relay durability', () => {
       assert.equal(res.status, 200);
       const meta = JSON.parse(await readFile(path.join(dir, 'home/meta.json'), 'utf8'));
       assert.match(meta.instance, /^[0-9a-f]{16}$/);
-    } finally { child.kill(); await rm(dir, { recursive: true, force: true }); }
+    } finally {
+      const exited = once(child, 'exit');
+      child.kill();
+      const [code] = await exited;
+      assert.equal(code, 0, 'SIGTERM awaits graceful shutdown');
+      await assert.rejects(readFile(path.join(dir, '.relay.lock')), { code: 'ENOENT' });
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });
