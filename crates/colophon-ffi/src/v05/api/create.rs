@@ -337,3 +337,12 @@ impl AccountCreation {
 pub fn account_default_policy() -> Result<String, AccountError> {
     guard(|| to_json(&default_policy()))
 }
+
+/// A typed controller as its protocol JSON (§6.1), for a host that puts it in the `keyring.add` of
+/// a `change` it builds itself (§8.7), for example beside `homes.appoint` in one transition. The
+/// same JSON `begin_add_controller` and creation use; the core validates it again when it signs.
+#[cfg_attr(feature = "native05", uniffi::export)]
+#[cfg_attr(feature = "web05", wasm_bindgen::prelude::wasm_bindgen)]
+pub fn account_controller_json(controller: ControllerSpec) -> Result<String, AccountError> {
+    guard(|| to_json(&cv::controller_value(&controller)?))
+}

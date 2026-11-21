@@ -48,6 +48,8 @@ import com.luff.colophon.StandingKind
 import com.luff.colophon.StatusKind
 import com.luff.colophon.Store
 import com.luff.colophon.Written
+import com.luff.colophon.HomeStatus
+import com.luff.colophon.accountControllerJson
 import com.luff.colophon.accountDefaultPolicy
 import com.luff.colophon.accountFormatDate
 import com.luff.colophon.accountKeyId
@@ -114,6 +116,10 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
     private val notBefore = HashMap<String, Long>()
     /** Per home, the refusal that came with its `Retry-After`, shown again while the home is not contacted. */
     private val waitingIssue = HashMap<String, HomeIssue>()
+    /** Homes [appointHomes] appointed while this session runs, beside the configuration's: the exchange reaches them at once. */
+    private val appointedHomes = ArrayList<HomeConfiguration>()
+    /** Every home this session may reach: the configuration's, then those appointed since it started. */
+    private val homeConfigurations: List<HomeConfiguration> get() = configuration.homes + appointedHomes
     private suspend fun isStopped(engine: ColophonEngine): Boolean = engine.run { it.status() }.stopped != null
 
     // Gate
@@ -768,6 +774,100 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
         reconcile()
     }
 
+    // Appointing homes later
+
+    /** The steps of [appointHomes], for the tests that stop a call between two of them (a crash). */
+    internal enum class AppointStep { SIGNED, RECORDED, SLOTTED }
+    /** Tests only: [appointHomes] throws right after this step, as if the process died there. */
+    @Volatile internal var appointStopForTests: AppointStep? = null
+    internal class AppointStopped : Exception("stopped for a test")
+    private fun reached(step: AppointStep) { if (appointStopForTests == step) throw AppointStopped() }
+
+    /**
+     * Appoints `homes` (each one's request for this account, with its terms) and, with `adding`, adds that controller, in ONE
+     * transition signed by the owner under the control rule with the new key's possession proof (spec §8.7); records it when
+     * due; builds the new controller's own slot once it is current; and makes this session reach the homes. With no home in
+     * the state before it, the transition is due at `issued` and final at once (§13.1); with a home already current it waits
+     * out its delay and the answer is [HomesAppointment.Pending].
+     *
+     * What is done is read from the account, never from local memory: a call after a crash between any two steps finishes the
+     * rest. A home already current, a home or controller that a pending transition of this owner already names, a controller
+     * already present, a slot already built: none is done twice.
+     */
+    suspend fun appointHomes(homes: List<HomeConfiguration>, adding: Pair<ControllerSpec, AsyncKeyProvider>?): Pair<HomesAppointment, SessionSnapshot> = gated {
+        if (!homes.all { it.isAllowed }) throw SessionError.InsecureHome()
+        if (engine == null) reconcile()
+        val account = accountId ?: throw SessionError.NotReady()
+        val addedId = adding?.let { accountKeyId(it.first.key.signing) }
+        var signedChange: Pair<String, String>? = null
+        fun isCurrent(configured: HomeConfiguration, current: List<Home>) =
+            current.any { h -> h.status == HomeStatus.HOME && h.endpoints.any { it.trim('/') == configured.endpoint.trim('/') } }
+        val outcome = withOwner<HomesAppointment> { owner, ownerCustody, ownerId ->
+            val custody = if (adding != null && addedId != null) ownerCustody.merging(addedId, SessionKeys(adding.second)) else ownerCustody
+            // What a pending transition of this owner already appoints or adds (a call that stopped before it was recorded).
+            val mine = owner.run { it.pending() }.filter { it.by == ownerId }
+            val inFlight = ArrayList<String>()
+            val pendingMembers = HashMap<String, String>()
+            for (p in mine) if ("homes" in p.components) for (m in appointedBy(p.digest)) pendingMembers[m] = p.digest
+            // 1. Each home not yet current: its request for this account and the terms it asks.
+            val current = owner.run { it.homes() }
+            val appoint = ArrayList<Map<String, Any?>>()
+            for (home in homes) {
+                if (isCurrent(home, current)) continue
+                val makeRequest = home.request ?: throw SessionError.InvalidCommand()
+                val raw = makeRequest(account)
+                val info = accountRequestInfo(raw)
+                val inPending = pendingMembers[info.member]
+                if (inPending != null) { inFlight.add(inPending); continue }
+                appoint.add(mapOf("request" to Base64.getEncoder().encodeToString(raw), "terms" to Json.parse(info.termsJson)))
+            }
+            // The controller, unless the account or a pending transition of this owner already has it.
+            val add = ArrayList<Any?>()
+            if (adding != null && addedId != null && owner.run { it.controllers() }.none { it.id == addedId }) {
+                val p = mine.firstOrNull { addedId in it.adds }
+                if (p != null) inFlight.add(p.digest) else add.add(Json.parse(accountControllerJson(adding.first)))
+            }
+            // 2-3. One change, signed by the owner with the new key's possession proof, persisted.
+            if (appoint.isNotEmpty() || add.isNotEmpty()) {
+                val change = LinkedHashMap<String, Any?>()
+                if (appoint.isNotEmpty()) change["homes"] = mapOf("appoint" to appoint)
+                if (add.isNotEmpty()) change["keyring"] = mapOf("add" to add)
+                val json = Json.write(change)
+                val signers = signers(owner, ownerId, SignerNeed.CONTROL)
+                val written = owner.execute(custody, persistOn(owner)) { it.beginTransition(json, signers, RuleKind.CONTROL, ByteArray(0)) }
+                objectDigest(written.stores, "transitions/")?.let { inFlight.add(it); signedChange = it to json }
+                reached(AppointStep.SIGNED)
+            }
+            // 4. Record what is due (at once when the account had no home).
+            val at = nowMs
+            owner.run { it.advance(at) }
+            withContext(NonCancellable) { for (due in owner.run { it.recordDue() }) persist(due, owner) }
+            reached(AppointStep.RECORDED)
+            val now = owner.run { it.homes() }
+            val controller = addedId?.let { id -> owner.run { it.controllers() }.firstOrNull { it.id == id } }
+            val homesDone = homes.all { isCurrent(it, now) }
+            val controllerDone = addedId == null || controller?.provisional == false
+            if (!homesDone || !controllerDone) return@withOwner HomesAppointment.Pending(inFlight.lastOrNull() ?: "")
+            // 5. The new controller's own slot, signed by it, so it unlocks alone.
+            if (adding != null && addedId != null && controller?.hasSlot == false) {
+                owner.execute(custody, persistOn(owner)) { e -> withEntropy(32) { e.beginAddSlot(addedId, SlotPlan(listOf(addedId), adding.first.label), it) } }
+            }
+            reached(AppointStep.SLOTTED)
+            HomesAppointment.Done
+        }
+        signedChange?.let { (digest, json) -> loadJournal(); journal.signedChanges = journal.signedChanges + (digest to json); saveJournal() }
+        // 6. This session reaches the homes from now on (the exchange and the sync loop), without a relaunch.
+        for (home in homes) if (homeConfigurations.none { it.endpoint.trim('/') == home.endpoint.trim('/') }) appointedHomes.add(home)
+        outcome to reconcile()
+    }
+    /** The member IDs a stored transition appoints as homes: the requests in its `change.homes.appoint`. */
+    private fun appointedBy(digest: String): List<String> = try {
+        val envelope = Json.obj(String(storage().read("transitions/$digest.json"), Charsets.UTF_8))
+        val body = Json.obj(String(Base64.getDecoder().decode(envelope?.get("body") as String), Charsets.UTF_8))
+        val list = ((body?.get("change") as? Map<*, *>)?.get("homes") as? Map<*, *>)?.get("appoint") as? List<*> ?: listOf<Any?>()
+        list.mapNotNull { item -> ((item as? Map<*, *>)?.get("request") as? String)?.let { accountRequestInfo(Base64.getDecoder().decode(it)).member } }
+    } catch (e: CancellationException) { throw e } catch (_: Exception) { listOf() }
+
     // Create
 
     suspend fun create(): SessionSnapshot = gated {
@@ -892,7 +992,7 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
     // Exchange
 
     private fun transportFor(home: Home): HomeConfiguration? =
-        configuration.homes.firstOrNull { configured -> home.endpoints.any { it.trim('/') == configured.endpoint.trim('/') } }
+        homeConfigurations.firstOrNull { configured -> home.endpoints.any { it.trim('/') == configured.endpoint.trim('/') } }
 
     class ExchangeResult(var passes: Int = 0, val faults: MutableList<HomeFault> = ArrayList(), val issues: MutableList<HomeIssue> = ArrayList(),
                          var changed: Boolean = false, var unauthorized: Boolean = false,
@@ -976,7 +1076,7 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
                             // A request is for this home, except another home's public head (headQuorum above 1), which
                             // goes to the transport configured for the home its URL names, with no credential.
                             val target: HomeConfiguration = if (request.url.startsWith(base(configured.endpoint) + "/")) configured else {
-                                val other = configuration.homes.firstOrNull { request.url == base(it.endpoint) + "/head" }
+                                val other = homeConfigurations.firstOrNull { request.url == base(it.endpoint) + "/head" }
                                 if (request.method == HttpMethod.GET && request.url.endsWith("/head") &&
                                     request.headers.none { it.name.equals("authorization", ignoreCase = true) } && other != null && other.isAllowed) other
                                 else { stopped = HomeProblem.CallNotBound("a request for another host than the configured home"); break@homeLoop }

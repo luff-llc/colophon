@@ -16,12 +16,12 @@ import ColophonSession
     private let makeSession: @MainActor () -> ColophonSession
     init(medium: MemoryMedium = MemoryMedium(), member: SoftwareKeys = SoftwareKeys(), owner: SoftwareKeys = SoftwareKeys(),
          homes: [HomeConfiguration] = [], createWithoutHome: Bool = true, recovery: SoftwareKeys? = nil, additional: [AdditionalController] = [], namespaces: [String] = ["reading.saved"], services: [ServiceTerms] = [], libraryNamespaces: [String]? = nil,
-         history: HistoryAccess? = nil, headQuorum: Int? = nil, keys: (any AsyncKeyProvider)? = nil, clock: @escaping @Sendable () -> Date = { Date() }) {
+         history: HistoryAccess? = nil, headQuorum: Int? = nil, keys: (any AsyncKeyProvider)? = nil, ownerKey: (any AsyncKeyProvider)? = nil, clock: @escaping @Sendable () -> Date = { Date() }) {
         self.medium = medium; self.member = member; self.owner = owner
         let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString), secrets = MemoryDeviceSecrets()
         self.home = home; self.secrets = secrets
         let configuration = SessionConfiguration(memberLabel: "Test device", namespaces: namespaces, services: services, libraryNamespaces: libraryNamespaces, location: .memory(medium),
-            privateContainer: home, keys: keys ?? member, ownerController: owner, recoveryKeys: recovery, homes: homes, createWithoutHome: createWithoutHome, additionalControllers: additional,
+            privateContainer: home, keys: keys ?? member, ownerController: ownerKey ?? owner, recoveryKeys: recovery, homes: homes, createWithoutHome: createWithoutHome, additionalControllers: additional,
             deviceSecrets: secrets, history: history, headQuorum: headQuorum, now: clock)
         self.configuration = configuration
         makeSession = { ColophonSession(configuration: configuration) }

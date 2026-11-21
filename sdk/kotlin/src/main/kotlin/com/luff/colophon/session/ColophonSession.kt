@@ -48,7 +48,8 @@ class ColophonSession(configuration: SessionConfiguration) : AutoCloseable {
     @Suppress("OPT_IN_USAGE")
     private val lane = Dispatchers.Default.limitedParallelism(1, "colophon-session-facade")
     private val scope = CoroutineScope(SupervisorJob() + lane)
-    internal val homesConfigured = configuration.homes.isNotEmpty()
+    @Volatile internal var homesConfigured = configuration.homes.isNotEmpty()
+        private set
     private val _state = MutableStateFlow(SessionState(context = UUID.randomUUID().toString(),
         syncState = if (configuration.homes.isNotEmpty()) HomeSyncState.Idle else HomeSyncState.Disabled))
     /** Everything the session publishes. */
@@ -334,6 +335,31 @@ class ColophonSession(configuration: SessionConfiguration) : AutoCloseable {
     suspend fun addController(key: AsyncKeyProvider, label: String, roles: List<ControllerRole> = listOf(ControllerRole.APPROVE), immediate: Boolean = true) = owner {
         val d = key.keyDescriptor()
         worker.addController(ControllerSpec(d, label, roles, d.form == SignForm.WEBAUTHN, null, listOf()), if (immediate) AddMode.IMMEDIATE else AddMode.TRANSITION, key)
+    }
+    /**
+     * Appoints `homes` to an account that has none yet (one created with `createWithoutHome`), and with `adding` adds that
+     * controller (a passkey, say, with roles CONTROL and RECOVER), in ONE transition (spec §8.7) the owner signs with the new
+     * key's possession proof. With no home before it, it is recorded at once and final (§13.1): the new controller then builds
+     * its own slot, so it unlocks alone, and this session starts syncing with the homes at once (no relaunch; pass the same
+     * homes in `SessionConfiguration.homes` on the next launch). With a home already current the transition waits out its
+     * delay: the call submits it like [proposeTransition] and answers [HomesAppointment.Pending].
+     *
+     * Idempotent: called again after a crash or a `Pending`, it finishes what the account shows is not done, and never adds
+     * the controller or appoints a home twice. Each home's `request` is called for this account on every call.
+     */
+    suspend fun appointHomes(homes: List<HomeConfiguration>, adding: AdditionalController? = null): HomesAppointment = facade {
+        restore()
+        val added = adding?.let { a ->
+            val d = a.provider.keyDescriptor()
+            ControllerSpec(d, a.label, a.roles, d.form == SignForm.WEBAUTHN, null, listOf()) to a.provider
+        }
+        val outcome = try { val (o, s) = worker.appointHomes(homes, added); apply(s); o }
+        catch (e: CancellationException) { throw e } catch (e: Exception) { handleCommandError(e); throw e }
+        if (homes.isNotEmpty() && !homesConfigured) { homesConfigured = true; set { copy(syncState = HomeSyncState.Idle) } }
+        startSyncLoop()
+        if (outcome is HomesAppointment.Pending) submitUntilReceipted(outcome.transition, Submission.Kind.TRANSITION)
+        if (homesConfigured) try { apply(worker.registerRoutes()) } catch (e: CancellationException) { throw e } catch (_: Exception) {}
+        outcome
     }
     /** The existing device's half of "add a device": seals the vault seed to the new device. */
     suspend fun transferSeed(pairing: AccountPairing): SealedSeed = facade { restore(); worker.transferSeed(pairing) }

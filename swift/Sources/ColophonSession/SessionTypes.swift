@@ -45,6 +45,15 @@ public enum SessionFailure: Equatable, Sendable {
     }
 }
 
+/// What `ColophonSession.appointHomes` left the account with.
+public enum HomesAppointment: Sendable, Equatable {
+    /// The homes are current, the added controller (if any) is current with its own slot, and the session syncs with them.
+    case done
+    /// The transition waits (a home was already current, so it has a delay and a veto window): `transition` is its digest.
+    /// Call `appointHomes` again with the same arguments after it activates to finish (the new controller's slot).
+    case pending(transition: String)
+}
+
 public enum SessionError: Error, Equatable, Sendable {
     case notReady, staleRevision, destinationChanged, invalidCommand, publicationUncertain, migrationCollision
     /// New in 0.5: the account was created without a home and the host did not opt out (spec §18).
