@@ -321,6 +321,23 @@ import Observation
     }
     /// Tests only: runs between the worker's answer to `view` and the fence.
     @ObservationIgnored var afterViewForTests: (@MainActor () async -> Void)?
+    /// The exact authority head this session's verifier has accepted, including while this member waits
+    /// for approval. The read waits for initial restoration and does not refresh the record store.
+    /// Throws if this verifier is stopped, has seen an authority reorganization, or cannot vouch
+    /// for the current branch.
+    public func acceptedAuthorityHead() async throws -> (account: String, sequence: UInt64, digest: String) {
+        try Task.checkCancellation()
+        let lease = context
+        await restore()
+        try Task.checkCancellation()
+        guard lease == context else { throw SessionError.destinationChanged }
+        let head = try await worker.acceptedAuthorityHead()
+        try Task.checkCancellation()
+        guard lease == context, libraryID == head.account else { throw SessionError.destinationChanged }
+        guard phase != .locked else { throw SessionError.notReady }
+        return head
+    }
+
     /// The verified history as the engine reports it (JSON). Explicit: normal screens use named queries.
     public func ledger() async throws -> Data { await restore(); return try await worker.ledger() }
 

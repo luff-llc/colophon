@@ -64,6 +64,9 @@ actor SessionWorker {
     private var journal = SessionJournalFile()
     private var journalLoaded = false
     private var locked = false
+    /// A replacement of already accepted authority cannot be used for credential discovery in
+    /// this worker, even when the regular session subsequently follows the new branch.
+    private var reorganizedAuthority: Set<String> = []
     private var revision: UInt64 = 0
     private var lastRevisions: [String: UInt64] = [:]
     private var lastHead: UInt64 = 0
@@ -304,8 +307,10 @@ actor SessionWorker {
         if try await Self.isStopped(engine) { return }
         let list = listed(entries)
         let at = nowMs
-        _ = try await engine.run { try $0.advance(nowMs: at) }
-        _ = try await engine.run { try $0.refresh(listing: list) }
+        let elapsed = try await engine.run { try $0.advance(nowMs: at) }
+        if elapsed.reorganized { reorganizedAuthority.insert(engine.account) }
+        let changes = try await engine.run { try $0.refresh(listing: list) }
+        if changes.reorganized { reorganizedAuthority.insert(engine.account) }
         for written in try await engine.run({ try $0.recordDue() }) { try await persist(written) }
         try await unlockIfPossible()
     }
@@ -1263,6 +1268,22 @@ actor SessionWorker {
         guard let engine else { throw SessionError.notReady }
         return Data(try await engine.run { try $0.viewJson(namespace: namespace) }.utf8)
     }
+    /// Reads the already-open verifier under the worker gate without reconciling or opening storage.
+    func acceptedAuthorityHead() async throws -> (account: String, sequence: UInt64, digest: String) {
+        try await gated {
+            guard !locked, let engine, let account = accountID else { throw SessionError.notReady }
+            guard !reorganizedAuthority.contains(account) else { throw SessionError.staleRevision }
+            return try await engine.run {
+                let status = try $0.status()
+                guard status.kind == .ok, !status.rollback, status.stopped == nil else { throw SessionError.staleRevision }
+                let sequence = try $0.headSeq()
+                let digest = try $0.headDigest()
+                guard sequence > 0, !digest.isEmpty else { throw SessionError.notReady }
+                return (account, sequence, digest)
+            }
+        }
+    }
+
     func ledger() async throws -> Data {
         guard let engine else { throw SessionError.notReady }
         return Data(try await engine.run { try $0.ledgerJson() }.utf8)
