@@ -17,6 +17,41 @@ One home per account is the supported configuration in 0.5. Several homes for on
 the tests, but exchange between them (forwarding and candidate exchange) is experimental
 (spec §13.1; open issues in `docs/multi-home-open-issues.md`).
 
+## Batch record reads (plain slots)
+
+`POST /v1/libraries/<slot>/records/batch` is an additive endpoint for plain relay
+slots. It uses the same bearer authorization as a single-record GET. Send
+`Content-Type: application/json`, `Content-Length`, and a body of at most 64 KiB:
+
+```json
+{"paths":["ops/member/one.json","blobs/<64 lowercase hex digits>"]}
+```
+
+`paths` must contain 1–256 unique valid record paths. Invalid JSON or paths return
+400, an unsupported content type returns 415, and a body over the bound returns
+413. A successful answer preserves request order:
+
+```json
+{"records":[{"path":"ops/member/one.json","status":200,"etag":"\"<sha256>\"","bytes":"<base64>"},{"path":"ops/member/missing.json","status":404}],"truncated":false}
+```
+
+Records are checked against their indexed size and SHA-256 before serving; storage
+corruption fails the request with 500. Answers carry `Cache-Control: no-store,
+no-transform` and the configured CORS headers. Each response has a strict 4 MiB
+encoded JSON/base64 budget, including response framing and per-record overhead.
+An individual record exceeding that budget is not read or base64-encoded; its
+entry is `{ "path": "…", "status": 413, "etag": "\"<sha256>\"", "size": 4194304 }`
+(with its actual raw byte size). Fetch such records via plain GET. These entries
+count as returned paths so pagination always makes progress. When `truncated` is true,
+request the unreturned suffix of `paths` in the next batch. Slot metadata is
+unchanged; clients should probe the route and remember a 404/405 for fallback.
+
+The current 0.5 home authorization module does not support this route: home slots
+return 405 after their rate gate, without parsing the batch body or classifying
+its paths, and serve no batch bytes. Home reads still require their
+original individually bound Colophon calls. This endpoint alone does not change
+SDK sync scheduling.
+
 ## Run it
 
 ```sh
