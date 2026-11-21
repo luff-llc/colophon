@@ -798,3 +798,22 @@ fn authenticated_domain_roles_survive_incremental_replay_and_checkpoints() {
         )
     );
 }
+
+#[test]
+fn advertised_import_tools_route_to_queries() {
+    let (library, _, _) = create();
+    for name in colophon_core::imports::query_names() {
+        let tool = format!("notes__{name}");
+        assert!(library
+            .tools(NOW)
+            .unwrap()
+            .iter()
+            .any(|spec| spec.name == tool));
+        let input = json!({"key":"missing","id":"missing","category":"note","preferred":"missing","digest":"missing"});
+        let expected = success(library.query("notes", name, input.clone(), NOW).unwrap());
+        let actual = success(library.begin_call(&tool, input, NOW, [123; 32]).unwrap());
+        assert!(
+            matches!(actual, colophon_core::library::Call::Read { value } if value == expected)
+        );
+    }
+}

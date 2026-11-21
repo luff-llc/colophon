@@ -35,6 +35,7 @@ use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
+use zeroize::Zeroize;
 
 pub mod blobs;
 pub mod checkpoint;
@@ -89,10 +90,7 @@ impl Drop for KeyCopy {
 impl EngineOptions {
     /// Erase the device key held here.
     fn wipe_key(&mut self) {
-        for b in self.checkpoint_key.iter_mut() {
-            *b = 0;
-        }
-        std::hint::black_box(&self.checkpoint_key);
+        self.checkpoint_key.zeroize();
     }
 }
 impl Drop for EngineOptions {
@@ -972,20 +970,30 @@ impl<S: RecordSource> Engine<S> {
         if self.loading && self.account.stop_seq().is_some() {
             if !self.restored.is_empty() {
                 let restored = &self.restored;
-                incoming
-                    .records
-                    .retain(|r| restored.get(&r.path).is_some_and(|e| sha_of(e) == sha(&r.bytes)));
+                incoming.records.retain(|r| {
+                    restored
+                        .get(&r.path)
+                        .is_some_and(|e| sha_of(e) == sha(&r.bytes))
+                });
             }
             return self.account.merge_held(incoming, now);
         }
         self.account.merge(incoming, now)
     }
     /// [`Engine::merge_read`] for live candidates.
-    pub(crate) fn merge_live_read(&mut self, mut cands: Vec<HeldRecord>, now: i64) -> Result<Changes> {
+    pub(crate) fn merge_live_read(
+        &mut self,
+        mut cands: Vec<HeldRecord>,
+        now: i64,
+    ) -> Result<Changes> {
         if self.loading && self.account.stop_seq().is_some() {
             if !self.restored.is_empty() {
                 let restored = &self.restored;
-                cands.retain(|r| restored.get(&r.path).is_some_and(|e| sha_of(e) == sha(&r.bytes)));
+                cands.retain(|r| {
+                    restored
+                        .get(&r.path)
+                        .is_some_and(|e| sha_of(e) == sha(&r.bytes))
+                });
             }
             return self.account.merge_live_held(cands, now);
         }

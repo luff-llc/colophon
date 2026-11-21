@@ -1,5 +1,5 @@
 //! Storage engine transport. Keys stay in the host. Record callbacks are synchronous,
-//! read-only, and must not reenter this engine; try_lock turns reentry into an error.
+//! read-only, and must not reenter this engine; a thread-local guard rejects reentry.
 use super::*;
 use colophon_core::{
     checkpoint,
@@ -9,6 +9,7 @@ use std::{
     cell::RefCell,
     collections::{BTreeMap, HashMap},
 };
+use zeroize::Zeroizing;
 
 #[uniffi::export(callback_interface)]
 pub trait EngineRecordSource: Send + Sync {
@@ -44,9 +45,64 @@ pub struct NativeEngine {
     session: Mutex<EngineSession>,
     id: u64,
 }
+thread_local! {
+    static ACTIVE_ENGINES: RefCell<std::collections::HashSet<u64>> = RefCell::default();
+}
+
+struct EngineEntry(u64);
+impl Drop for EngineEntry {
+    fn drop(&mut self) {
+        ACTIVE_ENGINES.with(|active| active.borrow_mut().remove(&self.0));
+    }
+}
+
+// Drop the mutex guard before clearing the thread-local entry, including during unwinding.
+struct SessionGuard<'a, T> {
+    guard: MutexGuard<'a, T>,
+    _entry: EngineEntry,
+}
+impl<T> std::ops::Deref for SessionGuard<'_, T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.guard
+    }
+}
+impl<T> std::ops::DerefMut for SessionGuard<'_, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        &mut self.guard
+    }
+}
+fn lock_session<T>(session: &Mutex<T>, id: u64) -> Result<SessionGuard<'_, T>> {
+    let (reentry, nested) = ACTIVE_ENGINES.with(|active| {
+        let mut active = active.borrow_mut();
+        let nested = !active.is_empty();
+        (!active.insert(id), nested)
+    });
+    if reentry {
+        return Err(invalid(
+            "Record source callback must not reenter this engine",
+        ));
+    }
+    let entry = EngineEntry(id);
+    let guard = if nested {
+        session.try_lock().map_err(|error| match error {
+            std::sync::TryLockError::Poisoned(_) => BindingError::Poisoned,
+            std::sync::TryLockError::WouldBlock => {
+                invalid("Record source callback cannot wait for another engine")
+            }
+        })?
+    } else {
+        session.lock().map_err(|_| BindingError::Poisoned)?
+    };
+    Ok(SessionGuard {
+        guard,
+        _entry: entry,
+    })
+}
+
 impl NativeEngine {
-    fn lock(&self) -> Result<MutexGuard<'_, EngineSession>> {
-        self.session.try_lock().map_err(|_| BindingError::Poisoned)
+    fn lock(&self) -> Result<SessionGuard<'_, EngineSession>> {
+        lock_session(&self.session, self.id)
     }
     fn prepared(&self, s: &EngineSession, result: Outcome<PendingBatch>) -> Result<PreparedAction> {
         match result {
@@ -261,13 +317,15 @@ impl NativeEngine {
             .collect())
     }
     pub fn finish_unlock_many(&self, results: Vec<UnlockResult>) -> Result<()> {
+        let results: Vec<_> = results
+            .into_iter()
+            .map(|r| (r.step, Zeroizing::new(r.shared)))
+            .collect();
         let mut s = self.lock()?;
         let pending = s.engine.begin_unlock();
-        for result in &results {
+        for (step, _) in &results {
             if !pending.iter().any(|p| {
-                p.namespace == result.step.namespace
-                    && p.epoch == result.step.epoch
-                    && p.peer == result.step.peer
+                p.namespace == step.namespace && p.epoch == step.epoch && p.peer == step.peer
             }) {
                 return Err(BindingError::StaleAction);
             }
@@ -281,8 +339,8 @@ impl NativeEngine {
             .collect();
         s.engine.finish_unlock_many(
             results
-                .into_iter()
-                .map(|r| (r.step.namespace, r.step.epoch, r.shared))
+                .iter()
+                .map(|(step, shared)| (step.namespace.clone(), step.epoch, shared.to_vec()))
                 .collect(),
         )?;
         let after: Vec<_> = s
@@ -619,19 +677,115 @@ impl NativeCheckpointOpening {
             .agreement_peer()
             .to_vec())
     }
-    pub fn finish(&self, mut shared: Vec<u8>) -> Result<Arc<NativeCheckpointKey>> {
+    pub fn finish(&self, shared: Vec<u8>) -> Result<Arc<NativeCheckpointKey>> {
+        let shared = Zeroizing::new(shared);
         let opening = self
             .opening
             .lock()
             .map_err(|_| BindingError::Poisoned)?
             .take()
             .ok_or_else(|| invalid("Checkpoint opening consumed"))?;
-        let result = opening.finish(&shared);
-        shared.fill(0);
-        let (key, checkpoint) = result?;
+        let (key, checkpoint) = opening.finish(&shared)?;
         Ok(Arc::new(NativeCheckpointKey {
             key: Arc::new(key),
             checkpoint: Some(checkpoint),
         }))
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod lock_tests {
+    use super::*;
+    use std::{sync::mpsc, time::Duration};
+
+    #[test]
+    fn concurrent_calls_wait_and_callback_reentry_fails() {
+        let session = Mutex::new(0);
+        let id = NEXT_SESSION.fetch_add(1, Ordering::Relaxed);
+        let first = lock_session(&session, id).unwrap();
+        // This is the same acquisition used by an engine call from a synchronous callback.
+        let callback = || {
+            assert!(matches!(
+                lock_session(&session, id),
+                Err(BindingError::InvalidData { detail }) if detail.contains("reenter")
+            ));
+        };
+        callback();
+        std::thread::scope(|scope| {
+            let (started_tx, started_rx) = mpsc::channel();
+            let (finished_tx, finished_rx) = mpsc::channel();
+            let session = &session;
+            let caller = scope.spawn(move || {
+                started_tx.send(()).unwrap();
+                let mut guard = lock_session(session, id).unwrap();
+                *guard += 1;
+                finished_tx.send(()).unwrap();
+            });
+            started_rx.recv().unwrap();
+            assert!(matches!(
+                finished_rx.recv_timeout(Duration::from_millis(50)),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ));
+            drop(first);
+            finished_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            caller.join().unwrap();
+        });
+        assert_eq!(*lock_session(&session, id).unwrap(), 1);
+    }
+
+    #[test]
+    fn cross_engine_callbacks_never_wait_for_contended_locks() {
+        let a = Arc::new(Mutex::new(()));
+        let b = Arc::new(Mutex::new(()));
+        let a_id = NEXT_SESSION.fetch_add(1, Ordering::Relaxed);
+        let b_id = NEXT_SESSION.fetch_add(1, Ordering::Relaxed);
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let (done_tx, done_rx) = mpsc::channel();
+        let mut callers = Vec::new();
+        for (held, held_id, target, target_id) in [
+            (a.clone(), a_id, b.clone(), b_id),
+            (b.clone(), b_id, a.clone(), a_id),
+        ] {
+            let barrier = barrier.clone();
+            let done = done_tx.clone();
+            callers.push(std::thread::spawn(move || {
+                let _guard = lock_session(&held, held_id).unwrap();
+                barrier.wait();
+                assert!(matches!(lock_session(&target, target_id), Err(BindingError::InvalidData { detail }) if detail.contains("cannot wait")));
+                ACTIVE_ENGINES.with(|active| {
+                    assert!(!active.borrow().contains(&target_id));
+                });
+                // Keep both locks held until both callback attempts have completed.
+                done.send(()).unwrap();
+                barrier.wait();
+            }));
+        }
+        // Detached threads on failure let a deadlock regression fail within the timeout.
+        for _ in 0..2 {
+            done_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        }
+        for caller in callers {
+            caller.join().unwrap();
+        }
+        // Uncontended cross-engine callbacks still work.
+        let _a = lock_session(&a, a_id).unwrap();
+        let _b = lock_session(&b, b_id).unwrap();
+    }
+
+    #[test]
+    fn poisoning_is_reported_and_thread_entry_is_cleared() {
+        let session = Mutex::new(());
+        let id = NEXT_SESSION.fetch_add(1, Ordering::Relaxed);
+        let _ = std::panic::catch_unwind(|| {
+            let _guard = lock_session(&session, id).unwrap();
+            panic!("poison the mutex");
+        });
+        for _ in 0..2 {
+            assert!(matches!(
+                lock_session(&session, id),
+                Err(BindingError::Poisoned)
+            ));
+        }
     }
 }

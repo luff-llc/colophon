@@ -16,6 +16,7 @@ use p256::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
+use zeroize::Zeroize;
 
 /// The two uncompressed SEC1 public keys of a member.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -159,4 +160,10 @@ pub(crate) fn open(key: &[u8], nonce: &[u8], ciphertext: &[u8], aad: &[u8]) -> R
             },
         )
         .map_err(|_| Error("Authentication failed".into()))
+}
+
+impl Drop for Entropy {
+    fn drop(&mut self) {
+        self.seed.zeroize();
+    }
 }
