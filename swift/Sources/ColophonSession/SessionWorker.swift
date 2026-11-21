@@ -587,24 +587,15 @@ actor SessionWorker {
 
     // MARK: Requests (a member asking, an owner approving)
 
-    private func requestPath(_ id: String) -> String { "requests/\(id).json" }
+    private func requestPath(_ id: String) -> String { OwnRequest.path(id) }
     private func ownRequestBytes() async throws -> Data {
-        guard let account = accountID, let id = memberID else { throw SessionError.notReady }
-        let keys = try await memberKeys.publicKeys()
-        let spec = RequestSpec(account: account, signing: keys.signing, agreement: keys.agreement, label: configuration.memberLabel,
-            kind: Self.accountKind(configuration.memberKind), termsJson: Self.terms(namespaces: configuration.namespaces, access: configuration.access, expires: nil, budget: nil, services: configuration.services),
-            created: try accountFormatDate(ms: nowMs - 1000), custody: nil, operator: nil, endpoints: [])
-        let request = try AccountRequest.prepare(spec: spec)
-        let step = try request.step()
-        let signature = try await memberKeys.sign(body: step.body)
-        _ = id
-        return try request.finish(signature: Signature(signature: signature, authenticatorData: nil, clientData: nil)).raw
+        guard let account = accountID, memberID != nil else { throw SessionError.notReady }
+        return try await OwnRequest.make(configuration, keys: memberKeys, account: account, nowMs: nowMs)
     }
     private func ensureOwnRequest() async throws {
         guard let id = memberID else { return }
-        let path = requestPath(id)
-        if (try? storage().read(path)) != nil { return }
-        try storage().write([MediumWrite(path: path, bytes: try await ownRequestBytes())])
+        guard let account = accountID else { throw SessionError.notReady }
+        _ = try await OwnRequest.ensure(configuration, medium: try storage(), keys: memberKeys, account: account, memberID: id, nowMs: nowMs)
     }
     func exportRequest() async throws -> Data {
         try await gated {
@@ -1059,8 +1050,9 @@ actor SessionWorker {
 
     // MARK: Writes and queries
 
-    func write(_ command: DomainCommand, observed: UInt64, ingress: IngressEnvelope? = nil) async throws -> (WriteReceipt, SessionSnapshot) {
-        try await gated {
+    func write(_ command: DomainCommand, observed: UInt64, ingress: IngressEnvelope? = nil, claimed: Date? = nil) async throws -> (WriteReceipt, SessionSnapshot) {
+        if let claimed, !Self.claimable(claimed, now: now) { throw SessionError.invalidCommand }
+        return try await gated {
             let fresh = try await reconcile()
             guard fresh.phase == .ready, let engine, let custody = memberCustody else { throw SessionRefusal(snapshot: fresh, error: .notReady) }
             guard observed == revision else { throw SessionRefusal(snapshot: fresh, error: .staleRevision) }
@@ -1073,8 +1065,14 @@ actor SessionWorker {
                 if let operation = journal.ingress[ingress.id] { return (.saved(operationID: operation), fresh) }
             }
             let payload = String(decoding: command.payload, as: UTF8.self)
+            let claimedMs = claimed.map { Int64(($0.timeIntervalSince1970 * 1000).rounded(.down)) }
             let written = try await engine.execute(custody: custody) {
-                engine in try withEntropy(32) { try engine.beginWrite(namespace: command.namespace, kind: command.kind, payloadJson: payload, entropy: $0) }
+                engine in try withEntropy(32) { entropy in
+                    if let claimedMs {
+                        return try engine.beginWriteClaimed(namespace: command.namespace, kind: command.kind, payloadJson: payload, claimedMs: claimedMs, entropy: entropy)
+                    }
+                    return try engine.beginWrite(namespace: command.namespace, kind: command.kind, payloadJson: payload, entropy: entropy)
+                }
             }
             try await persist(written)
             let operation = Self.operationID(in: written.stores) ?? ""
@@ -1085,6 +1083,12 @@ actor SessionWorker {
             }
             return (.saved(operationID: operation), try await build())
         }
+    }
+    /// A claimed date a write may carry: finite, no later than `now`, and within the years 0001–9999 (spec §2.2), so the
+    /// conversion to milliseconds can never trap.
+    static func claimable(_ claimed: Date, now: Date) -> Bool {
+        let seconds = claimed.timeIntervalSince1970
+        return seconds.isFinite && seconds >= -62_135_596_800 && seconds < 253_402_300_800 && claimed <= now
     }
     /// `ops/<author>/<namespace>/<clock>-<id>.json`: the operation ID is the part after the clock.
     static func operationID(in stores: [Store]) -> String? {

@@ -421,6 +421,108 @@ pub fn finish_home_call(
     Ok(env)
 }
 
+// ---------------------------------------------------------------------------------------------
+// A history read by a member that holds no history yet (§12.2, §13.4, §14).
+
+/// The lowercase hex SHA-256 of the empty string: the `args.body` of a request with no body.
+pub const EMPTY_BODY_SHA256: &str =
+    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+/// A `colophon.history.read` call for one `GET` at a home path that serves the history (§13.4),
+/// signed by a member's own key, for a device that holds only the account ID, the home's base
+/// and an entry it was given (a joining device with an invite's head). Nothing else is read:
+/// no engine, no local history.
+#[derive(Clone, Debug)]
+pub struct HistoryReadSpec<'a> {
+    /// The account.
+    pub account: &'a AccountId,
+    /// `asOf`: the entry the device was given, `(seq, body digest)`. A home refuses a call whose
+    /// `asOf` is not in its own history (beyond it `unavailable`, another digest `refused:fork`).
+    pub as_of: (u64, &'a str),
+    /// The member's signing point: the signer is `Member(key_id(signing))` and the acting key.
+    pub signing: &'a [u8],
+    /// The home's base (the call's audience), with or without a trailing `/`.
+    pub audience: &'a str,
+    /// The path and query relative to the base, exactly as it will be sent; it must serve the
+    /// history ([`crate::v05::calls::home_path_serves_history`]).
+    pub path: &'a str,
+    /// `requestId`: 32 random bytes the host supplies.
+    pub request_id: [u8; 32],
+    /// `created`.
+    pub created: &'a str,
+}
+
+/// A prepared history read: the call to sign, and the request it is bound to.
+#[derive(Clone, Debug)]
+pub struct PreparedHistoryRead {
+    call: PreparedCall,
+    url: String,
+}
+impl PreparedHistoryRead {
+    /// The step: the member key signs `body` raw.
+    pub fn step(&self) -> &SigningStep {
+        self.call.step()
+    }
+    /// The URL the call is bound to: the base (without a trailing `/`) followed by the path.
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+}
+
+/// §12.2 for a history read: audience the home's base (its trailing `/` dropped, as the engine
+/// names a home), purpose `colophon.history.read`, signer the member, no links, and `args`
+/// exactly [`crate::v05::calls::home_call_args`]`("GET", path, sha256(""))`, the binding a home
+/// checks (§14). The same body the account's `begin_home_call` builds for that request, with the
+/// `asOf` given instead of read from a held history.
+pub fn prepare_history_read(spec: &HistoryReadSpec<'_>) -> Result<PreparedHistoryRead> {
+    use crate::v05::calls::{home_call_args, home_path_serves_history, HISTORY_READ};
+    point(spec.signing, "member.signing")?;
+    let base = spec.audience.trim_end_matches('/');
+    require(
+        base.starts_with("https://") || base.starts_with("http://"),
+        "the audience is a home's http(s) base",
+    )?;
+    require(
+        spec.path.starts_with('/') && spec.path.len() <= 4_096,
+        "the path starts with / and is at most 4,096 bytes",
+    )?;
+    require(
+        home_path_serves_history(spec.path),
+        "a history read is only for a path that serves the history",
+    )?;
+    let call = prepare_call(&CallSpec {
+        account: spec.account,
+        as_of: spec.as_of,
+        signer: CallSignerSpec::Member(key_id(spec.signing)),
+        key: spec.signing,
+        links: &[],
+        audience: base,
+        purpose: HISTORY_READ,
+        args: home_call_args("GET", spec.path, EMPTY_BODY_SHA256),
+        request_id: spec.request_id,
+        created: spec.created,
+        webauthn: false,
+    })?;
+    Ok(PreparedHistoryRead {
+        call,
+        url: format!("{base}{}", spec.path),
+    })
+}
+
+/// Assemble the call envelope and check what the signer can check without a history: it parses
+/// as a call (§12.3 step 1) and the signature proves possession of its key (step 2). Everything
+/// else (the signer's standing, `asOf` in the held history) is the home's to judge, and a device
+/// that holds no history cannot judge it: [`finish_call`] and [`finish_home_call`] need a view.
+pub fn finish_history_read(
+    prepared: &PreparedHistoryRead,
+    sig: &SignatureResult,
+) -> Result<Vec<u8>> {
+    let env = call_envelope(&prepared.call, sig)?;
+    let call = crate::v05::calls::Call::parse(&env)?;
+    call.verify_possession()?;
+    Ok(env)
+}
+
 fn call_envelope(prepared: &PreparedCall, sig: &SignatureResult) -> Result<Vec<u8>> {
     Ok(match (prepared.webauthn, &sig.assertion) {
         (true, Some((authenticator_data, client_data))) => canonical(&json!({

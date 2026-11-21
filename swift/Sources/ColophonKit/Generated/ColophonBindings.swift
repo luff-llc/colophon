@@ -1538,6 +1538,14 @@ public protocol AccountEngineProtocol: AnyObject, Sendable {
     func beginWrite(namespace: String, kind: String, payloadJson: String, entropy: Data) throws  -> AccountAction
     
     /**
+     * A record write whose signed `created` is `claimed_ms` (ms since the Unix epoch) instead
+     * of the engine's clock: an app importing old data keeps each item's original date. Only
+     * `created` changes; a claimed date later than the engine's clock is refused, and so is a
+     * write by a member whose grant has expired by the engine's clock. 32 bytes of entropy.
+     */
+    func beginWriteClaimed(namespace: String, kind: String, payloadJson: String, claimedMs: Int64, entropy: Data) throws  -> AccountAction
+    
+    /**
      * How much of a blob is held.
      */
     func blobAvailability(namespace: String, digest: String) throws  -> BlobAvailability
@@ -2525,6 +2533,26 @@ open func beginWrite(namespace: String, kind: String, payloadJson: String, entro
         FfiConverterString.lower(namespace),
         FfiConverterString.lower(kind),
         FfiConverterString.lower(payloadJson),
+        FfiConverterData.lower(entropy),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * A record write whose signed `created` is `claimed_ms` (ms since the Unix epoch) instead
+     * of the engine's clock: an app importing old data keeps each item's original date. Only
+     * `created` changes; a claimed date later than the engine's clock is refused, and so is a
+     * write by a member whose grant has expired by the engine's clock. 32 bytes of entropy.
+     */
+open func beginWriteClaimed(namespace: String, kind: String, payloadJson: String, claimedMs: Int64, entropy: Data)throws  -> AccountAction  {
+    return try  FfiConverterTypeAccountAction_lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_accountengine_begin_write_claimed(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(namespace),
+        FfiConverterString.lower(kind),
+        FfiConverterString.lower(payloadJson),
+        FfiConverterInt64.lower(claimedMs),
         FfiConverterData.lower(entropy),uniffiCallStatus
     )
 })
@@ -3729,6 +3757,169 @@ public func FfiConverterTypeAccountEngine_lift(_ handle: UInt64) throws -> Accou
 #endif
 public func FfiConverterTypeAccountEngine_lower(_ value: AccountEngine) -> UInt64 {
     return FfiConverterTypeAccountEngine.lower(value)
+}
+
+
+
+
+
+
+/**
+ * A `colophon.history.read` call being prepared and signed by a member that holds no history:
+ * one `GET` at a home path that serves the history, `asOf` the entry the device was given.
+ */
+public protocol AccountHistoryReadProtocol: AnyObject, Sendable {
+    
+    /**
+     * Finish with the member's signature: the envelope (parsed, possession checked), the URL it
+     * is bound to and the `Authorization` header value (`Colophon <base64url envelope>`).
+     */
+    func finish(signature: Signature) throws  -> HistoryReadCall
+    
+    /**
+     * The one step the member key signs (raw).
+     */
+    func step() throws  -> AccountSigningStep
+    
+}
+/**
+ * A `colophon.history.read` call being prepared and signed by a member that holds no history:
+ * one `GET` at a home path that serves the history, `asOf` the entry the device was given.
+ */
+open class AccountHistoryRead: AccountHistoryReadProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_colophon_ffi_fn_clone_accounthistoryread(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_colophon_ffi_fn_free_accounthistoryread(handle, $0) }
+    }
+
+    
+    /**
+     * Prepare a history read.
+     */
+public static func prepare(spec: HistoryReadSpec)throws  -> AccountHistoryRead  {
+    return try  FfiConverterTypeAccountHistoryRead_lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_constructor_accounthistoryread_prepare(
+        FfiConverterTypeHistoryReadSpec_lower(spec),uniffiCallStatus
+    )
+})
+}
+    
+
+    
+    /**
+     * Finish with the member's signature: the envelope (parsed, possession checked), the URL it
+     * is bound to and the `Authorization` header value (`Colophon <base64url envelope>`).
+     */
+open func finish(signature: Signature)throws  -> HistoryReadCall  {
+    return try  FfiConverterTypeHistoryReadCall_lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_accounthistoryread_finish(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeSignature_lower(signature),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * The one step the member key signs (raw).
+     */
+open func step()throws  -> AccountSigningStep  {
+    return try  FfiConverterTypeAccountSigningStep_lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_accounthistoryread_step(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+
+    
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAccountHistoryRead: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = AccountHistoryRead
+
+    public static func lift(_ handle: UInt64) throws -> AccountHistoryRead {
+        return AccountHistoryRead(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: AccountHistoryRead) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AccountHistoryRead {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: AccountHistoryRead, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAccountHistoryRead_lift(_ handle: UInt64) throws -> AccountHistoryRead {
+    return try FfiConverterTypeAccountHistoryRead.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAccountHistoryRead_lower(_ value: AccountHistoryRead) -> UInt64 {
+    return FfiConverterTypeAccountHistoryRead.lower(value)
 }
 
 
@@ -11407,6 +11598,209 @@ public func FfiConverterTypeHeader_lower(_ value: Header) -> RustBuffer {
 
 
 /**
+ * One page of a home's history: entries as canonical bytes, and whether more follow.
+ */
+public struct HistoryPage: Equatable, Hashable {
+    public let entries: [ByteString]
+    public let more: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(entries: [ByteString], more: Bool) {
+        self.entries = entries
+        self.more = more
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension HistoryPage: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeHistoryPage: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> HistoryPage {
+        return
+            try HistoryPage(
+                entries: FfiConverterSequenceTypeByteString.read(from: &buf), 
+                more: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: HistoryPage, into buf: inout [UInt8]) {
+        FfiConverterSequenceTypeByteString.write(value.entries, into: &buf)
+        FfiConverterBool.write(value.more, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHistoryPage_lift(_ buf: RustBuffer) throws -> HistoryPage {
+    return try FfiConverterTypeHistoryPage.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHistoryPage_lower(_ value: HistoryPage) -> RustBuffer {
+    return FfiConverterTypeHistoryPage.lower(value)
+}
+
+
+/**
+ * A finished history read: the URL it is bound to, the `Authorization` header value and
+ * the envelope.
+ */
+public struct HistoryReadCall: Equatable, Hashable {
+    public let url: String
+    public let authorization: String
+    public let envelope: Data
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(url: String, authorization: String, envelope: Data) {
+        self.url = url
+        self.authorization = authorization
+        self.envelope = envelope
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension HistoryReadCall: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeHistoryReadCall: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> HistoryReadCall {
+        return
+            try HistoryReadCall(
+                url: FfiConverterString.read(from: &buf), 
+                authorization: FfiConverterString.read(from: &buf), 
+                envelope: FfiConverterData.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: HistoryReadCall, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.url, into: &buf)
+        FfiConverterString.write(value.authorization, into: &buf)
+        FfiConverterData.write(value.envelope, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHistoryReadCall_lift(_ buf: RustBuffer) throws -> HistoryReadCall {
+    return try FfiConverterTypeHistoryReadCall.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHistoryReadCall_lower(_ value: HistoryReadCall) -> RustBuffer {
+    return FfiConverterTypeHistoryReadCall.lower(value)
+}
+
+
+/**
+ * A history read (`colophon.history.read`) by a member that holds no history yet: the
+ * account, the entry it was given as `asOf`, its signing point, the home's base (the
+ * audience) and the path relative to it, which must serve the history. `request_id` is 32
+ * random bytes.
+ */
+public struct HistoryReadSpec: Equatable, Hashable {
+    public let account: String
+    public let asOfSeq: UInt64
+    public let asOfDigest: String
+    public let signing: Data
+    public let audience: String
+    public let path: String
+    public let requestId: Data
+    public let created: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(account: String, asOfSeq: UInt64, asOfDigest: String, signing: Data, audience: String, path: String, requestId: Data, created: String) {
+        self.account = account
+        self.asOfSeq = asOfSeq
+        self.asOfDigest = asOfDigest
+        self.signing = signing
+        self.audience = audience
+        self.path = path
+        self.requestId = requestId
+        self.created = created
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension HistoryReadSpec: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeHistoryReadSpec: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> HistoryReadSpec {
+        return
+            try HistoryReadSpec(
+                account: FfiConverterString.read(from: &buf), 
+                asOfSeq: FfiConverterUInt64.read(from: &buf), 
+                asOfDigest: FfiConverterString.read(from: &buf), 
+                signing: FfiConverterData.read(from: &buf), 
+                audience: FfiConverterString.read(from: &buf), 
+                path: FfiConverterString.read(from: &buf), 
+                requestId: FfiConverterData.read(from: &buf), 
+                created: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: HistoryReadSpec, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.account, into: &buf)
+        FfiConverterUInt64.write(value.asOfSeq, into: &buf)
+        FfiConverterString.write(value.asOfDigest, into: &buf)
+        FfiConverterData.write(value.signing, into: &buf)
+        FfiConverterString.write(value.audience, into: &buf)
+        FfiConverterString.write(value.path, into: &buf)
+        FfiConverterData.write(value.requestId, into: &buf)
+        FfiConverterString.write(value.created, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHistoryReadSpec_lift(_ buf: RustBuffer) throws -> HistoryReadSpec {
+    return try FfiConverterTypeHistoryReadSpec.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHistoryReadSpec_lower(_ value: HistoryReadSpec) -> RustBuffer {
+    return FfiConverterTypeHistoryReadSpec.lower(value)
+}
+
+
+/**
  * The history verifier's verdict, with no host identity.
  */
 public struct HistoryReport: Equatable, Hashable {
@@ -11699,6 +12093,64 @@ public func FfiConverterTypeHttpRequest_lift(_ buf: RustBuffer) throws -> HttpRe
 #endif
 public func FfiConverterTypeHttpRequest_lower(_ value: HttpRequest) -> RustBuffer {
     return FfiConverterTypeHttpRequest.lower(value)
+}
+
+
+/**
+ * What a joining device accepted: `admitted` with the entries to store, or not admitted
+ * yet (the history names no member with its ID), with nothing to store.
+ */
+public struct JoinedHistory: Equatable, Hashable {
+    public let admitted: Bool
+    public let stores: [Store]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(admitted: Bool, stores: [Store]) {
+        self.admitted = admitted
+        self.stores = stores
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension JoinedHistory: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeJoinedHistory: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> JoinedHistory {
+        return
+            try JoinedHistory(
+                admitted: FfiConverterBool.read(from: &buf), 
+                stores: FfiConverterSequenceTypeStore.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: JoinedHistory, into buf: inout [UInt8]) {
+        FfiConverterBool.write(value.admitted, into: &buf)
+        FfiConverterSequenceTypeStore.write(value.stores, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeJoinedHistory_lift(_ buf: RustBuffer) throws -> JoinedHistory {
+    return try FfiConverterTypeJoinedHistory.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeJoinedHistory_lower(_ value: JoinedHistory) -> RustBuffer {
+    return FfiConverterTypeJoinedHistory.lower(value)
 }
 
 
@@ -26057,6 +26509,75 @@ public func accountDefaultPolicy()throws  -> String  {
 })
 }
 /**
+ * The descriptor (`rp`, credential, origins) of controller `id` in a verified history, when
+ * it is a current WebAuthn controller; none for a removed, provisional, suspended or raw
+ * controller or an unknown ID. The history must verify (`ok`), else its failure.
+ */
+public func accountCurrentWebauthnController(entries: [ByteString], id: String, nowMs: Int64)throws  -> KeyDescriptorView?  {
+    return try  FfiConverterOptionTypeKeyDescriptorView.lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_func_account_current_webauthn_controller(
+        FfiConverterSequenceTypeByteString.lower(entries),
+        FfiConverterString.lower(id),
+        FfiConverterInt64.lower(nowMs),uniffiCallStatus
+    )
+})
+}
+/**
+ * One page of `GET {base}/authority`: its entries as canonical bytes (at most 64) and
+ * whether more follow. `malformed` for anything else.
+ */
+public func accountHistoryPage(body: Data)throws  -> HistoryPage  {
+    return try  FfiConverterTypeHistoryPage_lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_func_account_history_page(
+        FfiConverterData.lower(body),uniffiCallStatus
+    )
+})
+}
+/**
+ * The path, relative to a home's base, of the history page after `after` entries
+ * (`/authority?after=<after>&limit=64`).
+ */
+public func accountHistoryPagePath(after: UInt64) -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_func_account_history_page_path(
+        FfiConverterUInt64.lower(after),uniffiCallStatus
+    )
+})
+}
+/**
+ * Accept a fetched history at an invite's head (core `v05::join::verify_at_head`): `ok`
+ * verdict, the history of `account`, every entry on the verified branch, the branch at least
+ * `seq` long with entry `seq` of body digest `head`, `member` (the key ID that signed the reads)
+ * the member `request` names, its tip exactly `signed_head` (the body
+ * of `GET {base}/head`, a fresh head of a current home serving at `base`), and the member of
+ * `request` (the joiner's own request envelope) current and granted from exactly that
+ * request. `admitted` false (and no stores) when the history names no member with that ID.
+ * Refused: another account, an entry off the branch, another digest at `seq`
+ * (`refused:fork`); a head beyond the history served (`refused:rollback`); a revoked or
+ * provisional member (`refused:revoked`), an expired one (`refused:expired`), a grant of
+ * another request (`refused:conflict`). `unavailable`: the branch is shorter than `seq`, or
+ * the head is behind or stale (fetch again).
+ */
+public func accountVerifyAtHead(account: String, seq: UInt64, head: String, member: String, request: Data, base: String, signedHead: Data, entries: [ByteString], nowMs: Int64)throws  -> JoinedHistory  {
+    return try  FfiConverterTypeJoinedHistory_lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_func_account_verify_at_head(
+        FfiConverterString.lower(account),
+        FfiConverterUInt64.lower(seq),
+        FfiConverterString.lower(head),
+        FfiConverterString.lower(member),
+        FfiConverterData.lower(request),
+        FfiConverterString.lower(base),
+        FfiConverterData.lower(signedHead),
+        FfiConverterSequenceTypeByteString.lower(entries),
+        FfiConverterInt64.lower(nowMs),uniffiCallStatus
+    )
+})
+}
+/**
  * The §2.2 date text of a millisecond time.
  */
 public func accountFormatDate(ms: Int64)throws  -> String  {
@@ -26225,6 +26746,18 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_colophon_ffi_checksum_func_account_default_policy() != 14553) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_func_account_current_webauthn_controller() != 989) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_func_account_history_page() != 41750) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_func_account_history_page_path() != 51785) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_func_account_verify_at_head() != 18815) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_colophon_ffi_checksum_func_account_format_date() != 57652) {
@@ -26659,6 +27192,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_colophon_ffi_checksum_method_accountengine_begin_write() != 50503) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_colophon_ffi_checksum_method_accountengine_begin_write_claimed() != 39144) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_colophon_ffi_checksum_method_accountengine_blob_availability() != 63667) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -26923,6 +27459,12 @@ private let initializationResult: InitializationResult = {
     if (uniffi_colophon_ffi_checksum_method_accountlivewrite_step() != 52482) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_colophon_ffi_checksum_method_accounthistoryread_finish() != 28928) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_accounthistoryread_step() != 5970) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_colophon_ffi_checksum_method_accountmove_finish() != 60405) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -27077,6 +27619,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_colophon_ffi_checksum_constructor_accountengine_open() != 59431) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_constructor_accounthistoryread_prepare() != 18393) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_colophon_ffi_checksum_constructor_accountmove_begin_upgrade() != 39020) {

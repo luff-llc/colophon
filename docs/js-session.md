@@ -115,6 +115,8 @@ from what is really stored, and the error is thrown.
 * **`PasskeyProvider`**: WebAuthn ES256 with user verification, and the PRF extension for the vault slot. Every ceremony
   is a `get` restricted to the one credential. `register` asks for PRF, records `authorityOrigins` (default: this
   page's origin) and makes sure every authority origin is also in `origins`; the core parses the attestation.
+  It asks for a discoverable credential (`residentKey: "required"`, `requireResidentKey: true`), so a security key
+  that cannot store one is refused at creation. This is deliberate: a Colophon passkey must be one the provider lists.
   `user.id` is the UTF-8 account ID when the account exists, else 32 random bytes (spec §17.4). **A passkey that
   returns no PRF output where one is needed fails (`unsupportedHere`): there is no fallback and no stand-in secret.**
   The core takes only `https://<host>` (no port) as a web origin, so a page served from `http://localhost` cannot own

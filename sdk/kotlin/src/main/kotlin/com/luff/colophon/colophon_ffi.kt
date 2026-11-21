@@ -883,6 +883,14 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_colophon_ffi_checksum_func_account_default_policy(
     ): Int
+    external fun uniffi_colophon_ffi_checksum_func_account_current_webauthn_controller(
+    ): Int
+    external fun uniffi_colophon_ffi_checksum_func_account_history_page(
+    ): Int
+    external fun uniffi_colophon_ffi_checksum_func_account_history_page_path(
+    ): Int
+    external fun uniffi_colophon_ffi_checksum_func_account_verify_at_head(
+    ): Int
     external fun uniffi_colophon_ffi_checksum_func_account_format_date(
     ): Int
     external fun uniffi_colophon_ffi_checksum_func_account_key_id(
@@ -1171,6 +1179,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_colophon_ffi_checksum_method_accountengine_begin_write(
     ): Int
+    external fun uniffi_colophon_ffi_checksum_method_accountengine_begin_write_claimed(
+    ): Int
     external fun uniffi_colophon_ffi_checksum_method_accountengine_blob_availability(
     ): Int
     external fun uniffi_colophon_ffi_checksum_method_accountengine_blob_chunk(
@@ -1347,6 +1357,10 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_colophon_ffi_checksum_method_accountlivewrite_step(
     ): Int
+    external fun uniffi_colophon_ffi_checksum_method_accounthistoryread_finish(
+    ): Int
+    external fun uniffi_colophon_ffi_checksum_method_accounthistoryread_step(
+    ): Int
     external fun uniffi_colophon_ffi_checksum_method_accountmove_finish(
     ): Int
     external fun uniffi_colophon_ffi_checksum_method_accountmove_kind(
@@ -1450,6 +1464,8 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_colophon_ffi_checksum_constructor_accountcreation_begin(
     ): Int
     external fun uniffi_colophon_ffi_checksum_constructor_accountengine_open(
+    ): Int
+    external fun uniffi_colophon_ffi_checksum_constructor_accounthistoryread_prepare(
     ): Int
     external fun uniffi_colophon_ffi_checksum_constructor_accountmove_begin_upgrade(
     ): Int
@@ -1869,6 +1885,8 @@ internal object UniffiLib {
     ): Long
     external fun uniffi_colophon_ffi_fn_method_accountengine_begin_write(`ptr`: Long,`namespace`: RustBuffer.ByValue,`kind`: RustBuffer.ByValue,`payloadJson`: RustBuffer.ByValue,`entropy`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
+    external fun uniffi_colophon_ffi_fn_method_accountengine_begin_write_claimed(`ptr`: Long,`namespace`: RustBuffer.ByValue,`kind`: RustBuffer.ByValue,`payloadJson`: RustBuffer.ByValue,`claimedMs`: Long,`entropy`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
     external fun uniffi_colophon_ffi_fn_method_accountengine_blob_availability(`ptr`: Long,`namespace`: RustBuffer.ByValue,`digest`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_colophon_ffi_fn_method_accountengine_blob_chunk(`ptr`: Long,`namespace`: RustBuffer.ByValue,`digest`: RustBuffer.ByValue,`index`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -2048,6 +2066,16 @@ internal object UniffiLib {
     external fun uniffi_colophon_ffi_fn_method_accountlivewrite_state_path(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_colophon_ffi_fn_method_accountlivewrite_step(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_colophon_ffi_fn_clone_accounthistoryread(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun uniffi_colophon_ffi_fn_free_accounthistoryread(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_colophon_ffi_fn_constructor_accounthistoryread_prepare(`spec`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun uniffi_colophon_ffi_fn_method_accounthistoryread_finish(`ptr`: Long,`signature`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_colophon_ffi_fn_method_accounthistoryread_step(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_colophon_ffi_fn_clone_accountmove(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
@@ -2251,6 +2279,14 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_colophon_ffi_fn_func_account_default_policy(uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_colophon_ffi_fn_func_account_current_webauthn_controller(`entries`: RustBuffer.ByValue,`id`: RustBuffer.ByValue,`nowMs`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_colophon_ffi_fn_func_account_history_page(`body`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_colophon_ffi_fn_func_account_history_page_path(`after`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_colophon_ffi_fn_func_account_verify_at_head(`account`: RustBuffer.ByValue,`seq`: Long,`head`: RustBuffer.ByValue,`member`: RustBuffer.ByValue,`request`: RustBuffer.ByValue,`base`: RustBuffer.ByValue,`signedHead`: RustBuffer.ByValue,`entries`: RustBuffer.ByValue,`nowMs`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_colophon_ffi_fn_func_account_format_date(`ms`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_colophon_ffi_fn_func_account_key_id(`signing`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -2428,6 +2464,18 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_colophon_ffi_checksum_func_account_default_policy() and 0xFFFF) != 14553) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_colophon_ffi_checksum_func_account_current_webauthn_controller() and 0xFFFF) != 989) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_colophon_ffi_checksum_func_account_history_page() and 0xFFFF) != 41750) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_colophon_ffi_checksum_func_account_history_page_path() and 0xFFFF) != 51785) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_colophon_ffi_checksum_func_account_verify_at_head() and 0xFFFF) != 18815) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_colophon_ffi_checksum_func_account_format_date() and 0xFFFF) != 57652) {
@@ -2862,6 +2910,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_colophon_ffi_checksum_method_accountengine_begin_write() and 0xFFFF) != 50503) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_colophon_ffi_checksum_method_accountengine_begin_write_claimed() and 0xFFFF) != 39144) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_colophon_ffi_checksum_method_accountengine_blob_availability() and 0xFFFF) != 63667) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -3126,6 +3177,12 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_colophon_ffi_checksum_method_accountlivewrite_step() and 0xFFFF) != 52482) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_colophon_ffi_checksum_method_accounthistoryread_finish() and 0xFFFF) != 28928) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_colophon_ffi_checksum_method_accounthistoryread_step() and 0xFFFF) != 5970) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_colophon_ffi_checksum_method_accountmove_finish() and 0xFFFF) != 60405) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -3280,6 +3337,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_colophon_ffi_checksum_constructor_accountengine_open() and 0xFFFF) != 59431) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_colophon_ffi_checksum_constructor_accounthistoryread_prepare() and 0xFFFF) != 18393) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_colophon_ffi_checksum_constructor_accountmove_begin_upgrade() and 0xFFFF) != 39020) {
@@ -5367,6 +5427,14 @@ public interface AccountEngineInterface {
     fun `beginWrite`(`namespace`: kotlin.String, `kind`: kotlin.String, `payloadJson`: kotlin.String, `entropy`: kotlin.ByteArray): AccountAction
     
     /**
+     * A record write whose signed `created` is `claimed_ms` (ms since the Unix epoch) instead
+     * of the engine's clock: an app importing old data keeps each item's original date. Only
+     * `created` changes; a claimed date later than the engine's clock is refused, and so is a
+     * write by a member whose grant has expired by the engine's clock. 32 bytes of entropy.
+     */
+    fun `beginWriteClaimed`(`namespace`: kotlin.String, `kind`: kotlin.String, `payloadJson`: kotlin.String, `claimedMs`: kotlin.Long, `entropy`: kotlin.ByteArray): AccountAction
+    
+    /**
      * How much of a blob is held.
      */
     fun `blobAvailability`(`namespace`: kotlin.String, `digest`: kotlin.String): BlobAvailability
@@ -6522,6 +6590,31 @@ open class AccountEngine: Disposable, AutoCloseable, AccountEngineInterface
         FfiConverterString.lower(`namespace`),
         FfiConverterString.lower(`kind`),
         FfiConverterString.lower(`payloadJson`),
+        FfiConverterByteArray.lower(`entropy`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * A record write whose signed `created` is `claimed_ms` (ms since the Unix epoch) instead
+     * of the engine's clock: an app importing old data keeps each item's original date. Only
+     * `created` changes; a claimed date later than the engine's clock is refused, and so is a
+     * write by a member whose grant has expired by the engine's clock. 32 bytes of entropy.
+     */
+    @Throws(AccountException::class)override fun `beginWriteClaimed`(`namespace`: kotlin.String, `kind`: kotlin.String, `payloadJson`: kotlin.String, `claimedMs`: kotlin.Long, `entropy`: kotlin.ByteArray): AccountAction {
+            return FfiConverterTypeAccountAction.lift(
+    callWithHandle {
+    uniffiRustCallWithError(AccountException) { _status ->
+    UniffiLib.uniffi_colophon_ffi_fn_method_accountengine_begin_write_claimed(
+        it,
+        
+        FfiConverterString.lower(`namespace`),
+        FfiConverterString.lower(`kind`),
+        FfiConverterString.lower(`payloadJson`),
+        FfiConverterLong.lower(`claimedMs`),
         FfiConverterByteArray.lower(`entropy`),_status)
 }
     }
@@ -8171,6 +8264,315 @@ public object FfiConverterTypeAccountEngine: FfiConverter<AccountEngine, Long> {
     override fun allocationSize(value: AccountEngine) = 8UL
 
     override fun write(value: AccountEngine, buf: ByteBuffer) {
+        buf.putLong(lower(value))
+    }
+}
+
+
+// This template implements a class for working with a Rust struct via a handle
+// to the live Rust struct on the other side of the FFI.
+//
+// There's some subtlety here, because we have to be careful not to operate on a Rust
+// struct after it has been dropped, and because we must expose a public API for freeing
+// theq Kotlin wrapper object in lieu of reliable finalizers. The core requirements are:
+//
+//   * Each instance holds an opaque handle to the underlying Rust struct.
+//     Method calls need to read this handle from the object's state and pass it in to
+//     the Rust FFI.
+//
+//   * When an instance is no longer needed, its handle should be passed to a
+//     special destructor function provided by the Rust FFI, which will drop the
+//     underlying Rust struct.
+//
+//   * Given an instance, calling code is expected to call the special
+//     `destroy` method in order to free it after use, either by calling it explicitly
+//     or by using a higher-level helper like the `use` method. Failing to do so risks
+//     leaking the underlying Rust struct.
+//
+//   * We can't assume that calling code will do the right thing, and must be prepared
+//     to handle Kotlin method calls executing concurrently with or even after a call to
+//     `destroy`, and to handle multiple (possibly concurrent!) calls to `destroy`.
+//
+//   * We must never allow Rust code to operate on the underlying Rust struct after
+//     the destructor has been called, and must never call the destructor more than once.
+//     Doing so may trigger memory unsafety.
+//
+//   * To mitigate many of the risks of leaking memory and use-after-free unsafety, a `Cleaner`
+//     is implemented to call the destructor when the Kotlin object becomes unreachable.
+//     This is done in a background thread. This is not a panacea, and client code should be aware that
+//      1. the thread may starve if some there are objects that have poorly performing
+//     `drop` methods or do significant work in their `drop` methods.
+//      2. the thread is shared across the whole library. This can be tuned by using `android_cleaner = true`,
+//         or `android = true` in the [`kotlin` section of the `uniffi.toml` file](https://mozilla.github.io/uniffi-rs/kotlin/configuration.html).
+//
+// If we try to implement this with mutual exclusion on access to the handle, there is the
+// possibility of a race between a method call and a concurrent call to `destroy`:
+//
+//    * Thread A starts a method call, reads the value of the handle, but is interrupted
+//      before it can pass the handle over the FFI to Rust.
+//    * Thread B calls `destroy` and frees the underlying Rust struct.
+//    * Thread A resumes, passing the already-read handle value to Rust and triggering
+//      a use-after-free.
+//
+// One possible solution would be to use a `ReadWriteLock`, with each method call taking
+// a read lock (and thus allowed to run concurrently) and the special `destroy` method
+// taking a write lock (and thus blocking on live method calls). However, we aim not to
+// generate methods with any hidden blocking semantics, and a `destroy` method that might
+// block if called incorrectly seems to meet that bar.
+//
+// So, we achieve our goals by giving each instance an associated `AtomicLong` counter to track
+// the number of in-flight method calls, and an `AtomicBoolean` flag to indicate whether `destroy`
+// has been called. These are updated according to the following rules:
+//
+//    * The initial value of the counter is 1, indicating a live object with no in-flight calls.
+//      The initial value for the flag is false.
+//
+//    * At the start of each method call, we atomically check the counter.
+//      If it is 0 then the underlying Rust struct has already been destroyed and the call is aborted.
+//      If it is nonzero them we atomically increment it by 1 and proceed with the method call.
+//
+//    * At the end of each method call, we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+//    * When `destroy` is called, we atomically flip the flag from false to true.
+//      If the flag was already true we silently fail.
+//      Otherwise we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+// Astute readers may observe that this all sounds very similar to the way that Rust's `Arc<T>` works,
+// and indeed it is, with the addition of a flag to guard against multiple calls to `destroy`.
+//
+// The overall effect is that the underlying Rust struct is destroyed only when `destroy` has been
+// called *and* all in-flight method calls have completed, avoiding violating any of the expectations
+// of the underlying Rust code.
+//
+// This makes a cleaner a better alternative to _not_ calling `destroy()` as
+// and when the object is finished with, but the abstraction is not perfect: if the Rust object's `drop`
+// method is slow, and/or there are many objects to cleanup, and it's on a low end Android device, then the cleaner
+// thread may be starved, and the app will leak memory.
+//
+// In this case, `destroy`ing manually may be a better solution.
+//
+// The cleaner can live side by side with the manual calling of `destroy`. In the order of responsiveness, uniffi objects
+// with Rust peers are reclaimed:
+//
+// 1. By calling the `destroy` method of the object, which calls `rustObject.free()`. If that doesn't happen:
+// 2. When the object becomes unreachable, AND the Cleaner thread gets to call `rustObject.free()`. If the thread is starved then:
+// 3. The memory is reclaimed when the process terminates.
+//
+// [1] https://stackoverflow.com/questions/24376768/can-java-finalize-an-object-when-it-is-still-in-scope/24380219
+//
+
+
+/**
+ * A `colophon.history.read` call being prepared and signed by a member that holds no history:
+ * one `GET` at a home path that serves the history, `asOf` the entry the device was given.
+ */
+public interface AccountHistoryReadInterface {
+    
+    /**
+     * Finish with the member's signature: the envelope (parsed, possession checked), the URL it
+     * is bound to and the `Authorization` header value (`Colophon <base64url envelope>`).
+     */
+    fun `finish`(`signature`: Signature): HistoryReadCall
+    
+    /**
+     * The one step the member key signs (raw).
+     */
+    fun `step`(): AccountSigningStep
+    
+    companion object
+}
+
+/**
+ * A `colophon.history.read` call being prepared and signed by a member that holds no history:
+ * one `GET` at a home path that serves the history, `asOf` the entry the device was given.
+ */
+open class AccountHistoryRead: Disposable, AutoCloseable, AccountHistoryReadInterface
+{
+
+    @Suppress("UNUSED_PARAMETER")
+    /**
+     * @suppress
+     */
+    constructor(withHandle: UniffiWithHandle, handle: Long) {
+        this.handle = handle
+        this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(handle))
+    }
+
+    /**
+     * @suppress
+     *
+     * This constructor can be used to instantiate a fake object. Only used for tests. Any
+     * attempt to actually use an object constructed this way will fail as there is no
+     * connected Rust object.
+     */
+    @Suppress("UNUSED_PARAMETER")
+    constructor(noHandle: NoHandle) {
+        this.handle = 0
+        this.cleanable = null
+    }
+
+    protected val handle: Long
+    protected val cleanable: UniffiCleaner.Cleanable?
+
+    private val wasDestroyed = AtomicBoolean(false)
+    private val callCounter = AtomicLong(1)
+
+    /**
+     * Whether the current object has been destroyed and its reference is gone in the Rust side.
+     */
+    val uniffiIsDestroyed: Boolean get() = wasDestroyed.get()
+
+    override fun destroy() {
+        // Only allow a single call to this method.
+        // TODO: maybe we should log a warning if called more than once?
+        if (this.wasDestroyed.compareAndSet(false, true)) {
+            // This decrement always matches the initial count of 1 given at creation time.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable?.clean()
+            }
+        }
+    }
+
+    @Synchronized
+    override fun close() {
+        this.destroy()
+    }
+
+    internal inline fun <R> callWithHandle(block: (handle: Long) -> R): R {
+        // Check and increment the call counter, to keep the object alive.
+        // This needs a compare-and-set retry loop in case of concurrent updates.
+        do {
+            val c = this.callCounter.get()
+            if (c == 0L) {
+                throw IllegalStateException("${this.javaClass.simpleName} object has already been destroyed")
+            }
+            if (c == Long.MAX_VALUE) {
+                throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
+            }
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
+        // Now we can safely do the method call without the handle being freed concurrently.
+        try {
+            return block(this.uniffiCloneHandle())
+        } finally {
+            // This decrement always matches the increment we performed above.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable?.clean()
+            }
+        }
+    }
+
+    // Use a static inner class instead of a closure so as not to accidentally
+    // capture `this` as part of the cleanable's action.
+    private class UniffiCleanAction(private val handle: Long) : Runnable {
+        override fun run() {
+            if (handle == 0.toLong()) {
+                // Fake object created with `NoHandle`, don't try to free.
+                return;
+            }
+            uniffiRustCall { status ->
+                UniffiLib.uniffi_colophon_ffi_fn_free_accounthistoryread(handle, status)
+            }
+        }
+    }
+
+    /**
+     * @suppress
+     */
+    fun uniffiCloneHandle(): Long {
+        if (handle == 0.toLong()) {
+            throw InternalException("uniffiCloneHandle() called on NoHandle object");
+        }
+        return uniffiRustCall() { status ->
+            UniffiLib.uniffi_colophon_ffi_fn_clone_accounthistoryread(handle, status)
+        }
+    }
+
+    
+    /**
+     * Finish with the member's signature: the envelope (parsed, possession checked), the URL it
+     * is bound to and the `Authorization` header value (`Colophon <base64url envelope>`).
+     */
+    @Throws(AccountException::class)override fun `finish`(`signature`: Signature): HistoryReadCall {
+            return FfiConverterTypeHistoryReadCall.lift(
+    callWithHandle {
+    uniffiRustCallWithError(AccountException) { _status ->
+    UniffiLib.uniffi_colophon_ffi_fn_method_accounthistoryread_finish(
+        it,
+        
+        FfiConverterTypeSignature.lower(`signature`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * The one step the member key signs (raw).
+     */
+    @Throws(AccountException::class)override fun `step`(): AccountSigningStep {
+            return FfiConverterTypeAccountSigningStep.lift(
+    callWithHandle {
+    uniffiRustCallWithError(AccountException) { _status ->
+    UniffiLib.uniffi_colophon_ffi_fn_method_accounthistoryread_step(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    
+
+    
+
+
+    
+    companion object {
+        
+    /**
+     * Prepare a history read.
+     */
+    @Throws(AccountException::class) fun `prepare`(`spec`: HistoryReadSpec): AccountHistoryRead {
+            return FfiConverterTypeAccountHistoryRead.lift(
+    uniffiRustCallWithError(AccountException) { _status ->
+    UniffiLib.uniffi_colophon_ffi_fn_constructor_accounthistoryread_prepare(
+    
+        
+        FfiConverterTypeHistoryReadSpec.lower(`spec`),_status)
+}
+    )
+    }
+    
+
+        
+    }
+    
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeAccountHistoryRead: FfiConverter<AccountHistoryRead, Long> {
+    override fun lower(value: AccountHistoryRead): Long {
+        return value.uniffiCloneHandle()
+    }
+
+    override fun lift(value: Long): AccountHistoryRead {
+        return AccountHistoryRead(UniffiWithHandle, value)
+    }
+
+    override fun read(buf: ByteBuffer): AccountHistoryRead {
+        return lift(buf.getLong())
+    }
+
+    override fun allocationSize(value: AccountHistoryRead) = 8UL
+
+    override fun write(value: AccountHistoryRead, buf: ByteBuffer) {
         buf.putLong(lower(value))
     }
 }
@@ -18685,6 +19087,168 @@ public object FfiConverterTypeHeader: FfiConverterRustBuffer<Header> {
 
 
 /**
+ * One page of a home's history: entries as canonical bytes, and whether more follow.
+ */
+data class HistoryPage (
+    val `entries`: List<ByteString>
+    , 
+    val `more`: kotlin.Boolean
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeHistoryPage: FfiConverterRustBuffer<HistoryPage> {
+    override fun read(buf: ByteBuffer): HistoryPage {
+        return HistoryPage(
+            FfiConverterSequenceTypeByteString.read(buf),
+            FfiConverterBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: HistoryPage) = (
+            FfiConverterSequenceTypeByteString.allocationSize(value.`entries`) +
+            FfiConverterBoolean.allocationSize(value.`more`)
+    )
+
+    override fun write(value: HistoryPage, buf: ByteBuffer) {
+            FfiConverterSequenceTypeByteString.write(value.`entries`, buf)
+            FfiConverterBoolean.write(value.`more`, buf)
+    }
+}
+
+
+
+/**
+ * A finished history read: the URL it is bound to, the `Authorization` header value and
+ * the envelope.
+ */
+data class HistoryReadCall (
+    val `url`: kotlin.String
+    , 
+    val `authorization`: kotlin.String
+    , 
+    val `envelope`: kotlin.ByteArray
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeHistoryReadCall: FfiConverterRustBuffer<HistoryReadCall> {
+    override fun read(buf: ByteBuffer): HistoryReadCall {
+        return HistoryReadCall(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterByteArray.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: HistoryReadCall) = (
+            FfiConverterString.allocationSize(value.`url`) +
+            FfiConverterString.allocationSize(value.`authorization`) +
+            FfiConverterByteArray.allocationSize(value.`envelope`)
+    )
+
+    override fun write(value: HistoryReadCall, buf: ByteBuffer) {
+            FfiConverterString.write(value.`url`, buf)
+            FfiConverterString.write(value.`authorization`, buf)
+            FfiConverterByteArray.write(value.`envelope`, buf)
+    }
+}
+
+
+
+/**
+ * A history read (`colophon.history.read`) by a member that holds no history yet: the
+ * account, the entry it was given as `asOf`, its signing point, the home's base (the
+ * audience) and the path relative to it, which must serve the history. `request_id` is 32
+ * random bytes.
+ */
+data class HistoryReadSpec (
+    val `account`: kotlin.String
+    , 
+    val `asOfSeq`: kotlin.ULong
+    , 
+    val `asOfDigest`: kotlin.String
+    , 
+    val `signing`: kotlin.ByteArray
+    , 
+    val `audience`: kotlin.String
+    , 
+    val `path`: kotlin.String
+    , 
+    val `requestId`: kotlin.ByteArray
+    , 
+    val `created`: kotlin.String
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeHistoryReadSpec: FfiConverterRustBuffer<HistoryReadSpec> {
+    override fun read(buf: ByteBuffer): HistoryReadSpec {
+        return HistoryReadSpec(
+            FfiConverterString.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: HistoryReadSpec) = (
+            FfiConverterString.allocationSize(value.`account`) +
+            FfiConverterULong.allocationSize(value.`asOfSeq`) +
+            FfiConverterString.allocationSize(value.`asOfDigest`) +
+            FfiConverterByteArray.allocationSize(value.`signing`) +
+            FfiConverterString.allocationSize(value.`audience`) +
+            FfiConverterString.allocationSize(value.`path`) +
+            FfiConverterByteArray.allocationSize(value.`requestId`) +
+            FfiConverterString.allocationSize(value.`created`)
+    )
+
+    override fun write(value: HistoryReadSpec, buf: ByteBuffer) {
+            FfiConverterString.write(value.`account`, buf)
+            FfiConverterULong.write(value.`asOfSeq`, buf)
+            FfiConverterString.write(value.`asOfDigest`, buf)
+            FfiConverterByteArray.write(value.`signing`, buf)
+            FfiConverterString.write(value.`audience`, buf)
+            FfiConverterString.write(value.`path`, buf)
+            FfiConverterByteArray.write(value.`requestId`, buf)
+            FfiConverterString.write(value.`created`, buf)
+    }
+}
+
+
+
+/**
  * The history verifier's verdict, with no host identity.
  */
 data class HistoryReport (
@@ -18928,6 +19492,48 @@ public object FfiConverterTypeHttpRequest: FfiConverterRustBuffer<HttpRequest> {
             FfiConverterString.write(value.`url`, buf)
             FfiConverterSequenceTypeHeader.write(value.`headers`, buf)
             FfiConverterByteArray.write(value.`body`, buf)
+    }
+}
+
+
+
+/**
+ * What a joining device accepted: `admitted` with the entries to store, or not admitted
+ * yet (the history names no member with its ID), with nothing to store.
+ */
+data class JoinedHistory (
+    val `admitted`: kotlin.Boolean
+    , 
+    val `stores`: List<Store>
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeJoinedHistory: FfiConverterRustBuffer<JoinedHistory> {
+    override fun read(buf: ByteBuffer): JoinedHistory {
+        return JoinedHistory(
+            FfiConverterBoolean.read(buf),
+            FfiConverterSequenceTypeStore.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: JoinedHistory) = (
+            FfiConverterBoolean.allocationSize(value.`admitted`) +
+            FfiConverterSequenceTypeStore.allocationSize(value.`stores`)
+    )
+
+    override fun write(value: JoinedHistory, buf: ByteBuffer) {
+            FfiConverterBoolean.write(value.`admitted`, buf)
+            FfiConverterSequenceTypeStore.write(value.`stores`, buf)
     }
 }
 
@@ -30625,6 +31231,90 @@ public object FfiConverterMapStringByteArray: FfiConverterRustBuffer<Map<kotlin.
     UniffiLib.uniffi_colophon_ffi_fn_func_account_default_policy(
     
         _status)
+}
+    )
+    }
+    
+
+        /**
+         * The descriptor (`rp`, credential, origins) of controller `id` in a verified history, when
+         * it is a current WebAuthn controller; none for a removed, provisional, suspended or raw
+         * controller or an unknown ID. The history must verify (`ok`), else its failure.
+         */
+    @Throws(AccountException::class) fun `accountCurrentWebauthnController`(`entries`: List<ByteString>, `id`: kotlin.String, `nowMs`: kotlin.Long): KeyDescriptorView? {
+            return FfiConverterOptionalTypeKeyDescriptorView.lift(
+    uniffiRustCallWithError(AccountException) { _status ->
+    UniffiLib.uniffi_colophon_ffi_fn_func_account_current_webauthn_controller(
+    
+        
+        FfiConverterSequenceTypeByteString.lower(`entries`),
+        FfiConverterString.lower(`id`),
+        FfiConverterLong.lower(`nowMs`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * One page of `GET {base}/authority`: its entries as canonical bytes (at most 64) and
+         * whether more follow. `malformed` for anything else.
+         */
+    @Throws(AccountException::class) fun `accountHistoryPage`(`body`: kotlin.ByteArray): HistoryPage {
+            return FfiConverterTypeHistoryPage.lift(
+    uniffiRustCallWithError(AccountException) { _status ->
+    UniffiLib.uniffi_colophon_ffi_fn_func_account_history_page(
+    
+        
+        FfiConverterByteArray.lower(`body`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * The path, relative to a home's base, of the history page after `after` entries
+         * (`/authority?after=<after>&limit=64`).
+         */ fun `accountHistoryPagePath`(`after`: kotlin.ULong): kotlin.String {
+            return FfiConverterString.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_colophon_ffi_fn_func_account_history_page_path(
+    
+        
+        FfiConverterULong.lower(`after`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Accept a fetched history at an invite's head (core `v05::join::verify_at_head`): `ok`
+         * verdict, the history of `account`, every entry on the verified branch, the branch at least
+         * `seq` long with entry `seq` of body digest `head`, `member` (the key ID that signed the reads)
+         * the member `request` names, its tip exactly `signed_head` (the body
+         * of `GET {base}/head`, a fresh head of a current home serving at `base`), and the member of
+         * `request` (the joiner's own request envelope) current and granted from exactly that
+         * request. `admitted` false (and no stores) when the history names no member with that ID.
+         * Refused: another account, an entry off the branch, another digest at `seq`
+         * (`refused:fork`); a head beyond the history served (`refused:rollback`); a revoked or
+         * provisional member (`refused:revoked`), an expired one (`refused:expired`), a grant of
+         * another request (`refused:conflict`). `unavailable`: the branch is shorter than `seq`, or
+         * the head is behind or stale (fetch again).
+         */
+    @Throws(AccountException::class) fun `accountVerifyAtHead`(`account`: kotlin.String, `seq`: kotlin.ULong, `head`: kotlin.String, `member`: kotlin.String, `request`: kotlin.ByteArray, `base`: kotlin.String, `signedHead`: kotlin.ByteArray, `entries`: List<ByteString>, `nowMs`: kotlin.Long): JoinedHistory {
+            return FfiConverterTypeJoinedHistory.lift(
+    uniffiRustCallWithError(AccountException) { _status ->
+    UniffiLib.uniffi_colophon_ffi_fn_func_account_verify_at_head(
+    
+        
+        FfiConverterString.lower(`account`),
+        FfiConverterULong.lower(`seq`),
+        FfiConverterString.lower(`head`),
+        FfiConverterString.lower(`member`),
+        FfiConverterByteArray.lower(`request`),
+        FfiConverterString.lower(`base`),
+        FfiConverterByteArray.lower(`signedHead`),
+        FfiConverterSequenceTypeByteString.lower(`entries`),
+        FfiConverterLong.lower(`nowMs`),_status)
 }
     )
     }

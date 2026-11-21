@@ -812,6 +812,18 @@ begin_methods! {
             Err(d) => Prepared::Denied(d),
         })
     }
+    /// A record write whose signed `created` is `claimed_ms` (ms since the Unix epoch) instead
+    /// of the engine's clock: an app importing old data keeps each item's original date. Only
+    /// `created` changes; a claimed date later than the engine's clock is refused, and so is a
+    /// write by a member whose grant has expired by the engine's clock. 32 bytes of entropy.
+    fn begin_write_claimed(namespace: String, kind: String, payload_json: String, claimed_ms: i64) Write |e, s| {
+        let sd = seeds32(s, 1)?;
+        let p = json(&payload_json, "payload")?;
+        Ok(match e.begin_write_claimed(&namespace, &kind, p, Level::Write, Some(claimed_ms), sd[0])? {
+            Ok(a) => Prepared::Action(a),
+            Err(d) => Prepared::Denied(d),
+        })
+    }
     /// A proposal (§11.6). 32 bytes of entropy.
     fn begin_propose(namespace: String, kind: String, payload_json: String) Propose |e, s| {
         let sd = seeds32(s, 1)?;

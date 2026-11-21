@@ -18,6 +18,7 @@ pub mod heads;
 pub mod history;
 pub(crate) mod hpke_wiped;
 pub mod ids;
+pub mod join;
 pub mod live;
 pub mod members;
 pub mod pairing;

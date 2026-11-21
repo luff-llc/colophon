@@ -1243,6 +1243,11 @@ uint64_t uniffi_colophon_ffi_fn_method_accountengine_begin_veto(uint64_t ptr, Ru
 uint64_t uniffi_colophon_ffi_fn_method_accountengine_begin_write(uint64_t ptr, RustBuffer namespace, RustBuffer kind, RustBuffer payload_json, RustBuffer entropy, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_METHOD_ACCOUNTENGINE_BEGIN_WRITE_CLAIMED
+#define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_METHOD_ACCOUNTENGINE_BEGIN_WRITE_CLAIMED
+uint64_t uniffi_colophon_ffi_fn_method_accountengine_begin_write_claimed(uint64_t ptr, RustBuffer namespace, RustBuffer kind, RustBuffer payload_json, int64_t claimed_ms, RustBuffer entropy, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_METHOD_ACCOUNTENGINE_BLOB_AVAILABILITY
 #define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_METHOD_ACCOUNTENGINE_BLOB_AVAILABILITY
 RustBuffer uniffi_colophon_ffi_fn_method_accountengine_blob_availability(uint64_t ptr, RustBuffer namespace, RustBuffer digest, RustCallStatus *_Nonnull out_status
@@ -1691,6 +1696,31 @@ RustBuffer uniffi_colophon_ffi_fn_method_accountlivewrite_state_path(uint64_t pt
 #ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_METHOD_ACCOUNTLIVEWRITE_STEP
 #define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_METHOD_ACCOUNTLIVEWRITE_STEP
 RustBuffer uniffi_colophon_ffi_fn_method_accountlivewrite_step(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_CLONE_ACCOUNTHISTORYREAD
+#define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_CLONE_ACCOUNTHISTORYREAD
+uint64_t uniffi_colophon_ffi_fn_clone_accounthistoryread(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_FREE_ACCOUNTHISTORYREAD
+#define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_FREE_ACCOUNTHISTORYREAD
+void uniffi_colophon_ffi_fn_free_accounthistoryread(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_CONSTRUCTOR_ACCOUNTHISTORYREAD_PREPARE
+#define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_CONSTRUCTOR_ACCOUNTHISTORYREAD_PREPARE
+uint64_t uniffi_colophon_ffi_fn_constructor_accounthistoryread_prepare(RustBuffer spec, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_METHOD_ACCOUNTHISTORYREAD_FINISH
+#define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_METHOD_ACCOUNTHISTORYREAD_FINISH
+RustBuffer uniffi_colophon_ffi_fn_method_accounthistoryread_finish(uint64_t ptr, RustBuffer signature, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_METHOD_ACCOUNTHISTORYREAD_STEP
+#define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_METHOD_ACCOUNTHISTORYREAD_STEP
+RustBuffer uniffi_colophon_ffi_fn_method_accounthistoryread_step(uint64_t ptr, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_CLONE_ACCOUNTMOVE
@@ -2201,6 +2231,26 @@ RustBuffer uniffi_colophon_ffi_fn_func_account_default_policy(RustCallStatus *_N
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_FUNC_ACCOUNT_CURRENT_WEBAUTHN_CONTROLLER
+#define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_FUNC_ACCOUNT_CURRENT_WEBAUTHN_CONTROLLER
+RustBuffer uniffi_colophon_ffi_fn_func_account_current_webauthn_controller(RustBuffer entries, RustBuffer id, int64_t now_ms, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_FUNC_ACCOUNT_HISTORY_PAGE
+#define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_FUNC_ACCOUNT_HISTORY_PAGE
+RustBuffer uniffi_colophon_ffi_fn_func_account_history_page(RustBuffer body, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_FUNC_ACCOUNT_HISTORY_PAGE_PATH
+#define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_FUNC_ACCOUNT_HISTORY_PAGE_PATH
+RustBuffer uniffi_colophon_ffi_fn_func_account_history_page_path(uint64_t after, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_FUNC_ACCOUNT_VERIFY_AT_HEAD
+#define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_FUNC_ACCOUNT_VERIFY_AT_HEAD
+RustBuffer uniffi_colophon_ffi_fn_func_account_verify_at_head(RustBuffer account, uint64_t seq, RustBuffer head, RustBuffer member, RustBuffer request, RustBuffer base, RustBuffer signed_head, RustBuffer entries, int64_t now_ms, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_FUNC_ACCOUNT_FORMAT_DATE
 #define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_FUNC_ACCOUNT_FORMAT_DATE
 RustBuffer uniffi_colophon_ffi_fn_func_account_format_date(int64_t ms, RustCallStatus *_Nonnull out_status
@@ -2587,6 +2637,30 @@ uint16_t uniffi_colophon_ffi_checksum_func_import_legacy_batch(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_FUNC_ACCOUNT_DEFAULT_POLICY
 #define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_FUNC_ACCOUNT_DEFAULT_POLICY
 uint16_t uniffi_colophon_ffi_checksum_func_account_default_policy(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_FUNC_ACCOUNT_CURRENT_WEBAUTHN_CONTROLLER
+#define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_FUNC_ACCOUNT_CURRENT_WEBAUTHN_CONTROLLER
+uint16_t uniffi_colophon_ffi_checksum_func_account_current_webauthn_controller(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_FUNC_ACCOUNT_HISTORY_PAGE
+#define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_FUNC_ACCOUNT_HISTORY_PAGE
+uint16_t uniffi_colophon_ffi_checksum_func_account_history_page(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_FUNC_ACCOUNT_HISTORY_PAGE_PATH
+#define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_FUNC_ACCOUNT_HISTORY_PAGE_PATH
+uint16_t uniffi_colophon_ffi_checksum_func_account_history_page_path(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_FUNC_ACCOUNT_VERIFY_AT_HEAD
+#define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_FUNC_ACCOUNT_VERIFY_AT_HEAD
+uint16_t uniffi_colophon_ffi_checksum_func_account_verify_at_head(void
     
 );
 #endif
@@ -3454,6 +3528,12 @@ uint16_t uniffi_colophon_ffi_checksum_method_accountengine_begin_write(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_METHOD_ACCOUNTENGINE_BEGIN_WRITE_CLAIMED
+#define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_METHOD_ACCOUNTENGINE_BEGIN_WRITE_CLAIMED
+uint16_t uniffi_colophon_ffi_checksum_method_accountengine_begin_write_claimed(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_METHOD_ACCOUNTENGINE_BLOB_AVAILABILITY
 #define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_METHOD_ACCOUNTENGINE_BLOB_AVAILABILITY
 uint16_t uniffi_colophon_ffi_checksum_method_accountengine_blob_availability(void
@@ -3982,6 +4062,18 @@ uint16_t uniffi_colophon_ffi_checksum_method_accountlivewrite_step(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_METHOD_ACCOUNTHISTORYREAD_FINISH
+#define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_METHOD_ACCOUNTHISTORYREAD_FINISH
+uint16_t uniffi_colophon_ffi_checksum_method_accounthistoryread_finish(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_METHOD_ACCOUNTHISTORYREAD_STEP
+#define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_METHOD_ACCOUNTHISTORYREAD_STEP
+uint16_t uniffi_colophon_ffi_checksum_method_accounthistoryread_step(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_METHOD_ACCOUNTMOVE_FINISH
 #define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_METHOD_ACCOUNTMOVE_FINISH
 uint16_t uniffi_colophon_ffi_checksum_method_accountmove_finish(void
@@ -4291,6 +4383,12 @@ uint16_t uniffi_colophon_ffi_checksum_constructor_accountcreation_begin(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_CONSTRUCTOR_ACCOUNTENGINE_OPEN
 #define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_CONSTRUCTOR_ACCOUNTENGINE_OPEN
 uint16_t uniffi_colophon_ffi_checksum_constructor_accountengine_open(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_CONSTRUCTOR_ACCOUNTHISTORYREAD_PREPARE
+#define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_CONSTRUCTOR_ACCOUNTHISTORYREAD_PREPARE
+uint16_t uniffi_colophon_ffi_checksum_constructor_accounthistoryread_prepare(void
     
 );
 #endif

@@ -1,0 +1,119 @@
+name: Colophon CI
+
+'on':
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Crypto-heavy test fixtures are prohibitively slow without optimization.
+  # The test profile keeps debug assertions and overflow checks enabled.
+  CARGO_PROFILE_TEST_OPT_LEVEL: '1'
+
+jobs:
+  rust-core:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      # Match the source-build toolchain documented in README.md.
+      - uses: dtolnay/rust-toolchain@1.99.1
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: rust-core
+      # cargo fmt --all -- --check fails on origin/main (57 existing files).
+      # Keep the verified clean scope until that formatting debt is fixed separately.
+      - name: Check formatting of legacy conformance code
+        run: >-
+          rustfmt --edition 2021 --check
+          crates/colophon-core/src/legacy_draft1/mod.rs
+          crates/colophon-core/src/legacy_draft1/terms.rs
+          crates/colophon-core/src/legacy_draft1/speaks.rs
+          crates/colophon-core/tests/legacy_draft1_conformance.rs
+      - name: Clippy (all workspace targets, warnings denied)
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Replay committed legacy vectors
+        run: cargo test -p colophon-core --test legacy_draft1_conformance --locked
+      - name: Colophon 0.5 engine and conformance runner
+        run: cargo test -p colophon-core --test v05_engine --test v05_candidate --locked -- --nocapture
+      - name: Check deterministic candidate vector regeneration
+        run: cargo test -p colophon-core --test v5_candidate --locked -- --ignored v5_generator_check
+      - name: Core without default features (serial code paths)
+        run: cargo test -p colophon-core --no-default-features --locked
+
+  wasm-and-js:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.99.1
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: wasm-and-js
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: js/package-lock.json
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+      - name: Check all WASM crates
+        run: cargo check -p colophon-core -p colophon-wasm -p colophon-home-wasm --target wasm32-unknown-unknown --locked
+      - name: Install matching WASM bindings generator
+        run: cargo install wasm-bindgen-cli --version 0.2.130 --locked
+      - name: Build @colophon/core and run Node unit and smoke tests
+        run: npm ci --prefix js && npm --prefix js run build && npm --prefix js test
+      # Exercise the 0.5 session against real relays without the browser/helper
+      # cleanup race documented for scripts/test-js.sh in docs/known-issues.md.
+      - name: Build the home module for JS session journeys
+        run: cargo build -p colophon-home-wasm --target wasm32-unknown-unknown --release --locked
+      - name: Typecheck JS session tests
+        run: js/node_modules/.bin/tsc -p js/test05/tsconfig.json
+      - name: Run JS session unit tests and relay journeys under Bun
+        working-directory: js
+        env:
+          COLOPHON_HOME_WASM: ${{ github.workspace }}/target/wasm32-unknown-unknown/release/colophon_home_wasm.wasm
+        # The default five-second per-test limit is too short for crypto-heavy
+        # relay fixtures under load; explicit longer journey limits still apply.
+        run: bun test --timeout 30000 test05
+
+  home-and-relay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      COLOPHON_REQUIRE_RELAY: '1'
+      # Avoid competing relay processes around the documented three-second
+      # multi-home forwarding assertion; every test still runs and must pass.
+      RUST_TEST_THREADS: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.99.1
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: home-and-relay
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+      - name: Home integration, crash recovery kill loop, and relay Bun tests
+        run: bash scripts/test-home.sh
+      # Run after test-home so CI has the home module and never silently skips
+      # the FFI and WASM crates' relay-backed integration tests.
+      - name: Full native workspace suite
+        run: cargo test --workspace --locked
