@@ -40,7 +40,7 @@ test('provisional and revoked members are denied even with no namespace checks; 
   try {
     await device.session.create();
     const member = device.session.state.members.find(m => m.id === device.session.memberId)!;
-    expect(member).toBeDefined();
+    expect(member).not.toBeUndefined();
     for (const namespaces of [[], ['notes']]) {
       for (const denied of [{ ...member, grant: { ...member.grant!, namespaces: [] }, provisional: true },
         { ...member, grant: { ...member.grant!, namespaces: [] }, revokedAt: 1n }]) {
