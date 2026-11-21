@@ -23,9 +23,10 @@ No format, reader-rule or version change. The spec stays Colophon 0.5, revision 
     a head behind, or past the bounds), `badSignature` (a head no current home signed).
   - A joining device holds at most 256 MiB of entries and 2^18 entries (spec §2.4's portability floor), each entry
     at most the authority envelope bound, checked while paging and again in the core.
-  - `Admitted.ownerDescriptor(keyId)` reads a current WebAuthn controller's descriptor (`rp`, credential, origins)
-    from the accepted history only. Swift's `KeyDescriptor(view:)` and Kotlin's `webauthnDescriptor(view)` turn it
-    into what a passkey provider takes.
+  - `Admitted.ownerDescriptor(keyId)` returns an `OwnerPasskey` for a current WebAuthn controller of the accepted
+    history (`rp`, credential, origins), and only an `Admitted` value, which only `fetchHistory()` makes, can give one.
+    Swift's `KeyDescriptor(passkey:)` and Kotlin's `OwnerPasskey.registrationDescriptor()` turn it into what a passkey
+    provider takes. The member whose grant is checked must be the key that signed the reads (else `refused:conflict`).
   - Core: `write::calls::prepare_history_read` / `finish_history_read` and `v05::join` (`history_page_path`,
     `parse_history_page`, `check_history_size`, `verify_at_head`, `current_webauthn_controller`). FFI:
     `AccountHistoryRead`, `account_history_page_path`, `account_history_page`, `account_verify_at_head`,

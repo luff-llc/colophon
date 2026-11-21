@@ -76,6 +76,32 @@ class ColophonJoinTest {
         fail("the owner did not settle: ${device.describe()}")
     }
 
+    /** The paging bound, through the pure helper paging calls with its fixed limits: a home that pages forever fails. */
+    @Test fun pagingStopsAtTheBound() {
+        val page = List(16) { ByteString(ByteArray(100_000)) }
+        var bytes = 0L
+        var count = 0
+        val limit = 4L * 1024 * 1024
+        val error = kotlin.runCatching {
+            while (true) { bytes = ColophonJoin.bounded(bytes, count, page, limit, 1 shl 18); count += page.size }
+        }.exceptionOrNull()
+        assertIs<JoinError.Rejected>(error); assertEquals("unavailable", error.code)
+        assertTrue(bytes <= limit, "nothing past the bound was kept")
+        assertEquals(1_600_000L, ColophonJoin.bounded(0, 0, page, ColophonJoin.MAX_HISTORY_BYTES, ColophonJoin.MAX_ENTRIES))
+        assertIs<JoinError.Rejected>(kotlin.runCatching { ColophonJoin.bounded(0, ColophonJoin.MAX_ENTRIES, page.take(1), ColophonJoin.MAX_HISTORY_BYTES, ColophonJoin.MAX_ENTRIES) }.exceptionOrNull())
+    }
+
+    /** An accepted history and an owner passkey cannot be made outside the SDK, from Kotlin or Java. */
+    @Test fun acceptanceValuesHaveNoPublicConstructor() {
+        for (type in listOf(JoinHistory.Admitted::class.java, OwnerPasskey::class.java)) {
+            val open = type.declaredConstructors.filter { !it.isSynthetic && !java.lang.reflect.Modifier.isPrivate(it.modifiers) }
+            assertTrue(open.isEmpty(), "$type has a constructor Java can call: $open")
+            val factories = (type.declaredClasses.flatMap { it.declaredMethods.toList() } + type.declaredMethods)
+                .filter { it.returnType == type && !it.isSynthetic && java.lang.reflect.Modifier.isPublic(it.modifiers) }
+            assertTrue(factories.isEmpty(), "$type has a factory Java can call: $factories")
+        }
+    }
+
     @Test(timeout = 600_000)
     fun joinAtTheInviteHead() = runBlocking<Unit> {
         val relay = RelayHome(base)
@@ -120,14 +146,14 @@ class ColophonJoinTest {
             // The owner's passkey, read only from the accepted history (an Admitted value, which only fetchHistory makes).
             assertNull(admitted.ownerDescriptor("00".repeat(16)), "no controller with this ID")
             assertNull(admitted.ownerDescriptor(KeyCustody.keyId(owner.owner)), "a raw controller has no WebAuthn descriptor")
-            val descriptor = admitted.ownerDescriptor(KeyCustody.keyId(passkey)) ?: fail("the passkey controller's descriptor")
+            val ownerPasskey = admitted.ownerDescriptor(KeyCustody.keyId(passkey)) ?: fail("the passkey controller's descriptor")
+            val descriptor = ownerPasskey.view
             assertEquals(passkey.rp, descriptor.rp)
             assertContentEquals(passkey.credential, descriptor.credential)
             assertContentEquals(passkey.publicKeys().signing, descriptor.signing)
-            val restored = Json.obj(webauthnDescriptor(descriptor)!!.toString(Charsets.UTF_8))!!
+            val restored = Json.obj(ownerPasskey.registrationDescriptor().toString(Charsets.UTF_8))!!
             assertEquals("webauthn", restored["form"]); assertEquals(passkey.rp, restored["rp"])
             assertEquals(java.util.Base64.getEncoder().encodeToString(passkey.credential), restored["credential"])
-            assertNull(webauthnDescriptor(owner.owner.keyDescriptor()), "a raw key is no passkey descriptor")
 
             // A home that serves a history truncated at the invite's head, or before the grant: the tip is not its head.
             val full = admitted.files.toSortedMap().values.toList()
@@ -144,14 +170,6 @@ class ColophonJoinTest {
             val forged = forgedHead(account, tip.first, tip.second, join.memberId(), joiner.member)
             tamper.answer = { r, a -> if (r.url.endsWith("/head")) ok(forged) else a }
             rejected("badSignature") { join.fetchHistory() }
-            // A home that pages forever: an error at the byte bound, not memory growth (lowered to 4 MiB here so the test
-            // stays small; the shipped bound is 256 MiB).
-            val pad = Json.write(mapOf("pad" to "a".repeat(100_000))).toByteArray()
-            val big = Json.write(mapOf("entries" to List(16) { Json.parse(pad.toString(Charsets.UTF_8)) }, "receipts" to listOf<Any>(), "more" to true)).toByteArray()
-            tamper.answer = { r, a -> if (isAuthority(r) && a.status.toInt() == 200) ok(big) else a }
-            join.historyByteLimit = 4L * 1024 * 1024
-            rejected("unavailable") { join.fetchHistory() }
-            join.historyByteLimit = ColophonJoin.MAX_HISTORY_BYTES
             // One entry over the authority envelope bound: malformed.
             val huge = Json.write(mapOf("entries" to listOf(mapOf("pad" to "a".repeat(2_200_000))), "more" to false)).toByteArray()
             tamper.answer = { r, a -> if (isAuthority(r) && a.status.toInt() == 200) ok(huge) else a }
@@ -197,6 +215,10 @@ class ColophonJoinTest {
             settle(owner)
             assertTrue(until(theirs).files.isNotEmpty())
             rejected("refused:conflict") { mine.fetchHistory() }
+            // This member's key reading with another current member's request on its medium: refused:conflict.
+            val swapped = Device(member = joiner.member, medium = MemoryMedium(mapOf(OwnRequest.path(join.memberId()) to theirs.request())),
+                homes = listOf(HomeConfiguration("$base/", transport = relay.transport())), createWithoutHome = false).also { devices.add(it) }
+            rejected("refused:conflict") { ColophonJoin(swapped.configuration, account, base, seq2, head2).fetchHistory() }
 
             // A revoked member: the home's answer is the same refused:revoked as before approval: not admitted (no longer).
             owner.session.revoke(join.memberId())

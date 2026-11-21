@@ -19,13 +19,15 @@ public struct AdmittedHistory: Sendable, Equatable {
     public let files: [String: Data]
     init(files: [String: Data]) { self.files = files }
 
-    /// The WebAuthn descriptor (`rp`, credential, origins) of controller `keyID` in this accepted history, when it is a
-    /// current WebAuthn controller; nil for a removed, provisional, suspended or raw controller, or one the keyring does
-    /// not hold. `KeyDescriptor(view:)` (ColophonKeys) turns it into a descriptor a passkey provider takes.
-    public func ownerDescriptor(keyID: String, now: Date = Date()) throws -> KeyDescriptorView? {
+    /// The passkey of controller `keyID` in this accepted history, when it is a current WebAuthn controller; nil for a
+    /// removed, provisional, suspended or raw controller, or one the keyring does not hold. `KeyDescriptor(passkey:)`
+    /// (ColophonKeys) turns it into a descriptor a passkey provider takes.
+    public func ownerDescriptor(keyID: String, now: Date = Date()) throws -> OwnerPasskey? {
         let entries = files.filter { $0.key.hasPrefix("authority/") }.sorted { $0.key < $1.key }.map { ByteString(bytes: $0.value) }
-        do { return try accountCurrentWebauthnController(entries: entries, id: keyID, nowMs: Int64((now.timeIntervalSince1970 * 1000).rounded())) }
-        catch { throw ColophonError.wrap(error) }
+        do {
+            let view = try accountCurrentWebauthnController(entries: entries, id: keyID, nowMs: Int64((now.timeIntervalSince1970 * 1000).rounded()))
+            return view.flatMap { OwnerPasskey(view: $0) }
+        } catch { throw ColophonError.wrap(error) }
     }
 }
 
@@ -66,6 +68,17 @@ public struct ColophonJoin: Sendable {
     /// 4,096 pages of 64 entries.
     public static let maxEntries = 1 << 18
 
+    /// The joining device's bounds, checked while paging (the core checks them again): the bytes so far plus this page's
+    /// within `maxBytes`, and the entries so far plus this page's within `maxEntries`. Pure; paging passes the fixed
+    /// `maxHistoryBytes` and `maxEntries`. Returns the new byte total.
+    static func bounded(bytes: Int, count: Int, page: [ByteString], maxBytes: Int, maxEntries: Int) throws -> Int {
+        let total = bytes + page.reduce(0) { $0 + $1.bytes.count }
+        guard total <= maxBytes, count + page.count <= maxEntries else {
+            throw JoinError.rejected(code: "unavailable", detail: "the history passes what a joining device holds (2^18 entries, 256 MiB)")
+        }
+        return total
+    }
+
     public let configuration: SessionConfiguration
     public let account: String
     public let home: URL
@@ -74,8 +87,6 @@ public struct ColophonJoin: Sendable {
     private let keys: any AsyncKeyProvider
     private let base: String
     private let homeConfiguration: HomeConfiguration
-    /// The entry-byte bound while paging (`maxHistoryBytes`); tests lower it to exercise the bound cheaply.
-    var historyByteLimit = ColophonJoin.maxHistoryBytes
 
     public init(configuration: SessionConfiguration, account: String, home: URL, seq: UInt64, head: String) {
         self.configuration = configuration; self.account = account; self.home = home; self.seq = seq; self.head = head
@@ -107,6 +118,7 @@ public struct ColophonJoin: Sendable {
     /// fails with `refused:rollback`.
     public func fetchHistory() async throws -> JoinHistory {
         let request = try await request()
+        let member = try await memberID()
         var attempt = 0
         while true {
             attempt += 1
@@ -115,7 +127,7 @@ public struct ColophonJoin: Sendable {
             guard signedHead.status == 200 else { throw refused(signedHead) }
             let verdict: JoinedHistory
             do {
-                verdict = try accountVerifyAtHead(account: account, seq: seq, head: head, request: request, base: base,
+                verdict = try accountVerifyAtHead(account: account, seq: seq, head: head, member: member, request: request, base: base,
                                                   signedHead: signedHead.body, entries: entries, nowMs: nowMs)
             } catch {
                 let e = ColophonError.wrap(error)
@@ -158,12 +170,7 @@ public struct ColophonJoin: Sendable {
                 throw JoinError.rejected(code: (e as? ColophonError)?.code ?? "malformed", detail: (e as? ColophonError)?.detail ?? "")
             }
             if page.more && page.entries.isEmpty { throw JoinError.rejected(code: "malformed", detail: "a history page made no progress") }
-            // The joining device's bounds, checked while paging (the core checks them again): spec §2.4's portability
-            // floor of 256 MiB of envelopes, and 2^18 entries (4,096 pages of 64).
-            bytes += page.entries.reduce(0) { $0 + $1.bytes.count }
-            if bytes > historyByteLimit || entries.count + page.entries.count > Self.maxEntries {
-                throw JoinError.rejected(code: "unavailable", detail: "the history passes what a joining device holds (2^18 entries, 256 MiB)")
-            }
+            bytes = try Self.bounded(bytes: bytes, count: entries.count, page: page.entries, maxBytes: Self.maxHistoryBytes, maxEntries: Self.maxEntries)
             entries += page.entries
             after += UInt64(page.entries.count)
             if !page.more { return entries }

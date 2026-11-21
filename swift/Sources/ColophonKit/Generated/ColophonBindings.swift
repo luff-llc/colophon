@@ -26522,7 +26522,8 @@ public func accountHistoryPagePath(after: UInt64) -> String  {
 /**
  * Accept a fetched history at an invite's head (core `v05::join::verify_at_head`): `ok`
  * verdict, the history of `account`, every entry on the verified branch, the branch at least
- * `seq` long with entry `seq` of body digest `head`, its tip exactly `signed_head` (the body
+ * `seq` long with entry `seq` of body digest `head`, `member` (the key ID that signed the reads)
+ * the member `request` names, its tip exactly `signed_head` (the body
  * of `GET {base}/head`, a fresh head of a current home serving at `base`), and the member of
  * `request` (the joiner's own request envelope) current and granted from exactly that
  * request. `admitted` false (and no stores) when the history names no member with that ID.
@@ -26532,13 +26533,14 @@ public func accountHistoryPagePath(after: UInt64) -> String  {
  * another request (`refused:conflict`). `unavailable`: the branch is shorter than `seq`, or
  * the head is behind or stale (fetch again).
  */
-public func accountVerifyAtHead(account: String, seq: UInt64, head: String, request: Data, base: String, signedHead: Data, entries: [ByteString], nowMs: Int64)throws  -> JoinedHistory  {
+public func accountVerifyAtHead(account: String, seq: UInt64, head: String, member: String, request: Data, base: String, signedHead: Data, entries: [ByteString], nowMs: Int64)throws  -> JoinedHistory  {
     return try  FfiConverterTypeJoinedHistory_lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
         uniffiCallStatus in
     uniffi_colophon_ffi_fn_func_account_verify_at_head(
         FfiConverterString.lower(account),
         FfiConverterUInt64.lower(seq),
         FfiConverterString.lower(head),
+        FfiConverterString.lower(member),
         FfiConverterData.lower(request),
         FfiConverterString.lower(base),
         FfiConverterData.lower(signedHead),
@@ -26727,7 +26729,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_colophon_ffi_checksum_func_account_history_page_path() != 51785) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_colophon_ffi_checksum_func_account_verify_at_head() != 18503) {
+    if (uniffi_colophon_ffi_checksum_func_account_verify_at_head() != 18815) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_colophon_ffi_checksum_func_account_format_date() != 57652) {

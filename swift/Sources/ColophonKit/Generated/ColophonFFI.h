@@ -2243,7 +2243,7 @@ RustBuffer uniffi_colophon_ffi_fn_func_account_history_page_path(uint64_t after,
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_FUNC_ACCOUNT_VERIFY_AT_HEAD
 #define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_FUNC_ACCOUNT_VERIFY_AT_HEAD
-RustBuffer uniffi_colophon_ffi_fn_func_account_verify_at_head(RustBuffer account, uint64_t seq, RustBuffer head, RustBuffer request, RustBuffer base, RustBuffer signed_head, RustBuffer entries, int64_t now_ms, RustCallStatus *_Nonnull out_status
+RustBuffer uniffi_colophon_ffi_fn_func_account_verify_at_head(RustBuffer account, uint64_t seq, RustBuffer head, RustBuffer member, RustBuffer request, RustBuffer base, RustBuffer signed_head, RustBuffer entries, int64_t now_ms, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_FUNC_ACCOUNT_FORMAT_DATE

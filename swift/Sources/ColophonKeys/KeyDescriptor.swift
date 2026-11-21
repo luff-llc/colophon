@@ -32,14 +32,12 @@ public struct KeyDescriptor: Sendable, Equatable {
         self.origins = Set(origins).sorted { Array($0.utf8).lexicographicallyPrecedes(Array($1.utf8)) }
     }
 
-    /// A WebAuthn descriptor as a verified history names it (the `KeyDescriptorView` a 0.5 export returns, for example
-    /// `AdmittedHistory.ownerDescriptor`), so a device that did not register the passkey can use it. `json` is the
-    /// registration parser's form of the same fields (`form`, `signing`, `rp`, `credential`, `origins` when present).
-    /// A raw key, or a view without `rp` or `credential`, is `KeyProviderError.unsupportedHere`.
-    public init(view: KeyDescriptorView) throws {
-        guard view.form == .webauthn, let rp = view.rp, let credential = view.credential, view.signing.count == 65 else {
-            throw KeyProviderError.unsupportedHere
-        }
+    /// The passkey of a controller a joining device read from the history it accepted
+    /// (`AdmittedHistory.ownerDescriptor(keyID:)`), so a device that did not register the passkey can use it. `json` is
+    /// the registration parser's form of the same fields (`form`, `signing`, `rp`, `credential`, `origins` when present).
+    public init(passkey: OwnerPasskey) throws {
+        let view = passkey.view
+        guard let rp = view.rp, let credential = view.credential else { throw KeyProviderError.unsupportedHere }
         var fields: [String: Any] = ["form": "webauthn", "signing": view.signing.base64EncodedString(), "rp": rp,
                                      "credential": credential.base64EncodedString()]
         if !view.origins.isEmpty { fields["origins"] = view.origins }
@@ -49,6 +47,39 @@ public struct KeyDescriptor: Sendable, Equatable {
         self.credential = credential
         authorityOrigins = view.authorityOrigins
         origins = view.origins
+    }
+
+    /// A stable serialization for this device's own storage: `json`'s fields plus `authorityOrigins`, keys sorted.
+    /// `init(stored:)` reads it back.
+    public var stored: Data {
+        get throws {
+            var fields: [String: Any] = ["form": "webauthn", "signing": signing.base64EncodedString(), "rp": relyingParty,
+                                         "credential": credential.base64EncodedString()]
+            if !origins.isEmpty { fields["origins"] = origins }
+            if !authorityOrigins.isEmpty { fields["authorityOrigins"] = authorityOrigins }
+            return try JSONSerialization.data(withJSONObject: fields, options: [.sortedKeys, .withoutEscapingSlashes])
+        }
+    }
+
+    /// Restores a descriptor from `stored`, at every launch of a device that joined as a passkey owner. Only for a
+    /// descriptor this device stored after an accepted join (`init(passkey:)`); never for data received from elsewhere.
+    /// The authority verifier still checks every signature the key makes.
+    public init(stored: Data) throws {
+        struct Fields: Decodable {
+            let form: String; let signing: Data; let rp: String; let credential: Data
+            let origins: [String]?; let authorityOrigins: [String]?
+        }
+        let f = try JSONDecoder().decode(Fields.self, from: stored)
+        guard f.form == "webauthn", f.signing.count == 65 else { throw KeyProviderError.unsupportedHere }
+        var fields: [String: Any] = ["form": "webauthn", "signing": f.signing.base64EncodedString(), "rp": f.rp,
+                                     "credential": f.credential.base64EncodedString()]
+        if let o = f.origins, !o.isEmpty { fields["origins"] = o }
+        json = try JSONSerialization.data(withJSONObject: fields, options: [.sortedKeys, .withoutEscapingSlashes])
+        signing = f.signing
+        relyingParty = f.rp
+        credential = f.credential
+        origins = f.origins ?? []
+        authorityOrigins = f.authorityOrigins ?? []
     }
 
     /// The descriptor in the protocol form every 0.5 export takes (`ControllerSpec.key`).

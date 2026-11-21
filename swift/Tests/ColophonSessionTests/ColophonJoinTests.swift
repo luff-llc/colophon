@@ -91,6 +91,21 @@ import ColophonKeys
         return Data("{\"body\":\"\(body.base64EncodedString())\",\"signature\":\"\(signature.base64EncodedString())\"}".utf8)
     }
 
+    /// The paging bound, through the pure helper paging calls with its fixed limits: a home that pages forever fails.
+    @Test func pagingStopsAtTheBound() throws {
+        let page = Array(repeating: ByteString(bytes: Data(count: 100_000)), count: 16)
+        var bytes = 0, count = 0
+        let limit = 4 * 1024 * 1024
+        do {
+            while true { bytes = try ColophonJoin.bounded(bytes: bytes, count: count, page: page, maxBytes: limit, maxEntries: 1 << 18); count += page.count }
+        } catch let JoinError.rejected(code, _) { #expect(code == "unavailable") }
+        #expect(bytes <= limit, "nothing past the bound was kept")
+        #expect(try ColophonJoin.bounded(bytes: 0, count: 0, page: page, maxBytes: ColophonJoin.maxHistoryBytes, maxEntries: ColophonJoin.maxEntries) == 1_600_000)
+        #expect(throws: JoinError.self) {
+            try ColophonJoin.bounded(bytes: 0, count: ColophonJoin.maxEntries, page: [page[0]], maxBytes: ColophonJoin.maxHistoryBytes, maxEntries: ColophonJoin.maxEntries)
+        }
+    }
+
     @Test(.timeLimit(.minutes(10))) func joinAtTheInviteHead() async throws {
         let relay = RelayHome(base: base, port: RelayHome.freePort())
         let other = RelayHome(base: otherBase, port: RelayHome.freePort())
@@ -138,13 +153,14 @@ import ColophonKeys
         // The owner's passkey, read only from the accepted history (an AdmittedHistory, which only fetchHistory makes).
         #expect(try history.ownerDescriptor(keyID: String(repeating: "00", count: 16)) == nil, "no controller with this ID")
         #expect(try history.ownerDescriptor(keyID: try await KeyCustody.keyID(of: owner.owner)) == nil, "a raw controller is no passkey")
-        let view = try #require(try history.ownerDescriptor(keyID: try await KeyCustody.keyID(of: passkey)))
-        let descriptor = try KeyDescriptor(view: view)
+        let ownerPasskey = try #require(try history.ownerDescriptor(keyID: try await KeyCustody.keyID(of: passkey)))
+        let descriptor = try KeyDescriptor(passkey: ownerPasskey)
         #expect(descriptor.relyingParty == passkey.rp && descriptor.credential == passkey.credential)
         #expect(descriptor.signing == passkey.key.publicKey.x963Representation)
-        #expect(descriptor.view == view)
-        let rawView = try await owner.owner.keyDescriptor()
-        #expect(throws: KeyProviderError.self) { try KeyDescriptor(view: rawView) }
+        #expect(descriptor.view == ownerPasskey.view)
+        // What the device stores after the join, restored at the next launch.
+        let restored = try KeyDescriptor(stored: try descriptor.stored)
+        #expect(restored == descriptor)
 
         // A history truncated at the invite's head, or before the grant: the tip is not the home's signed head.
         let full = files.sorted { $0.key < $1.key }.map(\.value)
@@ -163,14 +179,6 @@ import ColophonKeys
         let forged = try await forgedHead(account: account, seq: tip.0, digest: tip.1, by: memberID, keys: joiner.member)
         tamper.set { r, a in r.url.hasSuffix("/head") ? Self.ok(forged) : a }
         await rejected("badSignature") { _ = try await join.fetchHistory() }
-        // A home that pages forever: an error at the byte bound, not memory growth (the bound is lowered to 4 MiB here
-        // so the test stays small; the shipped bound is 256 MiB).
-        let pad = String(repeating: "a", count: 100_000)
-        let big = try JSONSerialization.data(withJSONObject: ["entries": Array(repeating: ["pad": pad], count: 16), "more": true])
-        tamper.set { r, a in Self.isAuthority(r) && a.status == 200 ? Self.ok(big) : a }
-        var bounded = join
-        bounded.historyByteLimit = 4 * 1024 * 1024
-        await rejected("unavailable") { _ = try await bounded.fetchHistory() }
         // One entry over the authority envelope bound: malformed.
         let huge = try JSONSerialization.data(withJSONObject: ["entries": [["pad": String(repeating: "a", count: 2_200_000)]], "more": false])
         tamper.set { r, a in Self.isAuthority(r) && a.status == 200 ? Self.ok(huge) : a }
@@ -224,6 +232,12 @@ import ColophonKeys
         let theirs1 = try await admitted(theirs)
         #expect(theirs1 != nil)
         await rejected("refused:conflict") { _ = try await mine.fetchHistory() }
+        // This member's key reading with another current member's request on its medium: refused:conflict.
+        let swapped = Device(medium: MemoryMedium(files: ["requests/\(memberID).json": try await theirs.request()]), member: joiner.member,
+                             homes: [HomeConfiguration(endpoint: URL(string: base + "/")!, transport: relay.transport())], createWithoutHome: false)
+        await rejected("refused:conflict") {
+            _ = try await ColophonJoin(configuration: swapped.configuration, account: account, home: home, seq: seq2, head: head2).fetchHistory()
+        }
 
         // A revoked member: the home's answer is the same refused:revoked as before approval, so the joiner waits.
         try await owner.session.revoke(memberID: memberID)

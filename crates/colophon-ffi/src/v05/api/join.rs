@@ -63,7 +63,8 @@ fn entry_bytes(entries: Vec<ByteString>) -> R<Vec<Vec<u8>>> {
 free_fn! {
     /// Accept a fetched history at an invite's head (core `v05::join::verify_at_head`): `ok`
     /// verdict, the history of `account`, every entry on the verified branch, the branch at least
-    /// `seq` long with entry `seq` of body digest `head`, its tip exactly `signed_head` (the body
+    /// `seq` long with entry `seq` of body digest `head`, `member` (the key ID that signed the reads)
+    /// the member `request` names, its tip exactly `signed_head` (the body
     /// of `GET {base}/head`, a fresh head of a current home serving at `base`), and the member of
     /// `request` (the joiner's own request envelope) current and granted from exactly that
     /// request. `admitted` false (and no stores) when the history names no member with that ID.
@@ -72,13 +73,13 @@ free_fn! {
     /// provisional member (`refused:revoked`), an expired one (`refused:expired`), a grant of
     /// another request (`refused:conflict`). `unavailable`: the branch is shorter than `seq`, or
     /// the head is behind or stale (fetch again).
-    pub fn account_verify_at_head(account: String, seq: u64, head: String, request: Vec<u8>, base: String, signed_head: Vec<u8>, entries: Vec<ByteString>, now_ms: i64) -> Result<JoinedHistory, AccountError> {
+    pub fn account_verify_at_head(account: String, seq: u64, head: String, member: String, request: Vec<u8>, base: String, signed_head: Vec<u8>, entries: Vec<ByteString>, now_ms: i64) -> Result<JoinedHistory, AccountError> {
         guard(|| {
             let account = AccountId::parse(&account)?;
             bytes_ok(&request, 1 << 22, "a request")?;
             bytes_ok(&signed_head, 1 << 16, "a head")?;
             let entries = entry_bytes(entries)?;
-            Ok(match verify_at_head(&account, seq, &head, &request, &base, &signed_head, entries, now_ms)? {
+            Ok(match verify_at_head(&account, seq, &head, &member, &request, &base, &signed_head, entries, now_ms)? {
                 AtHead::Admitted(files) => JoinedHistory {
                     admitted: true,
                     stores: files.into_iter().map(|(path, bytes)| Store { path, bytes }).collect(),

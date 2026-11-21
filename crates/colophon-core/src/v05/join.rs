@@ -153,10 +153,12 @@ fn verified(entries: Vec<Vec<u8>>, now_ms: i64) -> Result<(crate::v05::history::
 /// - the branch is at least `seq` long (shorter: `unavailable`, a rolled-back history), and
 ///   its entry `seq` has the body digest `head` (another: `refused:fork`);
 /// - `signed_head` (the body of `GET {base}/head`) verifies (§13.3) as a fresh head of a current
-///   home whose endpoints name `base`, and names exactly the branch tip: a head beyond the tip
+///   home whose endpoints name `base` (any other signer, a home that was removed included, is
+///   `badSignature`), and names exactly the branch tip: a head beyond the tip
 ///   is `refused:rollback` (the home serves less than it signed); a head behind it is
 ///   `unavailable` (fetch again);
-/// - the member `key_id(request.member.signing)` is current at the tip (§8.5) and was granted
+/// - `member` (the key ID of the key that signed the reads) is the member `request` names (else
+///   `refused:conflict`: a request of another member), and that member is current at the tip (§8.5) and was granted
 ///   with exactly `request` (the same body bytes): revoked, expired or provisional is
 ///   `refused:revoked` / `refused:expired`, a grant of another request `refused:conflict`.
 ///   A history that names no member with this ID is [`AtHead::NotAdmitted`].
@@ -165,6 +167,7 @@ pub fn verify_at_head(
     account: &AccountId,
     seq: u64,
     head: &str,
+    member: &str,
     request: &[u8],
     base: &str,
     signed_head: &[u8],
@@ -227,7 +230,8 @@ pub fn verify_at_head(
         })
         .map(|m| (m.request.member_id(), m.request.signing.clone()))
         .collect();
-    require(!homes.is_empty(), "no current home of this account serves at this base")?;
+    // No current home serving at `base` leaves `homes` empty, and the head's signer is then
+    // refused like any other non-home (`badSignature`).
     let head_env = canonical(&strict_parse(signed_head)?)?;
     let tip = verdict.branch.len() as u64;
     let signed = match verify_head(
@@ -255,6 +259,9 @@ pub fn verify_at_head(
     }
     // This device, granted from exactly its request and current at the tip (§8.5).
     let id = request.member_id();
+    if id != member {
+        return Err(Failure::Refused(Reason::Conflict));
+    }
     match state.current_principal(&id, Claim::Member, now_ms) {
         Ok(Principal::Member(m)) | Ok(Principal::Home(m)) => {
             if m.request.body != request.body {
