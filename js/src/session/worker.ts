@@ -318,23 +318,11 @@ export class SessionWorker {
       return this.snapshot({ kind: 'waitingForApproval' }, { members, requests, homes });
     } else if (standing.kind === glue.StandingKind.Controller) {
       phase = { kind: 'failed', failure: { kind: 'other', detail: 'this identity is a controller, not a member' } };
-    } else if (standing.member?.revokedAt !== undefined) {
-      phase = { kind: 'denied' };
     } else {
-      // Denied only when this member lost access it was granted, never for a library namespace it was never granted
-      // (`libraryNamespaces` wider than its grant, or an approval that narrowed its request): `notGranted` on a namespace
-      // its verified grant does not name, while it is not provisional, is skipped (neither denied nor published).
-      phase = { kind: 'ready' };
-      const granted = standing.member?.grant?.namespaces ?? [];
-      const provisional = standing.member?.provisional ?? false;
-      for (const namespace of this.libraryNamespaces) {
-        const denial = plain<AccountDenial | undefined>(engine.run(e => e.access(namespace)));
-        if (!denial) { readable.push(namespace); continue; }
-        if (denial.reason === glue.AccountDenialReason.NotGranted && !provisional && !granted.includes(namespace)) continue;
-        phase = denial.reason === glue.AccountDenialReason.NotReadable || denial.reason === glue.AccountDenialReason.Unavailable
-          ? { kind: 'unavailable', reason: denial.detail } : { kind: 'denied' };
-        break;
-      }
+      const readiness = memberReadiness(standing.member, BigInt(this.nowMs), this.libraryNamespaces,
+        namespace => plain<AccountDenial | undefined>(engine.run(e => e.access(namespace))));
+      phase = readiness.phase;
+      readable.push(...readiness.readable);
     }
     const ready = phase.kind === 'ready';
     const revisions: Record<string, bigint> = {};
@@ -1437,4 +1425,22 @@ function withExclusiveLock<T>(name: string, body: () => Promise<T>): Promise<T> 
   processLocks.set(name, settled);
   void settled.then(() => { if (processLocks.get(name) === settled) processLocks.delete(name); });
   return run;
+}
+
+/** Readiness follows the verified member first, even when no library namespace belongs to its grant. */
+export function memberReadiness(member: AccountMember | undefined, nowMs: bigint, namespaces: readonly string[],
+  access: (namespace: string) => AccountDenial | undefined): { phase: SessionPhase; readable: string[] } {
+  if (!member || member.revokedAt !== undefined || member.provisional || (member.expiresMs !== undefined && nowMs > member.expiresMs))
+    return { phase: { kind: 'denied' }, readable: [] };
+  const granted = member.grant?.namespaces ?? [];
+  const readable: string[] = [];
+  for (const namespace of namespaces) {
+    const denial = access(namespace);
+    if (!denial) { readable.push(namespace); continue; }
+    // A wider library does not deny a member access it was never granted.
+    if (denial.reason === glue.AccountDenialReason.NotGranted && !granted.includes(namespace)) continue;
+    return { phase: denial.reason === glue.AccountDenialReason.NotReadable || denial.reason === glue.AccountDenialReason.Unavailable
+      ? { kind: 'unavailable', reason: denial.detail } : { kind: 'denied' }, readable: [] };
+  }
+  return { phase: { kind: 'ready' }, readable };
 }
