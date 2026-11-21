@@ -1566,6 +1566,24 @@ impl Account {
         level: Level,
         seed: [u8; 32],
     ) -> Result<std::result::Result<PendingAction, crate::model::Denial>> {
+        self.begin_write_claimed(namespace, kind, payload, level, None, seed)
+    }
+
+    /// [`Account::begin_write`] with an optional claimed date: when `claimed_ms` is given, the
+    /// operation's signed `created` (§11.2) is that date instead of the account's clock, so an
+    /// app importing old data keeps each item's original date. Only `created` changes: the
+    /// clock, the cited authority, the budget and every check run at the real time. A claimed
+    /// date later than the account's clock is refused, and so is a write by a member whose
+    /// grant has expired by the real time.
+    pub fn begin_write_claimed(
+        &self,
+        namespace: &str,
+        kind: &str,
+        payload: Value,
+        level: Level,
+        claimed_ms: Option<i64>,
+        seed: [u8; 32],
+    ) -> Result<std::result::Result<PendingAction, crate::model::Denial>> {
         self.require_writable()?;
         let me = self.me_member()?;
         if let Some(d) = self.authorize_level(namespace, level) {
@@ -1616,10 +1634,11 @@ impl Account {
             .get(&(me.clone(), namespace.to_string()))
             .map_or(&[][..], Vec::as_slice);
         let used = |ns: &str, e: u64, n: &[u8]| w.nonces.contains(&(ns.to_string(), e, n.to_vec()));
-        let prepared = crate::v05::write::records::prepare_operation_fast(
+        let prepared = crate::v05::write::records::prepare_operation_fast_claimed(
             &self.d.auth,
             &self.d.keys,
             self.now_ms,
+            claimed_ms,
             &OperationSpec {
                 namespace,
                 author: &me,

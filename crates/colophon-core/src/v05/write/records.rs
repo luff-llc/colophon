@@ -773,12 +773,51 @@ pub fn prepare_operation_fast(
     seed: [u8; 32],
     basis: &WriteBasis<'_>,
 ) -> Result<PreparedOperation> {
+    prepare_operation_fast_claimed(auth, keys, now_ms, None, spec, seed, basis)
+}
+
+/// [`prepare_operation_fast`] with an optional claimed `created` (§11.2, §11.3): the signer's
+/// date for the operation, for an app that writes old data (an imported note keeps its
+/// original date). `created` is display metadata: fold order is `(clock, author, id)` and never
+/// `created` (§11.4). Everything else is judged at the real time `now_ms`: a claimed date later
+/// than `now_ms` is refused, and so is a write by a member whose grant has expired by `now_ms`,
+/// even when the claimed date is before the expiry (§11.5 step 2 compares the signed `created`,
+/// so the writer keeps the real-time check here).
+pub(crate) fn prepare_operation_fast_claimed(
+    auth: &RecordAuthority,
+    keys: &EpochKeys,
+    now_ms: i64,
+    claimed_ms: Option<i64>,
+    spec: &OperationSpec<'_>,
+    seed: [u8; 32],
+    basis: &WriteBasis<'_>,
+) -> Result<PreparedOperation> {
     let auth = auth.clone();
     auth.require_clean()?;
     let account = auth.account().clone();
     let member = auth
         .member(spec.author)
         .ok_or(Failure::Refused(Reason::NotGranted))?;
+    let created_ms = match claimed_ms {
+        None => now_ms,
+        Some(ms) => {
+            require(ms <= now_ms, "a claimed date later than now is refused")?;
+            // Years 0001-9999 (§2.2): checked before formatting, so no arithmetic sees an
+            // extreme value.
+            require(
+                (-62_135_596_800_000..253_402_300_800_000).contains(&ms),
+                "a claimed date must be a date in the years 0001-9999",
+            )?;
+            require(
+                crate::v05::encoding::parse_date(&format_date(ms)) == Some(ms),
+                "a claimed date must be a date in the years 0001-9999",
+            )?;
+            if member.expires_ms.is_some_and(|e| now_ms > e) {
+                return Err(Failure::Refused(Reason::Expired));
+            }
+            ms
+        }
+    };
     let signing = member.request.signing.clone();
     let member_signing = signing.clone();
     require(
@@ -823,7 +862,7 @@ pub fn prepare_operation_fast(
         !(basis.nonce_used)(spec.namespace, epoch, &nonce),
         "that nonce is already used under this epoch key: pass a fresh seed",
     )?;
-    let created = format_date(now_ms);
+    let created = format_date(created_ms);
     let mut plain = json!({
         "id": "", "kind": spec.kind, "v": 1, "clock": clock,
         "authority": authority, "created": created, "payload": spec.payload,
@@ -842,7 +881,7 @@ pub fn prepare_operation_fast(
         id: id.clone(),
         clock,
         authority,
-        created: (created.clone(), now_ms),
+        created: (created.clone(), created_ms),
         level,
         previous: previous.clone(),
         nonce: nonce.to_vec(),

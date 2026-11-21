@@ -5,8 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   attachPageLifecycle, FetchHomeTransport, gateContent, glue, HomeLimits, HomeTransportError, init, KeyCustody, KeyCustodyError, MemoryDeviceSecrets, MemoryMedium,
-  MemoryPrivateStore, plain, putBlob, SecretBytes, SessionError, StorageError, WebCryptoKeyProvider,
-  type AccessRequest, type AsyncKeyProvider, type EpochAgreement, type HomeConfiguration, type HomeTransport, type PrfRequest, type RequestInfo, type UnlockInput,
+  MemoryPrivateStore, PasskeyProvider, plain, putBlob, SecretBytes, SessionError, StorageError, WebCryptoKeyProvider,
+  type AccessRequest, type AsyncKeyProvider, type CredentialClient, type EpochAgreement, type HomeConfiguration, type HomeTransport, type PrfRequest, type RequestInfo, type UnlockInput,
 } from '../src/session/index.js';
 import { FileMedium, FilePrivateStore, type FileMediumStep } from '../src/session/node.js';
 import { decodeSaved, encodeSaved, SessionJournal } from '../src/session/private.js';
@@ -127,6 +127,19 @@ describe('secrets', () => {
     ]));
     await expect(prf.answer([request('a'), request('b')])).rejects.toMatchObject({ outcome: 'unsupportedHere' });
     expect(prfOut.closed).toBe(true);
+  });
+
+  test('a passkey is registered as a discoverable credential with UV, ES256 and PRF', async () => {
+    let seen: CredentialCreationOptions | undefined;
+    const credentials: CredentialClient = {
+      create: async options => { seen = options; return null; },   // the person cancels: the request is what matters
+      get: async () => null,
+    };
+    await expect(PasskeyProvider.register({ rpId: 'id.luff.works', rpName: 'Colophon', userName: 'person',
+      authorityOrigins: ['https://id.luff.works'] }, credentials)).rejects.toMatchObject({ outcome: 'cancelled' });
+    expect(seen?.publicKey?.authenticatorSelection).toEqual({ userVerification: 'required', residentKey: 'required', requireResidentKey: true });
+    expect(seen?.publicKey?.pubKeyCredParams).toEqual([{ type: 'public-key', alg: -7 }]);
+    expect(seen?.publicKey?.extensions).toEqual({ prf: {} } as AuthenticationExtensionsClientInputs);
   });
 
   test('a secret that arrives after its prompt was abandoned is wiped', async () => {

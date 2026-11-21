@@ -28,7 +28,7 @@ export class PasskeyProvider implements KeyProvider {
       const result = await client(credentials).create({ publicKey: {
         rp: options.rp, user: options.user, challenge: new Uint8Array(options.challenge ?? randomChallenge()),
         pubKeyCredParams: [{ type: 'public-key', alg: -7 }], attestation: 'none',
-        authenticatorSelection: { userVerification: 'required', residentKey: 'preferred' },
+        authenticatorSelection: { userVerification: 'required', residentKey: 'required', requireResidentKey: true },
         extensions: { prf: {} } as AuthenticationExtensionsClientInputs,
       } });
       if (!result) throw new KeyProviderError('cancelled', 'Registration cancelled');

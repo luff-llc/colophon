@@ -1243,6 +1243,11 @@ uint64_t uniffi_colophon_ffi_fn_method_accountengine_begin_veto(uint64_t ptr, Ru
 uint64_t uniffi_colophon_ffi_fn_method_accountengine_begin_write(uint64_t ptr, RustBuffer namespace, RustBuffer kind, RustBuffer payload_json, RustBuffer entropy, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_METHOD_ACCOUNTENGINE_BEGIN_WRITE_CLAIMED
+#define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_METHOD_ACCOUNTENGINE_BEGIN_WRITE_CLAIMED
+uint64_t uniffi_colophon_ffi_fn_method_accountengine_begin_write_claimed(uint64_t ptr, RustBuffer namespace, RustBuffer kind, RustBuffer payload_json, int64_t claimed_ms, RustBuffer entropy, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_METHOD_ACCOUNTENGINE_BLOB_AVAILABILITY
 #define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_METHOD_ACCOUNTENGINE_BLOB_AVAILABILITY
 RustBuffer uniffi_colophon_ffi_fn_method_accountengine_blob_availability(uint64_t ptr, RustBuffer namespace, RustBuffer digest, RustCallStatus *_Nonnull out_status
@@ -3520,6 +3525,12 @@ uint16_t uniffi_colophon_ffi_checksum_method_accountengine_begin_veto(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_METHOD_ACCOUNTENGINE_BEGIN_WRITE
 #define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_METHOD_ACCOUNTENGINE_BEGIN_WRITE
 uint16_t uniffi_colophon_ffi_checksum_method_accountengine_begin_write(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_METHOD_ACCOUNTENGINE_BEGIN_WRITE_CLAIMED
+#define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_METHOD_ACCOUNTENGINE_BEGIN_WRITE_CLAIMED
+uint16_t uniffi_colophon_ffi_checksum_method_accountengine_begin_write_claimed(void
     
 );
 #endif

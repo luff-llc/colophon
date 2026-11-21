@@ -73,6 +73,32 @@ session.state.collect { render(it.phase, it.notices) }                    // pen
   `android:apk-key-hash:...` from `appPasskeyOrigins`) into the descriptor's `origins` too: the core admits a platform
   authority origin only when `origins` names it (spec §3.1). `AndroidSessionTest.anAndroidAppOriginCreatesAndApproves`
   runs this call with assertions made under such an origin.
+* **A passkey just created.** `PasskeyProvider.register` asks for a discoverable credential (`residentKey: "required"`
+  and `requireResidentKey: true`), as Android's passkey guide asks of every passkey
+  (<https://developer.android.com/identity/passkeys/create-passkeys>). Until this release it sent `"preferred"`. On a
+  Galaxy Z Fold5 (Android 17, Google Password Manager), creation reported success but no passkey for the relying party
+  was ever listed, and the first sign-in failed with "No available sign-in". The cause is not yet proven:
+  `"required"` is the likely fix, and it still needs a test on the device. **This is a deliberate change in
+  behaviour:** a security key that cannot store a discoverable credential is now refused at creation instead of making
+  a server-side credential. A Colophon passkey needs PRF and must be one a provider lists, so such keys were never a
+  good fit.
+* **The wait before the first get.** Separately, `CredentialManagerAdapter` waits before the first get for a passkey
+  created in this process (through any adapter instance), in case a provider saves new passkeys asynchronously. On
+  Android 14 and later it polls `prepareGetCredential` with no UI, checking `hasCredentialResults(TYPE_PUBLIC_KEY_CREDENTIAL)`
+  for that credential, every 400 ms for up to 15 s, then runs the get whatever the answer; before Android 14 it waits a
+  fixed 2.5 s. **The wait did not fix the failure above.** The probe cannot tell a stored passkey from the hybrid "use
+  another device" entry, which also counts as a credential result. So on a phone that offers hybrid sign-in (the tested
+  Fold5 does) it answers true on the first poll, and the wait ends at once without waiting for the save. It helps only
+  where the provider lists nothing for the new credential until it is saved. The wait stays because, where it does
+  nothing, it only adds the first poll's round trip.
+  The timeout bounds the whole wait, including a stuck poll. A get for any other passkey is not delayed, two gets for
+  the same new passkey share one wait, and cancelling the caller cancels the wait. A created passkey that is never
+  asserted is forgotten a minute after the timeout, and at most 16 are remembered. The poll needs
+  `android.permission.CREDENTIAL_MANAGER_QUERY_CANDIDATE_CREDENTIALS` (a normal permission), which the AAR's manifest
+  declares and the app's manifest merges in; without it the adapter waits the fixed time. Change the timings, or turn
+  the wait off with `PasskeyReadyWait.NONE`, through the adapter's `readyWait` parameter. Tests:
+  `PasskeyReadinessTest` (`sdk/kotlin`, JVM, fake clock). The SDK's tests do not run the adapter's Credential Manager
+  calls.
 * **A second device** restores over a copy of the history (a shared folder) or with nothing and shows
   `SessionPhase.WaitingForApproval` (no code). Approval spends a confirmed pairing for exactly its key (spec §7.3, §9.1):
   the owner device scans the request the new device shows (`exportRequest()` as a QR code, then `scanRequest(bytes)` and
@@ -148,7 +174,8 @@ home module and runs every JVM test in `sdk/kotlin` (the 0.4 wrappers too), then
 * **The relay journey on Android.** It runs on the JVM only; on the emulator the session ran without a home.
 * **A physical device**, StrongBox, and Keystore keys that require user authentication (`KeystorePresence`).
 * **Passkeys against Credential Manager.** `PasskeyController` is written over the 0.4 `PasskeyProvider` and
-  `CredentialManagerAdapter`; it has run only with a synthetic client. Registration is the 0.4 `PasskeyProvider.register`
+  `CredentialManagerAdapter`; it has run only with a synthetic client. The wait for a just-created passkey (above) is tested on a fake clock;
+  the SDK's own tests do not run it against Credential Manager. Registration is the 0.4 `PasskeyProvider.register`
   (it keeps no registration PRF output). The Swift move's one-assertion two-salt ceremony is not implemented.
 * **Pairing and seed transfer** (`addController`, `transferSeed`, `acceptSeedTransfer`) are ported from Swift but not
   exercised by a Kotlin test; the core's own journeys cover them through the exports.
