@@ -1259,6 +1259,21 @@ impl<S: RecordSource> Engine<S> {
         level: crate::v05::records::Level,
         seed: [u8; 32],
     ) -> Result<std::result::Result<crate::v05::account::PendingAction, Denial>> {
+        self.begin_write_claimed(namespace, kind, payload, level, None, seed)
+    }
+
+    /// [`Engine::begin_write`] with an optional claimed date for the operation's `created`
+    /// ([`crate::v05::account::Account::begin_write_claimed`]): an import keeps each item's
+    /// original date. Later than the engine's clock is refused; everything else is unchanged.
+    pub fn begin_write_claimed(
+        &self,
+        namespace: &str,
+        kind: &str,
+        payload: Value,
+        level: crate::v05::records::Level,
+        claimed_ms: Option<i64>,
+        seed: [u8; 32],
+    ) -> Result<std::result::Result<crate::v05::account::PendingAction, Denial>> {
         self.check_ready()?;
         self.account.refuse_if_stopped()?;
         if let Some(d) = self.partial_budget_denial() {
@@ -1269,7 +1284,7 @@ impl<S: RecordSource> Engine<S> {
         let retain = self.heads_to_retain(namespace, &payload)?;
         let r = self
             .account
-            .begin_write(namespace, kind, payload, level, seed)?;
+            .begin_write_claimed(namespace, kind, payload, level, claimed_ms, seed)?;
         if r.is_ok() {
             *self
                 .retain

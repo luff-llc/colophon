@@ -3946,3 +3946,184 @@ fn a_resolve_never_discards_a_branch_whose_later_activation_homes_witnessed() {
     );
     assert_eq!(v.branch[2], body_digest_of_env(&x3));
 }
+
+// ---------------------------------------------------------------------------------------------
+// Joining at a history head (`v05::join`): the owner's passkey only for a current WebAuthn
+// controller, and a head only from a current home.
+
+/// A, raw (approve, control, recover), and P, a passkey (control), both with slots.
+fn passkey_keyring(f: &Fixture, p: &Key) -> Value {
+    keyring(
+        vec![
+            raw_controller(&f.a, &key(2), "A", &["approve", "control", "recover"]),
+            passkey_controller(p, "P", &["control"]),
+        ],
+        vec![
+            slot_for(&f.a.id, "A"),
+            json!({"kind": "prf", "controllers": [p.id], "label": "P",
+                    "salt": b64(&[1u8; 32]), "box": b64(&[2u8; 60])}),
+        ],
+        1,
+        1,
+    )
+}
+
+#[test]
+fn join_reads_a_passkey_only_from_a_current_webauthn_controller() {
+    use colophon_core::v05::join::current_webauthn_controller;
+    let f = fixture();
+    let p = key(5);
+    let mut host = Host::default();
+    host.keys = f.host.keys.clone();
+    host.add(&p);
+    let entries = |c: &Chain| c.objects.entries.clone();
+
+    // Current: the descriptor comes back; a raw controller and an unknown ID give nothing.
+    let mut chain = Chain::new(T0 + 3_600 * SEC);
+    chain.genesis(&host, "Passkey", &[], passkey_keyring(&f, &p), std::slice::from_ref(&f.a.id));
+    let d = current_webauthn_controller(entries(&chain), &p.id, chain.now).unwrap().unwrap();
+    assert_eq!(d.webauthn().map(|w| w.rp()), Some(RP));
+    assert!(current_webauthn_controller(entries(&chain), &f.a.id, chain.now).unwrap().is_none());
+    assert!(current_webauthn_controller(entries(&chain), &"0".repeat(32), chain.now).unwrap().is_none());
+
+    // Removed: A removes P (no home, so at once).
+    let mut removed = Chain::new(chain.now);
+    removed.objects = chain.objects.clone();
+    let batch = prepare_transition(
+        &removed.objects,
+        removed.now,
+        &transition_params(&removed, T0 + 10 * SEC, &[&f.a], json!({"keyring": {"remove": [p.id]}})),
+    )
+    .unwrap();
+    let r = removed.run(&host, batch);
+    let t = body_digest_of_env(&r.pending[0]);
+    let act = prepare_activate(&removed.objects, removed.now, &t).unwrap();
+    removed.run(&host, act);
+    assert!(!removed.state().keyring().controllers.contains_key(&p.id));
+    assert!(current_webauthn_controller(entries(&removed), &p.id, removed.now).unwrap().is_none());
+
+    // Suspended and provisional: an account with a home, so changes wait and need witnesses.
+    let mut homed = Chain::new(T0 + 10 * 86_400 * SEC);
+    homed.genesis(&host, "Homed", &[], passkey_keyring(&f, &p), std::slice::from_ref(&f.a.id));
+    let account = homed.account();
+    let h = key(40);
+    host.add(&h);
+    let req = request(&account, &h, &key(41), "Home", "server", home_terms());
+    let batch = prepare_transition(
+        &homed.objects,
+        homed.now,
+        &transition_params(&homed, T0 + 10 * SEC, &[&f.a],
+            json!({"homes": {"appoint": [{"request": b64(&req), "terms": home_terms()}]}})),
+    )
+    .unwrap();
+    let r = homed.run(&host, batch);
+    let t = body_digest_of_env(&r.pending[0]);
+    let act = prepare_activate(&homed.objects, homed.now, &t).unwrap();
+    homed.run(&host, act);
+    assert_eq!(homed.state().current_homes().len(), 1);
+
+    // A proposes removing P and suspends it while that waits: suspended, nothing comes back.
+    let t2_issued = T0 + 100 * SEC;
+    let batch = prepare_transition(
+        &homed.objects,
+        homed.now,
+        &transition_params(&homed, t2_issued, &[&f.a], json!({"keyring": {"remove": [p.id]}})),
+    )
+    .unwrap();
+    let r = homed.run(&host, batch);
+    let t2 = body_digest_of_env(&r.pending[0]);
+    homed.objects.pending.push(receipt(&account, &h, &t2, t2_issued + 10 * SEC));
+    let batch = prepare_suspend(&homed.objects, homed.now, &p.id, &t2, t2_issued + 20 * SEC, &f.a.id).unwrap();
+    homed.run(&host, batch);
+    let during = t2_issued + 60 * SEC;
+    let mut suspended = homed.objects.clone();
+    suspended.pending.clear();
+    let v = verify_history(&suspended, &Persisted::default(), during);
+    assert!(v.state.as_ref().unwrap().active_suspensions(during).iter().any(|s| s.key == p.id));
+    assert!(current_webauthn_controller(suspended.entries.clone(), &p.id, during).unwrap().is_none());
+
+    // Provisional: a passkey Q added by an activation the home has not made final yet.
+    let q = key(7);
+    host.add(&q);
+    let mut prov = Chain::new(homed.now);
+    prov.objects = homed.objects.clone();
+    let t3_issued = T0 + 200 * SEC;
+    let batch = prepare_transition(
+        &prov.objects,
+        prov.now,
+        &transition_params(&prov, t3_issued, &[&f.a],
+            json!({"keyring": {"add": [passkey_controller(&q, "Q", &["control"])]}})),
+    )
+    .unwrap();
+    let r = prov.run(&host, batch);
+    let t3 = body_digest_of_env(&r.pending[0]);
+    prov.objects.pending.push(receipt(&account, &h, &t3, t3_issued + 10 * SEC));
+    let act = prepare_activate(&prov.objects, prov.now, &t3).unwrap();
+    let rec = act.finish(vec![]).unwrap();
+    prov.hold(&rec);
+    let st = prov.state();
+    assert!(st.keyring().controllers.contains_key(&q.id));
+    assert!(!st.activations().last().unwrap().final_, "provisional until the home's final");
+    assert!(current_webauthn_controller(entries(&prov), &q.id, prov.now).unwrap().is_none());
+}
+
+#[test]
+fn join_refuses_a_head_signed_by_a_home_that_was_removed() {
+    use colophon_core::v05::ids::AccountId;
+    use colophon_core::v05::join::verify_at_head;
+    let f = fixture();
+    let (mut chain, h, host) = account_with_home(&f);
+    let account = chain.account();
+    let base = format!("https://home.example/v1/accounts/{account}");
+    let m = key(50);
+    let joiner = request(&account, &m, &key(51), "Joiner", "agent", agent_terms());
+    let id = AccountId::parse(&account).unwrap();
+    let verify = |c: &Chain, head_env: &[u8]| {
+        let (seq, dg) = (1, body_digest_of_env(&c.objects.entries[0]));
+        verify_at_head(&id, seq, &dg, &m.id, &joiner, &base, head_env, c.objects.entries.clone(), c.now)
+    };
+    let tip = |c: &Chain| (c.objects.entries.len() as u64, body_digest_of_env(c.objects.entries.last().unwrap()));
+
+    // While H is appointed, its head over the tip passes the head check (the joiner, never
+    // granted, is then not admitted).
+    let (s, d) = tip(&chain);
+    let ok = verify(&chain, &head(&account, &h, s, &d, chain.now - 10 * SEC));
+    assert!(matches!(ok, Ok(colophon_core::v05::join::AtHead::NotAdmitted)), "{ok:?}");
+
+    // A removes H; H receipts it; after the delay the activation is recorded, H signs a head over
+    // it and the `final` makes the removal final.
+    let t_issued = T0 + 100 * SEC;
+    let batch = prepare_transition(
+        &chain.objects,
+        chain.now,
+        &transition_params(&chain, t_issued, &[&f.a], json!({"homes": {"revoke": [h.id]}})),
+    )
+    .unwrap();
+    let r = chain.run(&host, batch);
+    let t = body_digest_of_env(&r.pending[0]);
+    chain.objects.pending.push(receipt(&account, &h, &t, t_issued + 10 * SEC));
+    let act = prepare_activate(&chain.objects, chain.now, &t).unwrap();
+    let rec = act.finish(vec![]).unwrap();
+    chain.hold(&rec);
+    let a = chain.state().activations().last().unwrap().clone();
+    if !a.final_ {
+        chain.objects.heads.push(head(&account, &h, a.seq, &a.digest, T0 + 5_000 * SEC));
+        let fin = prepare_final(&chain.objects, chain.now, a.seq).unwrap();
+        chain.run(&host, fin);
+    }
+    assert!(chain.state().current_homes().is_empty(), "H is no longer a current home");
+
+    // H's head over the new tip: signed by a home the verified history no longer appoints.
+    let (s, d) = tip(&chain);
+    let refused = verify(&chain, &head(&account, &h, s, &d, chain.now - 10 * SEC));
+    assert!(matches!(refused, Err(Failure::BadSignature(_))), "{refused:?}");
+
+    // A request of another member, read with this key: refused:conflict before any grant.
+    let (s, d) = tip(&chain);
+    let other = request(&account, &key(52), &key(53), "Other", "agent", agent_terms());
+    let mismatched = verify_at_head(
+        &id, 1, &body_digest_of_env(&chain.objects.entries[0]), &m.id, &other, &base,
+        &head(&account, &h, s, &d, chain.now - 10 * SEC), chain.objects.entries.clone(), chain.now,
+    );
+    assert!(mismatched.is_err());
+}

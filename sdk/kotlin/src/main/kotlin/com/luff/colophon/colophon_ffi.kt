@@ -1181,6 +1181,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_colophon_ffi_checksum_method_accountengine_begin_write(
     ): Int
+    external fun uniffi_colophon_ffi_checksum_method_accountengine_begin_write_claimed(
+    ): Int
     external fun uniffi_colophon_ffi_checksum_method_accountengine_blob_availability(
     ): Int
     external fun uniffi_colophon_ffi_checksum_method_accountengine_blob_chunk(
@@ -1885,6 +1887,8 @@ internal object UniffiLib {
     ): Long
     external fun uniffi_colophon_ffi_fn_method_accountengine_begin_write(`ptr`: Long,`namespace`: RustBuffer.ByValue,`kind`: RustBuffer.ByValue,`payloadJson`: RustBuffer.ByValue,`entropy`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
+    external fun uniffi_colophon_ffi_fn_method_accountengine_begin_write_claimed(`ptr`: Long,`namespace`: RustBuffer.ByValue,`kind`: RustBuffer.ByValue,`payloadJson`: RustBuffer.ByValue,`claimedMs`: Long,`entropy`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
     external fun uniffi_colophon_ffi_fn_method_accountengine_blob_availability(`ptr`: Long,`namespace`: RustBuffer.ByValue,`digest`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_colophon_ffi_fn_method_accountengine_blob_chunk(`ptr`: Long,`namespace`: RustBuffer.ByValue,`digest`: RustBuffer.ByValue,`index`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -2285,7 +2289,7 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_colophon_ffi_fn_func_account_history_page_path(`after`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun uniffi_colophon_ffi_fn_func_account_verify_at_head(`account`: RustBuffer.ByValue,`seq`: Long,`head`: RustBuffer.ByValue,`request`: RustBuffer.ByValue,`base`: RustBuffer.ByValue,`signedHead`: RustBuffer.ByValue,`entries`: RustBuffer.ByValue,`nowMs`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_colophon_ffi_fn_func_account_verify_at_head(`account`: RustBuffer.ByValue,`seq`: Long,`head`: RustBuffer.ByValue,`member`: RustBuffer.ByValue,`request`: RustBuffer.ByValue,`base`: RustBuffer.ByValue,`signedHead`: RustBuffer.ByValue,`entries`: RustBuffer.ByValue,`nowMs`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_colophon_ffi_fn_func_account_format_date(`ms`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -2478,7 +2482,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_colophon_ffi_checksum_func_account_history_page_path() and 0xFFFF) != 51785) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_colophon_ffi_checksum_func_account_verify_at_head() and 0xFFFF) != 18503) {
+    if ((lib.uniffi_colophon_ffi_checksum_func_account_verify_at_head() and 0xFFFF) != 18815) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_colophon_ffi_checksum_func_account_format_date() and 0xFFFF) != 57652) {
@@ -2911,6 +2915,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_colophon_ffi_checksum_method_accountengine_begin_write() and 0xFFFF) != 50503) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_colophon_ffi_checksum_method_accountengine_begin_write_claimed() and 0xFFFF) != 39144) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_colophon_ffi_checksum_method_accountengine_blob_availability() and 0xFFFF) != 63667) {
@@ -5427,6 +5434,14 @@ public interface AccountEngineInterface {
     fun `beginWrite`(`namespace`: kotlin.String, `kind`: kotlin.String, `payloadJson`: kotlin.String, `entropy`: kotlin.ByteArray): AccountAction
     
     /**
+     * A record write whose signed `created` is `claimed_ms` (ms since the Unix epoch) instead
+     * of the engine's clock: an app importing old data keeps each item's original date. Only
+     * `created` changes; a claimed date later than the engine's clock is refused, and so is a
+     * write by a member whose grant has expired by the engine's clock. 32 bytes of entropy.
+     */
+    fun `beginWriteClaimed`(`namespace`: kotlin.String, `kind`: kotlin.String, `payloadJson`: kotlin.String, `claimedMs`: kotlin.Long, `entropy`: kotlin.ByteArray): AccountAction
+    
+    /**
      * How much of a blob is held.
      */
     fun `blobAvailability`(`namespace`: kotlin.String, `digest`: kotlin.String): BlobAvailability
@@ -6582,6 +6597,31 @@ open class AccountEngine: Disposable, AutoCloseable, AccountEngineInterface
         FfiConverterString.lower(`namespace`),
         FfiConverterString.lower(`kind`),
         FfiConverterString.lower(`payloadJson`),
+        FfiConverterByteArray.lower(`entropy`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * A record write whose signed `created` is `claimed_ms` (ms since the Unix epoch) instead
+     * of the engine's clock: an app importing old data keeps each item's original date. Only
+     * `created` changes; a claimed date later than the engine's clock is refused, and so is a
+     * write by a member whose grant has expired by the engine's clock. 32 bytes of entropy.
+     */
+    @Throws(AccountException::class)override fun `beginWriteClaimed`(`namespace`: kotlin.String, `kind`: kotlin.String, `payloadJson`: kotlin.String, `claimedMs`: kotlin.Long, `entropy`: kotlin.ByteArray): AccountAction {
+            return FfiConverterTypeAccountAction.lift(
+    callWithHandle {
+    uniffiRustCallWithError(AccountException) { _status ->
+    UniffiLib.uniffi_colophon_ffi_fn_method_accountengine_begin_write_claimed(
+        it,
+        
+        FfiConverterString.lower(`namespace`),
+        FfiConverterString.lower(`kind`),
+        FfiConverterString.lower(`payloadJson`),
+        FfiConverterLong.lower(`claimedMs`),
         FfiConverterByteArray.lower(`entropy`),_status)
 }
     }
@@ -31273,7 +31313,8 @@ public object FfiConverterMapStringByteArray: FfiConverterRustBuffer<Map<kotlin.
         /**
          * Accept a fetched history at an invite's head (core `v05::join::verify_at_head`): `ok`
          * verdict, the history of `account`, every entry on the verified branch, the branch at least
-         * `seq` long with entry `seq` of body digest `head`, its tip exactly `signed_head` (the body
+         * `seq` long with entry `seq` of body digest `head`, `member` (the key ID that signed the reads)
+         * the member `request` names, its tip exactly `signed_head` (the body
          * of `GET {base}/head`, a fresh head of a current home serving at `base`), and the member of
          * `request` (the joiner's own request envelope) current and granted from exactly that
          * request. `admitted` false (and no stores) when the history names no member with that ID.
@@ -31283,7 +31324,7 @@ public object FfiConverterMapStringByteArray: FfiConverterRustBuffer<Map<kotlin.
          * another request (`refused:conflict`). `unavailable`: the branch is shorter than `seq`, or
          * the head is behind or stale (fetch again).
          */
-    @Throws(AccountException::class) fun `accountVerifyAtHead`(`account`: kotlin.String, `seq`: kotlin.ULong, `head`: kotlin.String, `request`: kotlin.ByteArray, `base`: kotlin.String, `signedHead`: kotlin.ByteArray, `entries`: List<ByteString>, `nowMs`: kotlin.Long): JoinedHistory {
+    @Throws(AccountException::class) fun `accountVerifyAtHead`(`account`: kotlin.String, `seq`: kotlin.ULong, `head`: kotlin.String, `member`: kotlin.String, `request`: kotlin.ByteArray, `base`: kotlin.String, `signedHead`: kotlin.ByteArray, `entries`: List<ByteString>, `nowMs`: kotlin.Long): JoinedHistory {
             return FfiConverterTypeJoinedHistory.lift(
     uniffiRustCallWithError(AccountException) { _status ->
     UniffiLib.uniffi_colophon_ffi_fn_func_account_verify_at_head(
@@ -31292,6 +31333,7 @@ public object FfiConverterMapStringByteArray: FfiConverterRustBuffer<Map<kotlin.
         FfiConverterString.lower(`account`),
         FfiConverterULong.lower(`seq`),
         FfiConverterString.lower(`head`),
+        FfiConverterString.lower(`member`),
         FfiConverterByteArray.lower(`request`),
         FfiConverterString.lower(`base`),
         FfiConverterByteArray.lower(`signedHead`),

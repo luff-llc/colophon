@@ -79,7 +79,7 @@ export class PasskeyProvider implements AsyncKeyProvider {
           user: { id: owned(PasskeyProvider.userId(options.account)), name: options.userName, displayName: options.userDisplayName ?? options.userName },
           challenge: owned(options.challenge ?? crypto.getRandomValues(new Uint8Array(32))),
           pubKeyCredParams: [{ type: 'public-key', alg: -7 }], attestation: 'none',
-          authenticatorSelection: { userVerification: 'required', residentKey: 'required' },
+          authenticatorSelection: { userVerification: 'required', residentKey: 'required', requireResidentKey: true },
           extensions: { prf: {} } as AuthenticationExtensionsClientInputs,
         },
       }), 'Registration was cancelled');

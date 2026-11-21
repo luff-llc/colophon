@@ -203,6 +203,16 @@ or none**, then publish the new state. `.saved(operationID:)` means durable in t
 exchange. If the disk refuses the stores, the engine is ahead of the disk: it is discarded and reopened from what is really
 stored, and the error is thrown. Reads are `query(namespace:name:arguments:)` and the typed stores of the domain kits.
 
+**A claimed date.** `perform(_:observed:claimed:)` takes an optional `claimed: Date` (Kotlin: `perform(command, observed,
+claimedMs)`, milliseconds since the Unix epoch; core and bindings: `begin_write_claimed`). When given, the operation's signed
+`created` is that date instead of now, so an app importing old data (a person's podcast notes from another app) keeps each
+item's original date: rows that show an operation's date, such as a note's `created` or an episode's `updated` and
+`stateUpdated`, show the claimed one on every device. Nothing else changes: the clock, the cited authority, the budget and
+every check use the real time, and fold order stays `(clock, author, id)` (spec §11.4), so an imported note still sorts after
+what was written before it. A claimed date later than now is `SessionError.invalidCommand`, and a member whose grant has expired
+cannot write by claiming an earlier date. Any earlier date is allowed. `created` was always the signer's claim (spec §11.2), so
+readers need nothing new.
+
 The blob API keeps 0.4's names (`putBlob`, `blobAvailability`, `blobData`, `blobFile`, `blobStream`, `prefetchBlob`,
 `downloadRequiredBlobs`, `setBlobReference`). Chunks are written before the manifest is published; a required blob arrives with
 the exchange, an optional one on `prefetchBlob`. `collectBlobGarbage` does nothing: the core collects none.

@@ -145,11 +145,14 @@ import Observation
     }
     public var observedRevision: ObservedRevision { .init(context: context, revision: revision) }
 
-    @discardableResult public func perform(_ command: DomainCommand, observed: ObservedRevision) async throws -> WriteReceipt {
+    /// `claimed`, when given, is the operation's signed `created` instead of now: an app importing old data (a
+    /// note written years ago) keeps each item's original date, which rows such as a note's `created` show.
+    /// Order stays logical; only that date changes. A claimed date later than now is `SessionError.invalidCommand`.
+    @discardableResult public func perform(_ command: DomainCommand, observed: ObservedRevision, claimed: Date? = nil) async throws -> WriteReceipt {
         await restore()
         guard observed.context == context else { throw SessionError.destinationChanged }
         do {
-            let (receipt, snapshot) = try await worker.write(command, observed: observed.revision)
+            let (receipt, snapshot) = try await worker.write(command, observed: observed.revision, claimed: claimed)
             guard observed.context == context else { throw SessionError.destinationChanged }
             apply(snapshot)
             if homesConfigured { requestSync() }

@@ -2,15 +2,36 @@ import Foundation
 
 /// What `ColophonJoin.fetchHistory()` found.
 public enum JoinHistory: Sendable, Equatable {
-    /// Not admitted yet: the home refused the read with `403 refused:revoked` (no grant names this key), or its history
-    /// names no member with this ID. Spec 0.5 gives the same result after a revocation, so this also covers a member
-    /// revoked before its first fetch: show "Waiting for approval", and at a deadline "Not approved, or no longer allowed".
-    case waiting
-    /// The verified history, as files to store (`authority/<seq, eight digits>.json`), before the session is opened.
-    case admitted(files: [String: Data])
+    /// Not yet admitted, or no longer admitted; the home's answer is the same for both by design. The home refused the
+    /// read with `403 refused:revoked` (the result spec 0.5 gives a key no current grant names, before an approval and
+    /// after a revocation alike), or the history it served names no member with this ID. A host shows that it is waiting
+    /// for approval and, at its own deadline, that the device was not approved or is no longer allowed.
+    case notAdmitted
+    /// The accepted history. Only `fetchHistory()` makes one, after every acceptance condition held.
+    case admitted(AdmittedHistory)
 }
 
-/// Why a join at an invite's head failed. Anything here is an error, never "waiting".
+/// A history `ColophonJoin.fetchHistory()` accepted: it verified from seq 1 as the account's, holds the given entry at its
+/// seq, ends at a fresh head signed by a current home serving at the base, and grants this member from its exact request.
+/// Nothing in it reaches the host before then: it has no public initialiser.
+public struct AdmittedHistory: Sendable, Equatable {
+    /// The files to store (`authority/<seq, eight digits>.json`) before the session is opened.
+    public let files: [String: Data]
+    init(files: [String: Data]) { self.files = files }
+
+    /// The passkey of controller `keyID` in this accepted history, when it is a current WebAuthn controller; nil for a
+    /// removed, provisional, suspended or raw controller, or one the keyring does not hold. `KeyDescriptor(passkey:)`
+    /// (ColophonKeys) turns it into a descriptor a passkey provider takes.
+    public func ownerDescriptor(keyID: String, now: Date = Date()) throws -> OwnerPasskey? {
+        let entries = files.filter { $0.key.hasPrefix("authority/") }.sorted { $0.key < $1.key }.map { ByteString(bytes: $0.value) }
+        do {
+            let view = try accountCurrentWebauthnController(entries: entries, id: keyID, nowMs: Int64((now.timeIntervalSince1970 * 1000).rounded()))
+            return view.flatMap { OwnerPasskey(view: $0) }
+        } catch { throw ColophonError.wrap(error) }
+    }
+}
+
+/// Why a join at an invite's head failed. Anything here is an error, never "not admitted".
 public enum JoinError: Error, Equatable, Sendable {
     /// The home refused the read for another reason than "not a member" (its status, and the `result` it gave, validated).
     case refused(status: UInt32, code: String?)
@@ -40,6 +61,23 @@ public struct ColophonJoin: Sendable {
     /// The result a home gives a call from a key no grant names (spec 0.5 keeps it; `refused:notGranted` is reserved).
     public static let waitingCode = "refused:revoked"
     static let maxPages = 4096
+    /// Reads of the history and head in one `fetchHistory()` when the signed head moved meanwhile.
+    public static let attempts = 3
+    /// Spec §2.4's portability floor for envelopes: the most entry bytes a joining device holds.
+    public static let maxHistoryBytes = 256 * 1024 * 1024
+    /// 4,096 pages of 64 entries.
+    public static let maxEntries = 1 << 18
+
+    /// The joining device's bounds, checked while paging (the core checks them again): the bytes so far plus this page's
+    /// within `maxBytes`, and the entries so far plus this page's within `maxEntries`. Pure; paging passes the fixed
+    /// `maxHistoryBytes` and `maxEntries`. Returns the new byte total.
+    static func bounded(bytes: Int, count: Int, page: [ByteString], maxBytes: Int, maxEntries: Int) throws -> Int {
+        let total = bytes + page.reduce(0) { $0 + $1.bytes.count }
+        guard total <= maxBytes, count + page.count <= maxEntries else {
+            throw JoinError.rejected(code: "unavailable", detail: "the history passes what a joining device holds (2^18 entries, 256 MiB)")
+        }
+        return total
+    }
 
     public let configuration: SessionConfiguration
     public let account: String
@@ -73,39 +111,33 @@ public struct ColophonJoin: Sendable {
         return raw
     }
 
-    /// Fetch and verify the history. `.waiting` while this member is not admitted; `JoinError` for any other refusal or a
-    /// history that is not accepted; a transport failure is thrown as it came (`HomeTransportError`). A home whose signed
-    /// head moved while the history was read is read again, at most three times.
+    /// Fetch and verify the history. `.notAdmitted` while this member is not (or no longer) admitted; `JoinError` for any
+    /// other refusal or a history that is not accepted; a transport failure is thrown as it came (`HomeTransportError`).
+    /// A home whose signed head moved while the history was read (`unavailable`: behind; `refused:rollback`: beyond what
+    /// was served) is read again, at most `attempts` times in all; a home that keeps serving less than it signed then
+    /// fails with `refused:rollback`.
     public func fetchHistory() async throws -> JoinHistory {
         let request = try await request()
+        let member = try await memberID()
         var attempt = 0
         while true {
             attempt += 1
-            guard let entries = try await readHistory() else { return .waiting }
+            guard let entries = try await readHistory() else { return .notAdmitted }
             let signedHead = try await get("/head", authorization: nil)
             guard signedHead.status == 200 else { throw refused(signedHead) }
             let verdict: JoinedHistory
             do {
-                verdict = try accountVerifyAtHead(account: account, seq: seq, head: head, request: request, base: base,
+                verdict = try accountVerifyAtHead(account: account, seq: seq, head: head, member: member, request: request, base: base,
                                                   signedHead: signedHead.body, entries: entries, nowMs: nowMs)
             } catch {
                 let e = ColophonError.wrap(error)
                 guard let typed = e as? ColophonError else { throw e }
-                if typed.code == "unavailable", attempt < 3 { continue }
+                if typed.code == "unavailable" || typed.code == "refused:rollback", attempt < Self.attempts { continue }
                 throw JoinError.rejected(code: typed.code, detail: typed.detail)
             }
-            guard verdict.admitted else { return .waiting }
-            return .admitted(files: Dictionary(uniqueKeysWithValues: verdict.stores.map { ($0.path, $0.bytes) }))
+            guard verdict.admitted else { return .notAdmitted }
+            return .admitted(AdmittedHistory(files: Dictionary(uniqueKeysWithValues: verdict.stores.map { ($0.path, $0.bytes) })))
         }
-    }
-
-    /// The WebAuthn descriptor (`rp`, credential, origins) of controller `keyID` in the verified history `files` (as
-    /// `.admitted` gave them), when it is a current WebAuthn controller; nil for a removed, provisional, suspended or raw
-    /// controller, or one the keyring does not hold. An invite names the owner's key ID only.
-    public static func ownerDescriptor(files: [String: Data], keyID: String, now: Date = Date()) throws -> KeyDescriptorView? {
-        let entries = files.filter { $0.key.hasPrefix("authority/") }.sorted { $0.key < $1.key }.map { ByteString(bytes: $0.value) }
-        do { return try accountCurrentWebauthnController(entries: entries, id: keyID, nowMs: Int64((now.timeIntervalSince1970 * 1000).rounded())) }
-        catch { throw ColophonError.wrap(error) }
     }
 
     /// Every page of the history, or nil when the home refuses the read as from a non-member.
@@ -114,6 +146,7 @@ public struct ColophonJoin: Sendable {
         var entries: [ByteString] = []
         var after: UInt64 = 0
         var pages = 0
+        var bytes = 0
         while true {
             pages += 1
             if pages > Self.maxPages { throw JoinError.rejected(code: "malformed", detail: "the history has too many pages") }
@@ -137,6 +170,7 @@ public struct ColophonJoin: Sendable {
                 throw JoinError.rejected(code: (e as? ColophonError)?.code ?? "malformed", detail: (e as? ColophonError)?.detail ?? "")
             }
             if page.more && page.entries.isEmpty { throw JoinError.rejected(code: "malformed", detail: "a history page made no progress") }
+            bytes = try Self.bounded(bytes: bytes, count: entries.count, page: page.entries, maxBytes: Self.maxHistoryBytes, maxEntries: Self.maxEntries)
             entries += page.entries
             after += UInt64(page.entries.count)
             if !page.more { return entries }

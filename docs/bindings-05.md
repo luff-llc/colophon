@@ -81,6 +81,7 @@ nothing and consumes the action; prepare again with fresh entropy. An action fin
 | `begin_grant_transition` | `change_json` with a `grant`, `signers`, `rule`, `pairing: AccountPairing` (confirmed; spent) | 0 |
 | `begin_veto` / `begin_suspend` / `begin_resolve` | as the core | 0 |
 | `begin_write` / `begin_propose` | `namespace`, `kind`, `payload_json` | 32 |
+| `begin_write_claimed` | `namespace`, `kind`, `payload_json`, `claimed_ms: i64` (the operation's `created`; later than the engine's clock is refused) | 32 |
 | `begin_resolution` | `namespace`, `accept`, `proposals` | 32 |
 | `begin_import` | `namespace`, `batch_json` | 32 |
 
@@ -195,9 +196,9 @@ authenticator_data, client_data, WebauthnMode)`, `account_verify_swift_predecess
 `account_default_policy`.
 
 Joining at an invite's head (0.5.2): `account_history_page_path(after)`, `account_history_page(body)` (one page of
-`GET {base}/authority`), `account_verify_at_head(account, seq, head, request, base, signed_head, entries, now_ms)` (accept
+`GET {base}/authority`), `account_verify_at_head(account, seq, head, member, request, base, signed_head, entries, now_ms)` (accept
 a fetched history only when it verifies `ok`, is the account's, holds the head at `seq`, ends at the home's fresh signed
-head and grants the member of `request` from exactly that request; `admitted` false when it names no such member) and
+head and grants the member of `request`, which must be `member` (the reading key), from exactly that request; `admitted` false when it names no such member) and
 `account_current_webauthn_controller(entries, id, now_ms)`. The SDKs wrap them as `ColophonJoin`.
 
 ### A stopped account

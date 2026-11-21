@@ -56,6 +56,7 @@ AccountEngine.begin_unlock_epochs
 AccountEngine.begin_unlock_slot
 AccountEngine.begin_veto
 AccountEngine.begin_write
+AccountEngine.begin_write_claimed
 AccountEngine.blob_availability
 AccountEngine.blob_chunk
 AccountEngine.blob_manifest_json

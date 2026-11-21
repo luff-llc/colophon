@@ -21,9 +21,35 @@ use serde_json::Value;
 /// Entries a home serves in one page of `GET {base}/authority` (the engine's page).
 pub const PAGE: u64 = 64;
 
-/// The most entries a joining device accepts in one history (`2^18`): a bound on what a home
-/// can make it hold, far above any account's history.
+/// The most entries a joining device accepts in one history (`2^18`, 4,096 full pages): four
+/// times the §2.4 portability floor of 65,536 authority entries a verifier must handle, so no
+/// account within the floor is refused. Beyond it the history is `unavailable` (§2.4: "answers
+/// `unavailable` beyond them, never partial validity").
 pub const MAX_ENTRIES: usize = 1 << 18;
+
+/// The largest authority entry envelope a joining device accepts: twice the §2.4 authority body
+/// bound (1 MiB), the envelope bound every authority parser here applies
+/// (`AuthEnvelope::parse(_, AUTHORITY_BODY, 2 * AUTHORITY_BODY, _)`). A larger entry is
+/// `malformed`.
+pub const MAX_ENTRY_BYTES: usize = bounds::AUTHORITY_BODY * 2;
+
+/// The most entry bytes a joining device holds for one history: 256 MiB, the §2.4 portability
+/// floor for envelopes ("256 MiB of envelopes"), so every account a verifier must accept fits.
+/// Beyond it the history is `unavailable`, checked while paging and again before verifying,
+/// so a home that pages forever or sends large pages costs at most this much memory.
+pub const MAX_HISTORY_BYTES: usize = 256 * 1024 * 1024;
+
+/// Fails `unavailable` when `entries` pass [`MAX_ENTRIES`] or [`MAX_HISTORY_BYTES`], and
+/// `malformed` when one entry passes [`MAX_ENTRY_BYTES`]: the check a host runs while paging
+/// and the core runs again before any copy.
+pub fn check_history_size(count: usize, bytes: usize) -> Result<()> {
+    if count > MAX_ENTRIES || bytes > MAX_HISTORY_BYTES {
+        return Err(Failure::Unavailable(
+            "the history passes what a joining device holds (2^18 entries, 256 MiB)".into(),
+        ));
+    }
+    Ok(())
+}
 
 /// The path, relative to the home's base, of the history page after `after` entries.
 pub fn history_page_path(after: u64) -> String {
@@ -56,7 +82,12 @@ pub fn parse_history_page(body: &[u8]) -> Result<HistoryPage> {
         .iter()
         .map(|e| {
             require(e.is_object(), "a history entry is an object")?;
-            canonical(e)
+            let bytes = canonical(e)?;
+            require(
+                bytes.len() <= MAX_ENTRY_BYTES,
+                "a history entry exceeds the authority envelope bound",
+            )?;
+            Ok(bytes)
         })
         .collect::<Result<Vec<_>>>()?;
     let more = match &v["more"] {
@@ -79,13 +110,20 @@ pub enum AtHead {
     NotAdmitted,
 }
 
-fn verified(entries: &[Vec<u8>], now_ms: i64) -> Result<crate::v05::history::Verdict> {
-    require(
-        entries.len() <= MAX_ENTRIES,
-        "the history has more entries than a joining device accepts",
-    )?;
+/// Verify `entries` (taken, never copied) after the size checks; returns the verdict and the
+/// objects holding the entries.
+fn verified(entries: Vec<Vec<u8>>, now_ms: i64) -> Result<(crate::v05::history::Verdict, Objects)> {
+    let mut bytes = 0usize;
+    for e in &entries {
+        require(
+            e.len() <= MAX_ENTRY_BYTES,
+            "a history entry exceeds the authority envelope bound",
+        )?;
+        bytes = bytes.saturating_add(e.len());
+    }
+    check_history_size(entries.len(), bytes)?;
     let objects = Objects {
-        entries: entries.to_vec(),
+        entries,
         ..Default::default()
     };
     let verdict = verify_history(&objects, &Persisted::default(), now_ms);
@@ -101,7 +139,7 @@ fn verified(entries: &[Vec<u8>], now_ms: i64) -> Result<crate::v05::history::Ver
         verdict.state.is_some(),
         "the history has no verified genesis",
     )?;
-    Ok(verdict)
+    Ok((verdict, objects))
 }
 
 /// Accept a fetched history only when it verifies completely, holds the invite's head, ends at
@@ -115,10 +153,12 @@ fn verified(entries: &[Vec<u8>], now_ms: i64) -> Result<crate::v05::history::Ver
 /// - the branch is at least `seq` long (shorter: `unavailable`, a rolled-back history), and
 ///   its entry `seq` has the body digest `head` (another: `refused:fork`);
 /// - `signed_head` (the body of `GET {base}/head`) verifies (§13.3) as a fresh head of a current
-///   home whose endpoints name `base`, and names exactly the branch tip: a head beyond the tip
+///   home whose endpoints name `base` (any other signer, a home that was removed included, is
+///   `badSignature`), and names exactly the branch tip: a head beyond the tip
 ///   is `refused:rollback` (the home serves less than it signed); a head behind it is
 ///   `unavailable` (fetch again);
-/// - the member `key_id(request.member.signing)` is current at the tip (§8.5) and was granted
+/// - `member` (the key ID of the key that signed the reads) is the member `request` names (else
+///   `refused:conflict`: a request of another member), and that member is current at the tip (§8.5) and was granted
 ///   with exactly `request` (the same body bytes): revoked, expired or provisional is
 ///   `refused:revoked` / `refused:expired`, a grant of another request `refused:conflict`.
 ///   A history that names no member with this ID is [`AtHead::NotAdmitted`].
@@ -127,10 +167,11 @@ pub fn verify_at_head(
     account: &AccountId,
     seq: u64,
     head: &str,
+    member: &str,
     request: &[u8],
     base: &str,
     signed_head: &[u8],
-    entries: &[Vec<u8>],
+    entries: Vec<Vec<u8>>,
     now_ms: i64,
 ) -> Result<AtHead> {
     use crate::v05::heads::{verify_head, HeadContext};
@@ -142,7 +183,7 @@ pub fn verify_at_head(
         &request.account == account,
         "the request names another account",
     )?;
-    let verdict = verified(entries, now_ms)?;
+    let (verdict, objects) = verified(entries, now_ms)?;
     let state = verdict
         .state
         .as_ref()
@@ -157,20 +198,23 @@ pub fn verify_at_head(
     if at_head != head {
         return Err(Failure::Refused(Reason::Fork));
     }
+    // Each fetched entry, by its digest's place on the branch (one map, O(n)): an entry off the
+    // branch is `refused:fork`, the same entry twice `malformed`.
+    let index_of: std::collections::HashMap<&str, usize> = verdict
+        .branch
+        .iter()
+        .enumerate()
+        .map(|(i, d)| (d.as_str(), i))
+        .collect();
     let mut stored: Vec<Option<Vec<u8>>> = vec![None; verdict.branch.len()];
-    for e in entries {
-        let env = AuthEnvelope::parse(
-            e,
-            bounds::AUTHORITY_BODY,
-            bounds::AUTHORITY_BODY.saturating_mul(2),
-            false,
-        )?;
-        let i = verdict
-            .branch
-            .iter()
-            .position(|d| *d == env.digest)
+    for e in objects.entries {
+        let env = AuthEnvelope::parse(&e, bounds::AUTHORITY_BODY, MAX_ENTRY_BYTES, false)?;
+        let i = *index_of
+            .get(env.digest.as_str())
             .ok_or(Failure::Refused(Reason::Fork))?;
-        stored[i] = Some(e.clone());
+        let slot = &mut stored[i];
+        require(slot.is_none(), "a history entry is served twice")?;
+        *slot = Some(e);
     }
     // The tip is the home's signed head (§13.3), from a current home that serves at `base`.
     let base = base.trim_end_matches('/');
@@ -186,7 +230,8 @@ pub fn verify_at_head(
         })
         .map(|m| (m.request.member_id(), m.request.signing.clone()))
         .collect();
-    require(!homes.is_empty(), "no current home of this account serves at this base")?;
+    // No current home serving at `base` leaves `homes` empty, and the head's signer is then
+    // refused like any other non-home (`badSignature`).
     let head_env = canonical(&strict_parse(signed_head)?)?;
     let tip = verdict.branch.len() as u64;
     let signed = match verify_head(
@@ -214,6 +259,9 @@ pub fn verify_at_head(
     }
     // This device, granted from exactly its request and current at the tip (§8.5).
     let id = request.member_id();
+    if id != member {
+        return Err(Failure::Refused(Reason::Conflict));
+    }
     match state.current_principal(&id, Claim::Member, now_ms) {
         Ok(Principal::Member(m)) | Ok(Principal::Home(m)) => {
             if m.request.body != request.body {
@@ -241,12 +289,12 @@ pub fn verify_at_head(
 /// from the history rather than from an invite. `None` for a removed, provisional, suspended or
 /// raw controller, or an ID the keyring does not hold.
 pub fn current_webauthn_controller(
-    entries: &[Vec<u8>],
+    entries: Vec<Vec<u8>>,
     id: &str,
     now_ms: i64,
 ) -> Result<Option<crate::v05::descriptor::KeyDescriptor>> {
     use crate::v05::history::{Claim, Principal};
-    let verdict = verified(entries, now_ms)?;
+    let (verdict, _) = verified(entries, now_ms)?;
     let state = verdict
         .state
         .as_ref()
@@ -283,6 +331,18 @@ mod tests {
         assert!(parse_history_page(br#"{"more":false}"#).is_err());
         let many = format!("{{\"entries\":[{}]}}", vec!["{}"; 65].join(","));
         assert!(parse_history_page(many.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn size_bounds() {
+        assert!(check_history_size(MAX_ENTRIES, MAX_HISTORY_BYTES).is_ok());
+        assert_eq!(check_history_size(MAX_ENTRIES + 1, 0).err().map(|e| e.code()).as_deref(), Some("unavailable"));
+        assert_eq!(check_history_size(1, MAX_HISTORY_BYTES + 1).err().map(|e| e.code()).as_deref(), Some("unavailable"));
+        let big = format!("{{\"entries\":[{{\"p\":\"{}\"}}]}}", "a".repeat(MAX_ENTRY_BYTES));
+        assert_eq!(parse_history_page(big.as_bytes()).err().map(|e| e.code()).as_deref(), Some("malformed"));
+        let entry = vec![b'{'; MAX_ENTRY_BYTES + 1];
+        let err = verified(vec![entry], 0).err().map(|e| e.code());
+        assert_eq!(err.as_deref(), Some("malformed"));
     }
 
     #[test]
