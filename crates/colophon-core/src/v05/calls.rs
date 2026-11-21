@@ -1330,6 +1330,12 @@ fn home_request(
             signer,
             purposes: Some(home_purposes(req.method, req.path)),
             names_writes: false,
+            // Route upkeep is available even to a suspended or recover-only controller.
+            // Member links still need an explicit service grant.
+            route_write: matches!(req.method, "PUT" | "DELETE")
+                && req.path.strip_prefix("/routes/").is_some_and(|id| {
+                    id.len() == 64 && id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                }),
         },
     )
 }
@@ -1369,6 +1375,7 @@ struct Mode<'a> {
     purposes: Option<&'a [&'a str]>,
     /// A home write must name what it writes (`malformed` otherwise), judged at the same point.
     names_writes: bool,
+    route_write: bool,
 }
 
 fn verify(
@@ -1462,7 +1469,7 @@ fn verify(
                 id,
                 Claim::Controller {
                     roles: &[],
-                    suspended_ok: call.purpose == HISTORY_READ,
+                    suspended_ok: call.purpose == HISTORY_READ || (at_home && mode.route_write),
                 },
                 cfg.now_ms,
             )
@@ -1472,7 +1479,8 @@ fn verify(
                 && [at_s, latest]
                     .iter()
                     .all(|c| c.audiences().is_some_and(|a| a.contains(&call.audience)));
-            let role_ok = both(&Role::Approve)
+            let role_ok = (at_home && mode.route_write)
+                || both(&Role::Approve)
                 || both(&Role::Control)
                 || sign_ok
                 || (both(&Role::Recover) && call.purpose == HISTORY_READ);
@@ -1563,7 +1571,7 @@ fn verify(
             let home_read = at_home && call.links.is_empty() && call.purpose != HOME_WRITE;
             let home_write = at_home
                 && call.purpose == HOME_WRITE
-                && own_writes(m, writes)
+                && (own_writes(m, writes) || (mode.route_write && call.links.is_empty()))
                 && call
                     .links
                     .iter()

@@ -1,5 +1,5 @@
 // Colophon 0.3 reference relay (spec §8). Stores opaque records per library slot.
-// Dependency-free: node:http, node:https, node:fs, node:path and node:crypto only.
+// Uses built-in Node APIs and Bun’s built-in WebSocket server.
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { constants as fsc, promises as fsp, writeSync } from 'node:fs';
 import http from 'node:http';
@@ -28,6 +28,7 @@ export const DEFAULT_LIMITS = Object.freeze({
 
 const SLOT = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const HEX64 = /^[0-9a-f]{64}$/;
+const STREAM_PATH = /^\/v1\/libraries\/([a-z0-9][a-z0-9._-]{0,63})\/stream$/;
 const BATCH_BYTES = 4 * 1024 * 1024; // Encoded JSON/base64 response budget.
 
 export function sha256(bytes) { return createHash('sha256').update(bytes).digest('hex'); }
@@ -112,7 +113,8 @@ function answerOptions(req, res, listed) {
   const headers = {}; // a 204 carries no Content-Length (RFC 9110 §8.6)
   if (preflight) {
     if (listed) {
-      headers['access-control-allow-methods'] = CORS_METHODS;
+      headers['access-control-allow-methods'] = /^\/v1\/libraries\/[^/]+\/routes\/[0-9a-f]{64}$/.test(req.url)
+        ? 'GET, PUT, DELETE, OPTIONS' : CORS_METHODS;
       headers['access-control-allow-headers'] = CORS_HEADERS;
       headers['access-control-max-age'] = CORS_MAX_AGE;
     }
@@ -552,7 +554,7 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
           s.home = new HomeSlot({
             slot: s, wasm: homeModule, key: homeKey, base: homeSlots.get(name).base, account: homeSlots.get(name).account,
             clock, resolve, tracing,
-            deps: { HttpError, send, readBody, clampInt, clientAddress, reach },
+            deps: { HttpError, send, readBody, clampInt, clientAddress, isJsonType, reach },
             limits: { ...effective, requestsPerMinute: effective.requestsPerMinute ?? 0 },
           });
           await s.home.open();
@@ -758,7 +760,7 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
     const url = new URL(req.url, 'http://relay.invalid');
     if (url.pathname === '/healthz' && req.method === 'GET') return send(res, 200, { ok: true });
     if (provisioning.enabled && url.pathname === '/v1/provision') return door(req, res);
-    const route = /^\/v1\/libraries\/([^/]+)(?:\/(changes|records|head|authority|pending|predecessor)(?:\/(.*))?)?$/.exec(url.pathname);
+    const route = /^\/v1\/libraries\/([^/]+)(?:\/(changes|records|head|authority|pending|predecessor|routes|stream)(?:\/(.*))?)?$/.exec(url.pathname);
     if (!route) throw new HttpError(404, 'Not found');
     const [, name, section, recordPath] = route;
     // With provisioning on, a slot this home does not hold is named as such (an app asks for its
@@ -767,7 +769,10 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
       throw notProvisioned();
     }
     if (!SLOT.test(name)) throw new HttpError(401, 'Unauthorized', { 'www-authenticate': 'Bearer' });
-    if (!homeSlots.has(name)) authorize(req, name);
+    if (!homeSlots.has(name)) {
+      if (section === 'routes' || section === 'stream') throw new HttpError(404, 'Not found');
+      authorize(req, name);
+    }
     const s = await slot(name);
     // Counted from here until the response has ended and this handler has settled.
     if (closing || s.closing || s.releasing || s.released) throw notProvisioned();
@@ -884,6 +889,19 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
     throw new HttpError(405, 'Method not allowed', { allow: kind === 'request' ? 'GET, PUT, DELETE' : 'GET, PUT' });
   }
 
+  async function upgrade(req, connect) {
+    const match = STREAM_PATH.exec(req.url);
+    if (!match || !homeSlots.has(match[1])) throw new HttpError(404, 'Not found');
+    if (closing) throw new HttpError(503, 'Relay is closing');
+    if (req.headers['transfer-encoding'] || (req.headers['content-length'] ?? '0') !== '0') {
+      throw new HttpError(400, 'A stream request takes no body');
+    }
+    const s = await slot(match[1]);
+    if (closing || s.closing || s.releasing || s.released) throw notProvisioned();
+    enter(s);
+    try { await s.home.stream(req, connect); } finally { leave(s); }
+  }
+
   function listener(req, res) {
     const listed = enforceAnswerHeaders(req, res, origins);
     if (req.method === 'OPTIONS') { answerOptions(req, res, listed); return; }
@@ -921,11 +939,15 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
   if ((homeSlots.size > 0 || provisioning.enabled) && tickMs > 0) { timer = setInterval(() => { tickAll(); }, tickMs); timer.unref?.(); }
 
   let closePromise;
-  return { listener, limits: effective, slot, tickAll, close: () => {
+  return { listener, upgrade, limits: effective, slot, tickAll, close: () => {
     if (closePromise) return closePromise;
     closing = true;
     if (timer) clearInterval(timer);
-    for (const s of slots.values()) { s.closing = true; for (const waiter of [...s.waiters]) waiter.wake(); }
+    for (const s of slots.values()) {
+      s.closing = true;
+      s.home?.closeStreams();
+      for (const waiter of [...s.waiters]) waiter.wake();
+    }
     const drain = async () => {
       await Promise.allSettled([...requests, ...opening.values(), provisionTail]);
       await Promise.all([...slots.values()].map(async (s) => { await drained(s); await s.chain; }));
@@ -1040,13 +1062,39 @@ function send(res, status, json, headers = {}) {
   res.end(body);
 }
 
+/** Use Bun's built-in ws implementation on the same HTTP/TLS listener. */
+async function enableStreams(server, relay) {
+  if (!globalThis.Bun) return;
+  const { WebSocketServer } = await import('ws');
+  const streams = new WebSocketServer({ noServer: true, clientTracking: false, maxPayload: 1024 });
+  server.on('upgrade', (req, socket, head) => {
+    socket.on('error', () => socket.destroy());
+    if (req.headers.upgrade?.toLowerCase() !== 'websocket') { socket.destroy(); return; }
+    const connect = (onOpen) => {
+      if (!socket.destroyed) streams.handleUpgrade(req, socket, head, onOpen);
+    };
+    relay.upgrade(req, connect).catch((error) => {
+      if (socket.destroyed) return;
+      const httpError = error instanceof HttpError;
+      if (!httpError) console.error(error);
+      const status = httpError ? error.status : 500;
+      const body = JSON.stringify(httpError ? (error.body ?? { error: error.message }) : { error: 'Internal relay error' });
+      const headers = Object.entries(httpError ? error.headers : {}).map(([name, value]) => `${name}: ${value}\r\n`).join('');
+      socket.end(`HTTP/1.1 ${status} ${http.STATUS_CODES[status]}\r\n${headers}Connection: close\r\nContent-Type: application/json\r\nCache-Control: no-store\r\nContent-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`);
+    });
+  });
+}
+
 /** Starts an HTTP (or HTTPS when `tls` holds PEM `cert` and `key`) server. */
 export async function startRelay({ host = '127.0.0.1', port = 8787, tls, ...options }) {
   const relay = await createRelay(options);
   const server = tls ? https.createServer({ cert: tls.cert, key: tls.key }, relay.listener) : http.createServer(relay.listener);
   server.requestTimeout = 60_000;
   server.headersTimeout = 20_000;
-  try { await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, host, resolve); }); }
+  try {
+    await enableStreams(server, relay);
+    await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, host, resolve); });
+  }
   catch (error) { await relay.close(); throw error; }
   const address = server.address();
   return { server, relay, host: address.address, port: address.port,

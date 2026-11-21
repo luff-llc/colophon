@@ -191,6 +191,31 @@ fn unmatched_expiry(received_ms: i64, st: &State) -> i64 {
         .saturating_add((st.keyring.policy.recovery_delay() as i64).saturating_mul(1000))
         .saturating_add(WEEK)
 }
+/// Public metadata for a newly witnessed authority object.
+#[derive(Clone, Debug, Serialize)]
+pub struct Notice {
+    /// Digest of the object's canonical body.
+    pub object: String,
+    /// Transition, veto or suspend.
+    pub kind: &'static str,
+    /// The object's signed issue time.
+    pub issued: String,
+    /// The corresponding transition or succession veto deadline.
+    pub deadline: String,
+}
+
+impl Notice {
+    fn new(env: &AuthEnvelope, kind: &'static str, issued: i64, deadline: i64) -> Self {
+        use crate::v05::write::format_date;
+        Self {
+            object: env.digest.clone(),
+            kind,
+            issued: format_date(issued),
+            deadline: format_date(deadline),
+        }
+    }
+}
+
 /// Admission is pure: commit `state` and sign `receipts` in the host, even when `result` refuses.
 #[derive(Clone, Debug)]
 pub struct Admission {
@@ -200,6 +225,8 @@ pub struct Admission {
     pub result: AdmitResult<()>,
     /// Stable signing requests (retries reuse the original body).
     pub receipts: Vec<ReceiptToSign>,
+    /// Newly admitted objects that warrant a notice.
+    pub notices: Vec<Notice>,
 }
 impl HomeState {
     /// Start from verified account objects, with the home's historical serving intervals.
@@ -792,6 +819,7 @@ fn admit_full(
     let mut next = home.clone();
     let mut receipts = Vec::new();
     let mut admitted_head: Option<Vec<u8>> = None;
+    let mut notices = Vec::new();
     let result = (|| -> AdmitResult<()> {
         let now_ms = date(now, "home clock")?;
         let (persisted, prefix, fork) = home.context_any(now_ms)?;
@@ -954,6 +982,7 @@ fn admit_full(
                         &json!({"protocol":"colophon/receipt/5", "account":st.account.as_str(), "object":env.digest, "received":now, "by":home.home}),
                     )?,
                 };
+                notices.push(Notice::new(&env, "transition", at, t.deadline_ms));
                 next.drafts.insert(env.digest, draft.clone());
                 receipts.push(draft);
             }
@@ -969,7 +998,10 @@ fn admit_full(
                 if let Some(status) = super::succession_status(&st)
                     .filter(|s| s.genesis_digest == target && s.timing.is_some())
                 {
-                    return admit_succession_veto(&mut next, &st, &env, incoming, &status, now_ms, &mut receipts, batch);
+                    if let Some(notice) = admit_succession_veto(&mut next, &st, &env, incoming, &status, now_ms, &mut receipts, batch)? {
+                        notices.push(notice);
+                    }
+                    return Ok(());
                 }
                 let stored = next
                     .pending
@@ -1067,6 +1099,7 @@ fn admit_full(
                         &json!({"protocol":"colophon/receipt/5", "account":st.account.as_str(), "object":env.digest, "received":now, "by":home.home}),
                     )?,
                 };
+                notices.push(Notice::new(&env, "veto", at, t.deadline_ms));
                 next.drafts.insert(env.digest, draft.clone());
                 receipts.push(draft);
             }
@@ -1235,7 +1268,9 @@ fn admit_full(
                 admitted_head = Some(incoming.to_vec());
             }
             "colophon/authority/5" => {
-                admit_entry(&mut next, &persisted, &st, &env, incoming, now_ms, fork, later)?
+                if let Some(notice) = admit_entry(&mut next, &persisted, &st, &env, incoming, now_ms, fork, later)? {
+                    notices.push(notice);
+                }
             }
             _ => return Err(malformed("unknown home object protocol").into()),
         }
@@ -1254,6 +1289,7 @@ fn admit_full(
                 state: home.clone(),
                 result: Err(f.into()),
                 receipts: Vec::new(),
+                notices: Vec::new(),
             };
         }
     }
@@ -1261,6 +1297,7 @@ fn admit_full(
         state: next,
         result,
         receipts,
+        notices,
     }
 }
 
@@ -1408,7 +1445,7 @@ fn admit_entry(
     now_ms: i64,
     fork: Option<u64>,
     later: &[Vec<u8>],
-) -> AdmitResult<()> {
+) -> AdmitResult<Option<Notice>> {
     let entry = parse_entry(incoming)?;
     let held: Vec<Vec<u8>> = persisted
         .objects()
@@ -1417,7 +1454,7 @@ fn admit_entry(
     let held_entries: Vec<super::Entry> = held.iter().filter_map(|b| parse_entry(b).ok()).collect();
     // Equality is by body: an entry held already, on the branch or as a candidate, is stored.
     if held_entries.iter().any(|e| e.env.digest == env.digest) {
-        return Ok(());
+        return Ok(None);
     }
     let recording = matches!(
         entry.kind.as_str(),
@@ -1470,7 +1507,7 @@ fn admit_entry(
             &held_entries,
             covered,
             later,
-        );
+        ).map(|()| None);
     }
     let mut objects = Objects {
         entries: vec![incoming.to_vec()],
@@ -1516,7 +1553,14 @@ fn admit_entry(
     }
     objects.pending = next.pending.iter().map(|p| p.envelope.clone()).collect();
     next.checkpoint = Persisted::checkpoint(&objects, persisted, now_ms).to_bytes()?;
-    Ok(())
+    if entry.kind != "suspend" {
+        return Ok(None);
+    }
+    let notice = embedded_bytes(&env.value["transition"], "transition", bounds::TRANSITION_ENVELOPE)
+        .and_then(|transition| state::check_transition(st, &transition, &[], false, false))
+        .ok()
+        .map(|checked| Notice::new(env, "suspend", entry.issued, checked.deadline_ms));
+    Ok(notice)
 }
 
 fn endpoints_of(st: &State, home: &str) -> Vec<String> {
@@ -1818,7 +1862,7 @@ fn admit_succession_veto(
     now_ms: i64,
     receipts: &mut Vec<ReceiptToSign>,
     batch: &[Vec<u8>],
-) -> AdmitResult<()> {
+) -> AdmitResult<Option<Notice>> {
     let t = status.timing.as_ref().ok_or_else(|| malformed("no window"))?;
     if !super::succession::veto_is_valid(st, incoming) {
         return Err(malformed("not a valid veto of the succession").into());
@@ -1866,8 +1910,9 @@ fn admit_succession_veto(
         };
         next.drafts.insert(env.digest.clone(), draft.clone());
         receipts.push(draft);
+        return Ok(Some(Notice::new(env, "veto", at, t.veto_deadline_ms)));
     }
-    Ok(())
+    Ok(None)
 }
 
 /// A predecessor entry published to this home (§14 `PUT {base}/predecessor/authority/<8
@@ -2265,6 +2310,16 @@ pub fn admit_pending_batch(
     objects: &[Vec<u8>],
     now: &str,
 ) -> Result<(HomeState, Vec<AdmitResult<()>>, Vec<ReceiptToSign>)> {
+    let (next, results, receipts, _) = admit_pending_batch_notices(home, objects, now)?;
+    Ok((next, results, receipts))
+}
+
+/// Admit a pending batch and return the public metadata of newly witnessed objects.
+pub fn admit_pending_batch_notices(
+    home: &HomeState,
+    objects: &[Vec<u8>],
+    now: &str,
+) -> Result<(HomeState, Vec<AdmitResult<()>>, Vec<ReceiptToSign>, Vec<Notice>)> {
     require(
         (1..=16).contains(&objects.len()),
         "pending batch must contain 1–16 objects",
@@ -2272,6 +2327,7 @@ pub fn admit_pending_batch(
     let mut next = home.clone();
     let mut results = Vec::new();
     let mut receipts = Vec::new();
+    let mut notices = Vec::new();
     let stopped = home.is_stopped(date(now, "home clock")?)?;
     // Transitions and vetoes first, in request order, each judged with the receipts of the
     // batch (a veto more than 300 s after its `issued` is stored with an in-window receipt of
@@ -2319,12 +2375,14 @@ pub fn admit_pending_batch(
                 state: next.clone(),
                 result: Err(f.into()),
                 receipts: Vec::new(),
+                notices: Vec::new(),
             },
         };
         next = result.state;
         by_index[i] = Some(result.result);
         receipts.extend(result.receipts);
+        notices.extend(result.notices);
     }
     results.extend(by_index.into_iter().map(|r| r.unwrap_or(Err(Refusal::Conflict))));
-    Ok((next, results, receipts))
+    Ok((next, results, receipts, notices))
 }

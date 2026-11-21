@@ -12,12 +12,16 @@
 // module lists, under one lock; at start-up the files are reconciled with the state before
 // anything is served.
 import { createHash } from 'node:crypto';
-import { promises as fsp, writeSync } from 'node:fs';
+import { constants as fsc, promises as fsp, writeSync } from 'node:fs';
 import path from 'node:path';
 
 const b64 = (bytes) => Buffer.from(bytes).toString('base64');
 const unb64 = (text) => Buffer.from(text, 'base64');
 const sha = (bytes) => createHash('sha256').update(bytes).digest('hex');
+
+const ROUTE_BODY_BYTES = 4096;
+const ROUTE_KINDS = new Set(['push', 'email', 'sms', 'webhook', 'other']);
+const NOTICE_COMMIT = 'notice-commit.json';
 
 // Forwarding (§13.1), per peer: each request's own time limit, a pass's wall-time budget, how many
 // newly listed objects and how many backlog objects one pass offers, and how soon the same
@@ -144,6 +148,8 @@ export class HomeSlot {
     this.forward = { peers: {} };
     this.rate = new RateLimit(o.limits.requestsPerMinute);
     this.said = new Map();
+    this.sockets = new Set();
+    this.routes = new Map();
   }
 
   file(name) { return path.join(this.slot.root, name); }
@@ -183,6 +189,9 @@ export class HomeSlot {
     }
     await this.slot.open();
     if (fresh) await this.writeJson('home-state.json', this.state);
+    this.routes = new Map(await this.readOptionalJson('routes.json') ?? []);
+    this.noticeCommit = await this.readOptionalJson(NOTICE_COMMIT);
+    await this.flushNotices();
     // Reconcile storage with the state before serving: a crash between a commit and its files
     // (a missing entry, a head file older than the committed head) heals here, not later.
     await this.materialize(files);
@@ -207,7 +216,7 @@ export class HomeSlot {
       try { return await fsp.lstat(this.file(name)); }
       catch (error) { if (error.code !== 'ENOENT') throw error; return null; }
     };
-    for (const name of ['replay.log', 'alive.json', 'forward.json']) if (await stat(name)) return true;
+    for (const name of ['replay.log', 'alive.json', 'forward.json', 'routes.json', 'notices.jsonl', NOTICE_COMMIT]) if (await stat(name)) return true;
     const log = await stat('log.jsonl');
     if (log && (!log.isFile() || log.size > 0)) return true;
     const records = await stat('records');
@@ -242,10 +251,20 @@ export class HomeSlot {
   async readJson(name, fallback) {
     try { return JSON.parse(await fsp.readFile(this.file(name), 'utf8')); } catch { return fallback; }
   }
+  async readOptionalJson(name) {
+    let handle;
+    try { handle = await fsp.open(this.file(name), fsc.O_RDONLY | fsc.O_NOFOLLOW); }
+    catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+    try {
+      if (!(await handle.stat()).isFile()) throw new Error(`${name} must be a regular file`);
+      return JSON.parse(await handle.readFile('utf8'));
+    } finally { await handle.close(); }
+  }
+
   async writeJson(name, value) {
     const staged = path.join(this.slot.root, 'tmp', `${name}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}`);
-    const handle = await fsp.open(staged, 'w', 0o600);
-    try { await handle.write(JSON.stringify(value)); await handle.sync(); } finally { await handle.close(); }
+    const handle = await fsp.open(staged, 'wx', 0o600);
+    try { await handle.writeFile(JSON.stringify(value)); await handle.sync(); } finally { await handle.close(); }
     await fsp.rename(staged, this.file(name));
     // The rename must be durable too: in particular, a refused unknown-format entry's
     // stop has no stored entry to replay if a crash were to lose the checkpoint update.
@@ -253,10 +272,83 @@ export class HomeSlot {
     try { await directory.sync(); } finally { await directory.close(); }
   }
 
-  async commit(state) {
+  async commit(state, notices = []) {
+    await this.flushNotices();
     if (!state || state === this.state) return;
+    if (notices.length) {
+      const file = this.file('notices.jsonl');
+      const stat = await fsp.lstat(file).catch((error) => { if (error.code !== 'ENOENT') throw error; });
+      if (stat && !stat.isFile()) throw new Error('notices.jsonl must be a regular file');
+      const offset = stat?.size ?? 0;
+      const lines = notices.map((notice) =>
+        (JSON.stringify({ account: this.account, ...notice }) + '\n').repeat(Math.max(1, this.routes.size))).join('');
+      // A restart finishes the append only if the corresponding checkpoint committed.
+      // The offset makes replay safe after a torn or already completed append.
+      const journal = { state: sha(state), offset, lines };
+      await this.writeJson(NOTICE_COMMIT, journal);
+      this.noticeCommit = journal;
+    }
     await this.writeJson('home-state.json', state);
     this.state = state;
+    await this.flushNotices();
+  }
+
+  async flushNotices() {
+    if (!this.noticeCommit) return;
+    const { state, offset, lines } = this.noticeCommit;
+    if (state === sha(this.state)) {
+      const handle = await fsp.open(this.file('notices.jsonl'), fsc.O_WRONLY | fsc.O_APPEND | fsc.O_CREAT | fsc.O_NOFOLLOW, 0o600);
+      try {
+        const stat = await handle.stat();
+        if (!stat.isFile() || stat.size < offset) throw new Error('Invalid notices.jsonl at the committed offset');
+        await handle.truncate(offset);
+        await handle.writeFile(lines);
+        await handle.sync();
+      } finally { await handle.close(); }
+      const directory = await fsp.open(this.slot.root, 'r');
+      try { await directory.sync(); } finally { await directory.close(); }
+    }
+    await fsp.unlink(this.file(NOTICE_COMMIT));
+    this.noticeCommit = null;
+  }
+
+  publish(frame) {
+    if (!this.sockets.size) return;
+    const message = JSON.stringify(frame);
+    for (const ws of this.sockets) {
+      if (ws.readyState !== ws.OPEN || ws.bufferedAmount > 64 * 1024) ws.terminate();
+      else {
+        try { ws.send(message, (error) => { if (error) ws.terminate(); }); }
+        catch { ws.terminate(); }
+      }
+    }
+  }
+
+  publishNotices(notices) {
+    for (const { object, kind, deadline } of notices ?? []) this.publish({ type: 'notice', object, kind, deadline });
+  }
+
+  closeStreams() {
+    for (const ws of this.sockets) ws.terminate();
+    this.sockets.clear();
+  }
+
+  async stream(req, connect) {
+    const { HttpError } = this.deps;
+    await this.rateGate(req);
+    await this.lock(async () => {
+      if (this.slot.closing || this.slot.releasing || this.slot.released) throw new HttpError(503, 'Home unavailable');
+      if (this.sockets.size >= this.limits.maxWaiters) throw new HttpError(429, 'Too many streams', { 'retry-after': '60' });
+      const allowed = await this.access(req, 'stream', null, null, null);
+      await this.complete(allowed.reserve.key, 'completed');
+      if (this.slot.closing) throw new HttpError(503, 'Home unavailable');
+      connect((ws) => {
+        this.sockets.add(ws);
+        ws.on('close', () => this.sockets.delete(ws));
+        ws.on('error', () => ws.terminate());
+        ws.on('message', () => ws.close(1008, 'Read-only stream'));
+      });
+    });
   }
 
   /** Store the files the module listed. A path the module marks `replace` (a head; an entry
@@ -271,6 +363,11 @@ export class HomeSlot {
       if (replace) await this.slot.replaceRequest(p, body);
       else if (!have) await this.slot.putImmutable(p, body);
       else throw new Error(`Home slot ${this.slot.name}: ${p} on disk differs from the state`);
+      if (p.startsWith('heads/') && this.sockets.size) {
+        const signed = JSON.parse(body);
+        const { seq, digest } = JSON.parse(unb64(signed.body)).authority;
+        this.publish({ type: 'head', seq, digest });
+      }
     }
   }
 
@@ -503,16 +600,29 @@ export class HomeSlot {
   // HTTP. Returns true when it answered; false to let the relay's generic code serve the file,
   // the change feed or `GET {base}` (after the module allowed it).
 
-  async handle(req, res, url, section, rest) {
-    const { HttpError, send, readBody, clampInt } = this.deps;
+  async rateGate(req) {
+    const { HttpError } = this.deps;
     await this.keepLease();
     if (!this.rate.take(this.deps.clientAddress(req), this.clock())) {
       throw new HttpError(429, 'Too many requests', { 'retry-after': '60' });
+    }
+  }
+
+  async handle(req, res, url, section, rest) {
+    const { HttpError, send, readBody, clampInt } = this.deps;
+    await this.rateGate(req);
+    if (section === 'routes') {
+      if (this.relativePath(req) !== (rest === undefined ? '/routes' : `/routes/${rest}`)) {
+        throw new HttpError(400, 'Invalid notice route URL');
+      }
+      await this.handleRoutes(req, res, rest);
+      return true;
     }
     // Batch reads have no home call format. Refuse uniformly, without inspecting the body.
     if (section === 'records' && rest === 'batch') {
       throw new HttpError(405, 'Method not allowed', { allow: 'GET' });
     }
+    if (section === 'stream' && this.relativePath(req) !== '/stream') throw new HttpError(404, 'Not found');
     const method = req.method;
     const writing = section === 'records' && method === 'PUT';
     const effectPath = writing ? rest : (section === 'predecessor' && method === 'PUT' ? `predecessor/${rest}` : null);
@@ -527,6 +637,7 @@ export class HomeSlot {
     await this.deps.reach?.(`access ${section ?? ''}`); // a test hook (traced builds only)
     const key = allowed.reserve?.key;
     if (!section || section === 'changes') return false;
+    if (section === 'stream') throw new HttpError(426, 'WebSocket upgrade required', { upgrade: 'websocket' });
     if (section === 'head') { await this.serveOwnHead(res); return true; }
     if (section === 'authority') {
       if (method === 'GET') {
@@ -610,6 +721,54 @@ export class HomeSlot {
     throw new HttpError(404, 'Not found');
   }
 
+  async handleRoutes(req, res, id) {
+    const { HttpError, send, readBody, isJsonType } = this.deps;
+    const putting = req.method === 'PUT' && typeof id === 'string' && /^[0-9a-f]{64}$/.test(id);
+    let body;
+    if ((req.method === 'GET' || req.method === 'DELETE')
+        && (req.headers['transfer-encoding'] || (req.headers['content-length'] ?? '0') !== '0')) {
+      throw new HttpError(400, 'This request takes no body');
+    }
+    if (putting) {
+      if (!isJsonType(req.headers['content-type'])) throw new HttpError(415, 'Content-Type must be application/json');
+      body = await readBody(req, ROUTE_BODY_BYTES);
+    }
+    await this.lock(async () => {
+      const allowed = await this.access(req, 'routes', id ?? null, null, body);
+      const key = allowed.reserve.key;
+      try {
+        if (req.method === 'GET') {
+          const routes = Array.from(this.routes, ([id, { kind, reaches, by }]) => ({ id, kind, reaches, by }));
+          send(res, 200, { routes });
+          return;
+        }
+        const exists = this.routes.has(id);
+        const routes = new Map(this.routes);
+        if (putting) {
+          let route;
+          try { route = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(body)); }
+          catch { throw new HttpError(400, 'Invalid JSON'); }
+          const { kind, address, reaches } = route ?? {};
+          if (!route || Object.keys(route).length !== 3 || !ROUTE_KINDS.has(kind)
+              || typeof address !== 'string' || !address || !address.isWellFormed()
+              || typeof reaches !== 'string' || !reaches || !reaches.isWellFormed()) {
+            throw new HttpError(400, 'Invalid notice route');
+          }
+          if (sha(`${kind}\0${address}`) !== id) throw new HttpError(400, 'Route ID does not match kind and address');
+          routes.set(id, { kind, address, reaches, by: allowed.signer });
+        } else {
+          if (!exists) throw new HttpError(404, 'Route not found');
+          routes.delete(id);
+        }
+        await this.writeJson('routes.json', [...routes]);
+        this.routes = routes;
+        const status = putting ? (exists ? 200 : 201) : 204;
+        res.writeHead(status);
+        res.end();
+      } finally { await this.complete(key, 'completed'); }
+    });
+  }
+
   /** A head forwarded by another current home (§13.1). Anyone may send one: the module checks
    * it, and says which head to serve for that home. */
   async putHead(req, res, recordPath) {
@@ -630,6 +789,7 @@ export class HomeSlot {
     await this.lock(async () => {
       const check = this.wasm.call({ op: 'check_record', state: this.state, now: this.clock(), path: recordPath, bytes: b64(body) });
       if (!check.allowed) { send(res, 422, { result: check.code }); return; }
+      const cursor = this.slot.entries.length;
       const conditional = req.headers['if-none-match'];
       let status;
       if (conditional === '*') status = await this.slot.putImmutable(recordPath, body);
@@ -639,6 +799,7 @@ export class HomeSlot {
         if (!expected || !/^"[0-9a-f]{64}"$/.test(expected)) throw new HttpError(428, 'Live replacement requires If-Match');
         status = await this.slot.replaceRequest(recordPath, body, expected);
       } else throw new HttpError(428, 'Immutable records require If-None-Match: *');
+      if (this.slot.entries.length !== cursor) this.publish({ type: 'change', cursor: this.slot.entries.length });
       res.writeHead(status, { etag: `"${sha(body)}"`, 'content-length': 0 });
       res.end();
     });
@@ -654,8 +815,9 @@ export class HomeSlot {
   async postAuthority(res, body) {
     const { send } = this.deps;
     const r = this.wasm.call({ op: 'post_authority', state: this.state, now: this.clock(), body: b64(body) });
-    await this.commit(r.state); // even a refusal changes state (§13.1)
+    await this.commit(r.state, r.notify); // even a refusal changes state (§13.1)
     await this.materialize(r.store);
+    this.publishNotices(r.notify);
     const receipts = await this.signReceipts(r.sign);
     const head = r.appointed ? await this.settle() : 'fresh';
     if (r.outcome !== 'ok') return this.answerOutcome(res, r);
@@ -666,8 +828,9 @@ export class HomeSlot {
   async postPending(res, body) {
     const { send } = this.deps;
     const r = this.wasm.call({ op: 'post_pending', state: this.state, now: this.clock(), body: b64(body) });
-    await this.commit(r.state);
+    await this.commit(r.state, r.notify);
     await this.materialize(r.store);
+    this.publishNotices(r.notify);
     const receipts = await this.signReceipts(r.sign);
     if (r.outcome !== 'ok') return send(res, 422, r.results);
     return send(res, 200, { receipts });
