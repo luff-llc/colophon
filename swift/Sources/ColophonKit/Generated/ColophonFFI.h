@@ -2225,6 +2225,11 @@ RustBuffer uniffi_colophon_ffi_fn_func_bind_legacy_import_state(RustBuffer names
 RustBuffer uniffi_colophon_ffi_fn_func_import_legacy_batch(RustBuffer namespace, RustBuffer operations, RustBuffer state_json, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_FUNC_ACCOUNT_CONTROLLER_JSON
+#define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_FUNC_ACCOUNT_CONTROLLER_JSON
+RustBuffer uniffi_colophon_ffi_fn_func_account_controller_json(RustBuffer controller, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_FUNC_ACCOUNT_DEFAULT_POLICY
 #define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_FUNC_ACCOUNT_DEFAULT_POLICY
 RustBuffer uniffi_colophon_ffi_fn_func_account_default_policy(RustCallStatus *_Nonnull out_status
@@ -2631,6 +2636,12 @@ uint16_t uniffi_colophon_ffi_checksum_func_bind_legacy_import_state(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_FUNC_IMPORT_LEGACY_BATCH
 #define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_FUNC_IMPORT_LEGACY_BATCH
 uint16_t uniffi_colophon_ffi_checksum_func_import_legacy_batch(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_FUNC_ACCOUNT_CONTROLLER_JSON
+#define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_FUNC_ACCOUNT_CONTROLLER_JSON
+uint16_t uniffi_colophon_ffi_checksum_func_account_controller_json(void
     
 );
 #endif

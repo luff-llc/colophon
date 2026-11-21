@@ -3619,3 +3619,164 @@ fn a_control_controller_added_by_a_transition_with_a_home_then_its_slot() {
     );
     assert_eq!(f.account.status().code, "ok");
 }
+
+// ---------------------------------------------------------------------------------------------
+// Appointing homes and adding a controller in one transition (the sessions' `appointHomes`).
+
+/// An account whose only controller is a device key (`approve`, `control`, `recover`) and which
+/// has no home: the shape a host creates for a folder-only library (`createWithoutHome`).
+fn create_one_controller_no_home() -> Fixture {
+    let mut host = Host::new();
+    let d = host.identity(40);
+    let p = host.passkey();
+    let params = CreateParams {
+        label: "Folder library".into(),
+        namespaces: vec!["notes".into()],
+        controllers: vec![host.raw_controller(&d, "Device", &["approve", "control", "recover"])],
+        slots: vec![SlotPlan {
+            controllers: vec![d.clone()],
+            label: "Device".into(),
+        }],
+        threshold: None,
+        recover_threshold: None,
+        add_threshold: None,
+        count_by_holders: false,
+        policy: Some({
+            let mut p = default_policy();
+            p["recoveryDelay"] = json!(3600);
+            p
+        }),
+        signers: vec![d.clone()],
+        rekey_signers: vec![d.clone()],
+        vault_seed: host.fresh(),
+        entropy: host.fresh(),
+        epoch_seed: host.fresh(),
+    };
+    let creation = Creation::begin(params, Identity::Controller(d.clone()), T0).unwrap();
+    assert!(creation.prf_requests().is_empty());
+    let sigs = host.sign(creation.steps());
+    let mut progress = creation.provide_signatures(sigs).unwrap();
+    loop {
+        match progress {
+            CreateProgress::Continue(c) => {
+                let sigs = host.sign(c.steps());
+                progress = c.provide_signatures(sigs).unwrap();
+            }
+            CreateProgress::Done(account) => {
+                return Fixture {
+                    host,
+                    d,
+                    p,
+                    k: String::new(),
+                    account: *account,
+                }
+            }
+        }
+    }
+}
+
+/// The combined change `{"homes":{"appoint":[…]},"keyring":{"add":[passkey]}}` in a
+/// one-controller account with no home: signed by the owner under the control rule with the
+/// passkey's possession proof, it passes `classify`, is due at `issued` (no receipt: there is no
+/// home in the state before it to witness time), and its activation is final at once, so the
+/// added passkey is current and may build its own slot straight away.
+#[test]
+fn appointing_a_home_and_adding_a_controller_in_one_transition_is_final_at_once() {
+    let mut f = create_one_controller_no_home();
+    assert!(f.account.homes().is_empty(), "created without a home");
+    assert_eq!(f.account.controllers().len(), 1);
+    let h = f.host.identity(71);
+    let hp = f.host.ids[&h].public();
+    let created = colophon_core::v05::write::format_date(f.account.now_ms());
+    let prepared = prepare_request(&RequestSpec {
+        account: f.account.id(),
+        signing: &hp.signing,
+        agreement: &hp.agreement,
+        label: "Home",
+        kind: "server",
+        terms: json!({"serves": ["home"]}),
+        created: &created,
+        custody: None,
+        operator: None,
+        endpoints: Some(vec!["https://home.example/".into()]),
+    })
+    .unwrap();
+    let sig = SignatureResult {
+        signature: f.host.ids[&h].sign(prepared.step().body()).to_vec(),
+        assertion: None,
+    };
+    let req = finish_request(&prepared, &sig).unwrap();
+    let passkey = f
+        .host
+        .passkey_controller("Passkey", &["control", "recover"]);
+    let mut map = serde_json::Map::new();
+    map.insert(
+        "homes".into(),
+        json!({"appoint": [{"request": b64(&req.raw), "terms": {"serves": ["home"]}}]}),
+    );
+    map.insert("keyring".into(), json!({"add": [passkey]}));
+    let action = f
+        .account
+        .begin_transition(&Change(map), &[f.d.clone()], TransitionRule::Control)
+        .unwrap();
+    let signers: Vec<String> = action
+        .steps()
+        .iter()
+        .map(|s| s.signer().to_string())
+        .collect();
+    assert_eq!(
+        signers,
+        vec![f.d.clone(), f.p.clone()],
+        "the owner signs, then the passkey's possession proof"
+    );
+    let done = run(&mut f.account, &f.host, action);
+    assert_eq!(done.pending.len(), 1, "one transition");
+    let issued = f.account.now_ms();
+    let pending = f.account.pending();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(
+        pending[0].due_ms,
+        Some(issued),
+        "due at `issued`: no receipt is needed"
+    );
+    let rec = f.account.record_due().unwrap();
+    assert_eq!(rec.len(), 1, "recorded at once: due when issued");
+    assert!(f.account.pending().is_empty());
+    let homes = f.account.homes();
+    assert_eq!(homes.len(), 1);
+    assert_eq!(homes[0].id, h);
+    assert_eq!(homes[0].status, "home");
+    let pk = f
+        .account
+        .controllers()
+        .into_iter()
+        .find(|c| c.id == f.p)
+        .expect("the passkey is a controller");
+    assert!(!pk.provisional, "the activation is final at once");
+    assert_eq!(pk.roles, vec!["control".to_string(), "recover".to_string()]);
+    // Being final, the passkey is current: its own slot is accepted now.
+    let entropy = f.host.fresh();
+    let action = f
+        .account
+        .begin_add_slot(
+            &f.p,
+            SlotPlan {
+                controllers: vec![f.p.clone()],
+                label: "Passkey".into(),
+            },
+            entropy,
+        )
+        .unwrap();
+    let results = f.host.answer_prf(action.prf_requests());
+    let action = f.account.provide_prf(action, results).unwrap();
+    run(&mut f.account, &f.host, action);
+    assert!(
+        f.account
+            .controllers()
+            .iter()
+            .find(|c| c.id == f.p)
+            .unwrap()
+            .has_slot
+    );
+    assert_eq!(f.account.status().code, "ok");
+}

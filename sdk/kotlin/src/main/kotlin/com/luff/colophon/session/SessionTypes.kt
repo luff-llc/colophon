@@ -136,6 +136,18 @@ class ProvisionRefusal(val status: Int, val code: String?, val retryAfterSeconds
     Exception("the home refused to provision: $status${code?.let { " $it" } ?: ""}")
 
 /** A further controller the account is created with (spec §18). It signs its own possession proof at creation. */
+/** What [ColophonSession.appointHomes] left the account with. */
+sealed class HomesAppointment {
+    /** The homes are current, the added controller (if any) is current with its own slot, and the session syncs with them. */
+    object Done : HomesAppointment() { override fun toString() = "Done" }
+    /**
+     * Not done yet: a home was already current, so the transitions have a delay and a veto window (or an activation waits to
+     * be final). [transitions] are the digests of the pending transitions of this owner that carry what was asked, sorted
+     * (empty when only finality is awaited). Call `appointHomes` again with the same arguments later to finish.
+     */
+    data class Pending(val transitions: List<String>) : HomesAppointment()
+}
+
 class AdditionalController(val provider: AsyncKeyProvider, val label: String, val roles: List<ControllerRole> = listOf(ControllerRole.APPROVE, ControllerRole.CONTROL))
 
 /** The session's configuration: one per process and account. */

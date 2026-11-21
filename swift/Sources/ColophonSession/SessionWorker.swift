@@ -82,6 +82,10 @@ actor SessionWorker {
     private var notBefore: [String: Date] = [:]
     /// Per home, the refusal that came with its `Retry-After`, shown again while the home is not contacted.
     private var waitingIssue: [String: HomeIssue] = [:]
+    /// Homes `appointHomes` appointed while this session runs, beside the configuration's: the exchange reaches them at once.
+    private var appointedHomes: [HomeConfiguration] = []
+    /// Every home this session may reach: the configuration's, then those appointed since it started.
+    private var homeConfigurations: [HomeConfiguration] { configuration.homes + appointedHomes }
 
     init(configuration: SessionConfiguration) {
         self.configuration = configuration; memberKeys = SessionKeys(base: configuration.keys)
@@ -934,6 +938,146 @@ actor SessionWorker {
         }
     }
 
+    // MARK: Appointing homes later
+
+    /// The steps of `appointHomes`, for the tests that stop a call between two of them (a crash).
+    enum AppointStep: Sendable { case signed, recorded, slotted }
+    /// Tests only: `appointHomes` throws right after this step, as if the process died there.
+    private var appointStopForTests: AppointStep?
+    func setAppointStopForTests(_ step: AppointStep?) { appointStopForTests = step }
+    struct AppointStopped: Error {}
+    private func reached(_ step: AppointStep) throws { if appointStopForTests == step { throw AppointStopped() } }
+
+    /// Appoints `homes` (each one's request for this account, with its terms) and, with `adding`, adds that controller, in
+    /// ONE transition signed by the owner under the control rule with the new key's possession proof (spec §8.7); records
+    /// it when due; builds the new controller's own slot once it is current; and makes this session reach the homes.
+    /// With no home in the state before it, the transition is due at `issued` and final at once (§13.1); with a home
+    /// already current it waits out its delay and the call answers `.pending` with every transition it waits on.
+    ///
+    /// What is done is read from the account, never from local memory, and bound to what this call asks for: a home is
+    /// done when a current home, or an appointment in a pending transition of this owner, names its configured endpoint
+    /// (whatever member a home answers with on a later call); the controller when the keyring, or a pending transition of
+    /// this owner, holds exactly the requested controller; the slot when a slot has exactly the new key as its holder. A
+    /// call after a crash between any two steps finishes the rest and never signs any of these twice. A home request that
+    /// names another account or does not name the configured endpoint, and a key already present (or pending) with another
+    /// label or roles, are refused (`invalidCommand`) before anything is signed.
+    func appointHomes(_ homes: [HomeConfiguration], adding: (spec: ControllerSpec, key: any AsyncKeyProvider)?) async throws -> (HomesAppointment, SessionSnapshot) {
+        try await gated {
+            guard homes.allSatisfy(\.isAllowed) else { throw SessionError.insecureHome }
+            if engine == nil { _ = try await reconcile() }
+            guard let account = accountID else { throw SessionError.notReady }
+            let addedID = try adding.map { try KeyCustody.keyID(of: $0.spec) }
+            let requested = try adding.map { try JSONSerialization.jsonObject(with: Data(try accountControllerJson(controller: $0.spec).utf8)) }
+            var signedChange: (String, String)?
+            let outcome = try await withOwner { owner, ownerCustody, ownerID -> HomesAppointment in
+                var custody = ownerCustody
+                if let adding, let addedID { custody = KeyCustody(providers: custody.providers.merging([addedID: adding.key]) { _, new in new }) }
+                func covers(_ endpoints: [String], _ configured: HomeConfiguration) -> Bool {
+                    endpoints.contains { Self.base($0) == Self.base(configured.endpoint.absoluteString) }
+                }
+                func isCurrent(_ configured: HomeConfiguration, in current: [Home]) -> Bool {
+                    current.contains { $0.status == .home && covers($0.endpoints, configured) }
+                }
+                // What the pending transitions of this owner already appoint (by endpoint) or add (by controller JSON).
+                let mine = try await owner.run { try $0.pending() }.filter { $0.by == ownerID }
+                var inFlight: [String] = []
+                var pendingEndpoints: [(digest: String, endpoints: [String])] = []
+                var pendingControllers: [(digest: String, controller: Any)] = []
+                for p in mine {
+                    guard let change = pendingChange(p.digest) else { continue }
+                    for request in ((change["homes"] as? [String: Any])?["appoint"] as? [[String: Any]]) ?? [] {
+                        if let text = request["request"] as? String, let raw = Data(base64Encoded: text) { pendingEndpoints.append((p.digest, Self.requestBody(raw).endpoints)) }
+                    }
+                    for c in ((change["keyring"] as? [String: Any])?["add"] as? [Any]) ?? [] { pendingControllers.append((p.digest, c)) }
+                }
+                // 1. Each home neither current nor pending: its request for this account, checked, and the terms it asks.
+                let current = try await owner.run { try $0.homes() }
+                var appoint: [[String: Any]] = []
+                for home in homes where !isCurrent(home, in: current) {
+                    if let p = pendingEndpoints.first(where: { covers($0.endpoints, home) }) { inFlight.append(p.digest); continue }
+                    guard let makeRequest = home.request else { throw SessionError.invalidCommand }
+                    let raw = try await makeRequest(account)
+                    let body = Self.requestBody(raw)
+                    guard body.account == account, covers(body.endpoints, home) else { throw SessionError.invalidCommand }
+                    let info = try accountRequestInfo(raw: raw)
+                    appoint.append(["request": raw.base64EncodedString(), "terms": try JSONSerialization.jsonObject(with: Data(info.termsJson.utf8))])
+                }
+                // The controller: exactly the requested one, in the keyring or pending, or else added here.
+                var add: [Any] = []
+                if let adding, let addedID, let requested {
+                    if let held = try await owner.run({ try $0.controllers() }).first(where: { $0.id == addedID }) {
+                        guard held.label == adding.spec.label, Set(held.roles) == Set(adding.spec.roles) else { throw SessionError.invalidCommand }
+                    } else if let p = pendingControllers.first(where: { Self.keyID(ofController: $0.controller) == addedID }) {
+                        guard Self.canonicalJSON(p.controller) == Self.canonicalJSON(requested) else { throw SessionError.invalidCommand }
+                        inFlight.append(p.digest)
+                    } else {
+                        add.append(requested)
+                    }
+                }
+                // 2-3. One change, signed by the owner with the new key's possession proof, persisted.
+                if !appoint.isEmpty || !add.isEmpty {
+                    var change: [String: Any] = [:]
+                    if !appoint.isEmpty { change["homes"] = ["appoint": appoint] }
+                    if !add.isEmpty { change["keyring"] = ["add": add] }
+                    guard let json = Self.canonicalJSON(change) else { throw SessionError.invalidCommand }
+                    let signers = try await signers(owner, ownerID: ownerID, need: .control)
+                    let written = try await owner.execute(custody: custody) { try $0.beginTransition(changeJson: json, signers: signers, rule: .control, entropy: Data()) }
+                    try await persist(written, on: owner)
+                    if let digest = Self.objectDigest(in: written.stores, prefix: "transitions/") { inFlight.append(digest); signedChange = (digest, json) }
+                    try reached(.signed)
+                }
+                // 4. Record what is due (at once when the account had no home).
+                let at = nowMs
+                _ = try await owner.run { try $0.advance(nowMs: at) }
+                for due in try await owner.run({ try $0.recordDue() }) { try await persist(due, on: owner) }
+                try reached(.recorded)
+                let now = try await owner.run { try $0.homes() }
+                var controller: Controller?
+                if let addedID { controller = try await owner.run { try $0.controllers() }.first { $0.id == addedID } }
+                let homesDone = homes.allSatisfy { isCurrent($0, in: now) }
+                let controllerDone = addedID == nil || controller?.provisional == false
+                guard homesDone, controllerDone else {
+                    return .pending(transitions: Set(inFlight).sorted())
+                }
+                // 5. The new controller's own slot (exactly it as holder), signed by it, so it unlocks alone.
+                if let adding, let addedID,
+                   !(try await owner.run { try $0.slots() }).contains(where: { $0.controllers.map(\.id) == [addedID] }) {
+                    let written = try await owner.execute(custody: custody) { engine in
+                        try withEntropy(32) { try engine.beginAddSlot(signer: addedID, plan: SlotPlan(controllers: [addedID], label: adding.spec.label), entropy: $0) }
+                    }
+                    try await persist(written, on: owner)
+                }
+                try reached(.slotted)
+                return .done
+            }
+            if let (digest, json) = signedChange { try loadJournal(); journal.signedChanges[digest] = json; try saveJournal() }
+            // 6. This session reaches the homes from now on (the exchange and the sync loop), without a relaunch.
+            for home in homes where !homeConfigurations.contains(where: { Self.base($0.endpoint.absoluteString) == Self.base(home.endpoint.absoluteString) }) {
+                appointedHomes.append(home)
+            }
+            return (outcome, try await reconcile())
+        }
+    }
+    /// The `change` of a stored transition (its body's), or nil.
+    private func pendingChange(_ digest: String) -> [String: Any]? {
+        guard let bytes = try? storage().read("transitions/\(digest).json"),
+              let envelope = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any],
+              let body = (envelope["body"] as? String).flatMap({ Data(base64Encoded: $0) }),
+              let value = try? JSONSerialization.jsonObject(with: body) as? [String: Any] else { return nil }
+        return value["change"] as? [String: Any]
+    }
+    /// The account and the `service.endpoints` a request envelope's signed body names (empty when it does not parse).
+    nonisolated static func requestBody(_ raw: Data) -> (account: String?, endpoints: [String]) {
+        guard let envelope = try? JSONSerialization.jsonObject(with: raw) as? [String: Any], let text = envelope["body"] as? String,
+              let body = Data(base64Encoded: text), let value = try? JSONSerialization.jsonObject(with: body) as? [String: Any] else { return (nil, []) }
+        return (value["account"] as? String, ((value["service"] as? [String: Any])?["endpoints"] as? [String]) ?? [])
+    }
+    /// The key ID of a controller's protocol JSON (its `key.signing`), or nil.
+    nonisolated static func keyID(ofController value: Any) -> String? {
+        guard let text = ((value as? [String: Any])?["key"] as? [String: Any])?["signing"] as? String, let point = Data(base64Encoded: text) else { return nil }
+        return try? accountKeyId(signing: point)
+    }
+
     // MARK: Create
 
     func create() async throws -> SessionSnapshot {
@@ -1129,7 +1273,7 @@ actor SessionWorker {
     /// What the engine's homes are, matched to the transports this host configured.
     private func transport(for home: Home) -> HomeConfiguration? {
         func base(_ text: String) -> String { text.trimmingCharacters(in: CharacterSet(charactersIn: "/")) }
-        return configuration.homes.first { configured in home.endpoints.contains { base($0) == base(configured.endpoint.absoluteString) } }
+        return homeConfigurations.first { configured in home.endpoints.contains { base($0) == base(configured.endpoint.absoluteString) } }
     }
 
     struct ExchangeResult: Sendable {
@@ -1227,7 +1371,7 @@ actor SessionWorker {
                     let target: HomeConfiguration
                     if request.url.hasPrefix(Self.base(configured.endpoint.absoluteString) + "/") { target = configured }
                     else if request.method == .get, request.url.hasSuffix("/head"), !request.headers.contains(where: { $0.name.lowercased() == "authorization" }),
-                            let other = configuration.homes.first(where: { request.url == Self.base($0.endpoint.absoluteString) + "/head" }), other.isAllowed {
+                            let other = homeConfigurations.first(where: { request.url == Self.base($0.endpoint.absoluteString) + "/head" }), other.isAllowed {
                         target = other
                     } else {
                         stopped = .callNotBound("a request for another host than the configured home"); break homeLoop
@@ -1385,7 +1529,7 @@ actor SessionWorker {
 
     var homeFaults: [HomeFault] { faults }
     var homeIssues: [HomeIssue] { issues }
-    var hasConfiguredHomes: Bool { !configuration.homes.isEmpty }
+    var hasConfiguredHomes: Bool { !homeConfigurations.isEmpty }
 
     /// Records transitions that came due (§8.7). A schedule calls it; refresh calls it too.
     func recordDue() async throws -> SessionSnapshot {

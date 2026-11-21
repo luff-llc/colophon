@@ -881,6 +881,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_colophon_ffi_checksum_func_import_legacy_batch(
     ): Int
+    external fun uniffi_colophon_ffi_checksum_func_account_controller_json(
+    ): Int
     external fun uniffi_colophon_ffi_checksum_func_account_default_policy(
     ): Int
     external fun uniffi_colophon_ffi_checksum_func_account_current_webauthn_controller(
@@ -2277,6 +2279,8 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_colophon_ffi_fn_func_import_legacy_batch(`namespace`: RustBuffer.ByValue,`operations`: RustBuffer.ByValue,`stateJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_colophon_ffi_fn_func_account_controller_json(`controller`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_colophon_ffi_fn_func_account_default_policy(uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_colophon_ffi_fn_func_account_current_webauthn_controller(`entries`: RustBuffer.ByValue,`id`: RustBuffer.ByValue,`nowMs`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -2461,6 +2465,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_colophon_ffi_checksum_func_import_legacy_batch() and 0xFFFF) != 60451) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_colophon_ffi_checksum_func_account_controller_json() and 0xFFFF) != 6465) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_colophon_ffi_checksum_func_account_default_policy() and 0xFFFF) != 14553) {
@@ -31217,6 +31224,23 @@ public object FfiConverterMapStringByteArray: FfiConverterRustBuffer<Map<kotlin.
         FfiConverterString.lower(`namespace`),
         FfiConverterSequenceTypeLegacyImportOperation.lower(`operations`),
         FfiConverterByteArray.lower(`stateJson`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * A typed controller as its protocol JSON (§6.1), for a host that puts it in the `keyring.add` of
+         * a `change` it builds itself (§8.7), for example beside `homes.appoint` in one transition. The
+         * same JSON `begin_add_controller` and creation use; the core validates it again when it signs.
+         */
+    @Throws(AccountException::class) fun `accountControllerJson`(`controller`: ControllerSpec): kotlin.String {
+            return FfiConverterString.lift(
+    uniffiRustCallWithError(AccountException) { _status ->
+    UniffiLib.uniffi_colophon_ffi_fn_func_account_controller_json(
+    
+        
+        FfiConverterTypeControllerSpec.lower(`controller`),_status)
 }
     )
     }

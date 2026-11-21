@@ -46,7 +46,7 @@ import Observation
     @ObservationIgnored private(set) var checkpointTask: Task<Void, Never>?
     @ObservationIgnored private var usable = false
     @ObservationIgnored private var caches: [UUID: @MainActor (Set<String>, Bool) -> Void] = [:]
-    @ObservationIgnored private let homesConfigured: Bool
+    @ObservationIgnored private var homesConfigured: Bool
     @ObservationIgnored private let syncSignal = SyncSignal()
     @ObservationIgnored private var commandFailureRevision: UInt64 = 0
     /// Counts the refreshes that moved `ready` to `refreshing`; only the latest such refresh puts `ready` back.
@@ -332,6 +332,34 @@ import Observation
         let descriptor = try await key.keyDescriptor()
         let spec = ControllerSpec(key: descriptor, label: label, roles: roles, verification: descriptor.form == .webauthn, holder: nil, audiences: [])
         do { apply(try await worker.addController(spec, mode: immediate ? .immediate : .transition, possession: key)) } catch { handleCommandError(error); throw error }
+    }
+    /// Appoints `homes` to an account that has none yet (one created with `createWithoutHome`), and with `adding` adds that
+    /// controller (a passkey, say, with roles `[.control, .recover]`), in ONE transition (spec §8.7) the owner signs with the
+    /// new key's possession proof. With no home before it, it is recorded at once and final (§13.1): the new controller then
+    /// builds its own slot, so it unlocks alone, and this session starts syncing with the homes at once (no relaunch; pass
+    /// the same homes in `SessionConfiguration.homes` on the next launch). With a home already current the transition waits
+    /// out its delay: the call submits each transition it waits on like `proposeTransition` and answers `.pending(transitions:)`.
+    ///
+    /// Idempotent: called again after a crash or a `.pending`, it finishes what the account shows is not done, and never
+    /// adds the controller or appoints a home twice. A home's `request` is called only while no current or pending
+    /// appointment names its endpoint; a request that names another account or not that endpoint, or a key already present
+    /// with another label or roles, is `invalidCommand` before anything is signed.
+    @discardableResult
+    public func appointHomes(_ homes: [HomeConfiguration], adding: (key: any AsyncKeyProvider, label: String, roles: [ControllerRole])? = nil) async throws -> HomesAppointment {
+        await restore()
+        var added: (spec: ControllerSpec, key: any AsyncKeyProvider)?
+        if let adding {
+            let d = try await adding.key.keyDescriptor()
+            added = (ControllerSpec(key: d, label: adding.label, roles: adding.roles, verification: d.form == .webauthn, holder: nil, audiences: []), adding.key)
+        }
+        let outcome: HomesAppointment
+        do { let (o, snapshot) = try await worker.appointHomes(homes, adding: added); outcome = o; apply(snapshot) }
+        catch { handleCommandError(error); throw error }
+        if !homes.isEmpty, !homesConfigured { homesConfigured = true; syncState = .idle }
+        startSyncLoop()
+        if case .pending(let digests) = outcome { for digest in digests { await submitUntilReceipted(digest, kind: .transition) } }
+        if homesConfigured, let registered = try? await worker.registerRoutes() { apply(registered) }
+        return outcome
     }
     /// The existing device's half of "add a device": after both screens showed the same digits, seals the
     /// vault seed to the new device. See `AccountPairing`.

@@ -37,6 +37,8 @@ No format, reader-rule or version change. The spec stays Colophon 0.5, revision 
     `account_current_webauthn_controller`.
   - The session's own request moved, unchanged, to one helper the join shares (`OwnRequest`).
 
+- **Sessions appoint homes later and add a controller in one transition** (Swift, Kotlin): `appointHomes(homes, adding:)` appoints homes to an account created with `createWithoutHome` and, optionally, adds a controller such as a passkey, in one §8.7 transition the owner signs with the new key's possession proof. With no home before it the transition is recorded at once and final, the new controller builds its own slot so it unlocks alone, and the running session syncs with the homes without a relaunch (`HomesAppointment.done`). With a home already current it is an ordinary pending transition (`.pending(transitions:)`, every transition it waits on). The call is idempotent and bound to what was asked: run again after a crash between steps it finishes what the account shows is not done, matching homes by their configured endpoint (a request that names another endpoint or account is refused unsigned), the controller by its exact label and roles (a mismatch is refused), and the slot by the new key alone as holder. The FFI gains `account_controller_json` (a typed controller as its protocol JSON). No format or reader-rule change ([docs/session.md](docs/session.md)).
+
 ## 0.5.1 — 2026-11-20
 
 0.5.0 plus the fixes and additions below, with no format or reader-rule change: 0.5.0 homes and

@@ -26499,6 +26499,19 @@ public func importLegacyBatch(namespace: String, operations: [LegacyImportOperat
 })
 }
 /**
+ * A typed controller as its protocol JSON (§6.1), for a host that puts it in the `keyring.add` of
+ * a `change` it builds itself (§8.7), for example beside `homes.appoint` in one transition. The
+ * same JSON `begin_add_controller` and creation use; the core validates it again when it signs.
+ */
+public func accountControllerJson(controller: ControllerSpec)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_func_account_controller_json(
+        FfiConverterTypeControllerSpec_lower(controller),uniffiCallStatus
+    )
+})
+}
+/**
  * The §18 person default policy as a JSON document, for a host that shows or adjusts it.
  */
 public func accountDefaultPolicy()throws  -> String  {
@@ -26743,6 +26756,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_colophon_ffi_checksum_func_import_legacy_batch() != 60451) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_func_account_controller_json() != 6465) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_colophon_ffi_checksum_func_account_default_policy() != 14553) {
