@@ -80,6 +80,7 @@ nothing and consumes the action; prepare again with fresh entropy. An action fin
 | `begin_grant_transition` | `change_json` with a `grant`, `signers`, `rule`, `pairing: AccountPairing` (confirmed; spent) | 0 |
 | `begin_veto` / `begin_suspend` / `begin_resolve` | as the core | 0 |
 | `begin_write` / `begin_propose` | `namespace`, `kind`, `payload_json` | 32 |
+| `begin_write_claimed` | `namespace`, `kind`, `payload_json`, `claimed_ms: i64` (the operation's `created`; later than the engine's clock is refused) | 32 |
 | `begin_resolution` | `namespace`, `accept`, `proposals` | 32 |
 | `begin_import` | `namespace`, `batch_json` | 32 |
 

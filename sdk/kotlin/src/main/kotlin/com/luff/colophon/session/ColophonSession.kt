@@ -187,12 +187,17 @@ class ColophonSession(configuration: SessionConfiguration) : AutoCloseable {
         if (retryCreate && phase == SessionPhase.NoLibrary) create()
     }
 
-    /** One write, bound to the revision observed when the person began the action. */
-    suspend fun perform(command: DomainCommand, observed: ObservedRevision): WriteReceipt = facade {
+    /**
+     * One write, bound to the revision observed when the person began the action. [claimedMs], when given (ms since
+     * the Unix epoch), is the operation's signed `created` instead of now: an app importing old data keeps each
+     * item's original date, which rows such as a note's `created` show. Order stays logical; only that date changes.
+     * A claimed date later than now is [SessionError.InvalidCommand].
+     */
+    suspend fun perform(command: DomainCommand, observed: ObservedRevision, claimedMs: Long? = null): WriteReceipt = facade {
         restore()
         if (observed.context != context) throw SessionError.DestinationChanged()
         try {
-            val (receipt, snapshot) = worker.write(command, observed.revision)
+            val (receipt, snapshot) = worker.write(command, observed.revision, claimedMs)
             if (observed.context != context) throw SessionError.DestinationChanged()
             apply(snapshot)
             if (homesConfigured) requestSync()
