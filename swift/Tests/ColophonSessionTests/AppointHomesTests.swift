@@ -48,7 +48,7 @@ import ColophonSavedKit
     private func controllerEngine(_ medium: MemoryMedium, id: String, account: String, clock: TestClock) async throws -> ColophonEngine {
         try await ColophonEngine.open(label: "test.controller", source: MediumSource(medium), listing: medium.listing().map { ListedPath(path: $0.path, version: $0.version) },
             identity: AccountIdentity(kind: .controller, id: id), account: account, namespaces: [], saved: nil,
-            deviceKey: Data(repeating: 0x33, count: 32), nowMs: clock.now)
+            deviceKey: SecretBytes(copying: Data(repeating: 0x33, count: 32)), nowMs: clock.now)
     }
     /// The passkey opens its own slot with nothing else: the account unlocks by it alone.
     private func unlocksAlone(_ medium: MemoryMedium, passkey: TestPasskey, account: String, clock: TestClock) async throws -> Bool {
@@ -165,14 +165,97 @@ import ColophonSavedKit
         let home = appointable(next)
         let outcome = try await first.session.appointHomes([home], adding: (key: passkey, label: "Passkey", roles: [.control, .recover]))
         first.session.stopSync()
-        guard case .pending(let digest) = outcome else { Issue.record("expected pending, got \(outcome)"); return }
-        #expect(!digest.isEmpty && transitions(first.medium) == before + 1)
+        guard case .pending(let digests) = outcome, digests.count == 1, let digest = digests.first else { Issue.record("expected one pending, got \(outcome)"); return }
+        #expect(transitions(first.medium) == before + 1)
         #expect(first.session.homes.count == 1, "not appointed before its delay")
         #expect(first.session.notices.pending.contains { $0.digest == digest })
         clock.advance(1000)
         let repeated = try await first.session.appointHomes([home], adding: (key: passkey, label: "Passkey", roles: [.control, .recover]))
         first.session.stopSync()
-        #expect(repeated == .pending(transition: digest), "the same transition, not a second one")
+        #expect(repeated == .pending(transitions: [digest]), "the same transition, not a second one")
         #expect(transitions(first.medium) == before + 1)
+    }
+
+    /// A home that answers with another identity after a crash (same endpoint, another member) is not appointed again: the
+    /// pending appointment names its endpoint. A request that does not name the configured endpoint is refused unsigned.
+    @Test func aHomeIsBoundByItsEndpointNotByTheMemberItAnswersWith() async throws {
+        let clock = TestClock(Self.t0)
+        let relay = RelayHome(base: "https://appoint.test/v1/accounts/swift-rotating", port: RelayHome.freePort(), clock: { clock.now })
+        let impostor = RelayHome(base: relay.base, port: RelayHome.freePort(), clock: { clock.now })
+        let elsewhere = RelayHome(base: "https://elsewhere.test/v1/accounts/swift", port: RelayHome.freePort(), clock: { clock.now })
+        defer { relay.stop() }
+        let first = Device(createWithoutHome: true, clock: { clock.date })
+        await first.session.create()
+        try #require(first.session.phase == .ready)
+        // A request for another endpoint than the configured one: refused before anything is signed.
+        let wrong = HomeConfiguration(endpoint: URL(string: relay.base + "/")!, request: { try elsewhere.memberRequest(account: $0) }, transport: relay.transport())
+        await #expect(throws: SessionError.invalidCommand) { try await first.session.appointHomes([wrong]) }
+        #expect(transitions(first.medium) == 0)
+        // The first call stops once its transition is signed; the home then answers as another member.
+        let started = Once()
+        let rotating = HomeConfiguration(endpoint: URL(string: relay.base + "/")!, request: { account in
+            var first = false
+            try started.run { try relay.start(account: account); first = true }
+            return try (first ? relay : impostor).memberRequest(account: account)
+        }, transport: relay.transport())
+        await first.session.worker.setAppointStopForTests(.signed)
+        await #expect(throws: SessionWorker.AppointStopped.self) { try await first.session.appointHomes([rotating]) }
+        first.session.stopSync()
+        let again = first.relaunch()
+        await again.restore()
+        let outcome = try await again.appointHomes([rotating])
+        again.stopSync()
+        #expect(outcome == .done)
+        #expect(transitions(first.medium) == 1, "not appointed twice")
+        #expect(again.homes.map(\.id) == [relay.id], "the home first appointed, not the impostor")
+    }
+
+    /// A key already in the keyring with other roles than asked is refused, not taken as done; nothing is signed.
+    @Test func anExistingKeyWithOtherRolesIsRefused() async throws {
+        let clock = TestClock(Self.t0)
+        let relay = RelayHome(base: "https://appoint.test/v1/accounts/swift-roles", port: RelayHome.freePort(), clock: { clock.now })
+        defer { relay.stop() }
+        let first = Device(createWithoutHome: true, clock: { clock.date })
+        await first.session.create()
+        let key = SoftwareKeys()
+        try await first.session.addController(key, label: "Key", roles: [.approve], immediate: true)
+        let before = first.medium.snapshot().count
+        await #expect(throws: SessionError.invalidCommand) {
+            try await first.session.appointHomes([appointable(relay)], adding: (key: key, label: "Key", roles: [.control, .recover]))
+        }
+        #expect(first.medium.snapshot().count == before && transitions(first.medium) == 0, "nothing signed")
+        #expect(first.session.homes.isEmpty)
+    }
+
+    /// A key that is a controller but held only in a combined [owner, key] slot gets its own slot: done means it unlocks alone.
+    @Test func aKeyInOnlyACombinedSlotGetsItsOwn() async throws {
+        let clock = TestClock(Self.t0)
+        let relay = RelayHome(base: "https://appoint.test/v1/accounts/swift-combined", port: RelayHome.freePort(), clock: { clock.now })
+        defer { relay.stop() }
+        let first = Device(createWithoutHome: true, clock: { clock.date })
+        await first.session.create()
+        let account = try #require(first.session.libraryID)
+        let key = SoftwareKeys()
+        try await first.session.addController(key, label: "Key", roles: [.approve], immediate: true)
+        let ownerID = try await KeyCustody.keyID(of: first.owner), keyID = try await KeyCustody.keyID(of: key)
+        // The owner builds a slot both keys must open together.
+        let owner = try await controllerEngine(first.medium, id: ownerID, account: account, clock: clock)
+        let own = try #require(try await owner.run { try $0.slots() }.first { $0.controllers.map(\.id) == [ownerID] })
+        let custody = try await KeyCustody([first.owner, key])
+        let inputs = try await owner.run { try $0.beginUnlockSlot(index: own.index) }
+        _ = try await owner.finishUnlockSlot(index: own.index, secrets: try await custody.answer(unlock: inputs))
+        let written = try await owner.execute(custody: custody) { e in
+            try withEntropy(32) { try e.beginAddSlot(signer: ownerID, plan: SlotPlan(controllers: [ownerID, keyID], label: "Both"), entropy: $0) }
+        }
+        await owner.lock()
+        try first.medium.write(written.stores.map { MediumWrite(path: $0.path, bytes: $0.bytes) })
+        let outcome = try await first.session.appointHomes([appointable(relay)], adding: (key: key, label: "Key", roles: [.approve]))
+        first.session.stopSync()
+        #expect(outcome == .done)
+        let keyring = try await controllerEngine(first.medium, id: keyID, account: account, clock: clock)
+        let slots = try await keyring.run { try $0.slots() }
+        await keyring.lock()
+        #expect(slots.filter { $0.controllers.map(\.id) == [keyID] }.count == 1, "its own slot was built")
+        #expect(slots.contains { Set($0.controllers.map(\.id)) == [ownerID, keyID] })
     }
 }

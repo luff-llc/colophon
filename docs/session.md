@@ -147,6 +147,31 @@ that holds its own verified revocation is `denied`, as before.
   key; both screens run the ceremony (`AccountPairing`, six digits); the existing device calls `transferSeed(pairing:)`; the new
   device calls `acceptSeedTransfer(key:pairing:sealed:label:)`, which opens a controller engine from the seed and builds its own
   slot, so it unlocks alone afterwards.
+* **Appointing homes later, with a new controller** (`appointHomes(_:adding:)`): an account created with `createWithoutHome`
+  (its one controller the device's owner key) gets its homes, and optionally a second controller such as a passkey, in **one**
+  transition (spec §8.7): `try await session.appointHomes([home], adding: (key: passkey, label: "Passkey", roles: [.control, .recover]))`.
+  For each home not yet current it calls `HomeConfiguration.request(account)` and appoints that request with its terms; the
+  owner signs under the control rule, and the added key signs its own possession proof (one assertion for a passkey). With no
+  home in the state before it the transition is due at `issued` and recorded at once, final (§13.1); the added controller then
+  builds its own slot (a PRF slot for a passkey), so it unlocks alone, and the running session starts its exchange and sync
+  loop with the homes at once (no relaunch; pass the same homes in `SessionConfiguration.homes` from the next launch). The
+  answer is `HomesAppointment.done`.
+  * **With a home already current** the transition has a delay: the call submits it like `proposeTransition` and answers
+    `.pending(transitions:)` with the digests of every pending transition of this owner that carries what was asked
+    (sorted; each is submitted). Call it again with the same arguments after they activate to build the slot.
+  * **Idempotent, and bound to what was asked.** What is done is read from the account, never from local memory: a call
+    after a crash between any two steps, or after `.pending`, finishes the rest and never signs any part twice. A home is
+    done when a current home, or an appointment in a pending transition of this owner, names its configured endpoint,
+    whatever member the home answers with later; its `request` is called only while none does, and a request that names
+    another account or does not name the configured endpoint is refused before anything is signed. The controller is done
+    when the keyring, or a pending transition of this owner, holds exactly the requested one: the same key with another
+    label or roles is refused, not skipped. The slot is done when a slot has exactly the new key as its holder (a combined
+    slot does not count). `insecureHome` for a home that is not `https`; `invalidCommand` for a home that is not current
+    and has no `request`, for a request bound elsewhere, and for a key already present with another label or roles.
+  * The controller JSON in the change comes from the export `accountControllerJson(controller:)`, the same JSON
+    `beginAddController` uses. The Kotlin session has the same call, taking an `AdditionalController`
+    (`appointHomes(homes, AdditionalController(passkey, "Passkey", listOf(CONTROL, RECOVER)))`) and answering
+    `HomesAppointment.Done` or `HomesAppointment.Pending(transitions)`. Not in the JS session yet.
 
 ## Refresh and the exchange with each home
 

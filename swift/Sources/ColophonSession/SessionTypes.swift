@@ -49,9 +49,10 @@ public enum SessionFailure: Equatable, Sendable {
 public enum HomesAppointment: Sendable, Equatable {
     /// The homes are current, the added controller (if any) is current with its own slot, and the session syncs with them.
     case done
-    /// The transition waits (a home was already current, so it has a delay and a veto window): `transition` is its digest.
-    /// Call `appointHomes` again with the same arguments after it activates to finish (the new controller's slot).
-    case pending(transition: String)
+    /// Not done yet: a home was already current, so the transitions have a delay and a veto window (or an activation waits
+    /// to be final). `transitions` are the digests of the pending transitions of this owner that carry what was asked, sorted
+    /// (empty when only finality is awaited). Call `appointHomes` again with the same arguments later to finish.
+    case pending(transitions: [String])
 }
 
 public enum SessionError: Error, Equatable, Sendable {

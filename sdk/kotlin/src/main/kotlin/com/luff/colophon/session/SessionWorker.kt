@@ -788,44 +788,64 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
      * transition signed by the owner under the control rule with the new key's possession proof (spec §8.7); records it when
      * due; builds the new controller's own slot once it is current; and makes this session reach the homes. With no home in
      * the state before it, the transition is due at `issued` and final at once (§13.1); with a home already current it waits
-     * out its delay and the answer is [HomesAppointment.Pending].
+     * out its delay and the answer is [HomesAppointment.Pending] with every transition it waits on.
      *
-     * What is done is read from the account, never from local memory: a call after a crash between any two steps finishes the
-     * rest. A home already current, a home or controller that a pending transition of this owner already names, a controller
-     * already present, a slot already built: none is done twice.
+     * What is done is read from the account, never from local memory, and bound to what this call asks for: a home is done
+     * when a current home, or an appointment in a pending transition of this owner, names its configured endpoint (whatever
+     * member a home answers with on a later call); the controller when the keyring, or a pending transition of this owner,
+     * holds exactly the requested controller; the slot when a slot has exactly the new key as its holder. A call after a crash
+     * between any two steps finishes the rest and never signs any of these twice. A home request that names another account
+     * or does not name the configured endpoint, and a key already present (or pending) with another label or roles, are
+     * refused (`InvalidCommand`) before anything is signed.
      */
     suspend fun appointHomes(homes: List<HomeConfiguration>, adding: Pair<ControllerSpec, AsyncKeyProvider>?): Pair<HomesAppointment, SessionSnapshot> = gated {
         if (!homes.all { it.isAllowed }) throw SessionError.InsecureHome()
         if (engine == null) reconcile()
         val account = accountId ?: throw SessionError.NotReady()
         val addedId = adding?.let { accountKeyId(it.first.key.signing) }
+        val requested = adding?.let { Json.parse(accountControllerJson(it.first)) }
         var signedChange: Pair<String, String>? = null
-        fun isCurrent(configured: HomeConfiguration, current: List<Home>) =
-            current.any { h -> h.status == HomeStatus.HOME && h.endpoints.any { it.trim('/') == configured.endpoint.trim('/') } }
+        fun covers(endpoints: List<String>, configured: HomeConfiguration) = endpoints.any { it.trim('/') == configured.endpoint.trim('/') }
+        fun isCurrent(configured: HomeConfiguration, current: List<Home>) = current.any { it.status == HomeStatus.HOME && covers(it.endpoints, configured) }
         val outcome = withOwner<HomesAppointment> { owner, ownerCustody, ownerId ->
             val custody = if (adding != null && addedId != null) ownerCustody.merging(addedId, SessionKeys(adding.second)) else ownerCustody
-            // What a pending transition of this owner already appoints or adds (a call that stopped before it was recorded).
+            // What the pending transitions of this owner already appoint (by endpoint) or add (by controller JSON).
             val mine = owner.run { it.pending() }.filter { it.by == ownerId }
             val inFlight = ArrayList<String>()
-            val pendingMembers = HashMap<String, String>()
-            for (p in mine) if ("homes" in p.components) for (m in appointedBy(p.digest)) pendingMembers[m] = p.digest
-            // 1. Each home not yet current: its request for this account and the terms it asks.
+            val pendingEndpoints = ArrayList<Pair<String, List<String>>>()
+            val pendingControllers = ArrayList<Pair<String, Any?>>()
+            for (p in mine) {
+                val change = pendingChange(p.digest) ?: continue
+                for (r in ((change["homes"] as? Map<*, *>)?.get("appoint") as? List<*>).orEmpty()) {
+                    val text = (r as? Map<*, *>)?.get("request") as? String ?: continue
+                    pendingEndpoints.add(p.digest to requestBody(Base64.getDecoder().decode(text)).second)
+                }
+                for (c in ((change["keyring"] as? Map<*, *>)?.get("add") as? List<*>).orEmpty()) pendingControllers.add(p.digest to c)
+            }
+            // 1. Each home neither current nor pending: its request for this account, checked, and the terms it asks.
             val current = owner.run { it.homes() }
             val appoint = ArrayList<Map<String, Any?>>()
             for (home in homes) {
                 if (isCurrent(home, current)) continue
+                val p = pendingEndpoints.firstOrNull { covers(it.second, home) }
+                if (p != null) { inFlight.add(p.first); continue }
                 val makeRequest = home.request ?: throw SessionError.InvalidCommand()
                 val raw = makeRequest(account)
+                val (named, endpoints) = requestBody(raw)
+                if (named != account || !covers(endpoints, home)) throw SessionError.InvalidCommand()
                 val info = accountRequestInfo(raw)
-                val inPending = pendingMembers[info.member]
-                if (inPending != null) { inFlight.add(inPending); continue }
                 appoint.add(mapOf("request" to Base64.getEncoder().encodeToString(raw), "terms" to Json.parse(info.termsJson)))
             }
-            // The controller, unless the account or a pending transition of this owner already has it.
+            // The controller: exactly the requested one, in the keyring or pending, or else added here.
             val add = ArrayList<Any?>()
-            if (adding != null && addedId != null && owner.run { it.controllers() }.none { it.id == addedId }) {
-                val p = mine.firstOrNull { addedId in it.adds }
-                if (p != null) inFlight.add(p.digest) else add.add(Json.parse(accountControllerJson(adding.first)))
+            if (adding != null && addedId != null) {
+                val held = owner.run { it.controllers() }.firstOrNull { it.id == addedId }
+                val pending = pendingControllers.firstOrNull { controllerKeyId(it.second) == addedId }
+                when {
+                    held != null -> if (held.label != adding.first.label || held.roles.toSet() != adding.first.roles.toSet()) throw SessionError.InvalidCommand()
+                    pending != null -> { if (Json.write(pending.second) != Json.write(requested)) throw SessionError.InvalidCommand(); inFlight.add(pending.first) }
+                    else -> add.add(requested)
+                }
             }
             // 2-3. One change, signed by the owner with the new key's possession proof, persisted.
             if (appoint.isNotEmpty() || add.isNotEmpty()) {
@@ -847,9 +867,9 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
             val controller = addedId?.let { id -> owner.run { it.controllers() }.firstOrNull { it.id == id } }
             val homesDone = homes.all { isCurrent(it, now) }
             val controllerDone = addedId == null || controller?.provisional == false
-            if (!homesDone || !controllerDone) return@withOwner HomesAppointment.Pending(inFlight.lastOrNull() ?: "")
-            // 5. The new controller's own slot, signed by it, so it unlocks alone.
-            if (adding != null && addedId != null && controller?.hasSlot == false) {
+            if (!homesDone || !controllerDone) return@withOwner HomesAppointment.Pending(inFlight.toSortedSet().toList())
+            // 5. The new controller's own slot (exactly it as holder), signed by it, so it unlocks alone.
+            if (adding != null && addedId != null && owner.run { it.slots() }.none { s -> s.controllers.map { it.id } == listOf(addedId) }) {
                 owner.execute(custody, persistOn(owner)) { e -> withEntropy(32) { e.beginAddSlot(addedId, SlotPlan(listOf(addedId), adding.first.label), it) } }
             }
             reached(AppointStep.SLOTTED)
@@ -860,13 +880,12 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
         for (home in homes) if (homeConfigurations.none { it.endpoint.trim('/') == home.endpoint.trim('/') }) appointedHomes.add(home)
         outcome to reconcile()
     }
-    /** The member IDs a stored transition appoints as homes: the requests in its `change.homes.appoint`. */
-    private fun appointedBy(digest: String): List<String> = try {
+    /** The `change` of a stored transition (its body's), or null. */
+    private fun pendingChange(digest: String): Map<*, *>? = try {
         val envelope = Json.obj(String(storage().read("transitions/$digest.json"), Charsets.UTF_8))
         val body = Json.obj(String(Base64.getDecoder().decode(envelope?.get("body") as String), Charsets.UTF_8))
-        val list = ((body?.get("change") as? Map<*, *>)?.get("homes") as? Map<*, *>)?.get("appoint") as? List<*> ?: listOf<Any?>()
-        list.mapNotNull { item -> ((item as? Map<*, *>)?.get("request") as? String)?.let { accountRequestInfo(Base64.getDecoder().decode(it)).member } }
-    } catch (e: CancellationException) { throw e } catch (_: Exception) { listOf() }
+        body?.get("change") as? Map<*, *>
+    } catch (e: CancellationException) { throw e } catch (_: Exception) { null }
 
     // Create
 
@@ -1311,6 +1330,16 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
             if (terms["records"] == null && terms["services"] == null && terms["serves"] == null) throw SessionError.InvalidCommand()
             return Json.write(terms)
         }
+        /** The account and the `service.endpoints` a request envelope's signed body names (empty when it does not parse). */
+        fun requestBody(raw: ByteArray): Pair<String?, List<String>> = try {
+            val envelope = Json.obj(String(raw, Charsets.UTF_8))
+            val body = Json.obj(String(Base64.getDecoder().decode(envelope?.get("body") as String), Charsets.UTF_8))
+            (body?.get("account") as? String) to ((body?.get("service") as? Map<*, *>)?.get("endpoints") as? List<*>).orEmpty().filterIsInstance<String>()
+        } catch (_: Exception) { null to listOf() }
+        /** The key ID of a controller's protocol JSON (its `key.signing`), or null. */
+        fun controllerKeyId(value: Any?): String? = try {
+            ((value as? Map<*, *>)?.get("key") as? Map<*, *>)?.get("signing")?.let { accountKeyId(Base64.getDecoder().decode(it as String)) }
+        } catch (_: Exception) { null }
         /** The digest an object's store path names (`transitions/<digest>.json`). */
         fun objectDigest(stores: List<Store>, prefix: String): String? {
             for (s in stores) {

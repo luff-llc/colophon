@@ -203,10 +203,10 @@ class AppointHomesTest {
             val outcome = first.session.appointHomes(listOf(home), AdditionalController(passkey, "Passkey", passkeyRoles))
             first.session.stopSync()
             val pending = assertIs<HomesAppointment.Pending>(outcome)
-            assertTrue(pending.transition.isNotEmpty())
+            assertEquals(1, pending.transitions.size)
             assertEquals(before + 1, transitions(first.medium))
             assertEquals(1, first.session.homes.size, "not appointed before its delay")
-            assertTrue(first.session.notices.pending.any { it.digest == pending.transition })
+            assertTrue(first.session.notices.pending.any { it.digest == pending.transitions[0] })
             now.addAndGet(1000)
             val repeated = first.session.appointHomes(listOf(home), AdditionalController(passkey, "Passkey", passkeyRoles))
             first.session.stopSync()
@@ -215,6 +215,99 @@ class AppointHomesTest {
         } finally {
             devices.forEach { it.close() }
             current.stop(); next.stop()
+        }
+    }
+
+    /**
+     * A home that answers with another identity after a crash (same endpoint, another member) is not appointed again: the
+     * pending appointment names its endpoint. A request that does not name the configured endpoint is refused unsigned.
+     */
+    @Test fun aHomeIsBoundByItsEndpointNotByTheMemberItAnswersWith() = runBlocking<Unit> {
+        val relay = RelayHome("https://appoint.test/v1/accounts/kotlin-rotating", clockSource = clock)
+        val impostor = RelayHome(relay.base, clockSource = clock)
+        val elsewhere = RelayHome("https://elsewhere.test/v1/accounts/kotlin", clockSource = clock)
+        val devices = ArrayList<Device>()
+        try {
+            val first = Device(createWithoutHome = true, now = clock).also { devices.add(it) }
+            first.session.create()
+            assertEquals(SessionPhase.Ready, first.session.phase, first.describe())
+            val wrong = HomeConfiguration("${relay.base}/", request = { elsewhere.memberRequest(it) }, transport = relay.transport())
+            assertFailsWith<SessionError.InvalidCommand> { first.session.appointHomes(listOf(wrong)) }
+            assertEquals(0, transitions(first.medium))
+            var started = false
+            val rotating = HomeConfiguration("${relay.base}/", request = { account ->
+                if (!started) { relay.start(account); started = true; relay.memberRequest(account) } else impostor.memberRequest(account)
+            }, transport = relay.transport())
+            first.session.worker.appointStopForTests = SessionWorker.AppointStep.SIGNED
+            assertFailsWith<SessionWorker.AppointStopped> { first.session.appointHomes(listOf(rotating)) }
+            first.session.stopSync()
+            val again = Device(medium = first.medium, member = first.member, owner = first.owner, secrets = first.secrets, dir = first.dir, now = clock)
+            again.session.restore()
+            val outcome = again.session.appointHomes(listOf(rotating))
+            again.session.stopSync()
+            assertEquals(HomesAppointment.Done, outcome)
+            assertEquals(1, transitions(first.medium), "not appointed twice")
+            assertEquals(listOf(relay.id), again.session.homes.map { it.id }, "the home first appointed, not the impostor")
+            again.session.shutdown()
+        } finally {
+            devices.forEach { it.close() }
+            relay.stop(); impostor.stop(); elsewhere.stop()
+        }
+    }
+
+    /** A key already in the keyring with other roles than asked is refused, not taken as done; nothing is signed. */
+    @Test fun anExistingKeyWithOtherRolesIsRefused() = runBlocking<Unit> {
+        val relay = RelayHome("https://appoint.test/v1/accounts/kotlin-roles", clockSource = clock)
+        val devices = ArrayList<Device>()
+        try {
+            val first = Device(createWithoutHome = true, now = clock).also { devices.add(it) }
+            first.session.create()
+            val key = SoftwareKeys()
+            first.session.addController(key, "Key", listOf(ControllerRole.APPROVE), immediate = true)
+            val before = first.medium.snapshot().size
+            assertFailsWith<SessionError.InvalidCommand> {
+                first.session.appointHomes(listOf(appointable(relay)), AdditionalController(key, "Key", passkeyRoles))
+            }
+            assertEquals(before, first.medium.snapshot().size, "nothing signed")
+            assertEquals(0, transitions(first.medium))
+            assertTrue(first.session.homes.isEmpty())
+        } finally {
+            devices.forEach { it.close() }
+            relay.stop()
+        }
+    }
+
+    /** A key that is a controller but held only in a combined [owner, key] slot gets its own slot: done means it unlocks alone. */
+    @Test fun aKeyInOnlyACombinedSlotGetsItsOwn() = runBlocking<Unit> {
+        val relay = RelayHome("https://appoint.test/v1/accounts/kotlin-combined", clockSource = clock)
+        val devices = ArrayList<Device>()
+        try {
+            val first = Device(createWithoutHome = true, now = clock).also { devices.add(it) }
+            first.session.create()
+            val account = assertNotNull(first.session.libraryId)
+            val key = SoftwareKeys()
+            first.session.addController(key, "Key", listOf(ControllerRole.APPROVE), immediate = true)
+            val ownerId = KeyCustody.keyId(first.owner); val keyId = KeyCustody.keyId(key)
+            // The owner builds a slot both keys must open together.
+            val owner = controllerEngine(first.medium, ownerId, account)
+            val custody = KeyCustody.of(listOf(first.owner, key))
+            val written = try {
+                val own = owner.run { it.slots() }.first { s -> s.controllers.map { it.id } == listOf(ownerId) }
+                val inputs = owner.run { it.beginUnlockSlot(own.index) }
+                owner.finishUnlockSlot(own.index, custody.answerUnlock(inputs))
+                owner.execute(custody) { e -> withEntropy(32) { e.beginAddSlot(ownerId, com.luff.colophon.SlotPlan(listOf(ownerId, keyId), "Both"), it) } }
+            } finally { owner.lock() }
+            first.medium.write(written.stores.map { MediumWrite(it.path, it.bytes) })
+            val outcome = first.session.appointHomes(listOf(appointable(relay)), AdditionalController(key, "Key", listOf(ControllerRole.APPROVE)))
+            first.session.stopSync()
+            assertEquals(HomesAppointment.Done, outcome)
+            val keyring = controllerEngine(first.medium, keyId, account)
+            val slots = try { keyring.run { it.slots() } } finally { keyring.lock() }
+            assertEquals(1, slots.count { s -> s.controllers.map { it.id } == listOf(keyId) }, "its own slot was built")
+            assertTrue(slots.any { s -> s.controllers.map { it.id }.toSet() == setOf(ownerId, keyId) })
+        } finally {
+            devices.forEach { it.close() }
+            relay.stop()
         }
     }
 }

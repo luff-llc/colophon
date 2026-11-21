@@ -342,10 +342,12 @@ class ColophonSession(configuration: SessionConfiguration) : AutoCloseable {
      * key's possession proof. With no home before it, it is recorded at once and final (§13.1): the new controller then builds
      * its own slot, so it unlocks alone, and this session starts syncing with the homes at once (no relaunch; pass the same
      * homes in `SessionConfiguration.homes` on the next launch). With a home already current the transition waits out its
-     * delay: the call submits it like [proposeTransition] and answers [HomesAppointment.Pending].
+     * delay: the call submits each transition it waits on like [proposeTransition] and answers [HomesAppointment.Pending].
      *
      * Idempotent: called again after a crash or a `Pending`, it finishes what the account shows is not done, and never adds
-     * the controller or appoints a home twice. Each home's `request` is called for this account on every call.
+     * the controller or appoints a home twice. A home's `request` is called only while no current or pending appointment
+     * names its endpoint; a request that names another account or not that endpoint, or a key already present with another
+     * label or roles, is `InvalidCommand` before anything is signed.
      */
     suspend fun appointHomes(homes: List<HomeConfiguration>, adding: AdditionalController? = null): HomesAppointment = facade {
         restore()
@@ -357,7 +359,7 @@ class ColophonSession(configuration: SessionConfiguration) : AutoCloseable {
         catch (e: CancellationException) { throw e } catch (e: Exception) { handleCommandError(e); throw e }
         if (homes.isNotEmpty() && !homesConfigured) { homesConfigured = true; set { copy(syncState = HomeSyncState.Idle) } }
         startSyncLoop()
-        if (outcome is HomesAppointment.Pending) submitUntilReceipted(outcome.transition, Submission.Kind.TRANSITION)
+        if (outcome is HomesAppointment.Pending) for (digest in outcome.transitions) submitUntilReceipted(digest, Submission.Kind.TRANSITION)
         if (homesConfigured) try { apply(worker.registerRoutes()) } catch (e: CancellationException) { throw e } catch (_: Exception) {}
         outcome
     }
