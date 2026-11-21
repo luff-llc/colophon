@@ -17,6 +17,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
+use zeroize::Zeroize;
 
 #[path = "storage.rs"]
 pub(crate) mod storage;
@@ -346,6 +347,22 @@ pub struct Library {
     live: BTreeMap<(String, String, String), Judged>,
     /// Signed candidates awaiting epoch keys; never replace the verified envelope early.
     pending_live: BTreeMap<String, Vec<Vec<u8>>>,
+}
+impl Zeroize for Library {
+    fn zeroize(&mut self) {
+        self.vault_seed.zeroize();
+        for key in self.keys.values_mut() {
+            key.zeroize();
+        }
+        for key in self.checkpoint_keys.values_mut() {
+            key.zeroize();
+        }
+    }
+}
+impl Drop for Library {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Status {
@@ -1192,7 +1209,9 @@ impl Library {
             &[slots::OpeningSecret::Prf(output)],
             vault::derive,
         )?;
-        let binding = prf_binding(&slot, |id| (id == verified.key.id()).then(|| verified.key.clone()))?;
+        let binding = prf_binding(&slot, |id| {
+            (id == verified.key.id()).then(|| verified.key.clone())
+        })?;
         self.checked_slots.insert((
             self.authority.keyring.vault.id(),
             slot_fingerprint(&slot)?,
@@ -1255,7 +1274,9 @@ impl Library {
             &[slots::OpeningSecret::Prf(&verified.output)],
             vault::derive,
         )?;
-        let binding = prf_binding(&slot, |id| (id == verified.key.id()).then(|| verified.key.clone()))?;
+        let binding = prf_binding(&slot, |id| {
+            (id == verified.key.id()).then(|| verified.key.clone())
+        })?;
         self.checked_slots
             .insert((v.id(), slot_fingerprint(&slot)?, binding));
         Ok(slot)
@@ -1408,6 +1429,10 @@ impl Library {
     /// Complete all host ECDH results atomically, then refresh admission/projections once.
     /// Each tuple is (namespace, epoch, raw shared secret). Prefer this on cold open.
     pub fn finish_unlock_many(&mut self, results: Vec<(String, u64, Vec<u8>)>) -> Result<()> {
+        let results: Vec<_> = results
+            .into_iter()
+            .map(|(ns, epoch, shared)| (ns, epoch, zeroize::Zeroizing::new(shared)))
+            .collect();
         let keys = results
             .iter()
             .map(|(ns, epoch, shared)| {
@@ -1876,7 +1901,8 @@ impl Library {
                 // A new route must match a checked construction for the exact descriptors the
                 // keyring publishes (rp, credential, origins), not only the controller IDs.
                 let checked = !preserved && {
-                    let binding = prf_binding(slot, |id| keyring.controller(id).map(|c| c.key.clone()))?;
+                    let binding =
+                        prf_binding(slot, |id| keyring.controller(id).map(|c| c.key.clone()))?;
                     self.checked_slots
                         .contains(&(keyring.vault.id(), fingerprint, binding))
                 };
@@ -2502,6 +2528,7 @@ impl Library {
             .queries()
             .into_iter()
             .chain(module.operations())
+            .chain(crate::imports::query_specs())
             .find(|s| s.name == kind);
         let Some(spec) = spec else {
             return Ok(Outcome::failure(Denial::new("unavailable", "Unknown tool")));
@@ -3630,7 +3657,10 @@ fn prf_binding(slot: &Slot, lookup: impl Fn(&str) -> Option<KeyDescriptor>) -> R
     let mut bound = Vec::new();
     for id in slot.controllers() {
         let key = lookup(id).ok_or_else(|| missing("route controller"))?;
-        bound.push(serde_json::json!([id, serde_json::from_slice::<Value>(&key.canonical()?)?]));
+        bound.push(serde_json::json!([
+            id,
+            serde_json::from_slice::<Value>(&key.canonical()?)?
+        ]));
     }
     canonical(&Value::Array(bound))
 }
@@ -3640,4 +3670,73 @@ fn slot_fingerprint(slot: &Slot) -> Result<Vec<u8>> {
         map.remove("label");
     }
     canonical(&value)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod secret_tests {
+    use super::*;
+
+    #[test]
+    fn library_clones_erase_all_owned_secrets_independently() {
+        let owner = crypto::SoftwareKeys::from_seed([1; 32]).unwrap();
+        let member = crypto::SoftwareKeys::from_seed([2; 32]).unwrap();
+        let pending = Library::begin_create(
+            CreateOptions {
+                owner: owner.public(),
+                member: member.public(),
+                vault_seed: [3; 32],
+                import_expires: None,
+                label: "Test".into(),
+                owner_label: "Owner".into(),
+                namespaces: vec!["notes".into()],
+                recovery: None,
+                imported_from: None,
+            },
+            "2026-11-04T12:00:00.000Z",
+            [4; 32],
+        )
+        .unwrap();
+        let signatures = pending
+            .steps
+            .iter()
+            .map(|step| {
+                if step.signing == owner.public().signing {
+                    owner.sign(&step.body)
+                } else {
+                    member.sign(&step.body)
+                }
+            })
+            .collect();
+        let pending = pending.advance_create(signatures).unwrap();
+        let signatures = pending
+            .steps
+            .iter()
+            .map(|step| owner.sign(&step.body))
+            .collect();
+        let mut original =
+            Library::open(pending.finish(signatures).unwrap(), member.public()).unwrap();
+        original.vault_seed = Some([5; 32]);
+        for epoch in [1, 2] {
+            original.keys.insert(("notes".into(), epoch), vec![6; 32]);
+            original
+                .checkpoint_keys
+                .insert(("notes".into(), epoch), vec![7; 32]);
+        }
+        let mut copy = original.clone();
+        // Exercise the exact erasure implementation used by Drop, while fields remain inspectable.
+        copy.zeroize();
+        assert!(copy.vault_seed.is_none_or(|seed| seed == [0; 32]));
+        assert!(copy
+            .keys
+            .values()
+            .all(|key| key.iter().all(|byte| *byte == 0)));
+        assert!(copy
+            .checkpoint_keys
+            .values()
+            .all(|key| key.iter().all(|byte| *byte == 0)));
+        assert_eq!(original.vault_seed, Some([5; 32]));
+        assert!(original.keys.values().all(|key| key == &[6; 32]));
+        assert!(original.checkpoint_keys.values().all(|key| key == &[7; 32]));
+    }
 }

@@ -7,12 +7,10 @@
 //! schedule's context, secret, AEAD key and nonce, and the KEM shared secret once the key
 //! schedule has taken it.
 //!
-//! **What it cannot.** The `Hkdf` and HMAC objects of the RustCrypto crates keep their key
-//! block inside the object and do not erase it on drop (the crates are not built with
-//! `zeroize` here); the allocator and the stack may hold copies of a freed buffer that a
-//! `black_box`ed overwrite did not reach (a `Vec` that grew); and the ECDH bytes the host gives
-//! are the host's. The 0.4 path (`crate::hpke::{kem_shared_secret, key_schedule, SealedKey}`)
-//! wipes none of its temporaries and is used by 0.4 code only.
+//! Secret buffers owned by this module use `Zeroizing`, including on errors and unwinding.
+//! AES-GCM is built with its `zeroize` feature. HKDF/HMAC internal state is not erased by
+//! those crates; prior stack/register copies and allocations made elsewhere are outside this
+//! guarantee. The host owns its ECDH input. The separate 0.4 HPKE path is unchanged.
 use crate::{
     crypto::{self, Entropy},
     ensure,
@@ -22,43 +20,36 @@ use crate::{
 use hkdf::Hkdf;
 use p256::elliptic_curve::sec1::ToEncodedPoint;
 use sha2::Sha256;
+use zeroize::{Zeroize, Zeroizing};
+
+type Secret = Zeroizing<Vec<u8>>;
 
 const KEM_SUITE: &[u8] = b"KEM\x00\x10";
 
 /// Overwrite `b` with zeros in a way the optimiser may not drop.
 pub(crate) fn wipe(b: &mut [u8]) {
-    for x in b.iter_mut() {
-        *x = 0;
-    }
-    std::hint::black_box(&*b);
+    b.zeroize();
 }
 
-fn extract(suite: &[u8], salt: &[u8], label: &[u8], ikm: &[u8]) -> Vec<u8> {
-    let mut input = [b"HPKE-v1".as_slice(), suite, label, ikm].concat();
-    let prk = Hkdf::<Sha256>::extract(Some(salt), &input).0.to_vec();
-    wipe(&mut input);
-    prk
+fn extract(suite: &[u8], salt: &[u8], label: &[u8], ikm: &[u8]) -> Secret {
+    let input = Zeroizing::new([b"HPKE-v1".as_slice(), suite, label, ikm].concat());
+    let mut prk = Hkdf::<Sha256>::extract(Some(salt), &input).0;
+    let out = Zeroizing::new(prk.to_vec());
+    prk.as_mut_slice().zeroize();
+    out
 }
-fn expand(suite: &[u8], prk: &[u8], label: &[u8], info: &[u8], len: usize) -> Result<Vec<u8>> {
+fn expand(suite: &[u8], prk: &[u8], label: &[u8], info: &[u8], len: usize) -> Result<Secret> {
     let len16 = u16::try_from(len).map_err(|_| Error("HPKE output length".into()))?;
-    let mut labeled = [&len16.to_be_bytes()[..], b"HPKE-v1", suite, label, info].concat();
-    let mut out = vec![0; len];
-    let r = Hkdf::<Sha256>::from_prk(prk)
-        .map_err(|_| Error("HPKE PRK".into()))
-        .and_then(|h| {
-            h.expand(&labeled, &mut out)
-                .map_err(|_| Error("HPKE expand".into()))
-        });
-    wipe(&mut labeled);
-    match r {
-        Ok(()) => Ok(out),
-        Err(e) => {
-            wipe(&mut out);
-            Err(e)
-        }
-    }
+    let labeled =
+        Zeroizing::new([&len16.to_be_bytes()[..], b"HPKE-v1", suite, label, info].concat());
+    let mut out = Zeroizing::new(vec![0; len]);
+    Hkdf::<Sha256>::from_prk(prk)
+        .map_err(|_| Error("HPKE PRK".into()))?
+        .expand(&labeled, &mut out)
+        .map_err(|_| Error("HPKE expand".into()))?;
+    Ok(out)
 }
-fn kem_shared_secret(dh: &[u8], enc: &[u8], recipient: &[u8]) -> Result<Vec<u8>> {
+fn kem_shared_secret(dh: &[u8], enc: &[u8], recipient: &[u8]) -> Result<Secret> {
     ensure(dh.len() == 32, "Expected 32-byte ECDH secret")?;
     for point in [enc, recipient] {
         ensure(
@@ -67,38 +58,25 @@ fn kem_shared_secret(dh: &[u8], enc: &[u8], recipient: &[u8]) -> Result<Vec<u8>>
         )?;
         p256::PublicKey::from_sec1_bytes(point).map_err(|_| Error("Invalid HPKE point".into()))?;
     }
-    let mut prk = extract(KEM_SUITE, &[], b"eae_prk", dh);
-    let shared = expand(
+    let prk = extract(KEM_SUITE, &[], b"eae_prk", dh);
+    expand(
         KEM_SUITE,
         &prk,
         b"shared_secret",
         &[enc, recipient].concat(),
         32,
-    );
-    wipe(&mut prk);
-    shared
+    )
 }
-/// Base-mode key schedule for AEAD 2: `(key, nonce)`, both to be wiped by the caller.
-fn key_schedule(shared: &[u8], info: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
+/// Base-mode key schedule for AEAD 2; both outputs erase themselves on drop.
+fn key_schedule(shared: &[u8], info: &[u8]) -> Result<(Secret, Secret)> {
     let suite = [b"HPKE\x00\x10\x00\x01".as_slice(), &2u16.to_be_bytes()].concat();
-    let mut psk_hash = extract(&suite, &[], b"psk_id_hash", &[]);
-    let mut info_hash = extract(&suite, &[], b"info_hash", info);
-    let mut context = [&[0][..], &psk_hash, &info_hash].concat();
-    let mut secret = extract(&suite, shared, b"secret", &[]);
-    let key = expand(&suite, &secret, b"key", &context, 32);
-    let nonce = expand(&suite, &secret, b"base_nonce", &context, 12);
-    for b in [&mut psk_hash, &mut info_hash, &mut context, &mut secret] {
-        wipe(b);
-    }
-    match (key, nonce) {
-        (Ok(k), Ok(n)) => Ok((k, n)),
-        (k, n) => {
-            for mut v in [k, n].into_iter().flatten() {
-                wipe(&mut v);
-            }
-            Err(Error("HPKE key schedule".into()))
-        }
-    }
+    let psk_hash = extract(&suite, &[], b"psk_id_hash", &[]);
+    let info_hash = extract(&suite, &[], b"info_hash", info);
+    let context = Zeroizing::new([&[0][..], &psk_hash, &info_hash].concat());
+    let secret = extract(&suite, shared, b"secret", &[]);
+    let key = expand(&suite, &secret, b"key", &context, 32)?;
+    let nonce = expand(&suite, &secret, b"base_nonce", &context, 12)?;
+    Ok((key, nonce))
 }
 
 /// Seal `plaintext` to `recipient` (a 65-byte agreement point) under `info`.
@@ -114,16 +92,10 @@ pub(crate) fn seal(
         .to_encoded_point(false)
         .as_bytes()
         .to_vec();
-    let mut dh = crypto::agree(&ephemeral, recipient)?;
-    let shared = kem_shared_secret(&dh, &enc, recipient);
-    wipe(&mut dh);
-    let mut shared = shared?;
-    let schedule = key_schedule(&shared, info);
-    wipe(&mut shared);
-    let (mut key, mut nonce) = schedule?;
+    let dh = Zeroizing::new(crypto::agree(&ephemeral, recipient)?);
+    let shared = kem_shared_secret(&dh, &enc, recipient)?;
+    let (key, nonce) = key_schedule(&shared, info)?;
     let ciphertext = crypto::seal(&key, &nonce, plaintext, info);
-    wipe(&mut key);
-    wipe(&mut nonce);
     Ok(SealedKey {
         enc,
         ciphertext: ciphertext?,
@@ -137,15 +109,9 @@ pub(crate) fn finish_open(
     dh: &[u8],
     info: &[u8],
 ) -> Result<Vec<u8>> {
-    let shared = kem_shared_secret(dh, &sealed.enc, recipient);
-    let mut shared = shared?;
-    let schedule = key_schedule(&shared, info);
-    wipe(&mut shared);
-    let (mut key, mut nonce) = schedule?;
-    let plain = crypto::open(&key, &nonce, &sealed.ciphertext, info);
-    wipe(&mut key);
-    wipe(&mut nonce);
-    plain
+    let shared = kem_shared_secret(dh, &sealed.enc, recipient)?;
+    let (key, nonce) = key_schedule(&shared, info)?;
+    crypto::open(&key, &nonce, &sealed.ciphertext, info)
 }
 
 #[cfg(test)]

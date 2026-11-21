@@ -13,6 +13,7 @@ parallel = []
 work-counters = []
 
 [dependencies]
+zeroize.workspace = true
 p256.workspace = true
 aes-gcm.workspace = true
 hkdf.workspace = true

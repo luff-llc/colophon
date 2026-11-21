@@ -60,6 +60,16 @@ pub struct EngineOptions {
     /// Namespaces this replica lists. Empty means every namespace.
     pub namespaces: Vec<String>,
 }
+impl Zeroize for EngineOptions {
+    fn zeroize(&mut self) {
+        self.checkpoint_key.zeroize();
+    }
+}
+impl Drop for EngineOptions {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
+}
 /// Why this open used or invalidated a verified-prefix checkpoint.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OpenMode {
@@ -515,6 +525,10 @@ impl<S: RecordSource> Engine<S> {
     /// Authenticate epoch keys atomically, then admit/apply pending records.
     /// Additional historical keys explicitly invalidate the projection and replay from storage.
     pub fn finish_unlock_many(&mut self, results: Vec<(String, u64, Vec<u8>)>) -> Result<()> {
+        let results = results
+            .into_iter()
+            .map(|(ns, epoch, shared)| (ns, epoch, zeroize::Zeroizing::new(shared)))
+            .collect();
         self.check_failure()?;
         let result = self.unlock_inner(results);
         if let Err(error) = &result {
@@ -522,7 +536,10 @@ impl<S: RecordSource> Engine<S> {
         }
         result
     }
-    fn unlock_inner(&mut self, results: Vec<(String, u64, Vec<u8>)>) -> Result<()> {
+    fn unlock_inner(
+        &mut self,
+        results: Vec<(String, u64, zeroize::Zeroizing<Vec<u8>>)>,
+    ) -> Result<()> {
         let old: BTreeMap<_, _> = self
             .library
             .namespaces
@@ -2263,4 +2280,23 @@ fn validate_entry_header(
         )?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod secret_tests {
+    use super::*;
+
+    #[test]
+    fn options_clones_erase_their_own_checkpoint_key() {
+        let original = EngineOptions {
+            library_id: "library".into(),
+            checkpoint_key: [9; 32],
+            content_cache_bytes: 0,
+            namespaces: Vec::new(),
+        };
+        let mut copy = original.clone();
+        copy.zeroize();
+        assert_eq!(copy.checkpoint_key, [0; 32]);
+        assert_eq!(original.checkpoint_key, [9; 32]);
+    }
 }
