@@ -28,6 +28,7 @@ use colophon_core::v05::replay::{
     retained, ReplayKey, ReplayState, ReplayStore, Reservation, RETENTION_MS,
 };
 use colophon_core::v05::signature::RawEnvelope;
+use colophon_core::v05::terms::RecordsEntry;
 use colophon_core::v05::history::succession_status;
 use colophon_core::v05::write::calls::{
     finish_genesis_receipt, finish_head, finish_receipt, prepare_genesis_receipt, prepare_head,
@@ -37,7 +38,7 @@ use colophon_core::v05::write::succession::prepare_succession_vetoed;
 use colophon_core::v05::write::{format_date, SignatureResult};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 type R<T> = Result<T, String>;
 
@@ -54,6 +55,8 @@ const BOOTING_PREDECESSOR_BYTES: usize = 8 * 1024 * 1024;
 const MIN_SHARE: usize = 64;
 /// Replay rows of a slot when the host names no capacity.
 const DEFAULT_REPLAY_ROWS: usize = 65_536;
+const BATCH_BODY_BYTES: usize = 64 * 1024;
+const BATCH_PATHS: usize = 256;
 
 /// Run one request. The input is JSON, the output is JSON; nothing panics on bad input.
 pub fn handle(input: &[u8]) -> Vec<u8> {
@@ -384,6 +387,10 @@ enum Class {
     History,
     /// Records, live values, blob chunks and the change feed.
     RecordsRead,
+    /// One record read, with the path already classified.
+    RecordRead(Kind),
+    /// `POST /records/batch`, with one call for the raw JSON body.
+    BatchRead,
     /// Writes, with what they write.
     Write(Vec<HomeWrite>),
     /// `PUT {base}/predecessor/authority/<8 digits>.json` (§14): a predecessor entry published.
@@ -399,6 +406,47 @@ fn answer(status: u16) -> R<Value> {
 }
 fn not_allowed(allow: &str) -> R<Value> {
     Ok(json!({"allowed": false, "status": 405, "allow": allow}))
+}
+
+fn record_kind(path: &str) -> Option<Kind> {
+    paths::classify(path).filter(|kind| !matches!(kind, Kind::Request))
+}
+
+/// History and heads have their own call rules. Blobs name no namespace. A member
+/// reading a namespaced record must have a grant for that namespace, including when
+/// acting through links. Controllers have already been checked by the call verifier.
+fn record_read_allowed(path: &str, kind: &Kind, member_records: Option<&[RecordsEntry]>) -> bool {
+    let Some(records) = member_records else {
+        return true;
+    };
+    let namespace = match kind {
+        Kind::Op { namespace, .. } | Kind::Live { namespace, .. } => namespace.as_str(),
+        Kind::History => match path.split('/').nth(2) {
+            Some(namespace) => namespace,
+            None => return false,
+        },
+        _ => return true,
+    };
+    records.iter().any(|entry| entry.namespace == namespace)
+}
+
+fn batch_paths(body: &[u8]) -> R<Vec<(String, Kind)>> {
+    let body = body.strip_prefix(b"\xef\xbb\xbf").unwrap_or(body);
+    let parsed: Value = serde_json::from_slice(body).map_err(|_| "Invalid JSON")?;
+    let invalid = "Expected 1–256 unique valid record paths";
+    let paths = parsed["paths"].as_array().ok_or(invalid)?;
+    if !(1..=BATCH_PATHS).contains(&paths.len()) {
+        return Err(invalid.into());
+    }
+    let mut seen = BTreeSet::new();
+    paths
+        .iter()
+        .map(|path| {
+            let path = path.as_str().filter(|p| seen.insert(*p)).ok_or(invalid)?;
+            let kind = record_kind(path).ok_or(invalid)?;
+            Ok((path.to_string(), kind))
+        })
+        .collect()
 }
 
 /// The whole access decision for one request (§13.4, §14, §12.3, §12.4):
@@ -446,15 +494,20 @@ fn access(req: &Value) -> R<Value> {
             (_, Some(Kind::Predecessor(_))) => return not_allowed("GET, PUT"),
             _ => return answer(404),
         },
+        ("records", Some("batch")) => match method {
+            "POST" if str_of(req, "path")? == "/records/batch" => Class::BatchRead,
+            "POST" => return answer(400),
+            _ => return not_allowed("POST"),
+        },
         ("records", Some(p)) => {
-            let Some(kind) = paths::classify(p).filter(|k| !matches!(k, Kind::Request)) else {
+            let Some(kind) = record_kind(p) else {
                 return Ok(json!({"allowed": false, "status": 400, "error": "Invalid record path"}));
             };
             match (read, method, kind) {
                 (true, _, Kind::Head) => Class::Head,
                 (true, _, Kind::Authority(_) | Kind::Pending | Kind::Receipt) => Class::History,
                 (true, _, Kind::Predecessor(_)) => Class::History,
-                (true, _, _) => Class::RecordsRead,
+                (true, _, kind) => Class::RecordRead(kind),
                 (false, "PUT", Kind::Head) => Class::Admit,
                 // What a write writes is the core's rule, the one a signer builds its call by.
                 (
@@ -536,10 +589,23 @@ fn access(req: &Value) -> R<Value> {
         Class::Write(writes) => writes,
         _ => &[],
     };
+    let batch_body = if matches!(class, Class::BatchRead) {
+        let body = bytes_of(req, "batchBody")?;
+        if body.len() > BATCH_BODY_BYTES {
+            return answer(413);
+        }
+        Some(body)
+    } else {
+        None
+    };
+    let batch_digest = batch_body.as_deref().map(digest);
     let request = HomeRequest {
         method,
         path,
-        body_sha256: str_of(req, "bodySha256")?,
+        body_sha256: match &batch_digest {
+            Some(digest) => digest,
+            None => str_of(req, "bodySha256")?,
+        },
         writes,
     };
     let vc = match verify_home_request(&call, &account_view, &cfg, &mut store, &request) {
@@ -548,6 +614,22 @@ fn access(req: &Value) -> R<Value> {
     };
     if matches!(class, Class::PredecessorPut) && !matches!(vc.call.signer, CallSigner::Controller(_)) {
         return refuse("refused:notGranted".into());
+    }
+    let member_records = match (&class, &vc.call.signer) {
+        (Class::RecordRead(_) | Class::BatchRead, CallSigner::Member(id)) => Some(
+            v.state
+                .members()
+                .iter()
+                .find(|member| member.request.member_id() == *id)
+                .and_then(|member| member.terms.records())
+                .unwrap_or_default(),
+        ),
+        _ => None,
+    };
+    if let Class::RecordRead(kind) = &class {
+        if !record_read_allowed(rest.unwrap_or_default(), kind, member_records) {
+            return refuse("refused:notGranted".into());
+        }
     }
     // The replay table (§12.4): this principal's live rows, against its share of the table.
     let signer = signer_text(&vc.call.signer);
@@ -584,11 +666,26 @@ fn access(req: &Value) -> R<Value> {
         return Ok(json!({"allowed": false, "status": 429, "result": "refused:window",
                          "retryAfter": (wait_ms + 999) / 1000, "drop": drop}));
     }
-    Ok(json!({
+    let mut result = json!({
         "allowed": true, "via": "call", "signer": signer, "drop": drop,
         "reserve": {"key": key_text(&vc.replay_key), "signer": signer, "at": now_ms,
                     "digest": vc.call.digest},
-    }))
+    });
+    if let Some(body) = batch_body {
+        let paths = match batch_paths(&body) {
+            Ok(paths) => paths,
+            Err(error) => return Ok(json!({"allowed": false, "status": 400, "error": error})),
+        };
+        result["records"] = json!(paths.into_iter().map(|(path, kind)| {
+            let status = if record_read_allowed(&path, &kind, member_records) {
+                200
+            } else {
+                403
+            };
+            json!({"path": path, "status": status})
+        }).collect::<Vec<_>>());
+    }
+    Ok(result)
 }
 
 fn signer_text(s: &CallSigner) -> String {

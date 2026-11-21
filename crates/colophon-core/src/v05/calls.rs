@@ -1181,7 +1181,8 @@ pub fn home_call_args(method: &str, path: &str, body_sha256: &str) -> Value {
 }
 
 /// The purpose a signer gives a call to a home: `colophon.home.read` for GET and HEAD,
-/// `colophon.home.write` otherwise (§14).
+/// `colophon.home.write` otherwise (§14). For a request with a known path, use
+/// [`home_purposes`], which also recognizes the batch read route.
 pub fn home_call_purpose(method: &str) -> &'static str {
     if is_read(method) {
         HOME_READ
@@ -1193,9 +1194,12 @@ pub fn home_call_purpose(method: &str) -> &'static str {
 /// The purposes a home accepts for a request with `method` at `path` (relative to the home's
 /// base, as sent): for GET and HEAD, `colophon.home.read`, and `colophon.history.read` too when
 /// the path serves the history ([`home_path_serves_history`]; §12.3 step 7 and §13.4 limit that
-/// purpose to the history); `colophon.home.write` for anything else.
+/// purpose to the history). `POST /records/batch` takes only `colophon.home.read`. Other
+/// requests take `colophon.home.write`.
 pub fn home_purposes(method: &str, path: &str) -> &'static [&'static str] {
-    if !is_read(method) {
+    if method == "POST" && path == "/records/batch" {
+        &[HOME_READ]
+    } else if !is_read(method) {
         &[HOME_WRITE]
     } else if home_path_serves_history(path) {
         &[HOME_READ, HISTORY_READ]
@@ -1318,7 +1322,12 @@ fn home_request(
     signer: bool,
 ) -> Result<VerifiedCall> {
     let bound = home_call_args(req.method, req.path, req.body_sha256);
-    let writes = if is_read(req.method) { &[][..] } else { req.writes };
+    let purposes = home_purposes(req.method, req.path);
+    let writes = if purposes.contains(&HOME_WRITE) {
+        req.writes
+    } else {
+        &[]
+    };
     verify(
         envelope,
         view,
@@ -1328,7 +1337,7 @@ fn home_request(
             writes,
             bound: Some(&bound),
             signer,
-            purposes: Some(home_purposes(req.method, req.path)),
+            purposes: Some(purposes),
             names_writes: false,
         },
     )

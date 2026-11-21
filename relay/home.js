@@ -344,12 +344,7 @@ export class HomeSlot {
    * request (503, retryable) and the older head is never served. */
   async serveOwnHead(res) {
     const { HttpError, send } = this.deps;
-    let outcome;
-    try { outcome = await this.lock(async () => this.settle()); }
-    catch (error) {
-      if (!(error instanceof ModuleError)) throw error;
-      outcome = 'due';
-    }
+    const outcome = await this.lock(() => this.settleForRead());
     if (outcome === 'due') throw new HttpError(503, 'The head is due and cannot be signed yet', { 'retry-after': '1' }, { result: 'unavailable' });
     const head = await this.headEnvelope();
     if (!head) throw new HttpError(404, 'No head');
@@ -358,10 +353,13 @@ export class HomeSlot {
 
   /** The stored head, only when no other head is due (§13.3); null otherwise. Under the lock. */
   async headIfFresh() {
-    let outcome;
-    try { outcome = await this.settle(); }
-    catch (error) { if (!(error instanceof ModuleError)) throw error; outcome = 'due'; }
+    const outcome = await this.settleForRead();
     return outcome === 'due' ? null : this.headEnvelope();
+  }
+
+  async settleForRead() {
+    try { return await this.settle(); }
+    catch (error) { if (!(error instanceof ModuleError)) throw error; return 'due'; }
   }
 
   async headEnvelope() {
@@ -472,7 +470,10 @@ export class HomeSlot {
       const r = this.wasm.call({
         op: 'access', state: this.state, now: this.clock(), method: req.method, section, rest,
         call, existing, signerRows, replayRows: this.limits.replayRows, base: this.base,
-        path: this.relativePath(req), bodySha256: sha(body ?? Buffer.alloc(0)),
+        path: this.relativePath(req),
+        ...(section === 'records' && rest === 'batch'
+          ? { batchBody: b64(body) }
+          : { bodySha256: sha(body ?? Buffer.alloc(0)) }),
       });
       this.dropRows(r.drop);
       if (r.allowed) {
@@ -509,9 +510,15 @@ export class HomeSlot {
     if (!this.rate.take(this.deps.clientAddress(req), this.clock())) {
       throw new HttpError(429, 'Too many requests', { 'retry-after': '60' });
     }
-    // Batch reads have no home call format. Refuse uniformly, without inspecting the body.
     if (section === 'records' && rest === 'batch') {
-      throw new HttpError(405, 'Method not allowed', { allow: 'GET' });
+      const body = await this.deps.readBatchBody(req, url);
+      await this.lock(async () => {
+        const { records } = await this.access(req, section, rest, null, body);
+        const ownHead = records.find((r) => r.status === 200 && r.path === `heads/${this.key.memberId}.json`);
+        if (ownHead && await this.settleForRead() === 'due') ownHead.status = 503;
+        await this.deps.serveBatch(res, this.slot, records);
+      });
+      return true;
     }
     const method = req.method;
     const writing = section === 'records' && method === 'PUT';

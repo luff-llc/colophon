@@ -448,6 +448,36 @@ function readBody(req, max) {
   });
 }
 
+function readBatchBody(req, url) {
+  if (req.method !== 'POST') throw new HttpError(405, 'Method not allowed', { allow: 'POST' });
+  if (url.search) throw new HttpError(400, 'Record URLs take no query');
+  if (!isJsonType(req.headers['content-type'])) throw new HttpError(415, 'Content-Type must be application/json');
+  return readBody(req, 64 * 1024);
+}
+
+async function serveBatch(res, slot, decisions) {
+  const records = [];
+  // Include the envelope (false is longer than true), commas, and JSON path escaping.
+  const envelopeBytes = Buffer.byteLength(JSON.stringify({ records: [], truncated: false }));
+  let total = envelopeBytes;
+  for (const { path: p, status } of decisions) {
+    const entry = status === 200 ? slot.current.get(p) : undefined;
+    const encodedSize = entry ? Math.ceil(entry.size / 3) * 4 + Buffer.byteLength(JSON.stringify(p)) + 128 : 0;
+    const refusal = !entry ? { path: p, status: status === 200 ? 404 : status }
+      : encodedSize + envelopeBytes > BATCH_BYTES ? { path: p, status: 413, etag: `"${entry.sha256}"`, size: entry.size } : null;
+    const cost = (refusal ? Buffer.byteLength(JSON.stringify(refusal)) : encodedSize) + (records.length ? 1 : 0);
+    if (total + cost > BATCH_BYTES) break;
+    total += cost;
+    if (refusal) { records.push(refusal); continue; }
+    const max = slot.classify(p) === 'blob' ? slot.limits.blobBytes : slot.limits.recordBytes;
+    if (entry.size > max) throw new HttpError(500, 'Stored record exceeds its limit');
+    const bytes = await slot.readFile(p);
+    if (bytes.length !== entry.size || sha256(bytes) !== entry.sha256) throw new HttpError(500, 'Stored record failed integrity check');
+    records.push({ path: p, status: 200, etag: `"${entry.sha256}"`, bytes: bytes.toString('base64') });
+  }
+  return send(res, 200, { records, truncated: records.length < decisions.length });
+}
+
 /**
  * Creates the relay. `libraries` maps slot names to `{ tokenSha256 }`, `{ token }` or
  * `{ open: true }` (no bearer token; local testing only).
@@ -552,7 +582,7 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
           s.home = new HomeSlot({
             slot: s, wasm: homeModule, key: homeKey, base: homeSlots.get(name).base, account: homeSlots.get(name).account,
             clock, resolve, tracing,
-            deps: { HttpError, send, readBody, clampInt, clientAddress, reach },
+            deps: { HttpError, send, readBody, readBatchBody, serveBatch, clampInt, clientAddress, reach },
             limits: { ...effective, requestsPerMinute: effective.requestsPerMinute ?? 0 },
           });
           await s.home.open();
@@ -774,12 +804,7 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
     enter(s); work.slot = s;
     if (s.home && await s.home.handle(req, res, url, section, recordPath)) return undefined;
     if (section === 'records' && recordPath === 'batch') {
-      // Home authorization and rate limiting run before any batch parsing/classification.
-      if (s.home) throw new HttpError(405, 'Batch reads require home module support', { allow: 'GET' });
-      if (req.method !== 'POST') throw new HttpError(405, 'Method not allowed', { allow: 'POST' });
-      if (url.search) throw new HttpError(400, 'Record URLs take no query');
-      if (!isJsonType(req.headers['content-type'])) throw new HttpError(415, 'Content-Type must be application/json');
-      const body = await readBody(req, 64 * 1024);
+      const body = await readBatchBody(req, url);
       let parsed;
       try { parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(body)); } catch { throw new HttpError(400, 'Invalid JSON'); }
       const paths = parsed?.paths;
@@ -787,26 +812,7 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
           new Set(paths).size !== paths.length || paths.some((p) => typeof p !== 'string' || !s.classify(p))) {
         throw new HttpError(400, 'Expected 1–256 unique valid record paths');
       }
-      const records = [];
-      // Include the envelope (false is longer than true), commas, and JSON path escaping.
-      const envelopeBytes = Buffer.byteLength(JSON.stringify({ records: [], truncated: false }));
-      let total = envelopeBytes;
-      for (const p of paths) {
-        const entry = s.current.get(p);
-        const encodedSize = entry ? Math.ceil(entry.size / 3) * 4 + Buffer.byteLength(JSON.stringify(p)) + 128 : 0;
-        const refusal = !entry ? { path: p, status: 404 }
-          : encodedSize + envelopeBytes > BATCH_BYTES ? { path: p, status: 413, etag: `"${entry.sha256}"`, size: entry.size } : null;
-        const cost = (refusal ? Buffer.byteLength(JSON.stringify(refusal)) : encodedSize) + (records.length ? 1 : 0);
-        if (total + cost > BATCH_BYTES) break;
-        total += cost;
-        if (refusal) { records.push(refusal); continue; }
-        const max = s.classify(p) === 'blob' ? effective.blobBytes : effective.recordBytes;
-        if (entry.size > max) throw new HttpError(500, 'Stored record exceeds its limit');
-        const bytes = await s.readFile(p);
-        if (bytes.length !== entry.size || sha256(bytes) !== entry.sha256) throw new HttpError(500, 'Stored record failed integrity check');
-        records.push({ path: p, status: 200, etag: `"${entry.sha256}"`, bytes: bytes.toString('base64') });
-      }
-      return send(res, 200, { records, truncated: records.length < paths.length });
+      return serveBatch(res, s, paths.map((path) => ({ path, status: 200 })));
     }
     if (!s.home && ['head', 'authority', 'pending', 'predecessor'].includes(section)) throw new HttpError(404, 'Not found');
     if (!section) {

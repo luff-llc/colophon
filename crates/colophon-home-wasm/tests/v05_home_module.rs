@@ -12,12 +12,14 @@ mod support;
 mod support_relay;
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
-use colophon_core::v05::account::Change;
+use colophon_core::v05::account::{Change, RevokeKeep};
+use colophon_core::v05::calls::home_call_args;
+use colophon_core::v05::encoding::digest;
 use colophon_core::v05::write::authority::TransitionRule;
 use colophon_home_wasm::handle;
 use serde_json::{json, Value};
 use support::*;
-use support_relay::{appoint_homes, create_with, entries_json, HomeKeys, BASE_A};
+use support_relay::{appoint_homes, call_as, create_with, entries_json, HomeKeys, BASE_A};
 
 const NOW: i64 = T0 + 3 * HOUR;
 const NS: &str = "listening.podcasts";
@@ -150,6 +152,149 @@ fn transition(s: &mut Setup, window: u64, by: &[String]) -> (String, Value) {
         .map(|p| serde_json::from_slice(p).unwrap())
         .unwrap();
     (digest, env)
+}
+
+#[test]
+fn a_batch_uses_one_bound_call_and_the_same_namespace_scope_as_get() {
+    let mut f = create_with(&[NS, "notes"], "members", 1);
+    let member = f.host.identity(31);
+    let revoked = f.host.identity(32);
+    let terms = terms_for(&[(NS, "read")]);
+    for id in [&member, &revoked] {
+        admit(&mut f, id, "Reader", "device", terms.clone(), terms.clone());
+    }
+    let revoke = f
+        .account
+        .begin_revoke(&revoked, &RevokeKeep::Nothing, &[f.d.clone()], [0x79; 32])
+        .unwrap();
+    run(&mut f.account, &f.host, revoke);
+    let keys = HomeKeys::new(0x77);
+    appoint_homes(&mut f, &[(&keys, BASE_A)]);
+    let mut home = Home::new(keys, f.account.id().as_str());
+    let entries: Vec<Value> = entries_json(&f)
+        .into_iter()
+        .map(|(_, entry)| entry)
+        .collect();
+    let first = home.authority(1, &entries, NOW);
+    assert_eq!(first["appointed"], true, "{first}");
+    assert!(home.head(NOW).is_some());
+
+    let op = format!("ops/{member}/{NS}/000000000001-{}.json", "a".repeat(32));
+    let live = format!("state/{member}/{NS}/current.json");
+    let denied = format!(
+        "history/{revoked}/notes/000000000001-{}.json",
+        "b".repeat(32)
+    );
+    let blob = format!("blobs/{}", "c".repeat(64));
+    let history = "authority/00000001.json";
+    let paths = [&op, &live, &denied, &blob, history];
+    let body = json!({"paths": paths}).to_string();
+    let auth = |id: &str, purpose: &str, method: &str, path: &str, body: &str, at, n| {
+        b(&call_as(
+            &f.host,
+            &f.account,
+            "member",
+            id,
+            BASE_A,
+            purpose,
+            home_call_args(method, path, &digest(body.as_bytes())),
+            at,
+            [n; 32],
+        ))
+    };
+    let request = |body: &str, authorization: Value| {
+        json!({"op": "access", "state": home.state, "now": NOW, "base": BASE_A,
+               "method": "POST", "section": "records", "rest": "batch",
+               "path": "/records/batch", "batchBody": b(body.as_bytes()), "call": authorization})
+    };
+    let sign_batch = |id: &str, purpose: &str, body: &str, at, n| {
+        json!(auth(id, purpose, "POST", "/records/batch", body, at, n))
+    };
+    let read = "colophon.home.read";
+    let valid = request(&body, sign_batch(&member, read, &body, NOW, 1));
+    let allowed = call(valid.clone());
+    assert_eq!(allowed["allowed"], true, "{allowed}");
+    let decisions = allowed["records"].as_array().unwrap();
+    assert_eq!(decisions.len(), paths.len());
+    for (i, (path, status)) in paths.into_iter().zip([200, 200, 403, 200, 200]).enumerate() {
+        assert_eq!(decisions[i], json!({"path": path, "status": status}));
+        let relative = format!("/records/{path}");
+        let get = call(json!({
+            "op": "access", "state": home.state, "now": NOW, "base": BASE_A,
+            "method": "GET", "section": "records", "rest": path, "path": relative,
+            "bodySha256": digest(b""), "call": auth(&member, read, "GET", &relative, "", NOW, 2),
+        }));
+        assert_eq!(get["allowed"], status == 200, "{path}: {get}");
+        if status == 403 {
+            assert_eq!(get["status"], 403);
+        }
+    }
+    let mut replay = valid.clone();
+    replay["existing"] = allowed["reserve"].clone();
+    let mut over_share = valid;
+    over_share["replayRows"] = json!(1);
+    over_share["signerRows"] = json!((0..64)
+        .map(|key| json!({"at": NOW, "key": key}))
+        .collect::<Vec<_>>());
+    for (req, status, result) in [
+        (request(&body, Value::Null), 401, Value::Null),
+        (request(&body, json!(b(b"{}"))), 403, json!("malformed")),
+        (
+            request(&body, sign_batch(&revoked, read, &body, NOW, 3)),
+            403,
+            json!("refused:revoked"),
+        ),
+        (
+            request(&body, sign_batch(&member, read, "{}", NOW, 4)),
+            403,
+            json!("refused:outOfScope"),
+        ),
+        (
+            request(
+                &body,
+                sign_batch(&member, "colophon.history.read", &body, NOW, 5),
+            ),
+            403,
+            json!("refused:outOfScope"),
+        ),
+        (
+            request(&body, sign_batch(&member, read, &body, NOW - HOUR, 6)),
+            403,
+            json!("refused:window"),
+        ),
+        (replay, 403, json!("refused:replay")),
+        (over_share, 429, json!("refused:window")),
+    ] {
+        let answer = call(req);
+        assert_eq!(answer["status"], status, "{answer}");
+        assert_eq!(answer["result"], result);
+        assert!(answer.get("records").is_none());
+        assert!(answer.get("reserve").is_none());
+    }
+    let too_many = json!({"paths": (1..=257)
+        .map(|i| format!("authority/{i:08}.json")).collect::<Vec<_>>()});
+    for invalid in [
+        "{".to_string(),
+        json!({"paths": []}).to_string(),
+        json!({"paths": [history, history]}).to_string(),
+        json!({"paths": ["requests/one.json"]}).to_string(),
+        too_many.to_string(),
+    ] {
+        let answer = call(request(
+            &invalid,
+            sign_batch(&member, read, &invalid, NOW, 7),
+        ));
+        assert_eq!(answer["status"], 400, "{answer}");
+        assert!(answer.get("reserve").is_none());
+    }
+    let oversized = " ".repeat(64 * 1024 + 1);
+    assert_eq!(
+        call(request(
+            &oversized,
+            sign_batch(&member, read, &oversized, NOW, 8)
+        ))["status"],
+        413
+    );
 }
 
 #[test]

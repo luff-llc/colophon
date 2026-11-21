@@ -1814,7 +1814,7 @@ impl Account {
     }
 
     /// A call for one request at a home (§12.2, §14), signed by this session's own key (a
-    /// member's, or a controller's): audience the home's base, purpose by the method, `args`
+    /// member's, or a controller's): audience the home's base, purpose by the method and path, `args`
     /// bound to exactly this request. `finish` judges it with the home's own rule over what this
     /// account holds ([`crate::v05::calls::check_home_call_as_signer`]) and returns the envelope
     /// as `artifact`. `asOf` is the head of the verified history.
@@ -1868,7 +1868,7 @@ impl Account {
             key,
             links: &[],
             audience: &call.audience,
-            purpose: crate::v05::calls::home_call_purpose(&call.method),
+            purpose: crate::v05::calls::home_purposes(&call.method, &call.path)[0],
             args: crate::v05::calls::home_call_args(&call.method, &call.path, &call.body_sha256),
             request_id,
             created: &created,
