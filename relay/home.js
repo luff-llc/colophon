@@ -19,6 +19,11 @@ const b64 = (bytes) => Buffer.from(bytes).toString('base64');
 const unb64 = (text) => Buffer.from(text, 'base64');
 const sha = (bytes) => createHash('sha256').update(bytes).digest('hex');
 
+function colophonCall(req) {
+  const match = /^Colophon ([A-Za-z0-9_-]+)$/.exec(req.headers.authorization ?? '');
+  return match ? b64(Buffer.from(match[1], 'base64url')) : null;
+}
+
 // Forwarding (§13.1), per peer: each request's own time limit, a pass's wall-time budget, how many
 // newly listed objects and how many backlog objects one pass offers, and how soon the same
 // entries are offered again while the peer's head lags. PASS_MS bounds all network request
@@ -452,11 +457,8 @@ export class HomeSlot {
   // -------------------------------------------------------------------------------------------
   // Who may do what (§13.4, §14): the module's `access` decision, all of it.
 
-  async access(req, section, rest, effect, body) {
+  async access(req, section, rest, effect, body, call = colophonCall(req)) {
     const { HttpError } = this.deps;
-    const header = req.headers.authorization ?? '';
-    const m = /^Colophon ([A-Za-z0-9_-]+)$/.exec(header);
-    const call = m ? b64(Buffer.from(m[1], 'base64url')) : null;
     return this.replayLock(async () => {
       let existing = null; let signerRows = [];
       if (call) {
@@ -511,9 +513,16 @@ export class HomeSlot {
       throw new HttpError(429, 'Too many requests', { 'retry-after': '60' });
     }
     if (section === 'records' && rest === 'batch') {
+      const call = colophonCall(req);
+      if (req.method === 'POST' && !call) {
+        req.resume();
+        throw new HttpError(401, 'A Colophon call is required', { 'www-authenticate': 'Colophon' });
+      }
       const body = await this.deps.readBatchBody(req, url);
+      const validation = this.wasm.call({ op: 'validate_batch', batchBody: b64(body) });
+      if (!validation.allowed) throw new HttpError(validation.status, validation.error ?? 'Record exceeds the relay limit');
       await this.lock(async () => {
-        const { records } = await this.access(req, section, rest, null, body);
+        const { records } = await this.access(req, section, rest, null, body, call);
         const ownHead = records.find((r) => r.status === 200 && r.path === `heads/${this.key.memberId}.json`);
         if (ownHead && await this.settleForRead() === 'due') ownHead.status = 503;
         await this.deps.serveBatch(res, this.slot, records);

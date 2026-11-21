@@ -174,39 +174,37 @@ describe('home batch record fetch', { skip: existsSync(wasm) ? false : 'build co
   const record = (name, ns = 'listening.podcasts') => `state/${member.id}/${ns}/${name}.json`;
   const okRecord = (path, bytes) => ({ path, status: 200, etag: `"${sha256(bytes)}"`, bytes: bytes.toString('base64') });
 
-  test('returns ordered records, missing paths, and denials without storage metadata', async () => {
+  test('returns ordered records across namespaces like single-record GET and HEAD', async () => {
     const op = `ops/${member.id}/listening.podcasts/000000000001-${'ab'.repeat(16)}.json`;
     const opBytes = Buffer.from('opaque record');
     const blobBytes = Buffer.from([0, 255, 128, 42]);
     const blob = `blobs/${sha256(blobBytes)}`;
-    const denied = record('denied', 'notes');
-    const deniedMissing = record('missing', 'notes');
+    const otherNamespace = record('present', 'notes');
+    const otherMissing = record('missing', 'notes');
+    const otherBytes = Buffer.from('opaque notes record');
     const missing = record('missing');
     const head = `heads/${slot.home.key.memberId}.json`;
     await slot.putImmutable(op, opBytes);
     await slot.putImmutable(blob, blobBytes);
-    await slot.putImmutable(denied, Buffer.from('out of scope'));
+    await slot.putImmutable(otherNamespace, otherBytes);
 
-    const get = slot.current.get;
-    slot.current.get = function (p) {
-      assert.ok(p !== denied && p !== deniedMissing, 'a denied path must never reach the storage index');
-      return get.call(this, p);
-    };
-    try {
-      const body = JSON.stringify({ paths: [op, missing, denied, history, deniedMissing, blob, head] }, null, 2);
-      const res = await post(body, await sign(body), { headers: { origin: 'https://client.example' } });
-      assert.equal(res.status, 200);
-      assert.equal(res.headers.get('cache-control'), 'no-store, no-transform');
-      assert.equal(res.headers.get('access-control-allow-origin'), 'https://client.example');
-      assert.deepEqual(await res.json(), { records: [
-        okRecord(op, opBytes), { path: missing, status: 404 }, { path: denied, status: 403 },
-        okRecord(history, await slot.readFile(history)), { path: deniedMissing, status: 403 },
-        okRecord(blob, blobBytes), okRecord(head, await slot.readFile(head)),
-      ], truncated: false });
-      const path = `/records/${denied}`;
-      const single = await fetch(base + path, { headers: { authorization: await sign('', { method: 'GET', path }) } });
-      assert.equal(single.status, 403);
-    } finally { slot.current.get = get; }
+    const body = JSON.stringify({ paths: [op, missing, otherNamespace, history, otherMissing, blob, head] }, null, 2);
+    const res = await post(body, await sign(body), { headers: { origin: 'https://client.example' } });
+    assert.equal(res.status, 200, res.status === 200 ? undefined : await res.text());
+    assert.equal(res.headers.get('cache-control'), 'no-store, no-transform');
+    assert.equal(res.headers.get('access-control-allow-origin'), 'https://client.example');
+    assert.deepEqual(await res.json(), { records: [
+      okRecord(op, opBytes), { path: missing, status: 404 }, okRecord(otherNamespace, otherBytes),
+      okRecord(history, await slot.readFile(history)), { path: otherMissing, status: 404 },
+      okRecord(blob, blobBytes), okRecord(head, await slot.readFile(head)),
+    ], truncated: false });
+    const path = `/records/${otherNamespace}`;
+    for (const method of ['GET', 'HEAD']) {
+      const single = await fetch(base + path, { method, headers: { authorization: await sign('', { method, path }) } });
+      assert.equal(single.status, 200);
+      assert.equal(single.headers.get('etag'), `"${sha256(otherBytes)}"`);
+      assert.deepEqual(Buffer.from(await single.arrayBuffer()), method === 'GET' ? otherBytes : Buffer.alloc(0));
+    }
   });
 
   test('rejects missing, invalid, revoked, stale, mismatched and replayed calls before returning records', async () => {
@@ -249,7 +247,7 @@ describe('home batch record fetch', { skip: existsSync(wasm) ? false : 'build co
     } finally { slot.readFile = readFile; }
   });
 
-  test('enforces method, content headers, body size and unique home paths', async () => {
+  test('rejects missing credentials and malformed batches before taking the slot lock', async () => {
     const get = await fetch(base + route);
     assert.equal(get.status, 405);
     assert.equal(get.headers.get('allow'), 'POST');
@@ -265,10 +263,15 @@ describe('home batch record fetch', { skip: existsSync(wasm) ? false : 'build co
       req.end(body);
     });
     assert.equal(chunked, 411);
-    for (const bad of ['{', batchBody([]), batchBody([history, history]), batchBody(['requests/old.json']),
-      batchBody(Array.from({ length: 257 }, (_, i) => `authority/${String(i + 1).padStart(8, '0')}.json`))]) {
-      assert.equal((await post(bad, await sign(bad))).status, 400, bad);
-    }
+    const lock = slot.home.lock;
+    slot.home.lock = () => { throw new Error('a malformed batch must never take the slot lock'); };
+    try {
+      assert.equal((await post(body, undefined)).status, 401);
+      for (const bad of ['{', batchBody([]), batchBody([history, history]), batchBody(['requests/old.json']),
+        batchBody(Array.from({ length: 257 }, (_, i) => `authority/${String(i + 1).padStart(8, '0')}.json`))]) {
+        assert.equal((await post(bad, await sign(bad))).status, 400, bad);
+      }
+    } finally { slot.home.lock = lock; }
     const maxBody = body.padEnd(64 * 1024);
     assert.equal((await post(maxBody, await sign(maxBody))).status, 200);
     const maxPaths = Array.from({ length: 256 }, (_, i) => `authority/${String(i + 1).padStart(8, '0')}.json`);

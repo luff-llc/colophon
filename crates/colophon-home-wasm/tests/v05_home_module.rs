@@ -155,14 +155,25 @@ fn transition(s: &mut Setup, window: u64, by: &[String]) -> (String, Value) {
 }
 
 #[test]
-fn a_batch_uses_one_bound_call_and_the_same_namespace_scope_as_get() {
+fn a_batch_uses_one_bound_call_and_the_same_read_access_as_get_and_head() {
     let mut f = create_with(&[NS, "notes"], "members", 1);
     let member = f.host.identity(31);
     let revoked = f.host.identity(32);
+    let expired = f.host.identity(33);
     let terms = terms_for(&[(NS, "read")]);
     for id in [&member, &revoked] {
         admit(&mut f, id, "Reader", "device", terms.clone(), terms.clone());
     }
+    let mut expiring_terms = terms.clone();
+    expiring_terms["expires"] = json!(colophon_core::v05::write::format_date(NOW - HOUR));
+    admit(
+        &mut f,
+        &expired,
+        "Expiring reader",
+        "device",
+        expiring_terms.clone(),
+        expiring_terms,
+    );
     let revoke = f
         .account
         .begin_revoke(&revoked, &RevokeKeep::Nothing, &[f.d.clone()], [0x79; 32])
@@ -181,13 +192,13 @@ fn a_batch_uses_one_bound_call_and_the_same_namespace_scope_as_get() {
 
     let op = format!("ops/{member}/{NS}/000000000001-{}.json", "a".repeat(32));
     let live = format!("state/{member}/{NS}/current.json");
-    let denied = format!(
+    let other_namespace = format!(
         "history/{revoked}/notes/000000000001-{}.json",
         "b".repeat(32)
     );
     let blob = format!("blobs/{}", "c".repeat(64));
     let history = "authority/00000001.json";
-    let paths = [&op, &live, &denied, &blob, history];
+    let paths = [&op, &live, &other_namespace, &blob, history];
     let body = json!({"paths": paths}).to_string();
     let auth = |id: &str, purpose: &str, method: &str, path: &str, body: &str, at, n| {
         b(&call_as(
@@ -216,17 +227,16 @@ fn a_batch_uses_one_bound_call_and_the_same_namespace_scope_as_get() {
     assert_eq!(allowed["allowed"], true, "{allowed}");
     let decisions = allowed["records"].as_array().unwrap();
     assert_eq!(decisions.len(), paths.len());
-    for (i, (path, status)) in paths.into_iter().zip([200, 200, 403, 200, 200]).enumerate() {
-        assert_eq!(decisions[i], json!({"path": path, "status": status}));
+    for (decision, path) in decisions.iter().zip(paths) {
+        assert_eq!(*decision, json!({"path": path, "status": 200}));
         let relative = format!("/records/{path}");
-        let get = call(json!({
-            "op": "access", "state": home.state, "now": NOW, "base": BASE_A,
-            "method": "GET", "section": "records", "rest": path, "path": relative,
-            "bodySha256": digest(b""), "call": auth(&member, read, "GET", &relative, "", NOW, 2),
-        }));
-        assert_eq!(get["allowed"], status == 200, "{path}: {get}");
-        if status == 403 {
-            assert_eq!(get["status"], 403);
+        for method in ["GET", "HEAD"] {
+            let single = call(json!({
+                "op": "access", "state": home.state, "now": NOW, "base": BASE_A,
+                "method": method, "section": "records", "rest": path, "path": relative,
+                "bodySha256": digest(b""), "call": auth(&member, read, method, &relative, "", NOW, 2),
+            }));
+            assert_eq!(single["allowed"], true, "{method} {path}: {single}");
         }
     }
     let mut replay = valid.clone();
@@ -243,6 +253,11 @@ fn a_batch_uses_one_bound_call_and_the_same_namespace_scope_as_get() {
             request(&body, sign_batch(&revoked, read, &body, NOW, 3)),
             403,
             json!("refused:revoked"),
+        ),
+        (
+            request(&body, sign_batch(&expired, read, &body, NOW, 9)),
+            403,
+            json!("refused:expired"),
         ),
         (
             request(&body, sign_batch(&member, read, "{}", NOW, 4)),
@@ -280,10 +295,10 @@ fn a_batch_uses_one_bound_call_and_the_same_namespace_scope_as_get() {
         json!({"paths": ["requests/one.json"]}).to_string(),
         too_many.to_string(),
     ] {
-        let answer = call(request(
-            &invalid,
-            sign_batch(&member, read, &invalid, NOW, 7),
-        ));
+        let mut req = request(&invalid, sign_batch(&member, read, &invalid, NOW, 7));
+        // A malformed batch must be refused even when no state can be loaded.
+        req["state"] = Value::Null;
+        let answer = call(req);
         assert_eq!(answer["status"], 400, "{answer}");
         assert!(answer.get("reserve").is_none());
     }

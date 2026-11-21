@@ -51,11 +51,14 @@ answer preserves request order:
 }
 ```
 
-The home applies its per-address rate limit, verifies the call once under its
-replay rules, and authorizes each path with the same rules as single-record GET. A member
-needs a grant for each namespace they read. Blob chunks name no namespace.
-A denied path returns only its path and status 403, whether or not it exists.
-Even a batch of public history paths or heads requires a valid batch call.
+The home applies its per-address rate limit and checks for a Colophon
+authorization header and valid batch structure before taking the slot lock.
+It then verifies the bound call under its replay rules. Under §14, any current
+member calling with its own key may read ciphertext records in any namespace,
+as with single-record GET and HEAD. E2EE epoch keys control who can decrypt
+those records. History paths follow `policy.history`. A verified batch call
+satisfies the call requirement for members-only history. Batches containing
+only public history paths or heads also require a valid batch call.
 A missing call returns 401. Refused calls, including revoked, expired, replayed
 or mismatched calls, return 403 for the whole request. Rate limits return 429
 with `Retry-After`. If the home's own head needs to be refreshed and cannot be
