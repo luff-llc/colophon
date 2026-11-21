@@ -19,7 +19,7 @@ use colophon_core::v05::engine::paths::{self, Kind};
 use colophon_core::v05::heads::HeadContext;
 use colophon_core::v05::history::envelope::AuthEnvelope;
 use colophon_core::v05::history::home::{
-    admit, admit_first_with, admit_pending_batch, admit_predecessor, admit_with, stage_predecessor, FirstUpload, HomeState, ReceiptToSign, Refusal,
+    admit, admit_first_with, admit_pending_batch_notices, admit_predecessor, admit_with, stage_predecessor, FirstUpload, HomeState, ReceiptToSign, Refusal,
 };
 use colophon_core::v05::history::{verify_history, Objects, Persisted, State, Stop};
 use colophon_core::v05::ids::{key_id, AccountId};
@@ -392,6 +392,7 @@ enum Class {
     RecordsRead,
     /// `POST /records/batch`, with one call for the raw JSON body.
     BatchRead,
+    RouteWrite,
     /// Writes, with what they write.
     Write(Vec<HomeWrite>),
     /// `PUT {base}/predecessor/authority/<8 digits>.json` (§14): a predecessor entry published.
@@ -480,6 +481,14 @@ fn access(req: &Value) -> R<Value> {
         ("changes", None) => match method {
             "GET" => Class::RecordsRead,
             _ => return not_allowed("GET"),
+        },
+        ("stream" | "routes", None) => match method {
+            "GET" => Class::RecordsRead,
+            _ => return not_allowed("GET"),
+        },
+        ("routes", Some(id)) if id.len() == 64 && id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) => match method {
+            "PUT" | "DELETE" => Class::RouteWrite,
+            _ => return not_allowed("PUT, DELETE"),
         },
         // §14: a successor's home serves its Swift predecessor's history (a history path,
         // §13.4) and takes it by `PUT`, with a call (below).
@@ -997,6 +1006,7 @@ fn post_authority(req: &Value) -> R<Value> {
     }
     let before = files_before(&l)?;
     let mut sign: Vec<Value> = Vec::new();
+    let mut notify = Vec::new();
     let mut accepted = Vec::new();
     let mut outcome = json!({"outcome": "ok"});
     let mut deferred: Option<Value> = None;
@@ -1024,6 +1034,7 @@ fn post_authority(req: &Value) -> R<Value> {
                 // in a.state, with no entry to store. Return it for commit before the 422.
                 l.home = Some(a.state);
                 sign.extend(signs(&a.receipts));
+                notify.extend(a.notices);
                 a.result
             }
             None => {
@@ -1091,6 +1102,7 @@ fn post_authority(req: &Value) -> R<Value> {
     out["state"] = json!(l.dump()?);
     out["store"] = json!(new_files(&before, &after, now_ms)?);
     out["sign"] = json!(sign);
+    out["notify"] = json!(notify);
     out["accepted"] = json!(accepted);
     out["appointed"] = json!(l.home.is_some());
     Ok(out)
@@ -1126,8 +1138,8 @@ fn post_pending(req: &Value) -> R<Value> {
         }
     }
     let before = held(h)?;
-    let (next, results, receipts) =
-        admit_pending_batch(h, &objs, &now).map_err(|e| e.to_string())?;
+    let (next, results, receipts, notices) =
+        admit_pending_batch_notices(h, &objs, &now).map_err(|e| e.to_string())?;
     let after = held(&next)?;
     let refused: Vec<Value> = results
         .iter()
@@ -1150,6 +1162,7 @@ fn post_pending(req: &Value) -> R<Value> {
         "state": l2.dump()?,
         "store": new_files(&before, &after, now_ms)?,
         "sign": signs(&receipts),
+        "notify": notices,
     }))
 }
 

@@ -447,7 +447,7 @@ first upload is sent again. One entry per seq, at most the claimed head's seq, 5
 8 MiB per slot; bytes that do not fit the chain are refused and nothing of them is kept, so
 flooding cannot take a place the genuine entry needs. Nothing staged is served.
 
-**Notices are not built** (§13.1, §17.5): see "Notices" below.
+**Notice routes and live streams** are available on home slots. See “Notices” and “Live stream” below.
 
 ## Storage layout
 
@@ -461,6 +461,9 @@ flooding cannot take a place the genuine entry needs. Nothing staged is served.
                                   fsynced before any effect; a completion line after it)
 <dataDir>/<slot>/forward.json     home slots: what each other home has been sent
 <dataDir>/<slot>/alive.json       home slots: the serving lease's end (serving intervals, §13.1)
+<dataDir>/<slot>/routes.json      home slots: registered notice routes (includes private addresses)
+<dataDir>/<slot>/notices.jsonl   home slots: durable queue of public notice metadata
+<dataDir>/<slot>/notice-commit.json  home slots: temporary journal for crash recovery of a queue append
 ```
 
 Home slots add `authority/<8 digits>.json`, `transitions/<digest>.json`, `vetoes/<digest>.json`,
@@ -528,38 +531,53 @@ this relay as a process (`crates/colophon-home-wasm/tests`, including the kill l
 here. **CI runs that script.** With `CI` or `COLOPHON_REQUIRE_RELAY=1` set, a missing Bun or module
 fails those tests; otherwise they are skipped with a printed `SKIPPED:` line naming what is missing.
 
-## Notices (not built: the contract is missing)
+## Notices
 
-Notice delivery and route registration are deferred to 0.6 (spec §17.5, revision 18). 0.5 requires
-a home to keep and serve pending objects until they are settled, and a syncing host to show them
-with their due time; this home does both. The contract below remains the proposal for 0.6. 0.5 gives a notice no signed body and no wire format, and nothing defines how
-a host registers a route with a home. The Swift and Kotlin sessions expect one: a
-`DeliveryRoute {kind: push|email|sms|webhook|other, address, reaches}` and a host-supplied
-`registerRoutes(account, routes) -> Bool` closure (`swift/Sources/ColophonSession/HostDuties.swift`,
-`SessionTypes.swift`; `sdk/kotlin/.../SessionTypes.kt`), with the HTTP call left to the host. So
-this home builds no route store, queue or sender: there is nothing for a session to call that a
-second implementation would also implement.
+A host registers delivery routes with each home (§17.5). Use `Authorization: Colophon <call>`
+with the slot's base URL as the audience. Bind the call to the method, the path relative to
+that base, and the lowercase SHA-256 digest of the request body (empty bytes for GET and DELETE).
+The `kind` is one of `push`, `email`, `sms`, `webhook` or `other`. The `address` is the delivery
+destination and `reaches` describes the device or service reached. The route ID is the lowercase
+hex SHA-256 of the UTF-8 bytes of `kind`, one zero byte, and the UTF-8 bytes of `address`.
 
-What is missing, and the smallest contract that would close it (a proposal, not built):
+| Request | Purpose | Result |
+| --- | --- | --- |
+| `PUT {base}/routes/<route ID>` with JSON `{"kind","address","reaches"}` | `colophon.home.write` | 201 on creation or 200 on replacement |
+| `DELETE {base}/routes/<route ID>` | `colophon.home.write` | 204 on removal or 404 when absent |
+| `GET {base}/routes` | `colophon.home.read` | 200 with `{"routes":[{"id","kind","reaches","by"}]}` |
 
-- **Register.** `PUT {base}/routes/<route ID>` with body `{"kind","address","reaches"}`, under a
-  `colophon.home.write` call by a controller (any role, suspended or not: a recover-only key must
-  be able to keep a route) or a current member; the route ID is the lowercase hex SHA-256 of
-  `kind ‖ 0x00 ‖ address`. 200 or 201. `DELETE` the same path removes it. `GET {base}/routes`
-  (same call, `colophon.home.read`) lists `{"routes":[{"id","kind","reaches","by"}]}`, never the
-  addresses. The `Bool` the sessions expect is "201 or 200".
-- **What triggers a notice.** The module returns, with every admission that receipted a
-  transition, a veto or a `suspend`, a `notify` list: `{"object","kind","issued","deadline"}`.
-  The relay appends one queue line per route (`notices.jsonl`, fsynced before the receipt is
-  returned), and a sender drains it with retries; the queue survives restarts like the replay log.
-- **The text.** Fixed by the home, carrying only public facts: the account ID, the object's kind
-  and digest, its veto deadline, and the §17.5 sentence about what the delay protects. Nothing
-  from a private record.
-- **The sender.** Pluggable (`deliver(route, notice) -> ok | retry | drop`), a test sender that
-  writes to a file, and production senders that each need operator credentials outside this
-  repository: APNs (a token-signing key and topic per app), FCM (a service account), e-mail (an
-  SMTP or provider API key with a verified sender domain), webhooks (an allow-list, since an
-  account would otherwise make the home call arbitrary addresses, finding L7 of the H1 check).
+Any current controller can register or delete a route, including recovery-only and suspended
+controllers. A current member can use its own key. Member links use their explicit service
+grants. `by` identifies the registering principal as `controller:<ID>` or `member:<ID>`.
+The route list omits delivery addresses. PUT takes an `application/json` body up to 4 KiB.
+The home stages, fsyncs and renames the route file before acknowledging a change.
+
+When the home admits a suspend or agrees to receipt a new transition or veto, it fsyncs
+`notices.jsonl` before responding. It writes one line per registered route, or one line when
+no routes are registered. Each line has the account ID, object digest, kind, signed issue
+time and veto deadline, in fields `account`, `object`, `kind`, `issued` and `deadline`. Retrying an
+already-held object does not duplicate notices. The queue survives restarts. Delivery
+providers and signed notice payloads are outside this implementation.
+
+## Live stream
+
+On Bun, connect to `GET {base}/stream` using a WebSocket client that can set the
+`Authorization: Colophon <call>` header. Use a fresh `colophon.home.read` call bound to
+`{"method":"GET","path":"/stream","body":"<SHA-256 of empty bytes>"}` and the slot's audience.
+An appointed home answers a missing call with 401 and a refused call with 403. Reconnecting
+requires a fresh call.
+
+The home sends compact JSON text frames after committing an event.
+
+| Frame | When |
+| --- | --- |
+| `{"type":"head","seq":N,"digest":"..."}` | The slot stores a new signed head |
+| `{"type":"change","cursor":N}` | A record write adds a change-log entry |
+| `{"type":"notice","object":"...","kind":"...","deadline":"..."}` | A new notice is queued |
+
+The numeric cursor is the slot's change-log position. Record frames carry no path names.
+Use the normal authenticated HTTP endpoints to catch up after reconnecting and fetch records
+or verify signed objects. The stream only sends live events and accepts no application messages.
 
 ## A stopped home
 
