@@ -45,9 +45,11 @@ import Observation
     @ObservationIgnored private(set) var dueTask: Task<Void, Never>?
     @ObservationIgnored private var stoppedSyncTask: Task<Void, Never>?
     @ObservationIgnored private var stoppedDueTask: Task<Void, Never>?
+    @ObservationIgnored private var dueWork: Task<Void, Never>?
+    @ObservationIgnored private var refreshWaiters: [UUID: [CheckedContinuation<Void, Never>]] = [:]
     @ObservationIgnored private var batchNeedsRefresh = false
     @ObservationIgnored private var syncPaused = false
-    @ObservationIgnored private var suspended = false
+    private var suspended = false
     @ObservationIgnored private var lockTask: Task<Void, Never>?
     @ObservationIgnored private var lockGeneration: UInt64 = 0
     @ObservationIgnored private(set) var checkpointTask: Task<Void, Never>?
@@ -84,32 +86,40 @@ import Observation
     /// A shared completion barrier. Dependent startup work awaits this before using the session.
     public func restore() async {
         if let restoreTask { await restoreTask.value; return }
+        guard !suspended else { return }
+        let lease = context, generation = lockGeneration
         let task = Task { [weak self] in
             guard let self else { return }
-            let lease = context
             await startWatching()
+            guard canPublish(lease, generation) else { return }
             do {
                 let snapshot = try await worker.restore()
-                guard lease == context, !Task.isCancelled else { return }
+                guard canPublish(lease, generation), !Task.isCancelled else { return }
                 apply(snapshot)
-            } catch { if lease == context { fail(error) } }
+            } catch { if canPublish(lease, generation) { fail(error) } }
             startSyncLoop(); startDueLoop()
         }
         restoreTask = task
         await task.value
     }
-    public func refresh() async { await refresh(preservingCommandFailure: false) }
-    private func refresh(preservingCommandFailure: Bool) async {
+    public func refresh() async {
+        guard !suspended, !Task.isCancelled else { return }
+        let id = UUID(), lease = context, lockEpoch = lockGeneration
+        refreshWaiters[id] = []
+        defer {
+            if let waiters = refreshWaiters.removeValue(forKey: id) {
+                for waiter in waiters { waiter.resume() }
+            }
+        }
         await restore()
-        guard !suspended else { return }
-        let lease = context
+        guard canPublish(lease, lockEpoch), !Task.isCancelled else { return }
         let failureRevision = commandFailureRevision
         let marked = phase == .ready
         if marked { phase = .refreshing; refreshMark &+= 1 }
         // This refresh's generation. A refresh that a newer one has since re-marked is stale: its outcome (snapshot or
         // error) is dropped and the phase follows the newer one.
         let generation = refreshMark
-        var current: Bool { generation == refreshMark && lease == context }
+        var current: Bool { generation == refreshMark && canPublish(lease, lockEpoch) }
         // A finished refresh never leaves the phase at `refreshing`: whatever path ends it (cancelled, a snapshot apply()
         // ignored, a command failure that set no phase), the phase this refresh replaced comes back.
         defer { if marked, current, phase == .refreshing { phase = .ready } }
@@ -123,7 +133,7 @@ import Observation
             if snapshot.phase == .ready, failureHoldsPhase { return }
             apply(snapshot)
             await startWatching()
-        } catch { if current, !failureHoldsPhase { fail(error) } }
+        } catch { if current, !Task.isCancelled, !failureHoldsPhase { fail(error) } }
     }
     /// Creates the account for this device: the owner controller, this device's member, and (spec §18) the
     /// configured homes appointed at once. A passkey owner is asked more than once at first run (see
@@ -478,18 +488,20 @@ import Observation
         lockGeneration &+= 1
         if let lockTask { await lockTask.value; return }
         suspended = true
-        let watch = watchTask, batch = batchTask, checkpoint = checkpointTask
+        if syncState == .syncing { syncState = .idle }
+        let watch = watchTask, checkpoint = checkpointTask
         stopSyncLoops()
         watch?.cancel(); watchTask = nil
-        batch?.cancel(); batchTask = nil; batchNeedsRefresh = false
+        batchTask?.cancel(); batchNeedsRefresh = false
         checkpoint?.cancel(); checkpointTask = nil
         let task = Task {
             await watch?.value
-            await batch?.value
             await checkpoint?.value
+            await restoreTask?.value
             await drainSync()
+            batchTask = nil
             if let snapshot = try? await worker.lock() {
-                usable = false; apply(snapshot)
+                usable = false; apply(snapshot, whileSuspended: true)
             }
             lockTask = nil
         }
@@ -497,6 +509,7 @@ import Observation
         await task.value
     }
     public func unlock() async {
+        lockGeneration &+= 1
         let generation = lockGeneration
         await lockTask?.value
         guard generation == lockGeneration else { return }
@@ -509,6 +522,10 @@ import Observation
         } catch {
             if lease == context, generation == lockGeneration { suspended = false; fail(error) }
         }
+    }
+
+    private func canPublish(_ lease: UUID, _ generation: UInt64) -> Bool {
+        lease == context && generation == lockGeneration && !suspended
     }
 
     // MARK: Exchange with the homes
@@ -527,8 +544,9 @@ import Observation
     }
     @ObservationIgnored private var syncChain: Task<Bool, Never>?
     private func runSync() async -> Bool {
+        let lease = context, generation = lockGeneration
         await restore()
-        guard !suspended else { return false }
+        guard canPublish(lease, generation) else { return false }
         // With no library there is nothing to exchange. A pass here would refresh to `noLibrary` and erase what a failed
         // `create()` just published (its `failed` phase and error), which an app would see as a missing error.
         guard libraryID != nil else { return false }
@@ -537,26 +555,30 @@ import Observation
         if syncState != .syncing { syncState = .syncing }
         do {
             let result = try await worker.exchange()
+            guard canPublish(lease, generation) else { return false }
             homeFaults = result.faults; homeIssues = result.issues
             lastSynced = .now
-            if result.stopped { syncState = .disabled; await refresh(preservingCommandFailure: true); return true }
+            if result.stopped { syncState = .disabled; await refresh(); return true }
             // A home that answered `503 {"result":"unavailable"}` is not available: shown so, retried with backoff (never as
             // this device being stopped, which only its own verified history decides).
             if result.homeUnavailable, !result.changed { syncState = .offline(reason: HomeWords.unavailable); return false }
             syncState = result.unauthorized ? .unauthorized : result.failed ? .error(reason: "a pass could not finish: the engine was still waiting") : .idle
-            if result.changed || phase != .ready { await refresh(preservingCommandFailure: true) }
-            else if let snapshot = try? await worker.currentSnapshot() { apply(snapshot) }
+            if result.changed || phase != .ready { await refresh() }
+            else if let snapshot = try? await worker.currentSnapshot(), canPublish(lease, generation) { apply(snapshot) }
             return !result.unauthorized && !result.failed
         } catch is CancellationError {
             return false
         } catch let error as HomeTransportError {
+            guard canPublish(lease, generation) else { return false }
             if case .offline(let reason) = error { syncState = .offline(reason: reason) } else { syncState = .error(reason: error.localizedDescription) }
             return false
         } catch let error as ColophonError {
+            guard canPublish(lease, generation) else { return false }
             syncState = .error(reason: error.localizedDescription)
             if error.isNewerFormat { fail(error) }
             return false
         } catch {
+            guard canPublish(lease, generation) else { return false }
             syncState = .error(reason: error.localizedDescription)
             return false
         }
@@ -575,6 +597,7 @@ import Observation
         if let dueTask { stoppedDueTask = dueTask }
         syncTask?.cancel(); syncTask = nil
         dueTask?.cancel(); dueTask = nil
+        dueWork?.cancel()
     }
 
     /// Restarts periodic exchange and due work for an active session.
@@ -584,12 +607,22 @@ import Observation
         startSyncLoop(); startDueLoop()
     }
 
-    /// Waits for the exchange chain and any queued or running file-change refresh.
+    /// Waits for the current exchanges, refreshes and due work. A running loop's next timer is outside this barrier.
     public func drainSync() async {
         let sync = syncChain, batch = batchTask
+        let refreshes = Array(refreshWaiters.keys), due = dueWork
+        let refusal = refusalRefresh
         let stoppedSync = stoppedSyncTask, stoppedDue = stoppedDueTask
         _ = await sync?.value
         await batch?.value
+        for id in refreshes {
+            await withCheckedContinuation { waiter in
+                if refreshWaiters[id] != nil { refreshWaiters[id]?.append(waiter) }
+                else { waiter.resume() }
+            }
+        }
+        await refusal?.value
+        await due?.value
         await stoppedSync?.value
         await stoppedDue?.value
     }
@@ -629,7 +662,16 @@ import Observation
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(60))
                 guard let self, !Task.isCancelled else { return }
-                if self.phase == .ready, let snapshot = try? await self.worker.recordDue(), !Task.isCancelled { self.apply(snapshot) }
+                guard phase == .ready, !suspended else { continue }
+                let lease = context, generation = lockGeneration
+                let work = Task {
+                    if let snapshot = try? await worker.recordDue(), canPublish(lease, generation), !Task.isCancelled {
+                        apply(snapshot)
+                    }
+                }
+                dueWork = work
+                await work.value
+                dueWork = nil
             }
         }
     }
@@ -685,7 +727,7 @@ import Observation
                 do { try await Task.sleep(for: .milliseconds(75)) } catch { return }
                 guard let self, !Task.isCancelled else { return }
                 batchNeedsRefresh = false
-                await refresh(preservingCommandFailure: true)
+                await refresh()
                 guard !Task.isCancelled else { return }
                 if !batchNeedsRefresh { batchTask = nil; return }
             }
@@ -693,15 +735,20 @@ import Observation
     }
     /// Deterministic batch barrier for hosts/tests; no timing-based polling is required.
     public func flushExternalChanges() async {
+        guard !suspended else { return }
+        let lease = context, generation = lockGeneration
         let batch = batchTask
         batch?.cancel(); batchTask = nil; batchNeedsRefresh = false
         await batch?.value
-        await refresh(preservingCommandFailure: true)
+        guard canPublish(lease, generation) else { return }
+        await refresh()
     }
-    public var hasUsableContent: Bool { usable && ([.ready, .refreshing, .waitingForDownload, .retry].contains(phase) || phase.isStopped) }
+    public var hasUsableContent: Bool {
+        !suspended && usable && ([.ready, .refreshing, .waitingForDownload, .retry].contains(phase) || phase.isStopped)
+    }
 
-    private func apply(_ snapshot: SessionSnapshot) {
-        guard snapshot.revision >= revision else { return }
+    private func apply(_ snapshot: SessionSnapshot, whileSuspended: Bool = false) {
+        guard !suspended || whileSuspended, snapshot.revision >= revision else { return }
         if homesConfigured, snapshot.revision != revision || snapshot.phase != phase { Task { [syncSignal] in await syncSignal.fire() } }
         let changed = Set(snapshot.namespaceRevisions.keys.filter { namespaceRevisions[$0] != snapshot.namespaceRevisions[$0] })
         let lost = !snapshot.usable
@@ -724,7 +771,11 @@ import Observation
             // A refused command does not decide the phase: the engine's access check does, on the next refresh (a read-only
             // member keeps reading; a revoked one becomes `denied` there).
             lastError = error.localizedDescription
-            refusalRefresh = Task { await refresh(preservingCommandFailure: false) }
+            let lease = context, generation = lockGeneration
+            refusalRefresh = Task { [weak self] in
+                guard let self, canPublish(lease, generation) else { return }
+                await refresh()
+            }
         case is ColophonError, is StorageError, is SessionKeyFailure, is KeyCustodyError:
             commandFailureRevision &+= 1
             fail(error)
@@ -732,7 +783,7 @@ import Observation
         }
     }
     private func fail(_ error: any Error) {
-        if error is CancellationError { return }
+        if suspended || error is CancellationError { return }
         // A stopped account refuses every write (`newerFormat`) and every call (`unavailable`): that is the stopped phase
         // the person already sees, not a new fault, so the phase and the readable content stay.
         if phase.isStopped, let colophon = error as? ColophonError, colophon.isNewerFormat || colophon.code.hasPrefix("unavailable") { return }

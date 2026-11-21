@@ -97,6 +97,16 @@ struct FolderMediumTests {
         }
     }
 
+    @Test func aScopedListingRefusesAnOverlongEmptyDirectory() throws {
+        let root = try folder(); defer { try? FileManager.default.removeItem(at: root) }
+        let medium = FolderMedium(folder: root, coordinated: false)
+        let component = String(repeating: "a", count: 255)
+        let path = "requests/\(component)/\(component)"
+        try FileManager.default.createDirectory(at: root.appendingPathComponent(path), withIntermediateDirectories: true)
+        #expect(throws: StorageError.invalidPath(path)) { try medium.listing(prefix: "requests/") }
+        #expect(throws: StorageError.invalidPath(path)) { try medium.listing() }
+    }
+
     @Test func pathsThatEscapeOrHideAreRefusedAndSymlinksAreNeverFollowed() throws {
         let root = try folder(); defer { try? FileManager.default.removeItem(at: root) }
         let medium = FolderMedium(folder: root, coordinated: false)
@@ -113,9 +123,11 @@ struct FolderMediumTests {
 
     @Test func anICloudPlaceholderIsUnavailableNeverAbsent() throws {
         let root = try folder(); defer { try? FileManager.default.removeItem(at: root) }
-        let medium = FolderMedium(folder: root, coordinated: false)
-        try FileManager.default.createDirectory(at: root.appendingPathComponent("authority"), withIntermediateDirectories: true)
-        try Data().write(to: root.appendingPathComponent("authority/.00000002.json.icloud"))
+        let library = root.appendingPathComponent("library")
+        let medium = FolderMedium(folder: library, coordinated: false)
+        #expect(try medium.listing().isEmpty)
+        try FileManager.default.createDirectory(at: library.appendingPathComponent("authority"), withIntermediateDirectories: true)
+        try Data().write(to: library.appendingPathComponent("authority/.00000002.json.icloud"))
         #expect(throws: StorageError.unavailable("iCloud download pending: .00000002.json.icloud")) { _ = try medium.listing() }
         #expect(throws: StorageError.unavailable("iCloud download pending: .00000002.json.icloud")) { _ = try medium.read("authority/00000002.json") }
         #expect(throws: StorageError.unavailable("iCloud download pending: .00000002.json.icloud")) {

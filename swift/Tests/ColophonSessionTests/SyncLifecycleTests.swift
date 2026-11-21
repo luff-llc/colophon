@@ -63,6 +63,43 @@ import Testing
         #expect(home.requestLog.count == requestCount, "draining an idle session sends no requests")
     }
 
+    @Test(.timeLimit(.minutes(1)))
+    func lockingWaitsForAnInFlightRefreshAndDiscardsItsSnapshot() async throws {
+        let device = Device()
+        let session = device.session
+        await session.create()
+        await session.flushExternalChanges()
+        try #require(session.phase == .ready)
+        let due = try #require(session.dueTask)
+
+        let (refreshStarted, started) = AsyncStream<Void>.makeStream()
+        let (refreshRelease, release) = AsyncStream<Void>.makeStream()
+        defer { release.finish(); session.refreshWillFinish = nil }
+        var refreshReleased = false
+        session.refreshWillFinish = {
+            guard case .enqueued = started.yield(()) else { return }
+            started.finish()
+            for await _ in refreshRelease {}
+            refreshReleased = true
+        }
+        let refresh = Task { await session.refresh() }
+        var startedIterator = refreshStarted.makeAsyncIterator()
+        try #require(await startedIterator.next() != nil)
+        #expect(session.phase == .refreshing)
+
+        let lock = Task {
+            await session.lock()
+            #expect(refreshReleased, "lock drains refresh before returning")
+        }
+        while !due.isCancelled, !Task.isCancelled { await Task.yield() }
+        #expect(!session.hasUsableContent, "lock hides content while refresh is still paused")
+        release.finish()
+        await lock.value
+        await refresh.value
+        #expect(session.phase == .locked)
+        #expect(!session.hasUsableContent)
+    }
+
     @Test func lockingCancelsFileWorkAndUnlockingRegistersThePresenterAgain() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

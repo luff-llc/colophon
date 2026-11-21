@@ -674,6 +674,8 @@ actor SessionWorker {
         let known = Set(members.map(\.id))
         var out: [AccessRequest] = []
         for entry in try storage().listing(prefix: "requests/") {
+            // OwnRequest writes one flat record per member.
+            guard !entry.path.dropFirst("requests/".count).contains("/") else { continue }
             guard let bytes = try? storage().read(entry.path), let info = try? accountRequestInfo(raw: bytes),
                   !known.contains(info.member), info.member != memberID else { continue }
             out.append(Self.accessRequest(info))

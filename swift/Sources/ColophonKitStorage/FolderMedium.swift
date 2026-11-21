@@ -35,7 +35,6 @@ import Foundation
 public final class FolderMedium: RecordMedium, @unchecked Sendable {
     public let folder: URL
     private let coordinated: Bool
-    private let ubiquitous: Bool
     private let lock = NSLock()
     private var presenters: [UUID: FolderPresenter] = [:]
     private var hook: (@Sendable (FolderBatchStep) throws -> Void)?
@@ -43,13 +42,11 @@ public final class FolderMedium: RecordMedium, @unchecked Sendable {
 
     public init(folder: URL) {
         self.folder = Self.canonical(folder); coordinated = true
-        ubiquitous = FileManager.default.isUbiquitousItem(at: folder)
     }
     /// Test seam for restricted hosts without `filecoordinationd`. Never a production fallback: the journal and its
     /// lock still make every batch all or none for every process; only the iCloud coordination is skipped.
     package init(folder: URL, coordinated: Bool) {
         self.folder = Self.canonical(folder); self.coordinated = coordinated
-        ubiquitous = FileManager.default.isUbiquitousItem(at: folder)
     }
 
     /// Called at each step of a batch (tests: a crash helper kills the process there; a fault test throws).
@@ -91,7 +88,6 @@ public final class FolderMedium: RecordMedium, @unchecked Sendable {
 
     /// A directory prefix opens that subtree directly. Other prefixes match the start of each record path.
     public func listing(prefix: String) throws -> [MediumEntry] {
-        try checkAvailability(folder)
         let directoryPrefix = prefix.hasSuffix("/") ? String(prefix.dropLast()) : prefix
         let validDirectory = (try? RecordPaths.validate(directoryPrefix)) != nil
         let entries = try reading { root -> [MediumEntry] in
@@ -129,16 +125,16 @@ public final class FolderMedium: RecordMedium, @unchecked Sendable {
             }
             let path = prefix + name
             if entry.isSymlink { throw StorageError.invalidPath(path) }
+            guard entry.isDirectory || entry.isRegular else { continue }
+            // Bound recursion using the same path limit imposed on stored records.
+            try RecordPaths.validate(path)
+            let info = entry.info
+            try checkDataless(info, path)
             if entry.isDirectory {
-                try checkDataless(entry.info, path)
                 guard let child = try directory.directory(name, create: false) else { continue }
                 try list(child, prefix: path + "/", into: &result)
                 continue
             }
-            guard entry.isRegular else { continue }
-            try RecordPaths.validate(path)
-            let info = entry.info
-            try checkDataless(info, path)
             let modified = Double(info.st_mtimespec.tv_sec) + Double(info.st_mtimespec.tv_nsec) / 1e9
             result.append(MediumEntry(path: path, version: "\(info.st_ino):\(info.st_size):\(modified)"))
         }
@@ -166,7 +162,7 @@ public final class FolderMedium: RecordMedium, @unchecked Sendable {
     }
 
     private func readRecord(_ parent: DirectoryHandle, _ leaf: String, _ path: String, maximumBytes: Int) throws -> Data? {
-        if ubiquitous, let info = try parent.info(leaf) {
+        if let info = try parent.info(leaf) {
             if info.st_mode & S_IFMT == S_IFLNK { throw StorageError.invalidPath(path) }
             try checkDataless(info, path)
         }
@@ -176,7 +172,11 @@ public final class FolderMedium: RecordMedium, @unchecked Sendable {
     /// Runs `body` with the folder's handle under the shared lock, after completing any batch left behind. Nil when
     /// the folder does not exist yet (an empty store).
     private func reading<T>(_ body: (DirectoryHandle) throws -> T) throws -> T? {
-        try downloadAfterUnlock { try lockedRead(body) }
+        // The folder can be created or evicted after initialization. Read fresh resource values before taking flock.
+        try downloadAfterUnlock {
+            try checkAvailability(URL(fileURLWithPath: folder.path))
+            return try lockedRead(body)
+        }
     }
 
     private func lockedRead<T>(_ body: (DirectoryHandle) throws -> T) throws -> T? {
@@ -388,11 +388,11 @@ public final class FolderMedium: RecordMedium, @unchecked Sendable {
         _ parent: DirectoryHandle, _ name: String, path: String, create: Bool, allowNonDirectory: Bool
     ) throws -> DirectoryHandle? {
         try checkPlaceholder(parent, name, path)
-        if ubiquitous || allowNonDirectory, let info = try parent.info(name) {
+        if let info = try parent.info(name) {
             let kind = info.st_mode & S_IFMT
             if kind == S_IFLNK { throw StorageError.invalidPath(path) }
-            if allowNonDirectory && kind != S_IFDIR { return nil }
             try checkDataless(info, path)
+            if allowNonDirectory && kind != S_IFDIR { return nil }
         }
         return try parent.directory(name, create: create)
     }
@@ -406,8 +406,8 @@ public final class FolderMedium: RecordMedium, @unchecked Sendable {
     }
 
     private func checkDataless(_ info: stat, _ path: String) throws {
-        if ubiquitous, info.st_flags & UInt32(SF_DATALESS) != 0 {
-            let url = folder.appendingPathComponent(path)
+        if info.st_flags & UInt32(SF_DATALESS) != 0 {
+            let url = path.isEmpty ? folder : folder.appendingPathComponent(path)
             throw DownloadPending(url: url, name: url.lastPathComponent)
         }
     }
@@ -461,15 +461,19 @@ public final class FolderMedium: RecordMedium, @unchecked Sendable {
         let name = url.lastPathComponent
         let placeholder = url.deletingLastPathComponent().appendingPathComponent("." + name + ".icloud")
         if name.hasSuffix(".icloud") || FileManager.default.fileExists(atPath: placeholder.path) {
-            try? FileManager.default.startDownloadingUbiquitousItem(at: url)
-            throw StorageError.unavailable("iCloud download pending: \(name)")
+            throw DownloadPending(url: url, name: name)
         }
+        var info = stat()
+        guard lstat(url.path, &info) == 0 else {
+            if errno == ENOENT { return }
+            throw FolderFiles.failure(errno, url.path)
+        }
+        if info.st_mode & S_IFMT == S_IFLNK { throw StorageError.invalidPath(url.path) }
+        try checkDataless(info, "")
         do {
-            let values = try url.resourceValues(forKeys: [.isUbiquitousItemKey, .ubiquitousItemDownloadingStatusKey, .isSymbolicLinkKey])
-            guard values.isSymbolicLink != true else { throw StorageError.invalidPath(url.path) }
+            let values = try url.resourceValues(forKeys: [.isUbiquitousItemKey, .ubiquitousItemDownloadingStatusKey])
             if values.isUbiquitousItem == true && values.ubiquitousItemDownloadingStatus != .current {
-                try? FileManager.default.startDownloadingUbiquitousItem(at: url)
-                throw StorageError.unavailable("iCloud download pending: \(name)")
+                throw DownloadPending(url: url, name: name)
             }
         } catch let error as CocoaError where error.code == .fileReadNoSuchFile || error.code == .fileNoSuchFile {
             return
