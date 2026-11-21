@@ -1,4 +1,4 @@
-# Known issues in 0.5.1
+# Known issues in 0.5.2
 
 What 0.5.0 does not do as a protocol is [spec §21.1](../spec/colophon-0.5.md#211-what-050-does-not-do),
 and the freeze conditions still open are in [§21](../spec/colophon-0.5.md#21-conformance-and-freeze).

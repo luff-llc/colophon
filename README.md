@@ -13,10 +13,10 @@ every client folds the admitted operations into the same state. A **home** keeps
 vouches for its head, but storage and transport never grant access: a home, a folder or iCloud
 Drive only moves bytes it cannot read. There is no vendor account.
 
-## Status: 0.5.1
+## Status: 0.5.2
 
 **0.5 ("one portable identity: an account") was released as 0.5.0, spec revision 18; the current
-release is 0.5.1, which adds fixes and no format change.** Its formats
+release is 0.5.2, which adds fixes and no format change.** Its formats
 and reader rules are frozen, provisionally: some freeze conditions are still open (missing
 vectors, the Swift differential corpus, a dry run on a real library, Galley alignment, physical
 devices), and they are closed in 0.5.x without changing any format.
