@@ -441,7 +441,13 @@ fn a_home_holding_a_fork_serves_it_refuses_what_depends_on_it_and_admits_a_resol
     src_both.put(&format!("heads/{}.json", w.hb), hb_x.clone());
     let mut ctl_b = controller_engine(&w.f, &w.host, &src_both, &w.f.d.clone(), at);
     let mut wire = w.wire();
+    // Run exchange concurrently with device sync, rather than waiting for convergence.
+    // A holds only X, while B serves both equivocations and cannot sign a fresh head.
+    w.a.tick();
+    b.tick();
+    assert_eq!(b.get("/head").0, 503, "an exchanging fork cannot serve a misleading head");
     pass_without_calls(&mut ctl_b, &src_both, &w.hb, &mut wire, &w.host, at);
+    assert_eq!(b.get("/head").0, 503, "exchange has not resolved the equivocation");
     assert_eq!(ctl_b.account().status().code, "refused:fork");
     // The owner resolves it, keeping X: every control unit and the recovery key sign (a full
     // set: due at its receipt).
@@ -658,7 +664,7 @@ fn watch_heads(seen: &mut BTreeMap<u64, BTreeSet<String>>, r: &Relay) {
 
 /// Two homes at `headQuorum` 2. The second home B is down while the account advances at the
 /// primary A (two devices approved, A signing heads). B comes back long after (more than 300 s
-/// after those entries' `issued`): A's forwarded head reaches it, and a device's pass pushes the
+/// after those entries' `issued`): a device supplies A's signed covering head, then pushes the
 /// entries, which B stores because the primary's head covers them (the clock rule is the
 /// primary's to apply; a home that was offline catches up). B then signs heads again, never two
 /// for one seq.
@@ -697,10 +703,18 @@ fn an_offline_home_catches_up_from_a_device_and_signs_heads_again() {
     w.link();
     let b = w.b.as_ref().unwrap();
     watch_heads(&mut seen, b);
-    forwarded("A's head reaches B", &[&w.a], || {
-        b.get(&format!("/records/heads/{}.json", w.ha)).0 == 200
-            && body_of(&serde_json::from_slice(&b.get(&format!("/records/heads/{}.json", w.ha)).1).unwrap())["authority"]["seq"].as_u64() == Some(last)
-    });
+    // Without the primary's covering head, this old upload is 422 refused:late. Normal
+    // forwarding must not follow that rejection with an ahead-of-entries head. Supply the
+    // signed coverage explicitly as part of the device's recovery before pushing entries.
+    let (s, out) = b.post("/authority", &json!({"from": 1, "entries": entries(&w.a), "receipts": []}));
+    assert_eq!((s, out), (422, json!({"result": "refused:late"})));
+    let (s, primary_head) = w.a.get("/head");
+    assert_eq!(s, 200);
+    let (s, _, out) = http(
+        b.port, "PUT", &b.url(&format!("/records/heads/{}.json", w.ha)),
+        &[("Content-Type".into(), "application/json".into())], &primary_head,
+    );
+    assert_eq!(s, 200, "{}", String::from_utf8_lossy(&out));
     // A device's pass brings B up to date.
     let mut ctl = w.controller(back);
     let mut wire = w.wire();

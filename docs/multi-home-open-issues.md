@@ -36,36 +36,7 @@ Each item gives where it is, what goes wrong, and the fix proposed.
    - Proposed fix: page forward from the last shared entry, one 64-entry request per pass, keeping
      a per-peer exchange cursor in `forward.json`. The receiver stores each page as candidates (its
      parent is then held). Specify the procedure in §13.1.
-2. **One home can recycle its candidate slot.**
-   - Where: `crates/colophon-core/src/v05/history/home.rs`, `admit_candidate` (`slot_free`), with
-     `kept_heads` keeping only four off-branch heads per home.
-   - What goes wrong: slot ownership is rebuilt from the heads the home still keeps. A home that
-     posts newer off-branch heads pushes out its old covering head, then covers a new candidate.
-     Repeating this fills all four slots, and an honest candidate can no longer be exchanged.
-   - Proposed fix: record each kept candidate's covering home with the candidate itself, in the
-     checkpoint, not derived from current heads. Never count a home twice at one seq.
-3. **Standing candidates are unbounded at one seq.**
-   - Where: `admit_candidate`, the `stands || (forks && covered)` branch, which runs before the
-     per-seq bound is checked.
-   - What goes wrong: a controller who can produce successively better recording candidates (for
-     example by grinding digests under §8.6's order) gets each new winner stored. Displaced winners
-     are never removed.
-   - Proposed fix: when a new candidate stands, drop the displaced non-standing candidates beyond
-     the bound, keeping the evidence §13.3 needs (one per covering home).
-4. **A head can go out before an entry it covers.**
-   - Where: `relay/home.js`, `forwardEntries`. `fwd` is computed under the lock, the request goes
-     out without it, and `putHead()` takes the lock again later.
-   - What goes wrong: an entry appended in between gets a head that is sent without its entry. The
-     peer then holds a head ahead of what it can verify, until the next pass.
-   - Proposed fix: take the head and the entries in one module call under one lock (the head over
-     exactly the last entry sent), or send no head newer than the entries just sent.
-5. **The 15 s pass limit is not enforced around entries and the head.**
-   - Where: `relay/home.js`, `forwardTo` and `forwardEntries`.
-   - What goes wrong: after the new-object offers use up the deadline, the entries request, the
-     head request and a forced retry still run, each with a 5 s limit. A pass can take about 30 s.
-     Other peers are not affected.
-   - Proposed fix: check the deadline before each request, and give each request the smaller of
-     5 s and the time left.
+
 6. **The spec text for deep forks and batch judging is incomplete.**
    - Where: `spec/colophon-0.5.md` §13.1 (candidate exchange) and §14 (`POST {base}/authority`).
    - What goes wrong: "from the seq after the last shared entry, at most 64 entries" gives no
@@ -74,28 +45,42 @@ Each item gives where it is, what goes wrong, and the fix proposed.
      implementation may stop at the first conflict.
    - Proposed fix: write the paging procedure of item 1. In §14, require judging every entry of a
      request after a stored candidate.
-7. **Up to three hostile homes can keep an honest non-standing candidate out.**
-   - Where: `admit_candidate`, the per-seq bound (`CANDIDATES_PER_SEQ`, 4).
-   - What goes wrong: with the home's own entry and three slots taken by candidates that three
-     other homes cover, a fourth home's candidate that does not stand is refused. A standing
-     candidate is always stored.
-   - Proposed fix: one slot per current home (at most 8) instead of a fixed 4, once item 2 makes
-     slot ownership durable.
-8. **The tests do not reach the failure cases above.**
-   - Where: `v05_relay_h2.rs`, `v05_home_h2.rs`, `relay/test/forward.test.js`.
-   - What goes wrong: the exchange test has a one-entry fork, and the evidence test never evicts a
-     covering head or reaches four candidates. The silent-peer test does not crash mid-pass or
-     check the deadline. The fork test waits until both homes agree before devices sync, so it
-     does not show what a device sees while the homes exchange.
-   - Proposed fix: one test per item above, written first. Add a device test during exchange
-     (expect `refused:fork` or 503, never a wrong history).
-9. **Another test port picker remains.**
-   - Where: `crates/colophon-ffi/tests/v05_relay/mod.rs` (`free_port`).
-   - What goes wrong: a port is probed and released before the relay binds it, so a parallel test
-     can take it.
-   - Proposed fix: start on port 0 and use the resolve file, as `support_relay` now does.
 
-Fixed during PR 28, for the record:
+## Fixed
+
+The safety follow-up on `fix/multi-home-safety` fixes items **#2, #3, #4, #5, #7,
+#8 (for these fixes), and #9**:
+
+- **#2 / #7: durable, per-home candidate slots.** `HomeState` persists each evidence slot's
+  covering home and candidate digest, independently of retained heads. A home cannot recycle
+  its slot when its covering head is evicted. Each current home has one evidence slot (at most
+  eight), with the standing entry also retained. The serde-defaulted field keeps version-2
+  checkpoints readable. On first use at a seq, legacy evidence is assigned from held heads;
+  a legacy candidate whose covering head was already evicted owns no home's slot and does not
+  block honest homes from claiming their evidence slots at that seq.
+- **#3: bounded displaced winners.** When a candidate stands, the checkpoint retains that
+  winner and at most one evidence candidate per covering home at the seq. Displaced winners
+  without an evidence slot are removed; repeated recording-candidate grinding cannot grow
+  the seq without bound. Rebuilding preserves head marks, the stop floor and high-water mark.
+- **#4: a consistent forwarding snapshot.** The relay settles and captures the head and entries
+  under one lock, before any network request. An append during forwarding cannot advance the
+  captured head past the entries sent. Candidate exchange still sends the covering head first,
+  as required to admit non-standing evidence; ordinary catch-up sends entries first.
+- **#5: one request deadline for the whole pass.** New-object offers, backlog offers, entries,
+  the head and a forced entries retry all check the remaining 15 s budget immediately before
+  a request and use the smaller of 5 s and that remainder. Local lock/storage work can still
+  delay completion, but cannot start another network timeout past the deadline.
+- **#8: focused regressions.** Core tests evict the covering head, serialize and restore the
+  home checkpoint, exercise all eight homes, and grind 32 successive recording candidates.
+  Host tests append during an entries request and exhaust the deadline across offers, entries,
+  head and retry. The real-relay fork test syncs a device while forwarding is running and
+  asserts `refused:fork` / 503 until the fork is resolved. Deep-fork paging tests remain with
+  #1 / #6 and require the spec revision described above.
+- **#9: no probe-and-release port picker.** FFI journeys start every relay on port 0, read its
+  bound port from the listening announcement, then atomically publish peer mappings through
+  the resolve file, matching `support_relay`.
+
+### Fixed during PR 28
 
 - a candidate `activate` that skipped the late-activation rule;
 - homes on different branches that never reconciled (one-entry case);

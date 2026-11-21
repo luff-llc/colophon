@@ -308,11 +308,14 @@ fn journey(history: &str, homes: u8) {
     // --- The homes: started for this account, appointed in one transition recorded at once.
     // Each home knows where the others are (it forwards transitions, receipts and its heads).
     let mut relays = Vec::new();
-    let ports: Vec<u16> = (0..homes).map(|_| free_port()).collect();
     let bases: Vec<String> = (0..homes).map(base).collect();
     for (n, key) in home_keys.iter().enumerate() {
-        let peers: Vec<(&str, u16)> = (0..usize::from(homes)).filter(|m| *m != n).map(|m| (bases[m].as_str(), ports[m])).collect();
-        relays.push(Relay::start_on(key, &account, &bases[n], NOW, &peers, &format!("{history}-{homes}-{n}"), ports[n]));
+        relays.push(Relay::start(key, &account, &bases[n], NOW, &[], &format!("{history}-{homes}-{n}")));
+    }
+    for (n, relay) in relays.iter().enumerate() {
+        let peers: Vec<(&str, u16)> = relays.iter().enumerate().filter(|(m, _)| *m != n)
+            .map(|(m, peer)| (bases[m].as_str(), peer.port)).collect();
+        relay.set_resolve(&peers);
     }
     let mut appoint = Vec::new();
     let mut home_ids = Vec::new();

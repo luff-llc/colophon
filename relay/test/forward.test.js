@@ -63,6 +63,156 @@ describe('offering entries to a peer', () => {
     assert.equal(posts, 2, 'offered again 2 s later');
   });
 
+  test('an append during the entries request cannot advance the forwarded head', async () => {
+    const h = slot();
+    const row = { after: 0, retry: [], head: '' };
+    now = 1_000;
+    let head = { seq: 5 };
+    h.headIfFresh = async () => head;
+    const sent = [];
+    globalThis.fetch = async (url, init) => {
+      if (String(url).endsWith('/authority')) head = { seq: 6 };
+      else sent.push(JSON.parse(init.body));
+      return { status: 200, text: async () => '' };
+    };
+    await h.forwardTo('http://peer.test', row, PEER);
+    assert.deepEqual(sent, [{ seq: 5 }]);
+  });
+
+  for (const status of [409, 422, 500]) {
+    test(`an entry upload rejected with ${status} does not forward its head`, async () => {
+      const h = slot();
+      now = 1_000;
+      h.headIfFresh = async () => ({ seq: 5 });
+      const requests = [];
+      globalThis.fetch = async (url, init) => {
+        requests.push(init.method);
+        return { status, text: async () => 'rejected' };
+      };
+      const row = { after: 0, retry: [], head: '' };
+      await h.forwardTo('http://peer.test', row, PEER);
+      now += 1_000;
+      await h.forwardTo('http://peer.test', row, PEER);
+      assert.deepEqual(requests, ['POST'], 'a throttled retry cannot send the rejected head either');
+    });
+  }
+
+  for (const name of ['network failure', 'timeout']) {
+    test(`an entry upload ending in ${name} does not forward its head`, async () => {
+      const h = slot();
+      now = 1_000;
+      h.headIfFresh = async () => ({ seq: 5 });
+      const requests = [];
+      globalThis.fetch = async (url, init) => {
+        requests.push(init.method);
+        throw new Error(name);
+      };
+      await assert.rejects(h.forwardTo('http://peer.test', { after: 0, retry: [], head: '' }, PEER), { message: name });
+      assert.deepEqual(requests, ['POST']);
+    });
+  }
+
+  for (const status of [200, 204, 421]) {
+    test(`an entry upload returning ${status} allows its head`, async () => {
+      const h = slot();
+      now = 1_000;
+      h.headIfFresh = async () => ({ seq: 5 });
+      const requests = [];
+      globalThis.fetch = async (url, init) => {
+        requests.push(init.method);
+        return { status: requests.length === 1 ? status : 200, text: async () => '' };
+      };
+      await h.forwardTo('http://peer.test', { after: 0, retry: [], head: '' }, PEER);
+      assert.deepEqual(requests, status === 421 ? ['POST', 'PUT', 'POST'] : ['POST', 'PUT']);
+    });
+  }
+
+  test('a fork exchange sends its covering head before the expected 409', async () => {
+    const h = slot();
+    now = 1_000;
+    h.headIfFresh = async () => ({ seq: 5 });
+    const call = h.wasm.call;
+    h.wasm.call = (req) => req.op === 'forward_entries' ? { ...call(req), exchange: true } : call(req);
+    const requests = [];
+    globalThis.fetch = async (url, init) => {
+      requests.push(init.method);
+      return { status: init.method === 'POST' ? 409 : 200, text: async () => '' };
+    };
+    await h.forwardTo('http://peer.test', { after: 0, retry: [], head: '' }, PEER);
+    assert.deepEqual(requests, ['PUT', 'POST']);
+  });
+
+  test('a head can be sent when there are no entries to upload', async () => {
+    const h = slot();
+    now = 1_000;
+    h.headIfFresh = async () => ({ seq: 5 });
+    const call = h.wasm.call;
+    h.wasm.call = (req) => req.op === 'forward_entries' ? { ...call(req), entries: [] } : call(req);
+    const requests = [];
+    globalThis.fetch = async (url, init) => {
+      requests.push(init.method);
+      return { status: 200, text: async () => '' };
+    };
+    await h.forwardTo('http://peer.test', { after: 0, retry: [], head: '' }, PEER);
+    assert.deepEqual(requests, ['PUT']);
+  });
+
+  test('an exhausted pass never starts the entries snapshot lock', async () => {
+    const h = slot();
+    now = 1_000;
+    h.lock = async () => { throw new Error('snapshot lock entered'); };
+    await h.forwardEntries('http://peer.test', {}, PEER, now);
+  });
+
+  test('entries, head and forced retry share the remaining pass deadline', async () => {
+    const h = slot();
+    const row = { after: 0, retry: [], head: '' };
+    h.headIfFresh = async () => ({ seq: 5 });
+    now = 0;
+    const realTimeout = AbortSignal.timeout;
+    const limits = [];
+    AbortSignal.timeout = (ms) => { limits.push(ms); return realTimeout(ms); };
+    // Simulate work before forwarding entries, then the 421 and head responses.
+    h.saveForward = async () => { if (now === 0) now = 11_000; };
+    const requests = [];
+    globalThis.fetch = async (url) => {
+      requests.push(String(url));
+      now += requests.length === 1 ? 3_000 : 1_000;
+      return { status: requests.length === 1 ? 421 : 200, text: async () => '' };
+    };
+    try {
+      await h.forwardTo('http://peer.test', row, PEER);
+      assert.deepEqual(limits, [4_000, 1_000]);
+      assert.equal(requests.length, 2, 'no forced retry after the deadline');
+      assert.equal(now, 15_000);
+    } finally { AbortSignal.timeout = realTimeout; }
+  });
+
+  test('new object offers cannot leave entries or a head outside the pass budget', async () => {
+    const h = slot();
+    h.forwardEntries = async () => { throw new Error('entries forwarding started after deadline'); };
+    const row = { after: 0, retry: [], head: '' };
+    now = 0;
+    h.headIfFresh = async () => ({ seq: 5 });
+    h.wasm.call = (req) => {
+      if (req.op === 'pending_page') return { objects: [1, 2, 3, 4].map((seq) => ({ seq, kind: 'transition' })) };
+      if (req.op === 'forward_objects') return { objects: [ENTRY] };
+      if (req.op === 'peer_answer') return { delivered: false, why: 'timeout' };
+      throw new Error(`unexpected op after deadline: ${req.op}`);
+    };
+    let requests = 0;
+    globalThis.fetch = async (url) => {
+      assert.ok(String(url).endsWith('/pending'));
+      requests += 1;
+      now += 5_000;
+      return { status: 503, arrayBuffer: async () => new ArrayBuffer(0) };
+    };
+    await h.forwardTo('http://peer.test', row, PEER);
+    assert.equal(requests, 3);
+    assert.equal(now, 15_000);
+    assert.deepEqual(row.retry, [1, 2, 3, 4]);
+  });
+
   test('a clock that moved back offers the suffix again at once', async () => {
     const h = slot();
     const row = (h.forward.peers[PEER] = { after: 0, retry: [], head: '' });
