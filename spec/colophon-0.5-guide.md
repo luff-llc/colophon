@@ -139,6 +139,13 @@ whether it is final and which homes it still needs; and per unit, v(u).
   as a controller; a namespace is shown only when the key of its latest epoch is held (§10.2, §17.1).
 - **First-seen seq** of a pending change is the verified seq at which this host first held the
   object: local memory, to be persisted so a change is not shown twice after a restart (§17.5).
+- **Joining a new device** under `members`: either the approving device hands it the history out
+  of band, or it is given only the account ID, a home's base and one entry (`seq` and digest),
+  makes its request, and after approval fetches the history from that home with
+  `colophon.history.read` calls naming that entry. It verifies the history from seq 1, accepts it
+  only if it contains that entry, a current grant made from its exact request and a fresh head from
+  a current home at that base, and waits on `refused:revoked` until a verified history settles it
+  (§13.4, §12.3).
 - **A controller added by a transition** builds its slot by a self-slot entry once its activation
   is final (§17.3).
 - **Handles and stored state.** Epoch key handles are as trusted as the keys. Stored verifier

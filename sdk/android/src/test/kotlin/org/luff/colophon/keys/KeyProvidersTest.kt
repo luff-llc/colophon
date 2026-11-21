@@ -61,6 +61,11 @@ class KeyProvidersTest {
         assertEquals(KeyForm.WEBAUTHN, provider.form)
         val registration = credentials.requests.single()
         assertEquals("none", registration.string("attestation"))
+        val selection = registration.fields.getValue("authenticatorSelection") as KeyJson.Obj
+        assertEquals("required", selection.string("residentKey"))      // a discoverable credential (a passkey)
+        assertEquals(true, selection.bool("requireResidentKey"))
+        assertEquals("required", selection.string("userVerification"))
+        assertFalse(selection.fields.containsKey("authenticatorAttachment"))
         val parameters = registration.array("pubKeyCredParams").single() as KeyJson.Obj
         assertEquals("-7", (parameters.fields.getValue("alg") as KeyJson.Number).raw)
         assertFalse(provider.descriptor().decodeToString().contains("agreement"))

@@ -52,10 +52,13 @@ class PasskeyProvider private constructor(descriptor: ByteArray, private val cre
     }
 
     companion object {
-        /** Register ES256. No registration-time PRF output is retained or used. */
+        /**
+         * Register ES256 as a discoverable credential (`residentKey: "required"`, `requireResidentKey: true`, as
+         * Android's passkey guide asks). No registration-time PRF output is retained or used.
+         */
         suspend fun register(rp: String, rpName: String, userID: ByteArray, userName: String, displayName: String,
                              credentials: CredentialClient, challenge: ByteArray = ByteArray(32).also(SecureRandom()::nextBytes)): PasskeyProvider {
-            val request = """{"rp":{"id":${keyQuote(rp)},"name":${keyQuote(rpName)}},"user":{"id":"${url(userID)}","name":${keyQuote(userName)},"displayName":${keyQuote(displayName)}},"challenge":"${url(challenge)}","pubKeyCredParams":[{"type":"public-key","alg":-7}],"attestation":"none","authenticatorSelection":{"userVerification":"required","residentKey":"preferred"},"extensions":{"prf":{}}}"""
+            val request = """{"rp":{"id":${keyQuote(rp)},"name":${keyQuote(rpName)}},"user":{"id":"${url(userID)}","name":${keyQuote(userName)},"displayName":${keyQuote(displayName)}},"challenge":"${url(challenge)}","pubKeyCredParams":[{"type":"public-key","alg":-7}],"attestation":"none","authenticatorSelection":{"userVerification":"required","residentKey":"required","requireResidentKey":true},"extensions":{"prf":{}}}"""
             val result = keyObject(keyCall { credentials.create(request) }.toByteArray())
             val attestation = decode(required(obj(result, "response"), "attestationObject"))
             val key = parseRegistration(attestation, rp)
