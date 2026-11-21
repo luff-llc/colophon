@@ -56,3 +56,9 @@ pub(crate) fn verification() {}
 #[cfg(not(feature = "work-counters"))]
 #[inline(always)]
 pub(crate) fn prepare() {}
+
+// Deterministic regression probes for effective pending-object selection.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static PENDING_CHECKS: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
+}

@@ -622,6 +622,7 @@ pub fn prepare_end_sessions_by_member(
 // Receipts and pending objects.
 
 /// A receipt (§13.5) parsed far enough to choose among them.
+#[derive(Clone)]
 struct Receipt {
     bytes: Vec<u8>,
     by: String,
@@ -653,6 +654,11 @@ fn parse_receipt(state: &State, held: &[u8]) -> Option<Receipt> {
         .into_iter()
         .find(|m| m.request.member_id() == by)
         .map(|m| m.request.signing.clone())?;
+    #[cfg(test)]
+    crate::v05::history::work::PENDING_CHECKS.with(|c| {
+        let (t, r) = c.get();
+        c.set((t, r + 1));
+    });
     env.verify(&key).ok()?;
     Some(Receipt {
         bytes: bytes.to_vec(),
@@ -722,6 +728,25 @@ fn choose_receipts_among(
     not_after_ms: Option<i64>,
     exempt: &[String],
 ) -> Result<Vec<Vec<u8>>> {
+    let receipts = held.iter().filter_map(|b| parse_receipt(state, b));
+    choose_parsed_receipts(
+        state,
+        receipts,
+        object_digest,
+        object_issued_ms,
+        not_after_ms,
+        exempt,
+    )
+}
+
+fn choose_parsed_receipts(
+    state: &State,
+    receipts: impl IntoIterator<Item = Receipt>,
+    object_digest: &str,
+    object_issued_ms: i64,
+    not_after_ms: Option<i64>,
+    exempt: &[String],
+) -> Result<Vec<Vec<u8>>> {
     let homes = state
         .current_homes()
         .into_iter()
@@ -732,10 +757,7 @@ fn choose_receipts_among(
     }
     let quorum = (state.keyring().policy.head_quorum() as usize).min(homes);
     let mut best: BTreeMap<String, Receipt> = BTreeMap::new();
-    for bytes in held {
-        let Some(r) = parse_receipt(state, bytes) else {
-            continue;
-        };
+    for r in receipts {
         if exempt.contains(&r.by) {
             continue;
         }
@@ -759,6 +781,31 @@ fn choose_receipts_among(
         ));
     }
     Ok(best.into_values().take(quorum).map(|r| r.bytes).collect())
+}
+
+/// Receipts parsed and verified once, indexed by the exact object they name.
+pub(crate) struct ReceiptIndex(BTreeMap<String, Vec<Receipt>>);
+impl ReceiptIndex {
+    pub(crate) fn new(state: &State, held: &[Vec<u8>]) -> Self {
+        let mut index: BTreeMap<String, Vec<Receipt>> = BTreeMap::new();
+        for receipt in held.iter().filter_map(|b| parse_receipt(state, b)) {
+            index
+                .entry(receipt.object.clone())
+                .or_default()
+                .push(receipt);
+        }
+        Self(index)
+    }
+    pub(crate) fn choose(&self, state: &State, digest: &str, issued: i64) -> Result<Vec<Vec<u8>>> {
+        choose_parsed_receipts(
+            state,
+            self.0.get(digest).into_iter().flatten().cloned(),
+            digest,
+            issued,
+            None,
+            &[],
+        )
+    }
 }
 
 fn receipt_received(state: &State, bytes: &[u8]) -> Result<i64> {
@@ -1295,7 +1342,12 @@ impl<'a> VerifiedObjects<'a> {
                 .state
                 .ok_or_else(|| malformed("the held objects hold no genesis"))
         });
-        Self { objects, now_ms, fork, head }
+        Self {
+            objects,
+            now_ms,
+            fork,
+            head,
+        }
     }
     /// The objects it verified.
     pub fn objects(&self) -> &'a Objects {
@@ -1319,7 +1371,11 @@ impl<'a> VerifiedObjects<'a> {
         activate_over(self, transition_digest)
     }
     /// [`prepare_vetoed`] over these objects and this clock.
-    pub fn prepare_vetoed(&self, transition_digest: &str, veto_digest: &str) -> Result<PendingBatch> {
+    pub fn prepare_vetoed(
+        &self,
+        transition_digest: &str,
+        veto_digest: &str,
+    ) -> Result<PendingBatch> {
         crate::v05::history::work::prepare();
         vetoed_over(self, transition_digest, veto_digest)
     }
@@ -2078,8 +2134,7 @@ fn judge_veto(
     // The home's receipt of the veto, before the deadline, judged by the verifier's own receipt
     // check (shape, a current home's key, the veto, the window).
     let v_issued = issued_of(&v)?;
-    let (home, received) =
-        crate::v05::history::check_receipt(&s, receipt, &v.digest, v_issued)?;
+    let (home, received) = crate::v05::history::check_receipt(&s, receipt, &v.digest, v_issued)?;
     require(
         received <= timing.deadline_ms,
         "the home receipted the veto after the deadline",

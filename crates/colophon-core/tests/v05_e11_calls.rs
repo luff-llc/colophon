@@ -131,7 +131,7 @@ impl Wire for CallingHome {
             || (method == "POST" && (bare == "/authority" || bare == "/pending"))
             || (method == "PUT" && bare.starts_with("/records/heads/"));
         let history = bare == "/authority" || bare == "/pending" || bare.starts_with("/pending/");
-        if !open && !(history && self.public_history) {
+        if !(open || history && self.public_history) {
             let call = req.headers.iter().find_map(|(k, v)| {
                 (k == "Authorization").then(|| v.strip_prefix("Colophon ")).flatten()
             });

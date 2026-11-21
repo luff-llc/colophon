@@ -639,7 +639,7 @@ impl Derived {
                     }
                     // An empty fold with a checkpoint's snapshot to reuse: the full path takes it.
                     None => {
-                        if !(f.fold.order.is_empty() && !inputs.fold_seed.contains_key(ns)) {
+                        if !f.fold.order.is_empty() || inputs.fold_seed.contains_key(ns) {
                             full_fold = true;
                             break;
                         }
@@ -1143,10 +1143,14 @@ pub(super) fn effective_objects(
     state: &crate::v05::history::State,
 ) -> (Objects, BTreeSet<Vec<u8>>) {
     use crate::v05::encoding::bounds;
-    use crate::v05::history::{check_pending_transition, check_pending_veto};
-    use crate::v05::write::authority::choose_receipts;
+    use crate::v05::history::{
+        check_pending_transition, check_pending_veto_with, check_transition,
+    };
+    use crate::v05::write::authority::ReceiptIndex;
     let mut groups: BTreeMap<(String, String), Vec<&Vec<u8>>> = BTreeMap::new();
     let mut rest: Vec<&Vec<u8>> = Vec::new();
+    let mut veto_targets = BTreeSet::new();
+    let mut issued = BTreeMap::new();
     for b in &objects.pending {
         let parsed = AuthEnvelope::parse(
             b,
@@ -1157,6 +1161,19 @@ pub(super) fn effective_objects(
         match parsed {
             Ok(e) => match e.value.get("protocol").and_then(Value::as_str) {
                 Some(p @ ("colophon/transition/5" | "colophon/veto/5")) => {
+                    if p == "colophon/veto/5" {
+                        if let Some(d) = e.value.get("transition").and_then(Value::as_str) {
+                            veto_targets.insert(d.to_string());
+                        }
+                    } else {
+                        issued.entry(e.digest.clone()).or_insert_with(|| {
+                            e.value
+                                .get("issued")
+                                .and_then(Value::as_str)
+                                .and_then(crate::v05::encoding::parse_date)
+                                .unwrap_or(0)
+                        });
+                    }
                     groups.entry((p.to_string(), e.digest)).or_default().push(b)
                 }
                 _ => rest.push(b),
@@ -1166,11 +1183,10 @@ pub(super) fn effective_objects(
     }
     let mut chosen: BTreeMap<(String, String), Vec<u8>> = BTreeMap::new();
     let mut verified: BTreeSet<Vec<u8>> = BTreeSet::new();
-    let transition_of = |digest: &str, chosen: &BTreeMap<(String, String), Vec<u8>>| {
-        chosen
-            .get(&("colophon/transition/5".to_string(), digest.to_string()))
-            .cloned()
-    };
+    // Most opens have no vetoes. Do no receipt work until a chosen transition needs it.
+    let receipts = std::cell::OnceCell::new();
+    let mut transitions: BTreeMap<String, crate::v05::Result<crate::v05::history::TCheck>> =
+        BTreeMap::new();
     for protocol in ["colophon/transition/5", "colophon/veto/5"] {
         for ((p, digest), list) in &groups {
             if p != protocol {
@@ -1189,30 +1205,13 @@ pub(super) fn effective_objects(
                     else {
                         return false;
                     };
-                    let Some(t) = v
-                        .value
-                        .get("transition")
-                        .and_then(Value::as_str)
-                        .and_then(|d| transition_of(d, &chosen))
-                    else {
+                    let Some(d) = v.value.get("transition").and_then(Value::as_str) else {
                         return false;
                     };
-                    let Ok(te) = AuthEnvelope::parse(
-                        &t,
-                        bounds::TRANSITION_ENVELOPE,
-                        bounds::TRANSITION_ENVELOPE,
-                        true,
-                    ) else {
-                        return false;
-                    };
-                    let issued = te
-                        .value
-                        .get("issued")
-                        .and_then(Value::as_str)
-                        .and_then(crate::v05::encoding::parse_date)
-                        .unwrap_or(0);
-                    choose_receipts(state, &objects.pending, &te.digest, issued, None)
-                        .is_ok_and(|r| check_pending_veto(state, &t, &r, b).is_ok())
+                    transitions.get(d).is_some_and(|t| {
+                        t.as_ref()
+                            .is_ok_and(|t| check_pending_veto_with(state, t, b).is_ok())
+                    })
                 })
                 .map(|b| (**b).clone());
             if let Some(b) = &found {
@@ -1220,6 +1219,13 @@ pub(super) fn effective_objects(
             }
             let pick = found.or_else(|| list.first().map(|b| (**b).clone()));
             if let Some(b) = pick {
+                if protocol == "colophon/transition/5" && veto_targets.contains(digest) {
+                    let checked = receipts
+                        .get_or_init(|| ReceiptIndex::new(state, &objects.pending))
+                        .choose(state, digest, issued[digest])
+                        .and_then(|r| check_transition(state, &b, &r, true, false));
+                    transitions.insert(digest.clone(), checked);
+                }
                 chosen.insert((p.clone(), digest.clone()), b);
             }
         }
@@ -1418,3 +1424,7 @@ impl Derived {
         c.wipe_plaintext();
     }
 }
+
+#[cfg(test)]
+#[path = "effective_tests.rs"]
+mod effective_tests;
