@@ -61,8 +61,8 @@ The matching tool is installed at `~/.cargo/tools/wasm-bindgen-0.2.130/bin/wasm-
 export PATH=$HOME/.cargo/tools/wasm-bindgen-0.2.130/bin:$PATH
 wasm-bindgen --version                      # wasm-bindgen 0.2.130
 W=/tmp/b2-web
-cargo build --locked -p colophon-wasm --target wasm32-unknown-unknown --release
-wasm-bindgen --target nodejs --out-dir $W $CARGO_TARGET_DIR/wasm32-unknown-unknown/release/colophon_wasm.wasm
+cargo build --locked -p colophon-wasm --target wasm32-unknown-unknown --profile release-wasm
+wasm-bindgen --target nodejs --out-dir $W $CARGO_TARGET_DIR/wasm32-unknown-unknown/release-wasm/colophon_wasm.wasm
 echo '{"type":"commonjs"}' > $W/package.json
 echo '{"type":"module"}' > $W/snippets/package.json   # the inline JS helper is an ES module
 node crates/colophon-ffi/tests/smoke/js/smoke.mjs $W

@@ -188,6 +188,7 @@ build_js() {
   local out="$1" file tc packed
   # node_modules always comes from the lock (integrity hashes), never from an earlier install.
   (cd js && npm ci --ignore-scripts --no-audit --no-fund)
+  # The browser package uses release-wasm (size); native and home builds use release (speed).
   bash js/scripts/build.sh
   packed="$(cd js && npm pack --silent --pack-destination "$out")"
   file="$(echo "$packed" | tail -n 1)"
