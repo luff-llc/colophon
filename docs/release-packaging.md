@@ -30,7 +30,7 @@ registry.
 
 ```sh
 git clone https://github.com/luff-llc/colophon && cd colophon
-git checkout v0.5.1
+git checkout v0.5.2
 bash scripts/package-release.sh --verify          # all four, each built twice and compared
 bash scripts/package-release.sh --only home       # one artefact (apple, android, js or home)
 ```
