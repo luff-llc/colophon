@@ -93,13 +93,12 @@ impl Relay {
             .iter()
             .map(|(b, p)| (b.to_string(), serde_json::json!(format!("http://127.0.0.1:{p}/v1/libraries/home"))))
             .collect();
-        let config = dir.0.join("config.json");
-        std::fs::write(&config, serde_json::json!({"resolve": resolve}).to_string()).unwrap();
+        let resolve_file = dir.0.join("resolve.json");
+        std::fs::write(&resolve_file, serde_json::Value::Object(resolve).to_string()).unwrap();
         let mut child = Command::new("bun")
             .arg(relay)
             .arg("--test-clock")
-            .arg("--config")
-            .arg(&config)
+            .env("COLOPHON_RELAY_RESOLVE_FILE", &resolve_file)
             .env("COLOPHON_RELAY_PORT", port.to_string())
             .env("COLOPHON_RELAY_DATA", dir.0.join("data"))
             .env("COLOPHON_RELAY_HOME_SLOTS", format!("home={account}@{base}"))
@@ -121,6 +120,15 @@ impl Relay {
         let port = v["listening"]["port"].as_u64().unwrap() as u16;
         let control = Mutex::new((stdin, stdout));
         Self { child, control, port, base: base.trim_end_matches('/').to_string(), clock, _dir: dir }
+    }
+    /// Publish peers only after their relays have bound port 0.
+    pub fn set_resolve(&self, peers: &[(&str, u16)]) {
+        let resolve: serde_json::Map<String, serde_json::Value> = peers.iter()
+            .map(|(b, p)| (b.to_string(), serde_json::json!(format!("http://127.0.0.1:{p}/v1/libraries/home"))))
+            .collect();
+        let staged = self._dir.0.join("resolve.tmp");
+        std::fs::write(&staged, serde_json::Value::Object(resolve).to_string()).unwrap();
+        std::fs::rename(staged, self._dir.0.join("resolve.json")).unwrap();
     }
     /// Run one scheduler pass over the home slot (recording entries when due, heads; forwarding
     /// to the other homes is started, not awaited) and return once it is done: the relay answers
@@ -232,9 +240,4 @@ pub fn forwarded(what: &str, relays: &[Relay], mut done: impl FnMut() -> bool) {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
     panic!("timed out waiting for {what}");
-}
-
-/// A free local port (bound and released: a short race, accepted in a test).
-pub fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
 }

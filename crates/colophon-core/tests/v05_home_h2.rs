@@ -344,11 +344,26 @@ fn a_late_activate_is_refused_when_it_arrives_as_a_candidate() {
 /// too, it is.
 #[test]
 fn a_candidate_another_homes_head_covers_is_kept_as_evidence_one_per_home() {
+    candidate_evidence_slots(false);
+}
+
+#[test]
+fn legacy_unattributable_candidate_does_not_consume_an_honest_homes_slot() {
+    candidate_evidence_slots(true);
+}
+
+fn candidate_evidence_slots(legacy: bool) {
     use colophon_core::v05::account::{Account, Identity};
-    let (mut f, a, [ka, kb, kc]) = three_homes();
+    let keys: Vec<_> = (0x77..0x7f).map(HomeKeys::new).collect();
+    let bases: Vec<_> = (0..8).map(|i| format!("https://home{i}.example/v1/libraries/home/")).collect();
+    let mut f = create_with(&[NS], "public", 1);
+    let homes: Vec<_> = keys.iter().zip(&bases).map(|(k, b)| (k, b.as_str())).collect();
+    appoint_homes(&mut f, &homes);
+    let (ka, kb, kc) = (&keys[0], &keys[1], &keys[2]);
+    let a = HomeState::new(ka.id.clone(), f.account.objects(), Vec::new(), f.account.now_ms()).unwrap();
     let account = f.account.id().as_str().to_string();
     let t = f.account.now_ms() + 60_000;
-    let (_tr, d, a) = receipted(&mut f, a, &ka, t);
+    let (_tr, d, a) = receipted(&mut f, a, ka, t);
     let open = |f: &Fixture| {
         Account::open(f.account.objects().clone(), f.account.records().to_vec(), None,
             Identity::Controller(f.d.clone()), t + 2_000).unwrap()
@@ -361,7 +376,7 @@ fn a_candidate_another_homes_head_covers_is_kept_as_evidence_one_per_home() {
         let b: Value = serde_json::from_slice(&STANDARD.decode(v["body"].as_str().unwrap()).unwrap()).unwrap();
         !(b["protocol"] == "colophon/receipt/5" && b["by"] == ka.id.as_str())
     });
-    objects.pending.push(receipt(&kb, &account, &d, t + 1_500));
+    objects.pending.push(receipt(kb, &account, &d, t + 1_500));
     let mut other2 = Account::open(objects, f.account.records().to_vec(), None,
         Identity::Controller(f.d.clone()), t + 2_000).unwrap();
     // X at A before T is due, and A's head over it.
@@ -375,7 +390,7 @@ fn a_candidate_another_homes_head_covers_is_kept_as_evidence_one_per_home() {
     let (n, dx) = (entry_seq(&x), body_digest(&x));
     let a = admit(&a, &x, &format_date(t + 3_000));
     assert_eq!(a.result, Ok(()));
-    let a = admit(&a.state, &head(&ka, &account, n, &dx, t + 4_000), &format_date(t + 4_000));
+    let a = admit(&a.state, &head(ka, &account, n, &dx, t + 4_000), &format_date(t + 4_000));
     assert_eq!(a.result, Ok(()));
     let a = a.state;
     // R and R2: T's activate at n, from the two other copies.
@@ -396,26 +411,77 @@ fn a_candidate_another_homes_head_covers_is_kept_as_evidence_one_per_home() {
     assert_eq!(alone.result, Err(Refusal::Conflict));
     assert!(!held(&alone.state, &dr));
     // With B's head over R, R is kept as evidence, still 409; A's branch keeps X.
-    let a = admit(&a, &head(&kb, &account, n, &dr, due + 1_500), &now).state;
+    let a = admit(&a, &head(kb, &account, n, &dr, due + 1_500), &now).state;
     let with = admit(&a, &r, &now);
     assert_eq!(with.result, Err(Refusal::Conflict));
     assert!(held(&with.state, &dr), "kept as evidence");
     let a = with.state;
     let branch_n = |s: &HomeState| {
-        let h = admit(s, &head(&ka, &account, n, &dx, due + 3_000), &format_date(due + 3_000));
+        let h = admit(s, &head(ka, &account, n, &dx, due + 3_000), &format_date(due + 3_000));
         h.result
     };
     assert_eq!(branch_n(&a), Ok(()), "A can still sign over X: its verdict is unchanged");
-    // R2 covered by B only: B already covers a candidate at n, so it is not stored.
-    let a = admit(&a, &head(&kb, &account, n, &dr2, due + 1_800), &now).state;
+    // B pushes its old covering head out of the four off-branch heads, then covers R2.
+    let mut a = a;
+    for i in 0..5 {
+        a = admit(&a, &head(kb, &account, n, &format!("{i:064x}"), due + 1_600 + i), &now).state;
+    }
+    assert!(!a.persisted().unwrap().objects().unwrap().heads.iter().any(|h| {
+        let env: Value = serde_json::from_slice(h).unwrap();
+        let b: Value = serde_json::from_slice(&STANDARD.decode(env["body"].as_str().unwrap()).unwrap()).unwrap();
+        b["by"] == kb.id && b["authority"]["digest"] == dr
+    }), "the original covering head was evicted");
+    // Ownership survives the actual home checkpoint serialization used by the WASM host.
+    let a = HomeState::from_bytes(&a.to_bytes().unwrap()).unwrap();
+    if legacy {
+        // Simulate a deserialized version-2 checkpoint: R is retained, but its covering
+        // head was evicted and the checkpoint has no durable ownership information.
+        let mut bytes: Value = serde_json::from_slice(&a.to_bytes().unwrap()).unwrap();
+        bytes.as_object_mut().unwrap().remove("candidate_slots");
+        let legacy = HomeState::from_bytes(&serde_json::to_vec(&bytes).unwrap()).unwrap();
+        let bytes: Value = serde_json::from_slice(&legacy.to_bytes().unwrap()).unwrap();
+        assert_eq!(bytes["candidate_slots"], json!({}));
+        assert!(held(&legacy, &dr), "the unattributable non-standing candidate is held");
+        let covered = admit(&legacy, &head(kc, &account, n, &dr2, due + 1_900), &now);
+        assert_eq!(covered.result, Ok(()));
+        let honest = admit(&covered.state, &r2, &now);
+        assert_eq!(honest.result, Err(Refusal::Conflict), "X still stands");
+        assert!(held(&honest.state, &dr2), "C's independently covered candidate is admitted as evidence");
+        let restarted = HomeState::from_bytes(&honest.state.to_bytes().unwrap()).unwrap();
+        assert!(held(&restarted, &dr2), "honest evidence survives serialization");
+        let bytes: Value = serde_json::from_slice(&restarted.to_bytes().unwrap()).unwrap();
+        assert_eq!(bytes["candidate_slots"][n.to_string()], json!({kc.id.clone(): dr2}));
+        assert_eq!(branch_n(&restarted), Ok(()));
+        return;
+    }
+    let a = admit(&a, &head(kb, &account, n, &dr2, due + 1_800), &now).state;
     let b_only = admit(&a, &r2, &now);
     assert_eq!(b_only.result, Err(Refusal::Conflict));
     assert!(!held(&b_only.state, &dr2), "one slot per covering home");
     // Covered by C too: C's own slot.
-    let a = admit(&a, &head(&kc, &account, n, &dr2, due + 1_900), &now).state;
+    let a = admit(&a, &head(kc, &account, n, &dr2, due + 1_900), &now).state;
     let c_too = admit(&a, &r2, &now);
     assert_eq!(c_too.result, Err(Refusal::Conflict));
     assert!(held(&c_too.state, &dr2));
+    // Every remaining current home has its own slot, even after four entries at this seq.
+    let mut a = c_too.state;
+    let env: Value = serde_json::from_slice(&r).unwrap();
+    let body: Value = serde_json::from_slice(&STANDARD.decode(env["body"].as_str().unwrap()).unwrap()).unwrap();
+    for (i, key) in keys[3..].iter().enumerate() {
+        let mut body = body.clone();
+        body["receipts"] = json!([STANDARD.encode(receipt(key, &account, &d, t + 1_600 + i as i64))]);
+        let mut env = env.clone();
+        env["body"] = json!(STANDARD.encode(canonical(&body).unwrap()));
+        let candidate = canonical(&env).unwrap();
+        let digest = body_digest(&candidate);
+        a = admit(&a, &head(key, &account, n, &digest, due + 1_950), &now).state;
+        let result = admit(&a, &candidate, &now);
+        assert_eq!(result.result, Err(Refusal::Conflict));
+        assert!(held(&result.state, &digest), "each current home has a slot");
+        a = result.state;
+    }
+    assert_eq!(a.persisted().unwrap().objects().unwrap().entries.iter().filter(|e| entry_seq(e) == n).count(), 8);
+
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -474,4 +540,45 @@ fn an_old_full_set_candidate_is_refused_late_not_kept_as_evidence() {
     assert_eq!(got.result, Err(Refusal::Late));
     let held = got.state.persisted().unwrap().objects().unwrap().entries.iter().any(|e| body_digest(e) == dr);
     assert!(!held, "an old full set is not kept, even as evidence");
+}
+
+/// Successively smaller recording digests all stand (§8.6), but displaced winners must not
+/// accumulate. One displaced winner covered by B remains durable evidence throughout.
+#[test]
+fn grinding_standing_candidates_keeps_only_the_winner_and_covering_home_evidence() {
+    use colophon_core::v05::account::{Account, Identity};
+    let (mut f, a, [ka, kb, _]) = three_homes();
+    let account = f.account.id().as_str().to_string();
+    let t = f.account.now_ms() + 60_000;
+    let (_, transition, mut a) = receipted(&mut f, a, &ka, t);
+    let due = t + 3_900_000;
+    let mut other = Account::open(f.account.objects().clone(), f.account.records().to_vec(), None,
+        Identity::Controller(f.d.clone()), due + 1_000).unwrap();
+    let r = other.record_due().unwrap()[0].entries[0].1.clone();
+    let env: Value = serde_json::from_slice(&r).unwrap();
+    let body: Value = serde_json::from_slice(&STANDARD.decode(env["body"].as_str().unwrap()).unwrap()).unwrap();
+    let mut variants = Vec::new();
+    for i in 0..32 {
+        let mut body = body.clone();
+        body["receipts"] = json!([STANDARD.encode(receipt(&kb, &account, &transition, t + 1_500 + i))]);
+        let mut env = env.clone();
+        env["body"] = json!(STANDARD.encode(canonical(&body).unwrap()));
+        variants.push(canonical(&env).unwrap());
+    }
+    variants.sort_by_key(|e| std::cmp::Reverse(body_digest(e)));
+    let n = entry_seq(&r);
+    let now = format_date(due + 2_000);
+    let evidence = body_digest(&variants[0]);
+    a = admit(&a, &variants[0], &now).state;
+    a = admit(&a, &head(&kb, &account, n, &evidence, due + 1_500), &now).state;
+    for candidate in &variants[1..] {
+        let result = admit(&a, candidate, &now);
+        assert_eq!(result.result, Ok(()), "each smaller digest stands");
+        a = HomeState::from_bytes(&result.state.to_bytes().unwrap()).unwrap();
+        let p = a.persisted().unwrap();
+        let at_seq: Vec<_> = p.objects().unwrap().entries.iter().filter(|e| entry_seq(e) == n).collect();
+        assert_eq!(at_seq.len(), 2, "only the winner and B's evidence are retained");
+        assert!(at_seq.iter().any(|e| body_digest(e) == evidence));
+        assert!(at_seq.iter().any(|e| body_digest(e) == body_digest(candidate)));
+    }
 }

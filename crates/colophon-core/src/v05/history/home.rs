@@ -15,9 +15,6 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
 const WINDOW: i64 = 300_000;
-/// Entries a home keeps at one seq (§13.1 candidate exchange): its own and the candidates other
-/// homes forwarded as evidence. A candidate that stands is stored beyond it.
-const CANDIDATES_PER_SEQ: usize = 4;
 /// The persisted format of [`HomeState`]: 2 stores bytes as base64 and keeps the checkpoint's
 /// pending objects and heads replaced, not merged.
 const STATE_VERSION: u32 = 2;
@@ -154,6 +151,10 @@ pub struct HomeState {
     /// Heads this home has had drafted for signing: `(seq, digest, issued ms)`, oldest first.
     #[serde(default)]
     signed_heads: Vec<(u64, String, i64)>,
+    /// Durable evidence slots: seq -> covering home -> candidate digest. Heads may be pruned
+    /// without freeing these slots. The standing entry is retained in addition to these slots.
+    #[serde(default)]
+    candidate_slots: BTreeMap<u64, BTreeMap<String, String>>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct ObservedReceipt {
@@ -235,6 +236,7 @@ impl HomeState {
             serving,
             unmatched_receipts: Vec::new(),
             signed_heads: Vec::new(),
+            candidate_slots: BTreeMap::new(),
         };
         refresh_checkpoint(&mut state, None, now_ms)?;
         Ok(state)
@@ -1714,48 +1716,77 @@ fn admit_candidate(
             .and_then(|i| verdict.branch.get(i))
             == Some(&entry.env.digest);
     let forks = matches!(verdict.stop, Some(Stop::Fork { .. }));
-    if stands || (forks && covered) {
+    let extra: Vec<super::Entry> = std::iter::once(incoming)
+        .chain(later.iter().map(Vec::as_slice))
+        .filter_map(|b| parse_entry(b).ok())
+        .collect();
+    let refs: Vec<&super::Entry> = held.iter().chain(extra.iter()).collect();
+    let head_set = HeadSet::parse(&heads);
+    let homes: Vec<String> = before
+        .current_homes()
+        .iter()
+        .map(|m| m.request.member_id().to_string())
+        .collect();
+    let slots = next.candidate_slots.entry(entry.seq).or_default();
+    // Seed old checkpoints and entries that used to stand while their covering heads are
+    // still held. A legacy candidate with no surviving covering head owns no home's slot.
+    // Once recorded, ownership is never reconstructed from prunable heads.
+    let old_branch = st.history();
+    for e in held
+        .iter()
+        .filter(|e| e.seq == entry.seq && (stands || !old_branch.contains(&e.env.digest)))
+    {
+        for h in &homes {
+            if state::covered_by_home_head(&before, &head_set, &refs, e, h) {
+                slots.entry(h.clone()).or_insert_with(|| e.env.digest.clone());
+            }
+        }
+    }
+    let owner = homes
+        .iter()
+        .find(|h| {
+            !slots.contains_key(*h)
+                && state::covered_by_home_head(&before, &head_set, &refs, entry, h)
+        })
+        .cloned();
+    if stands || (forks && covered && owner.is_some()) {
         if (!recording || full) && !covered && entry.issued < now_ms.saturating_sub(WINDOW) {
             return Err(Refusal::Late);
         }
-        next.checkpoint = Persisted::checkpoint(&objects, persisted, now_ms).to_bytes()?;
+        if let Some(h) = owner {
+            slots.insert(h, entry.env.digest.clone());
+        }
+        let mut p = Persisted::checkpoint(&objects, persisted, now_ms);
+        if stands {
+            // A grinding controller may replace the winner arbitrarily often. Keep only
+            // the new winner and one piece of evidence per current covering home at this seq.
+            slots.retain(|h, _| homes.contains(h));
+            let mut kept = p.objects().cloned().unwrap_or_default();
+            kept.entries.retain(|b| {
+                parse_entry(b).is_ok_and(|e| {
+                    e.seq != entry.seq
+                        || e.env.digest == entry.env.digest
+                        || slots.values().any(|d| d == &e.env.digest)
+                })
+            });
+            let mut rebuilt = Persisted::rebuild(&kept, &p.to_bytes()?, now_ms);
+            rebuilt.high_water = p.high_water.clone();
+            p = rebuilt;
+        }
+        next.checkpoint = p.to_bytes()?;
         return Ok(());
     }
-    // Candidate exchange (§13.1): a valid candidate that does not stand is stored as evidence
-    // when a held head of another current home covers it (that home forwarded its branch), so
-    // homes on different branches come to hold the same candidates and reach the same §8.6
-    // verdict. The answer is unchanged (409, or `refused:fork`). At most CANDIDATES_PER_SEQ
-    // entries per seq, and at most one non-standing candidate per covering home at a seq (a home
-    // whose heads cover two of them equivocated itself), so one hostile home fills one slot; a
-    // candidate that stands is stored whatever the count (above).
-    // §13.1 Clock: a full set more than 300 s behind the clock is `refused:late`, a candidate
-    // kept as evidence too.
+    // Non-standing evidence consumes one durable slot of a current covering home; the
+    // standing entry is retained alongside at most eight evidence slots.
     if full && entry.issued < now_ms.saturating_sub(WINDOW) {
         return Err(Refusal::Late);
     }
-    let stored_as_evidence = (verdict.stop.is_none() || forks) && {
-        let extra: Vec<super::Entry> = std::iter::once(incoming)
-            .chain(later.iter().map(Vec::as_slice))
-            .filter_map(|b| parse_entry(b).ok())
-            .collect();
-        let refs: Vec<&super::Entry> = held.iter().chain(extra.iter()).collect();
-        let head_set = HeadSet::parse(&heads);
-        let others: Vec<String> = before
-            .current_homes()
-            .iter()
-            .map(|m| m.request.member_id().to_string())
-            .filter(|h| *h != next.home)
-            .collect();
-        let at_seq: Vec<&super::Entry> = held.iter().filter(|e| e.seq == entry.seq).collect();
-        let coverers: Vec<&String> = others
-            .iter()
-            .filter(|h| state::covered_by_home_head(&before, &head_set, &refs, entry, h))
-            .collect();
-        let slot_free = coverers.iter().any(|h| {
-            !at_seq.iter().any(|e| state::covered_by_home_head(&before, &head_set, &refs, e, h))
-        });
-        !coverers.is_empty() && slot_free && at_seq.len() < CANDIDATES_PER_SEQ
-    };
+    let stored_as_evidence = (verdict.stop.is_none() || forks) && owner.is_some();
+    if stored_as_evidence {
+        if let Some(h) = owner {
+            slots.insert(h, entry.env.digest.clone());
+        }
+    }
     if stored_as_evidence {
         next.checkpoint = Persisted::checkpoint(&objects, persisted, now_ms).to_bytes()?;
     }

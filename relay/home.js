@@ -21,7 +21,8 @@ const sha = (bytes) => createHash('sha256').update(bytes).digest('hex');
 
 // Forwarding (§13.1), per peer: each request's own time limit, a pass's wall-time budget, how many
 // newly listed objects and how many backlog objects one pass offers, and how soon the same
-// entries are offered again while the peer's head lags.
+// entries are offered again while the peer's head lags. PASS_MS bounds all network request
+// wait times in a pass; local lock/state commits always finish atomically to avoid torn state.
 const PEER_TIMEOUT_MS = 5000;
 const PASS_MS = 15000;
 const NEW_PER_PASS = 64;
@@ -734,8 +735,10 @@ export class HomeSlot {
   /** Offer one listed object to a peer, with what the module sends with it (its receipts).
    * Returns whether it was delivered (the module reads the peer's answer); receipts the peer
    * returns are admitted like any forwarded receipt. */
-  async offer(base, objects, peerId) {
-    const r = await fetch(`${base}/pending`, { signal: AbortSignal.timeout(PEER_TIMEOUT_MS), method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ objects }) });
+  async offer(base, objects, peerId, deadline) {
+    const timeout = Math.min(PEER_TIMEOUT_MS, deadline - Date.now());
+    if (timeout <= 0) return false;
+    const r = await fetch(`${base}/pending`, { signal: AbortSignal.timeout(timeout), method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ objects }) });
     const body = Buffer.from(await r.arrayBuffer());
     const a = this.wasm.call({ op: 'peer_answer', status: r.status, body: b64(body) });
     if (a.receipts?.length) {
@@ -750,8 +753,8 @@ export class HomeSlot {
   }
 
   /** An offer that counts a failed request as not delivered. */
-  async tryOffer(base, objects, peerId) {
-    try { return await this.offer(base, objects, peerId); } catch (error) {
+  async tryOffer(base, objects, peerId, deadline) {
+    try { return await this.offer(base, objects, peerId, deadline); } catch (error) {
       this.note(`offer ${peerId}`, `home ${peerId} could not be reached (${error.message}); the object will be offered again`);
       return false;
     }
@@ -764,9 +767,10 @@ export class HomeSlot {
     return r.objects.length ? r.objects.map((o) => JSON.parse(unb64(o))) : null;
   }
 
-  /** One forwarding pass to one peer (§13.1: a home MUST forward), bounded in requests and wall
-   * time, in this order: (1) objects newly listed since the last pass, transitions and vetoes
-   * before receipts, so an in-window transition or veto never waits behind a backlog; (2) this
+  /** One forwarding pass to one peer (§13.1: a home MUST forward), bounded in requests and
+   * network wait time (local lock/state commits finish atomically), in this order: (1) objects
+   * newly listed since the last pass, transitions and vetoes before receipts, so an in-window
+   * transition or veto never waits behind a backlog; (2) this
    * home's entries the peer lacks and its head; (3) the backlog of objects the peer has not taken
    * (`retry`), the oldest first, a bounded number per pass, those still not taken going to the
    * back. Requests time out on their own, so a peer that never answers holds only its own pass. */
@@ -783,12 +787,12 @@ export class HomeSlot {
     for (const o of fresh) {
       const objects = Date.now() < deadline ? await this.listed(o.seq) : null;
       if (Date.now() >= deadline) { missed.push(o.seq); continue; }
-      if (objects && !await this.tryOffer(base, objects, peerId)) missed.push(o.seq);
+      if (objects && !await this.tryOffer(base, objects, peerId, deadline)) missed.push(o.seq);
     }
     if (page.objects.length) { row.after = page.objects[page.objects.length - 1].seq; row.retry.push(...missed); }
     await save();
     // (2) Entries and the head.
-    await this.forwardEntries(base, row, peerId);
+    if (Date.now() < deadline) await this.forwardEntries(base, row, peerId, deadline);
     // (3) The backlog.
     const todo = [...new Set(row.retry)];
     const now = todo.slice(0, RETRY_PER_PASS);
@@ -798,7 +802,7 @@ export class HomeSlot {
       if (Date.now() >= deadline) { again.push(seq); continue; }
       const object = await this.listed(seq);
       if (!object) continue; // recorded or expired: no longer listed, nothing left to forward
-      if (!await this.tryOffer(base, object, peerId)) again.push(seq);
+      if (!await this.tryOffer(base, object, peerId, deadline)) again.push(seq);
     }
     row.retry = [...rest, ...again];
     await save();
@@ -812,28 +816,40 @@ export class HomeSlot {
    * peer's head lags (the time is kept with the forwarding state; a clock that moved back offers
    * it again at once); an immediate entry a non-primary peer refused (421) for want of this
    * home's head is offered again right after the head. */
-  async forwardEntries(base, row, peerId) {
-    const fwd = await this.lock(async () => this.wasm.call({ op: 'forward_entries', state: this.state, now: this.clock(), peer: peerId }));
+  async forwardEntries(base, row, peerId, deadline) {
+    if (Date.now() >= deadline) return;
+    const { fwd, head } = await this.lock(async () => {
+      // Settling can append entries. Capture the head first, then the entries from that
+      // same state, so an append during the network request cannot advance this head.
+      const head = await this.headIfFresh();
+      const fwd = this.wasm.call({ op: 'forward_entries', state: this.state, now: this.clock(), peer: peerId });
+      return { fwd, head };
+    });
     const sendEntries = async (force) => {
       if (!fwd.entries.length) return 0;
       const mark = `${fwd.from}:${fwd.entries.length}:${sha(fwd.entries[fwd.entries.length - 1])}`;
       const now = Date.now();
       const at = row.entriesAt ?? 0;
       if (!force && mark === row.entries && now >= at && now - at < ENTRIES_RESEND_MS) return 0;
+      if (now >= deadline) return 0;
       row.entries = mark; row.entriesAt = now;
       await this.saveForward();
       const body = JSON.stringify({ from: fwd.from, entries: fwd.entries.map((e) => JSON.parse(unb64(e))), receipts: [] });
-      const r = await fetch(`${base}/authority`, { signal: AbortSignal.timeout(PEER_TIMEOUT_MS), method: 'POST', headers: { 'content-type': 'application/json' }, body });
+      const timeout = Math.min(PEER_TIMEOUT_MS, deadline - Date.now());
+      if (timeout <= 0) return 0;
+      const r = await fetch(`${base}/authority`, { signal: AbortSignal.timeout(timeout), method: 'POST', headers: { 'content-type': 'application/json' }, body });
       this.note(`entries ${peerId}`, r.status === 200 ? '' : `home ${peerId} did not take this home's entries from ${fwd.from}: ${r.status} ${(await r.text()).slice(0, 200)}`);
       return r.status;
     };
     const putHead = async () => {
+      if (Date.now() >= deadline) return;
       // §13.3: a head the home is due to replace never leaves it, to a peer either.
-      const head = await this.lock(async () => this.headIfFresh());
       if (!head) return;
       const text = JSON.stringify(head);
       if (sha(text) === row.head) return;
-      const r = await fetch(`${base}/records/heads/${this.key.memberId}.json`, { signal: AbortSignal.timeout(PEER_TIMEOUT_MS), method: 'PUT', headers: { 'content-type': 'application/json' }, body: text });
+      const timeout = Math.min(PEER_TIMEOUT_MS, deadline - Date.now());
+      if (timeout <= 0) return;
+      const r = await fetch(`${base}/records/heads/${this.key.memberId}.json`, { signal: AbortSignal.timeout(timeout), method: 'PUT', headers: { 'content-type': 'application/json' }, body: text });
       if (r.status === 200) { row.head = sha(text); await this.saveForward(); this.note(`head ${peerId}`, ''); }
       else this.note(`head ${peerId}`, `home ${peerId} refused this home's head: ${r.status} ${(await r.text()).slice(0, 200)}`);
     };
@@ -843,7 +859,11 @@ export class HomeSlot {
       return;
     }
     const status = await sendEntries(false);
-    await putHead();
-    if (status === 421) await sendEntries(true);
+    // A rejected or throttled upload cannot be followed by a head covering missing entries.
+    // 421 deliberately needs the covering head first; exchange mode already sent it above.
+    if (!fwd.entries.length || (status >= 200 && status < 300) || status === 421) {
+      await putHead();
+      if (status === 421) await sendEntries(true);
+    }
   }
 }
