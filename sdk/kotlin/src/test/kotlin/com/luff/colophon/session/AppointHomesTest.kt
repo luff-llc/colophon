@@ -21,29 +21,6 @@ import kotlin.test.assertTrue
 import kotlin.test.fail
 
 /**
- * A software WebAuthn authenticator: assertions as a platform passkey makes them (authenticator data with UP and UV, client
- * data over the core's challenge, a DER signature) and a deterministic PRF. A test double, not a key store.
- */
-class TestPasskey(private val rp: String = "id.luff.works", private val credential: ByteArray = byteArrayOf(1, 2, 3)) : AsyncKeyProvider {
-    private val key = P256.generate()
-    private val point = P256.point(key.public as ECPublicKey)
-    override val form get() = SignForm.WEBAUTHN
-    private fun prfOf(salt: ByteArray) = SecretBytes.adopt(MessageDigest.getInstance("SHA-256").digest("test-prf".toByteArray() + salt))
-    override suspend fun publicKeys() = PublicKeys(point, ByteArray(0))
-    override suspend fun sign(body: ByteArray): ByteArray = throw UnsupportedOperationException("a passkey signs assertions")
-    override suspend fun sharedSecret(peer: ByteArray): SecretBytes = throw UnsupportedOperationException("a passkey has no agreement key")
-    override suspend fun keyDescriptor() = KeyDescriptorView(SignForm.WEBAUTHN, point, null, rp, credential, listOf(), listOf())
-    override suspend fun assert(challenge: String, prfSalt: ByteArray?): KeyAssertion {
-        val clientData = """{"challenge":"$challenge","origin":"https://$rp","type":"webauthn.get"}""".toByteArray()
-        val sha = { b: ByteArray -> MessageDigest.getInstance("SHA-256").digest(b) }
-        val authData = sha(rp.toByteArray()) + byteArrayOf(0x05, 0, 0, 0, 0)
-        val signature = java.security.Signature.getInstance("SHA256withECDSA").run { initSign(key.private); update(authData + sha(clientData)); sign() }
-        return KeyAssertion(signature, authData, clientData, prfSalt?.let(::prfOf))
-    }
-    override suspend fun prf(salt: ByteArray): SecretBytes = prfOf(salt)
-}
-
-/**
  * `appointHomes` against the REAL relay ([RelayHome]): an account created without a home appoints one later and adds a
  * passkey-form controller in one transition. Every session and relay run on one clock the test moves, and the relay has no
  * scheduler timer (heads are published by [RelayHome.tick]), so nothing waits on real time.

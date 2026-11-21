@@ -401,6 +401,7 @@ error:AccountError.Reentered
 error:AccountError.Refused
 error:AccountError.Unavailable
 error:AccountError.WrongObject
+fn:account_controller_json
 fn:account_current_webauthn_controller
 fn:account_default_policy
 fn:account_format_date
