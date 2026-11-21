@@ -99,14 +99,34 @@ pub fn validate_input(schema: &Value, input: &Value) -> bool {
     if let Some(kind) = schema["x-colophon-saved-command"].as_str() {
         return crate::domains::saved::validate_command_input(kind, input);
     }
-    let valid_type = match schema["type"].as_str() {
-        Some("object") => input.is_object(),
-        Some("string") => input.is_string(),
-        Some("number") => input.is_number(),
-        Some("integer") => input.as_u64().is_some(),
-        Some("boolean") => input.is_boolean(),
-        Some("array") => input.is_array(),
-        _ => true,
+    let matches_type = |kind: &str| match kind {
+        "null" => input.is_null(),
+        "object" => input.is_object(),
+        "string" => input.is_string(),
+        "number" => input.is_number(),
+        "integer" => input.as_i64().is_some() || input.as_u64().is_some(),
+        "boolean" => input.is_boolean(),
+        "array" => input.is_array(),
+        _ => false,
+    };
+    let recognized_type = |kind: &Value| {
+        kind.as_str().is_some_and(|kind| {
+            matches!(
+                kind,
+                "object" | "string" | "number" | "integer" | "boolean" | "array" | "null"
+            )
+        })
+    };
+    let valid_type = match schema.get("type") {
+        None => true,
+        Some(Value::String(kind)) => matches_type(kind),
+        Some(Value::Array(kinds)) => {
+            kinds.iter().all(recognized_type)
+                && kinds
+                    .iter()
+                    .any(|kind| kind.as_str().is_some_and(matches_type))
+        }
+        _ => false,
     };
     if !valid_type {
         return false;
@@ -134,13 +154,26 @@ pub fn validate_input(schema: &Value, input: &Value) -> bool {
             return false;
         }
     }
-    if let (Some(min), Some(value)) = (schema["minimum"].as_f64(), input.as_f64()) {
-        if value < min {
-            return false;
-        }
-    }
-    if let (Some(max), Some(value)) = (schema["maximum"].as_f64(), input.as_f64()) {
-        if value > max {
+    // Preserve all signed and unsigned JSON integers before considering float bounds.
+    let integer = |value: &Value| {
+        value
+            .as_i64()
+            .map(i128::from)
+            .or_else(|| value.as_u64().map(i128::from))
+    };
+    for (name, forbidden) in [
+        ("minimum", std::cmp::Ordering::Less),
+        ("maximum", std::cmp::Ordering::Greater),
+    ] {
+        let bound = &schema[name];
+        let ordering = match (integer(input), integer(bound)) {
+            (Some(value), Some(bound)) => Some(value.cmp(&bound)),
+            _ => input
+                .as_f64()
+                .zip(bound.as_f64())
+                .and_then(|(value, bound)| value.partial_cmp(&bound)),
+        };
+        if ordering == Some(forbidden) {
             return false;
         }
     }
@@ -363,5 +396,78 @@ impl State {
         self.sidecar
             .validate_batch(payload, &self.projection)
             .map(|_| ())
+    }
+}
+
+#[cfg(test)]
+mod input_tests {
+    use super::*;
+
+    #[test]
+    fn signed_integers_respect_bounds() {
+        let schema = json!({"type":"integer"});
+        for value in [json!(-1), json!(0), json!(u64::MAX)] {
+            assert!(validate_input(&schema, &value));
+        }
+        assert!(!validate_input(&schema, &json!(1.5)));
+        assert!(!validate_input(
+            &json!({"type":"integer","minimum":0}),
+            &json!(-1)
+        ));
+    }
+
+    #[test]
+    fn invalid_type_declarations_fail_closed() {
+        for declaration in [
+            json!("bogus"),
+            json!(["string", "bogus"]),
+            json!(["string", 42]),
+            json!(null),
+            json!(42),
+            json!({}),
+            json!([]),
+        ] {
+            let schema = json!({"type": declaration});
+            for value in [
+                json!("text"),
+                json!(42),
+                json!(null),
+                json!({}),
+                json!([]),
+                json!(true),
+            ] {
+                assert!(!validate_input(&schema, &value), "{schema}: {value}");
+            }
+        }
+        assert!(validate_input(&json!({}), &json!("any type")));
+    }
+
+    #[test]
+    fn integer_bounds_are_exact_above_float_precision() {
+        let schema = json!({"type":"integer", "maximum": i64::MAX});
+        assert!(validate_input(&schema, &json!(i64::MAX)));
+        assert!(!validate_input(&schema, &json!(9223372036854775808u64)));
+        let schema = json!({"minimum": 9007199254740993u64});
+        assert!(!validate_input(&schema, &json!(9007199254740992u64)));
+        assert!(validate_input(&schema, &json!(9007199254740993u64)));
+        assert!(validate_input(&schema, &json!(u64::MAX)));
+        assert!(!validate_input(&schema, &json!(-1)));
+        assert!(!validate_input(&json!({"minimum": -3}), &json!(-4)));
+        assert!(validate_input(&json!({"minimum": -3}), &json!(-3)));
+        assert!(!validate_input(&json!({"maximum": 1.5}), &json!(2)));
+        assert!(validate_input(&json!({"minimum": 1}), &json!(1.5)));
+    }
+
+    #[test]
+    fn nullable_type_array_checks_each_alternative() {
+        let schema = json!({"type":["string","null"]});
+        for value in [json!("text"), Value::Null] {
+            assert!(validate_input(&schema, &value));
+        }
+        for value in [json!(42), json!({}), json!(true), json!(false), json!([])] {
+            assert!(!validate_input(&schema, &value));
+        }
+        assert!(validate_input(&json!({"type":"null"}), &Value::Null));
+        assert!(!validate_input(&json!({"type":"null"}), &json!("text")));
     }
 }

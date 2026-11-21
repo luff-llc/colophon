@@ -347,3 +347,49 @@ fn fourth_review_observed_version_change_waits_for_authority_unlock() {
     engine.checkpoint(vec![96; 32]).unwrap();
     engine.verify_batch(128).unwrap();
 }
+
+#[test]
+fn record_source_callback_cannot_reenter_engine() {
+    struct ReentrantSource(std::sync::Weak<NativeEngine>);
+    impl EngineRecordSource for ReentrantSource {
+        fn read(&self, _path: String) -> colophon_ffi::Result<Vec<u8>> {
+            let engine = self.0.upgrade().unwrap();
+            assert!(
+                matches!(engine.id(), Err(BindingError::InvalidData { detail }) if detail.contains("reenter"))
+            );
+            Ok(b"callback completed".to_vec())
+        }
+    }
+    let (library, owner, _) = create();
+    let records = library
+        .records()
+        .clone()
+        .into_iter()
+        .collect::<HashMap<_, _>>();
+    let listing = records.keys().cloned().collect();
+    let preparation =
+        NativeCheckpointPreparation::new(library.id().into(), public(&owner), vec![91; 32])
+            .unwrap();
+    let key = preparation
+        .finish(owner.sign(&preparation.signing_body().unwrap()))
+        .unwrap();
+    let engine = NativeEngine::open(
+        Box::new(Source(Arc::new(Mutex::new(records)))),
+        listing,
+        HashMap::new(),
+        public(&owner),
+        library.id().into(),
+        vec![],
+        key,
+    )
+    .unwrap();
+    engine
+        .set_source(Box::new(ReentrantSource(Arc::downgrade(&engine))))
+        .unwrap();
+    assert_eq!(
+        engine.records_at(vec!["callback-probe".into()]).unwrap(),
+        HashMap::from([("callback-probe".into(), b"callback completed".to_vec())])
+    );
+    // Rejection of the nested call did not poison or leave the thread-local guard set.
+    assert_eq!(engine.id().unwrap(), library.id());
+}

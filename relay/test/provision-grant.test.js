@@ -181,9 +181,9 @@ describe('gate grant at start-up', { skip: ready ? false : 'module not built' },
     const dir = await mkdtemp(path.join(tmpdir(), 'colophon-grant-'));
     try {
       const r = await start(dir, {}, { operator: { home: true, account: OPERATOR, base: `${PREFIX}operator` } });
-      r.close();
+      await r.close();
       const s = await start(dir, { operator: { account: OPERATOR, slot: 'notyet' } });
-      s.close();
+      await s.close();
       assert.ok(existsSync(path.join(dir, 'provision-replay')), 'the replay table is made');
     } finally { await rm(dir, { recursive: true, force: true }); }
   });

@@ -54,11 +54,16 @@ fn multiply(table: &Table, scalar: Scalar) -> ProjectivePoint {
     let bytes = scalar.to_bytes();
     let mut sum = ProjectivePoint::IDENTITY;
     for (i, byte) in bytes.iter().rev().enumerate() {
-        sum += table[i * 2][(byte & 15) as usize];
-        sum += table[i * 2 + 1][(byte >> 4) as usize];
+        if byte & 15 != 0 {
+            sum += table[i * 2][(byte & 15) as usize];
+        }
+        if byte >> 4 != 0 {
+            sum += table[i * 2 + 1][(byte >> 4) as usize];
+        }
     }
     sum
 }
+#[derive(Debug)]
 pub(crate) struct PreparedKey {
     key: VerifyingKey,
     table: OnceLock<Table>,
@@ -73,10 +78,16 @@ impl PreparedKey {
         })
     }
     pub(crate) fn verify(&self, record: &SignedRecord) -> Result<()> {
-        static GENERATOR: OnceLock<Table> = OnceLock::new();
         let sig = Signature::from_slice(&record.signature)
             .map_err(|_| Error("Invalid signature format".into()))?;
-        let z = <Scalar as Reduce<U256>>::reduce_bytes(&Sha256::digest(&record.body));
+        ensure(self.verify_body(&record.body, &sig), "Invalid signature")
+    }
+    pub(crate) fn verify_body(&self, body: &[u8], sig: &Signature) -> bool {
+        self.verify_prehash(&Sha256::digest(body), sig)
+    }
+    pub(crate) fn verify_prehash(&self, hash: &p256::FieldBytes, sig: &Signature) -> bool {
+        static GENERATOR: OnceLock<Table> = OnceLock::new();
+        let z = <Scalar as Reduce<U256>>::reduce_bytes(hash);
         let (r, s) = sig.split_scalars();
         let inverse = *s.invert_vartime();
         let point = multiply(
@@ -87,11 +98,8 @@ impl PreparedKey {
                 .get_or_init(|| table(ProjectivePoint::from(*self.key.as_affine()))),
             *r * inverse,
         );
-        ensure(
-            !bool::from(point.is_identity())
-                && *r == <Scalar as Reduce<U256>>::reduce_bytes(&point.to_affine().x()),
-            "Invalid signature",
-        )
+        !bool::from(point.is_identity())
+            && *r == <Scalar as Reduce<U256>>::reduce_bytes(&point.to_affine().x())
     }
 }
 

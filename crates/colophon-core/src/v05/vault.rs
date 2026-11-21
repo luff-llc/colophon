@@ -36,12 +36,11 @@
 //!    screen (§7.3). §7.4 requires it. The core cannot check the scan or the comparison beyond
 //!    the commit-then-reveal order and the single reveal; the host attests them.
 //!
-//! **Erasure is best effort.** The crate forbids `unsafe` and has no zeroizing dependency, so
-//! overwriting uses ordinary writes that `std::hint::black_box` only discourages the
-//! optimizer from removing; there are no volatile writes. Seed, ECDH, PRF, part-secret and
-//! box-key buffers, and opened plaintexts, are overwritten on drop. The 0.4 `Entropy` type
-//! (`crypto.rs`) keeps its seed without erasing it, and so do HPKE intermediates in `hpke.rs`;
-//! `slots::SlotBuild` erases its own copy of the entropy seed. p256 key types zeroize on drop.
+//! **Erasure is best effort.** Secret owners overwrite their buffers on drop. HPKE
+//! intermediates and opened sealed-part plaintexts use `zeroize` to resist optimization;
+//! the opaque vault types below use ordinary writes with `std::hint::black_box`. The
+//! crate forbids `unsafe`, and cannot guarantee erasure of compiler-generated copies.
+//! p256 key types and the shared `Entropy` type also zeroize on drop.
 //!
 //! The 0.4 labels `colophon/vault/4`, `colophon/entropy/3` and the slot labels are kept on
 //! purpose (§7.1: "unchanged in 0.5").
@@ -274,7 +273,7 @@ impl PartSecret {
         dh: &EcdhOutput,
         info: &[u8],
     ) -> VResult<Self> {
-        let plain = open_dh(sealed, recipient, dh, info)?;
+        let plain = zeroize::Zeroizing::new(open_dh(sealed, recipient, dh, info)?);
         <[u8; 32]>::try_from(plain.as_slice())
             .map(Self)
             .map_err(|_| locked())
@@ -857,4 +856,34 @@ impl SoftwareIdentity {
 /// key): the AES-256-GCM key of an operation.
 pub(super) fn box_key_of(key: &[u8; 32]) -> BoxKey {
     BoxKey(*key)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod sealed_part_tests {
+    use super::*;
+
+    #[test]
+    fn sealed_part_open_checks_plaintext_length_and_authentication() {
+        let member = crate::crypto::SoftwareKeys::from_seed([41; 32]).unwrap();
+        let recipient = member.public().agreement;
+        for length in [31, 32, 33] {
+            let sealed = SealedKey::seal(
+                &recipient,
+                &vec![42; length],
+                b"sealed part",
+                &mut Entropy::new([43; 32]),
+            )
+            .unwrap();
+            let dh = EcdhOutput::from_host(&member.agree(sealed.begin_open()).unwrap()).unwrap();
+            let sealed = SealedBox::from_key(sealed);
+            let opened = PartSecret::open_sealed(&sealed, &recipient, &dh, b"sealed part");
+            if length == 32 {
+                assert_eq!(opened.unwrap().0, [42; 32]);
+            } else {
+                assert!(opened.is_err());
+            }
+            assert!(PartSecret::open_sealed(&sealed, &recipient, &dh, b"wrong info").is_err());
+        }
+    }
 }

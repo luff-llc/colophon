@@ -199,7 +199,13 @@ if (process.argv[2] === 'provisioned') {
     });
     process.stdin.on('error', () => {});
   }
-  const stop = () => running.close().then(() => process.exit(0));
+  let stopping = false;
+  const stop = async () => {
+    if (stopping) return;
+    stopping = true;
+    try { await running.close(); process.exit(0); }
+    catch (error) { console.error(error.message); process.exit(1); }
+  };
   process.on('SIGINT', stop);
   process.on('SIGTERM', stop);
 }

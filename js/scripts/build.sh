@@ -8,8 +8,8 @@ if [[ "$actual" != "wasm-bindgen $expected" ]]; then
   echo "Expected wasm-bindgen $expected; found $actual" >&2
   exit 1
 fi
-cargo build --locked -p colophon-wasm --target wasm32-unknown-unknown --release
+cargo build --locked -p colophon-wasm --target wasm32-unknown-unknown --profile release-wasm
 mkdir -p js/dist/wasm
-wasm-bindgen --target web --out-dir js/dist/wasm --out-name colophon_wasm "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release/colophon_wasm.wasm"
+wasm-bindgen --target web --out-dir js/dist/wasm --out-name colophon_wasm "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release-wasm/colophon_wasm.wasm"
 cd js
 ./node_modules/.bin/tsc -p tsconfig.json

@@ -8,6 +8,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use zeroize::Zeroize;
 
 /// Maximum plaintext bytes in one authenticated read/write.
 pub const CHUNK_BYTES: usize = 64 * 1024;
@@ -155,14 +156,13 @@ impl BlobWriter {
     }
     /// Finish hashing. The caller publishes this manifest with the durable source unit.
     pub fn finish(mut self) -> Result<BlobManifest> {
-        self.manifest.descriptor.digest = self
-            .hash
+        self.manifest.descriptor.digest = std::mem::take(&mut self.hash)
             .finalize()
             .iter()
             .map(|b| format!("{b:02x}"))
             .collect();
         self.manifest.validate()?;
-        Ok(self.manifest)
+        Ok(self.manifest.clone())
     }
 }
 fn aad(library: &str, namespace: &str, manifest: &BlobManifest, index: usize) -> Result<Vec<u8>> {
@@ -244,4 +244,10 @@ pub enum BlobRead {
     Inaccessible(String),
     /// Stored bytes failed content-address or AEAD authentication.
     Invalid(String),
+}
+
+impl Drop for BlobWriter {
+    fn drop(&mut self) {
+        self.key.zeroize();
+    }
 }

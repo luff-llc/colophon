@@ -580,7 +580,7 @@ fn all(root: &Path, output: &Path) {
         .trim()
         .to_string()
     };
-    let mut result = json!({"date":"2026-11-16","commit":shell("git rev-parse HEAD"),"machine":{"model":"MacBook Pro Mac15,9","chip":"Apple M3 Max","cores":16,"performance_cores":12,"memory_gib":64,"os":shell("sw_vers -productVersion"),"rustc":shell("rustc --version")},"profile":"release (workspace LTO=true, opt-level=s)","rss_method":"getrusage(RUSAGE_SELF), Darwin ru_maxrss bytes; fresh child per case/run, sampled before write; includes process setup and simulated home for catchup","measurements":[],"fixtures":[],"stopped_unusable":false});
+    let mut result = json!({"date":"2026-11-16","commit":shell("git rev-parse HEAD"),"machine":{"model":"MacBook Pro Mac15,9","chip":"Apple M3 Max","cores":16,"performance_cores":12,"memory_gib":64,"os":shell("sw_vers -productVersion"),"rustc":shell("rustc --version")},"profile":"release (workspace LTO=true, opt-level=3)","rss_method":"getrusage(RUSAGE_SELF), Darwin ru_maxrss bytes; fresh child per case/run, sampled before write; includes process setup and simulated home for catchup","measurements":[],"fixtures":[],"stopped_unusable":false});
     result["started_utc"] = json!(shell("date -u +%Y-%m-%dT%H:%M:%SZ"));
     result["pressroom_threads"] = json!(std::env::var("PRESSROOM_THREADS").ok());
     result["cargo_target_dir"] = json!(std::env::var("CARGO_TARGET_DIR").ok());

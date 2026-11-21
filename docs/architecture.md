@@ -17,6 +17,16 @@ reference/swift/ independent 0.1 reference package, CLI, tests and legacy migrat
 docs/          this file and design notes
 ```
 
+## Build profiles
+
+The workspace `release` profile uses LTO and `opt-level = 3` for native Apple/Android/server
+builds and the server-side Bun `colophon-home-wasm` module. Browser `@colophon/core` builds
+use the dedicated `release-wasm` profile, inheriting release with `opt-level = "s"` to keep
+downloads small. The browser build and test scripts read its artifact from
+`wasm32-unknown-unknown/release-wasm/`; the home module stays under `wasm32-unknown-unknown/release/`.
+Release packaging delegates the browser build to `js/scripts/build.sh` and keeps native and
+home builds on `--release`.
+
 ## The core is a pure function of records
 
 The core owns everything that must mean the same thing on every device (section numbers

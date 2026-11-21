@@ -8,6 +8,7 @@ use crate::{
     Error, Result,
 };
 use serde::{Deserialize, Serialize};
+use zeroize::{Zeroize, Zeroizing};
 
 const PURPOSE: &str = "colophon/verified-prefix/protection/3";
 const MAX_BYTES: usize = 256 * 1024 * 1024;
@@ -43,20 +44,20 @@ impl PreparedCheckpointKey {
     pub fn new(library: &str, member: PublicIdentity, seed: [u8; 32]) -> Result<Self> {
         member.validate()?;
         let mut entropy = Entropy::new(seed);
-        let key = entropy.take::<32>()?;
+        let key = Zeroizing::new(entropy.take::<32>()?);
         let ticket = Ticket {
             purpose: PURPOSE.into(),
             library: library.into(),
             key: SealedKey::seal(
                 &member.agreement,
-                &key,
+                key.as_ref(),
                 &info(library, &member)?,
                 &mut entropy,
             )?,
             member: member.clone(),
         };
         Ok(Self {
-            key,
+            key: *key,
             body: canonical(&ticket)?,
             member,
         })
@@ -66,9 +67,13 @@ impl PreparedCheckpointKey {
         &self.body
     }
     /// Authenticate the ticket's creator: public-key encryption alone cannot do this.
-    pub fn finish(self, signature: Vec<u8>) -> Result<CheckpointKey> {
-        let ticket =
-            SignedRecord::finish_sign(self.body, signature, &self.member.signing)?.encode()?;
+    pub fn finish(mut self, signature: Vec<u8>) -> Result<CheckpointKey> {
+        let ticket = SignedRecord::finish_sign(
+            std::mem::take(&mut self.body),
+            signature,
+            &self.member.signing,
+        )?
+        .encode()?;
         Ok(CheckpointKey {
             key: self.key,
             ticket,
@@ -86,10 +91,10 @@ impl CheckpointKey {
     pub fn authentication_key(&self) -> [u8; 32] {
         self.key
     }
-    fn encryption_key(&self) -> Result<[u8; 32]> {
-        let mut key = [0; 32];
+    fn encryption_key(&self) -> Result<Zeroizing<[u8; 32]>> {
+        let mut key = Zeroizing::new([0; 32]);
         hkdf::Hkdf::<sha2::Sha256>::new(None, &self.key)
-            .expand(PURPOSE.as_bytes(), &mut key)
+            .expand(PURPOSE.as_bytes(), key.as_mut())
             .map_err(|_| Error("Checkpoint key derivation".into()))?;
         Ok(key)
     }
@@ -98,7 +103,12 @@ impl CheckpointKey {
     pub fn protect_binary(&self, checkpoint: &[u8], seed: [u8; 32]) -> Result<Vec<u8>> {
         ensure(checkpoint.len() <= MAX_BYTES, "Checkpoint too large")?;
         let nonce = Entropy::new(seed).take::<12>()?;
-        let ciphertext = crypto::seal(&self.encryption_key()?, &nonce, checkpoint, &self.ticket)?;
+        let ciphertext = crypto::seal(
+            self.encryption_key()?.as_ref(),
+            &nonce,
+            checkpoint,
+            &self.ticket,
+        )?;
         let mut output = Vec::with_capacity(24 + self.ticket.len() + ciphertext.len());
         output.extend_from_slice(b"COLOPRV3");
         output.extend_from_slice(&(self.ticket.len() as u32).to_le_bytes());
@@ -112,7 +122,12 @@ impl CheckpointKey {
     pub fn protect(&self, checkpoint: &[u8], seed: [u8; 32]) -> Result<Vec<u8>> {
         ensure(checkpoint.len() <= MAX_BYTES, "Checkpoint too large")?;
         let nonce = Entropy::new(seed).take::<12>()?.to_vec();
-        let ciphertext = crypto::seal(&self.encryption_key()?, &nonce, checkpoint, &self.ticket)?;
+        let ciphertext = crypto::seal(
+            self.encryption_key()?.as_ref(),
+            &nonce,
+            checkpoint,
+            &self.ticket,
+        )?;
         canonical(&Envelope {
             ticket: self.ticket.clone(),
             nonce,
@@ -172,12 +187,13 @@ impl CheckpointOpening {
     }
     /// Return the original protection key and authenticated plaintext for `Engine::open`.
     pub fn finish(self, shared: &[u8]) -> Result<(CheckpointKey, Vec<u8>)> {
-        let raw = self.ticket.key.finish_open(
+        let raw = Zeroizing::new(self.ticket.key.finish_open(
             &self.ticket.member.agreement,
             shared,
             &info(&self.ticket.library, &self.ticket.member)?,
-        )?;
+        )?);
         let key: [u8; 32] = raw
+            .as_slice()
             .try_into()
             .map_err(|_| Error("Checkpoint key length".into()))?;
         let key = CheckpointKey {
@@ -185,12 +201,50 @@ impl CheckpointOpening {
             ticket: self.envelope.ticket,
         };
         let checkpoint = crypto::open(
-            &key.encryption_key()?,
+            key.encryption_key()?.as_ref(),
             &self.envelope.nonce,
             &self.envelope.ciphertext,
             &key.ticket,
         )?;
         ensure(checkpoint.len() <= MAX_BYTES, "Checkpoint too large")?;
         Ok((key, checkpoint))
+    }
+}
+
+impl Drop for PreparedCheckpointKey {
+    fn drop(&mut self) {
+        self.key.zeroize();
+    }
+}
+
+impl Drop for CheckpointKey {
+    fn drop(&mut self) {
+        self.key.zeroize();
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn derived_keys_are_scoped_and_checkpoint_encodings_round_trip() {
+        let member = crypto::SoftwareKeys::from_seed([31; 32]).unwrap();
+        let prepared = PreparedCheckpointKey::new("library", member.public(), [32; 32]).unwrap();
+        let signature = member.sign(prepared.signing_body());
+        let key = prepared.finish(signature).unwrap();
+        let derived: Zeroizing<[u8; 32]> = key.encryption_key().unwrap();
+        assert_ne!(*derived, key.authentication_key());
+        for envelope in [
+            key.protect(b"checkpoint", [33; 32]).unwrap(),
+            key.protect_binary(b"checkpoint", [34; 32]).unwrap(),
+        ] {
+            let opening = CheckpointOpening::begin(&envelope, "library", &member.public()).unwrap();
+            let shared = Zeroizing::new(member.agree(opening.agreement_peer()).unwrap());
+            assert_eq!(opening.finish(&shared).unwrap().1, b"checkpoint");
+            let opening = CheckpointOpening::begin(&envelope, "library", &member.public()).unwrap();
+            assert!(opening.finish(&[0; 32]).is_err());
+        }
     }
 }

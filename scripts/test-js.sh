@@ -20,12 +20,13 @@ done
 expected=0.2.130
 [[ "$(wasm-bindgen --version)" == "wasm-bindgen $expected" ]] || { echo "test-js: wasm-bindgen $expected is required; found $(wasm-bindgen --version)" >&2; exit 1; }
 
-cargo build --locked --target wasm32-unknown-unknown --release -p colophon-wasm -p colophon-home-wasm
+cargo build --locked --target wasm32-unknown-unknown --profile release-wasm -p colophon-wasm
+cargo build --locked --target wasm32-unknown-unknown --release -p colophon-home-wasm
 export COLOPHON_HOME_WASM="${COLOPHON_HOME_WASM:-$target/wasm32-unknown-unknown/release/colophon_home_wasm.wasm}"
 echo "test-js: home module $(wc -c < "$COLOPHON_HOME_WASM" | tr -d ' ') bytes"
 rm -rf js/dist
 mkdir -p js/dist/wasm
-wasm-bindgen --target web --out-dir js/dist/wasm --out-name colophon_wasm "$target/wasm32-unknown-unknown/release/colophon_wasm.wasm"
+wasm-bindgen --target web --out-dir js/dist/wasm --out-name colophon_wasm "$target/wasm32-unknown-unknown/release-wasm/colophon_wasm.wasm"
 npm ci --prefix js --no-audit --no-fund
 (cd js && ./node_modules/.bin/tsc -p tsconfig.json && ./node_modules/.bin/tsc -p test05/tsconfig.json)
 echo "test-js: TypeScript built (strict), tests typechecked"
