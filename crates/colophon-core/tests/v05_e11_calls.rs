@@ -32,15 +32,20 @@ use support::*;
 
 const NOW: i64 = T0 + 3 * HOUR;
 const NS: &str = "notes";
+const LISTEN: &str = "listening.podcasts";
 const BASE: &str = "https://home.example";
 
 /// The journeys' account with `policy.history` set.
 fn fixture(history: &str) -> Fixture {
+    fixture_with_namespaces(history, &[NS])
+}
+
+fn fixture_with_namespaces(history: &str, namespaces: &[&str]) -> Fixture {
     let mut host = Host::new();
     let d = host.identity(10);
     let k = host.kit(20);
     let p = host.passkey();
-    let mut params = params(&mut host, &d, &p, &k, &[NS]);
+    let mut params = params(&mut host, &d, &p, &k, namespaces);
     params.policy.as_mut().unwrap()["history"] = json!(history);
     let mut creation = Creation::begin(params, Identity::Controller(d.clone()), T0).unwrap();
     let results = host.answer_prf(creation.prf_requests());
@@ -164,6 +169,7 @@ struct Pass {
     /// Calls the engine's own check refused, with the code.
     unbuilt: Vec<String>,
     calls: usize,
+    puts: Vec<String>,
 }
 
 /// One pass of `e` with the home, building every call the engine asks for with
@@ -194,6 +200,9 @@ fn pass(e: &mut Engine<MemSource>, src: &MemSource, home: &str, wire: &mut Calli
                 }
             }
             Step::Request(r) => {
+                if r.method == Method::Put {
+                    out.puts.push(r.url.clone());
+                }
                 let a = wire.call(host, &r, now);
                 let report = e.exchange_answer(home, r.ticket, a).unwrap();
                 src.publish_stores(&report.store);
@@ -318,6 +327,236 @@ fn a_member_writes_its_own_records_with_calls_and_nothing_else() {
             assert_eq!(x.code(), "refused:outOfScope", "{method} {path} by {member}");
         }
     }
+}
+
+#[test]
+fn a_shared_folder_pushes_only_the_sessions_records_and_pulls_remote_records() {
+    let mut f = fixture_with_namespaces("members", &[LISTEN, NS]);
+    let home = appoint_home(&mut f);
+    let a = f.host.identity(30);
+    let b = f.host.identity(31);
+    let writer = terms_for(&[(NS, "write"), (LISTEN, "write")]);
+    admit(&mut f, &a, "Mac", "device", writer.clone(), writer.clone());
+    admit(&mut f, &b, "Phone", "device", writer.clone(), writer);
+    let src = MemSource::new();
+    src.store_account(&f.account);
+    let mut mac = member_engine(&f, &f.host, &src, &a, NOW);
+    let mut phone = member_engine(&f, &f.host, &src, &b, NOW);
+    let mut wire = CallingHome::new(SimHome::new(&f, &home, BASE, NOW), false);
+    let mut host = std::mem::replace(&mut f.host, Host::new());
+
+    for e in [&mut mac, &mut phone] {
+        let author = e.account().identity().id().to_string();
+        engine_write(
+            e,
+            &mut host,
+            &src,
+            NS,
+            "note.put",
+            json!({"id": author, "text": "local"}),
+        );
+        engine_live(
+            e,
+            &mut host,
+            &src,
+            json!({"id": "episode", "show": "show", "seconds": 10}),
+        );
+    }
+    let remote = engine_write(
+        &mut phone,
+        &mut host,
+        &src,
+        NS,
+        "note.put",
+        json!({"id": "remote", "text": "from home"}),
+    );
+    let (remote_path, remote_bytes) = remote
+        .stores
+        .iter()
+        .find(|(p, _)| p.starts_with("ops/"))
+        .unwrap();
+    src.remove(remote_path);
+    wire.sim
+        .files
+        .insert(remote_path.clone(), remote_bytes.clone());
+    wire.sim.log.push(remote_path.clone());
+
+    let p = pass(&mut mac, &src, &home, &mut wire, &mut host, &a, NOW);
+    assert!(
+        p.unbuilt.is_empty() && p.faults.is_empty() && wire.refused.is_empty(),
+        "{p:?}, {:?}",
+        wire.refused
+    );
+    for kind in ["ops", "history", "state"] {
+        for (author, expected) in [(&a, true), (&b, false)] {
+            let prefix = format!("{kind}/{author}/");
+            let paths: Vec<_> = src
+                .listing()
+                .into_iter()
+                .filter(|p| p.starts_with(&prefix) && p != remote_path)
+                .collect();
+            assert_eq!(paths.len(), 1, "{prefix}: {paths:?}");
+            assert_eq!(
+                wire.sim.files.contains_key(&paths[0]),
+                expected,
+                "{}",
+                paths[0]
+            );
+        }
+    }
+    assert_eq!(src.get(remote_path).as_ref(), Some(remote_bytes));
+    assert_eq!(records(&mac), 3);
+}
+
+#[test]
+fn a_home_write_service_grant_allows_relaying_another_members_record() {
+    let mut f = fixture("members");
+    let home = appoint_home(&mut f);
+    let relay = f.host.identity(30);
+    let author = f.host.identity(31);
+    let mut grant = terms_for(&[(NS, "read")]);
+    grant["services"] = json!([{"audience": BASE, "purposes": ["colophon.home.write"]}]);
+    admit(&mut f, &relay, "Relay", "device", grant.clone(), grant);
+    let grant = terms_for(&[(NS, "write")]);
+    admit(&mut f, &author, "Author", "device", grant.clone(), grant);
+    let src = MemSource::new();
+    src.store_account(&f.account);
+    let mut writer = member_engine(&f, &f.host, &src, &author, NOW);
+    let mut wire = CallingHome::new(SimHome::new(&f, &home, BASE, NOW), false);
+    let mut host = std::mem::replace(&mut f.host, Host::new());
+    let written = engine_write(
+        &mut writer,
+        &mut host,
+        &src,
+        NS,
+        "note.put",
+        json!({"id": "local", "text": "relay me"}),
+    );
+    let (path, bytes) = written
+        .stores
+        .iter()
+        .find(|(p, _)| p.starts_with("ops/"))
+        .unwrap();
+    let mut e = member_engine(&f, &host, &src, &relay, NOW);
+
+    let p = pass(&mut e, &src, &home, &mut wire, &mut host, &relay, NOW);
+    assert!(
+        p.unbuilt.is_empty() && p.faults.is_empty() && wire.refused.is_empty(),
+        "{p:?}, {:?}",
+        wire.refused
+    );
+    assert_eq!(wire.sim.files.get(path), Some(bytes));
+}
+
+#[test]
+fn a_member_skips_its_signed_history_outside_its_namespace_grant() {
+    use colophon_core::v05::{encoding::canonical, records::OperationHeader};
+
+    let mut f = fixture_with_namespaces("members", &[LISTEN, NS]);
+    let home = appoint_home(&mut f);
+    let a = f.host.identity(30);
+    let writer = terms_for(&[(LISTEN, "write")]);
+    admit(&mut f, &a, "Mac", "device", writer.clone(), writer);
+    let src = MemSource::new();
+    src.store_account(&f.account);
+    let mut mac = member_engine(&f, &f.host, &src, &a, NOW);
+    let mut wire = CallingHome::new(SimHome::new(&f, &home, BASE, NOW), false);
+    let mut host = std::mem::replace(&mut f.host, Host::new());
+    let live = engine_live(
+        &mut mac,
+        &mut host,
+        &src,
+        json!({"id": "episode", "show": "show", "seconds": 10}),
+    );
+    let (own_path, bytes) = live
+        .stores
+        .iter()
+        .find(|(p, _)| p.starts_with("history/"))
+        .unwrap();
+    // History storage verifies the signed header without opening its ciphertext.
+    let (header, envelope) = OperationHeader::parse(bytes).unwrap();
+    let mut body = envelope.value;
+    body["namespace"] = json!(NS);
+    let body = canonical(&body).unwrap();
+    let signing = &host.ids[&a];
+    let bytes =
+        canonical(&json!({"body": b64(&body), "signature": b64(&signing.sign(&body))})).unwrap();
+    let path = format!("history/{a}/{NS}/{:012}-{}.json", header.clock, header.id);
+    src.put(&path, bytes);
+
+    let p = pass(&mut mac, &src, &home, &mut wire, &mut host, &a, NOW);
+    assert!(
+        p.unbuilt.is_empty() && p.faults.is_empty() && wire.refused.is_empty(),
+        "{p:?}, {:?}",
+        wire.refused
+    );
+    assert!(wire.sim.files.contains_key(own_path));
+    assert!(!p.puts.contains(&format!("{BASE}/records/{path}")), "{p:?}");
+}
+
+#[test]
+fn a_read_only_member_pulls_without_uploading_local_records_blobs_or_live_heads() {
+    let mut f = fixture_with_namespaces("members", &[LISTEN, NS]);
+    let home = appoint_home(&mut f);
+    let a = f.host.identity(30);
+    let b = f.host.identity(31);
+    for (member, access) in [(&a, "read"), (&b, "write")] {
+        let terms = terms_for(&[(NS, access), (LISTEN, access)]);
+        admit(&mut f, member, access, "device", terms.clone(), terms);
+    }
+    let src = MemSource::new();
+    src.store_account(&f.account);
+    let mut writer = member_engine(&f, &f.host, &src, &b, NOW);
+    let mut wire = CallingHome::new(SimHome::new(&f, &home, BASE, NOW), false);
+    let mut host = std::mem::replace(&mut f.host, Host::new());
+    engine_blob(
+        &mut writer,
+        &mut host,
+        &src,
+        NS,
+        "application/octet-stream",
+        b"local blob",
+        "blob",
+        false,
+    );
+    engine_live(
+        &mut writer,
+        &mut host,
+        &src,
+        json!({"id": "episode", "show": "show", "seconds": 10}),
+    );
+    let remote = engine_write(
+        &mut writer,
+        &mut host,
+        &src,
+        NS,
+        "note.put",
+        json!({"id": "remote", "text": "from home"}),
+    );
+    let (remote_path, remote_bytes) = remote
+        .stores
+        .iter()
+        .find(|(p, _)| p.starts_with("ops/"))
+        .unwrap();
+    src.remove(remote_path);
+    wire.sim
+        .files
+        .insert(remote_path.clone(), remote_bytes.clone());
+    wire.sim.log.push(remote_path.clone());
+    let mut reader = member_engine(&f, &host, &src, &a, NOW);
+    assert_eq!(records(&reader), 1);
+    assert_eq!(reader.account().live_heads().len(), 1);
+    assert!(src.listing().iter().any(|path| path.starts_with("blobs/")));
+
+    let p = pass(&mut reader, &src, &home, &mut wire, &mut host, &a, NOW);
+    assert!(
+        p.unbuilt.is_empty() && p.faults.is_empty() && wire.refused.is_empty(),
+        "{p:?}, {:?}",
+        wire.refused
+    );
+    assert!(p.puts.is_empty(), "{p:?}");
+    assert_eq!(src.get(remote_path).as_ref(), Some(remote_bytes));
+    assert_eq!(records(&reader), 2);
 }
 
 /// Gap 3. A device whose history ends before its approval (another device approved it) learns

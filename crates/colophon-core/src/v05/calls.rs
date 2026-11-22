@@ -1334,27 +1334,49 @@ fn home_request(
     )
 }
 
-/// Whether the member `m` may make `writes` under its own author ID (see [`verify_home_write`]).
-fn own_writes(m: &ViewMember, writes: &[HomeWrite]) -> bool {
+/// Whether a member's grants cover a home write, before checking links and conditions.
+pub(crate) fn member_allows_home_write(
+    id: &str,
+    terms: &Terms,
+    endpoint: &str,
+    writes: &[HomeWrite],
+) -> bool {
+    if terms.allows(endpoint, HOME_WRITE) {
+        return true;
+    }
     use super::terms::Access;
     let grants = |ns: &str, needed: Access| {
-        m.terms
-            .records()
+        terms.records()
             .is_some_and(|rs| rs.iter().any(|e| e.namespace == ns && e.access >= needed))
     };
     !writes.is_empty()
         && writes.iter().all(|w| match w {
             HomeWrite::Record { author, namespace } => {
-                author == &m.id && grants(namespace, Access::Propose)
+                author == id && grants(namespace, Access::Propose)
             }
             HomeWrite::Live { author, namespace } => {
-                author == &m.id && grants(namespace, Access::Write)
+                author == id && grants(namespace, Access::Write)
             }
-            HomeWrite::Blob => m
-                .terms
+            HomeWrite::Blob => terms
                 .records()
                 .is_some_and(|rs| rs.iter().any(|e| e.access >= Access::Propose)),
         })
+}
+
+pub(crate) fn controller_allows_call(
+    at_s: &Controller,
+    latest: &Controller,
+    audience: &str,
+    purpose: &str,
+) -> bool {
+    let both = |r: &Role| at_s.has(r) && latest.has(r);
+    both(&Role::Approve)
+        || both(&Role::Control)
+        || (both(&Role::Sign)
+            && [at_s, latest]
+                .iter()
+                .all(|c| c.audiences().is_some_and(|a| a.iter().any(|s| s == audience))))
+        || (both(&Role::Recover) && purpose == HISTORY_READ)
 }
 
 /// How [`verify`] runs: what a home write writes, the `args` a home binds the call to, and
@@ -1467,15 +1489,7 @@ fn verify(
                 cfg.now_ms,
             )
             .map_err(|_| revoked())?;
-            let both = |r: &Role| at_s.has(r) && latest.has(r);
-            let sign_ok = both(&Role::Sign)
-                && [at_s, latest]
-                    .iter()
-                    .all(|c| c.audiences().is_some_and(|a| a.contains(&call.audience)));
-            let role_ok = both(&Role::Approve)
-                || both(&Role::Control)
-                || sign_ok
-                || (both(&Role::Recover) && call.purpose == HISTORY_READ);
+            let role_ok = controller_allows_call(at_s, latest, &call.audience, &call.purpose);
             require_refused(role_ok, Reason::OutOfScope)?;
             require_sig(
                 latest.key().signing() == call.key.as_slice()
@@ -1561,16 +1575,13 @@ fn verify(
         None if standing_unknown => {}
         Some(m) => {
             let home_read = at_home && call.links.is_empty() && call.purpose != HOME_WRITE;
-            let home_write = at_home
-                && call.purpose == HOME_WRITE
-                && own_writes(m, writes)
-                && call
-                    .links
-                    .iter()
-                    .all(|l| l.terms.allows(&call.audience, &call.purpose));
+            let grant_allows = if at_home && call.purpose == HOME_WRITE {
+                member_allows_home_write(&m.id, &m.terms, &call.audience, writes)
+            } else {
+                m.terms.allows(&call.audience, &call.purpose)
+            };
             let allowed = home_read
-                || home_write
-                || (m.terms.allows(&call.audience, &call.purpose)
+                || (grant_allows
                     && call
                         .links
                         .iter()
