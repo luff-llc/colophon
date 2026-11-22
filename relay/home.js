@@ -20,6 +20,7 @@ const unb64 = (text) => Buffer.from(text, 'base64');
 const sha = (bytes) => createHash('sha256').update(bytes).digest('hex');
 
 const ROUTE_BODY_BYTES = 4096;
+const maxRoutes = 64;
 const ROUTE_KINDS = new Set(['push', 'email', 'sms', 'webhook', 'other']);
 const NOTICE_COMMIT = 'notice-commit.json';
 
@@ -148,7 +149,7 @@ export class HomeSlot {
     this.forward = { peers: {} };
     this.rate = new RateLimit(o.limits.requestsPerMinute);
     this.said = new Map();
-    this.sockets = new Set();
+    this.sockets = new Map();
     this.routes = new Map();
   }
 
@@ -290,6 +291,7 @@ export class HomeSlot {
     }
     await this.writeJson('home-state.json', state);
     this.state = state;
+    this.revalidateStreams();
     await this.flushNotices();
   }
 
@@ -313,9 +315,10 @@ export class HomeSlot {
   }
 
   publish(frame) {
+    this.pruneExpiredStreams();
     if (!this.sockets.size) return;
     const message = JSON.stringify(frame);
-    for (const ws of this.sockets) {
+    for (const ws of this.sockets.keys()) {
       if (ws.readyState !== ws.OPEN || ws.bufferedAmount > 64 * 1024) ws.terminate();
       else {
         try { ws.send(message, (error) => { if (error) ws.terminate(); }); }
@@ -329,8 +332,61 @@ export class HomeSlot {
   }
 
   closeStreams() {
-    for (const ws of this.sockets) ws.terminate();
-    this.sockets.clear();
+    for (const ws of this.sockets.keys()) {
+      this.dropStream(ws);
+      ws.terminate();
+    }
+  }
+
+  dropStream(ws) {
+    clearTimeout(this.sockets.get(ws)?.timer);
+    this.sockets.delete(ws);
+  }
+
+  closeUnauthorizedStream(ws) {
+    this.dropStream(ws);
+    ws.close(1008, 'Stream authorization ended');
+  }
+
+  pruneExpiredStreams(now = this.clock()) {
+    for (const [ws, { expiresAt }] of this.sockets) {
+      if (expiresAt !== null && now > expiresAt) this.closeUnauthorizedStream(ws);
+    }
+  }
+
+  armStreamExpiry(ws, subscriber) {
+    clearTimeout(subscriber.timer);
+    if (subscriber.expiresAt === null) return;
+    // The grant is valid through its expiry instant. Long delays must fit the timer range.
+    const delay = subscriber.expiresAt - this.clock() + 1;
+    if (delay <= 0) {
+      this.closeUnauthorizedStream(ws);
+      return;
+    }
+    subscriber.timer = setTimeout(() => this.armStreamExpiry(ws, subscriber), Math.min(delay, 2 ** 31 - 1));
+    subscriber.timer.unref();
+  }
+
+  revalidateStreams() {
+    const now = this.clock();
+    this.pruneExpiredStreams(now);
+    if (!this.sockets.size) return;
+    const sockets = [...this.sockets];
+    const subscribers = sockets.map(([, { principalId, sessionNonce }]) => ({ principalId, sessionNonce }));
+    let standing = [];
+    try {
+      ({ standing } = this.wasm.call({ op: 'stream_standing', state: this.state, base: this.base, now, subscribers }));
+    } catch (error) {
+      this.note('streams', `stream standing could not be checked: ${error.message}`);
+    }
+    for (const [i, [ws, subscriber]] of sockets.entries()) {
+      const current = standing[i];
+      if (!current) this.closeUnauthorizedStream(ws);
+      else if (current.expiresAt !== null && (subscriber.expiresAt === null || current.expiresAt < subscriber.expiresAt)) {
+        subscriber.expiresAt = current.expiresAt;
+        this.armStreamExpiry(ws, subscriber);
+      }
+    }
   }
 
   async stream(req, connect) {
@@ -338,15 +394,18 @@ export class HomeSlot {
     await this.rateGate(req);
     await this.lock(async () => {
       if (this.slot.closing || this.slot.releasing || this.slot.released) throw new HttpError(503, 'Home unavailable');
+      this.pruneExpiredStreams();
       if (this.sockets.size >= this.limits.maxWaiters) throw new HttpError(429, 'Too many streams', { 'retry-after': '60' });
       const allowed = await this.access(req, 'stream', null, null, null);
       await this.complete(allowed.reserve.key, 'completed');
       if (this.slot.closing) throw new HttpError(503, 'Home unavailable');
       connect((ws) => {
-        this.sockets.add(ws);
-        ws.on('close', () => this.sockets.delete(ws));
+        const subscriber = allowed.stream;
+        this.sockets.set(ws, subscriber);
+        ws.on('close', () => this.dropStream(ws));
         ws.on('error', () => ws.terminate());
         ws.on('message', () => ws.close(1008, 'Read-only stream'));
+        this.armStreamExpiry(ws, subscriber);
       });
     });
   }
@@ -424,8 +483,9 @@ export class HomeSlot {
       const r = this.wasm.call({ op: 'record_due', state: this.state, now });
       const said = r.result === 'ok' && !r.note ? '' : `recording entries for slot ${this.slot.name}: ${r.result} ${r.note ?? ''}`;
       this.note('record', said);
-      await this.commit(r.state);
+      await this.commit(r.state, r.notify);
       await this.materialize(r.store);
+      this.publishNotices(r.notify);
       await this.signReceipts(r.sign);
       this.trace('record_due end');
       // When what is due now could not be determined, no head is produced now (it stays due:
@@ -751,10 +811,14 @@ export class HomeSlot {
           const { kind, address, reaches } = route ?? {};
           if (!route || Object.keys(route).length !== 3 || !ROUTE_KINDS.has(kind)
               || typeof address !== 'string' || !address || !address.isWellFormed()
-              || typeof reaches !== 'string' || !reaches || !reaches.isWellFormed()) {
+              || typeof reaches !== 'string' || !reaches || !reaches.isWellFormed()
+              || reaches.trim().toLowerCase() === address.trim().toLowerCase()) {
             throw new HttpError(400, 'Invalid notice route');
           }
           if (sha(`${kind}\0${address}`) !== id) throw new HttpError(400, 'Route ID does not match kind and address');
+          if (!exists && this.routes.size >= maxRoutes) {
+            throw new HttpError(507, 'Too many notice routes', {}, { result: 'refused:overQuota' });
+          }
           routes.set(id, { kind, address, reaches, by: allowed.signer });
         } else {
           if (!exists) throw new HttpError(404, 'Route not found');
@@ -852,6 +916,7 @@ export class HomeSlot {
 
   async tickOnce() {
     await this.lock(async () => {
+      this.pruneExpiredStreams();
       await this.keepLease();
       await this.settle();
     });

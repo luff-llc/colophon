@@ -13,7 +13,7 @@ use colophon_core::v05::calls::{
     home_purposes, home_record_writes, verify_call, verify_home_request, AccountView, Call,
     CallConfig, CallSigner, HomeRequest, HomeWrite,
 };
-use colophon_core::v05::descriptor::HistoryAccess;
+use colophon_core::v05::descriptor::{HistoryAccess, Role};
 use colophon_core::v05::encoding::{bounds, canonical, digest, parse_date, strict_parse};
 use colophon_core::v05::engine::paths::{self, Kind};
 use colophon_core::v05::heads::HeadContext;
@@ -21,7 +21,7 @@ use colophon_core::v05::history::envelope::AuthEnvelope;
 use colophon_core::v05::history::home::{
     admit, admit_first_with, admit_pending_batch_notices, admit_predecessor, admit_with, stage_predecessor, FirstUpload, HomeState, ReceiptToSign, Refusal,
 };
-use colophon_core::v05::history::{verify_history, Objects, Persisted, State, Stop};
+use colophon_core::v05::history::{verify_history, Claim, Objects, Persisted, Principal, State, Stop};
 use colophon_core::v05::ids::{key_id, AccountId};
 use colophon_core::v05::records::{OperationHeader, RecordAuthority};
 use colophon_core::v05::replay::{
@@ -81,6 +81,7 @@ fn run(input: &[u8]) -> R<Value> {
         "lease" => lease(&req),
         "classify" => classify(&req),
         "access" => access(&req),
+        "stream_standing" => stream_standing(&req),
         "call_key" => call_key(&req),
         "replay_keep" => replay_keep(&req),
         "replay_recover" => replay_recover(&req),
@@ -593,11 +594,60 @@ fn access(req: &Value) -> R<Value> {
         return Ok(json!({"allowed": false, "status": 429, "result": "refused:window",
                          "retryAfter": (wait_ms + 999) / 1000, "drop": drop}));
     }
-    Ok(json!({
+    let mut answer = json!({
         "allowed": true, "via": "call", "signer": signer, "drop": drop,
         "reserve": {"key": key_text(&vc.replay_key), "signer": signer, "at": now_ms,
                     "digest": vc.call.digest},
-    }))
+    });
+    if section == "stream" {
+        let grant = account_view.stream_grant(&vc);
+        answer["stream"] = json!({
+            "principalId": signer,
+            "expiresAt": grant.and_then(|(expiry, _)| expiry),
+            "sessionNonce": grant.map(|(_, nonce)| nonce),
+        });
+    }
+    Ok(answer)
+}
+
+/// Recheck streams against the committed branch without replaying their opening calls.
+fn stream_standing(req: &Value) -> R<Value> {
+    let l = load(req)?;
+    let now = i64_of(req, "now")?;
+    let base = str_of(req, "base")?;
+    let subscribers = req["subscribers"].as_array().ok_or("missing subscribers")?;
+    let Some(v) = l.home.as_ref().map(|h| view(h, now)).transpose()?
+        .filter(|v| !v.stopped && v.fork.is_none())
+    else {
+        return Ok(json!({"standing": vec![Value::Null; subscribers.len()]}));
+    };
+    let standing: Vec<Value> = subscribers.iter().map(|subscriber| {
+        let Some((kind, id)) = subscriber["principalId"].as_str().and_then(|s| s.split_once(':')) else {
+            return Value::Null;
+        };
+        let claim = match kind {
+            "controller" => Claim::Controller {
+                roles: &[Role::Approve, Role::Control, Role::Sign],
+                suspended_ok: false,
+            },
+            "member" => Claim::Member,
+            _ => return Value::Null,
+        };
+        match v.state.current_principal(id, claim, now) {
+            Ok(Principal::Controller(c)) if c.has(&Role::Approve) || c.has(&Role::Control)
+                || c.audiences().is_some_and(|a| a.iter().any(|audience| audience == base)) =>
+            {
+                json!({"expiresAt": null})
+            }
+            Ok(Principal::Member(m))
+                if subscriber["sessionNonce"].as_u64() == Some(m.end_sessions.len() as u64) =>
+            {
+                json!({"expiresAt": m.expires_ms})
+            }
+            _ => Value::Null,
+        }
+    }).collect();
+    Ok(json!({"standing": standing}))
 }
 
 fn signer_text(s: &CallSigner) -> String {
@@ -1720,6 +1770,7 @@ fn record_due(req: &Value) -> R<Value> {
     let before = objects.clone();
     let mut note = Value::Null;
     let mut sign = Vec::new();
+    let mut notify = Vec::new();
     let mut result = "ok".to_string();
     let mut recorded = 0usize;
     // Whether what is due at `now` could be determined: when it could not, the host signs no
@@ -1747,6 +1798,7 @@ fn record_due(req: &Value) -> R<Value> {
                 let a = admit(&h, &bytes, &now);
                 if a.result.is_ok() {
                     h = a.state;
+                    notify.extend(a.notices);
                     recorded += 1;
                 }
             }
@@ -1775,6 +1827,7 @@ fn record_due(req: &Value) -> R<Value> {
                         let a = admit(&h, &bytes, &now);
                         h = a.state;
                         sign.extend(signs(&a.receipts));
+                        notify.extend(a.notices);
                         match a.result {
                             Ok(()) => recorded += 1,
                             Err(r) => {
@@ -1800,6 +1853,7 @@ fn record_due(req: &Value) -> R<Value> {
                     for (_, bytes) in rec.entries {
                         let a = admit(&h, &bytes, &now);
                         h = a.state;
+                        notify.extend(a.notices);
                         match a.result {
                             Ok(()) => recorded += 1,
                             Err(r) => result = r.code(),
@@ -1820,6 +1874,7 @@ fn record_due(req: &Value) -> R<Value> {
         "state": l.dump()?,
         "store": new_files(&before, &after, now_ms)?,
         "sign": sign,
+        "notify": notify,
         "result": result,
         "note": note,
         "settled": settled,
