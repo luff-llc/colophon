@@ -490,8 +490,7 @@ fn access(req: &Value) -> R<Value> {
             _ => return answer(404),
         },
         ("records", Some("batch")) => match method {
-            "POST" if str_of(req, "path")? == "/records/batch" => Class::BatchRead,
-            "POST" => return answer(400),
+            "POST" => Class::BatchRead,
             _ => return not_allowed("POST"),
         },
         ("records", Some(p)) => {
@@ -519,18 +518,6 @@ fn access(req: &Value) -> R<Value> {
         }
         _ => return answer(404),
     };
-    let call_text = req.get("call").and_then(Value::as_str);
-    let batch = if matches!(class, Class::BatchRead) {
-        if call_text.is_none() {
-            return answer(401);
-        }
-        match batch_input(req) {
-            Ok((body, paths)) => Some((digest(&body), paths)),
-            Err(response) => return Ok(response),
-        }
-    } else {
-        None
-    };
     let l = load(req)?;
     if matches!(class, Class::Identity | Class::Admit) {
         return Ok(json!({"allowed": true, "via": "open"}));
@@ -542,6 +529,21 @@ fn access(req: &Value) -> R<Value> {
     }
     let Some(h) = l.home.as_ref() else {
         return answer(404);
+    };
+    let call_text = req.get("call").and_then(Value::as_str);
+    let batch = if matches!(class, Class::BatchRead) {
+        if str_of(req, "path")? != "/records/batch" {
+            return answer(400);
+        }
+        if call_text.is_none() {
+            return answer(401);
+        }
+        match batch_input(req) {
+            Ok((body, paths)) => Some((digest(&body), paths)),
+            Err(response) => return Ok(response),
+        }
+    } else {
+        None
     };
     if matches!(class, Class::Head) {
         return Ok(json!({"allowed": true, "via": "public"}));

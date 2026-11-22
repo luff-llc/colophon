@@ -19,6 +19,7 @@ the tests, but exchange between them (forwarding and candidate exchange) is expe
 
 ## Batch record reads
 
+Home batches implement the [proposed Colophon 0.6 W1 exchange](../docs/colophon-0.6-w1-batch.md).
 `POST /v1/libraries/<slot>/records/batch` works on both plain slots and home slots.
 Plain slots use the same bearer authorization as single-record GET. On a home
 slot, send `Authorization: Colophon <base64url call>` with purpose
@@ -51,21 +52,28 @@ answer preserves request order:
 }
 ```
 
-The home applies its per-address rate limit and checks for a Colophon
+An unappointed home returns 404 before checking credentials or parsing the body.
+An appointed home applies its per-address rate limit and checks for a Colophon
 authorization header and valid batch structure before taking the slot lock.
-It then verifies the bound call under its replay rules. Under §14, any current
-member calling with its own key may read ciphertext records in any namespace,
-as with single-record GET and HEAD. E2EE epoch keys control who can decrypt
-those records. History paths follow `policy.history`. A verified batch call
-satisfies the call requirement for members-only history. Batches containing
-only public history paths or heads also require a valid batch call.
+It then verifies the bound call under its replay rules. Any current member
+calling with its own key may read ciphertext records in any namespace. E2EE
+epoch keys control who can decrypt those records.
+
+- Every home batch requires a `colophon.home.read` call, including batches of
+  public history or heads. Single GET can serve those paths without a call.
+- Batch refuses `colophon.history.read`, so recover-only controllers cannot
+  batch history. They can read members-only history with single GET and that purpose.
+- A stopped home returns a whole-request 503 for a well-formed batch carrying a
+  call. Single GET can still serve public history while the home is stopped.
+
 A missing call returns 401. Refused calls, including revoked, expired, replayed
 or mismatched calls, return 403 for the whole request. Rate limits return 429
 with `Retry-After`. If the home's own head needs to be refreshed and cannot be
 signed, its entry returns 503.
 
 Records are checked against their indexed size and SHA-256 before serving; storage
-corruption fails the request with 500. Answers carry `Cache-Control: no-store,
+corruption fails the whole request with 500 and no per-item results. Clients can
+fall back to single-record GETs to fetch the unaffected paths. Answers carry `Cache-Control: no-store,
 no-transform` and the configured CORS headers. Each response has a strict 4 MiB
 encoded JSON/base64 budget, including response framing and per-record overhead.
 An individual record exceeding that budget is not read or base64-encoded; its
@@ -348,9 +356,10 @@ real time. Without `--test-clock` stdin is not read.
 Production use is over TLS (directly, or behind Caddy/nginx or Tailscale, as for the 0.3 relay:
 pass `Authorization`, `If-None-Match`, `If-Match` and `Content-Length`, do not buffer bodies).
 
-## What a home serves (0.5 §14)
+## What a home serves
 
-At `{base}` (`/v1/libraries/<slot>`), in addition to the 0.3 endpoints (`changes`, `records/...`):
+At `{base}` (`/v1/libraries/<slot>`), a home adds the endpoints from 0.5 §14 and the
+proposed 0.6 batch read to the 0.3 endpoints (`changes`, `records/...`).
 
 | Request | Answer |
 | --- | --- |
@@ -365,8 +374,9 @@ At `{base}` (`/v1/libraries/<slot>`), in addition to the 0.3 endpoints (`changes
 | `GET {base}/pending/{digest}` | 200 `{"envelope","receipts"}`; 404 |
 | `POST {base}/pending` | `{"objects":[…]}`, 1–16: 200 `{"receipts"}`; 422 a JSON array with the result string of each refused object, in request order. Receipts in a batch are taken first, so an object later in it finds them. No credential needed. |
 
-**Before it is appointed** a home serves nothing it holds: every path but `GET {base}` and the two
-`POST`s answers 404. **Once appointed**, every access decision is the Rust module's (§13.4, §14):
+**Before it is appointed** a home serves nothing it holds. It exposes its identity at `GET {base}`
+and accepts admission requests such as `POST {base}/authority` and `POST {base}/pending`.
+**Once appointed**, access decisions follow the Rust module's rules (§13.4, §14):
 the head (`/head`, `records/heads/*`) is public; the history (`authority`, `pending`, and
 `records/authority/`, `transitions/`, `vetoes/`, `receipts/`) follows `policy.history`: `public`,
 or a call; records, blob chunks and the change feed always need a call. A call is

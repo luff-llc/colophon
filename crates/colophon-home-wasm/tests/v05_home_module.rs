@@ -9,13 +9,17 @@
 )]
 #[path = "../../colophon-core/tests/v05_engine_support/mod.rs"]
 mod support;
+#[path = "../../colophon-core/tests/v05_stopped_support/mod.rs"]
+mod stopped_support;
 mod support_relay;
-use base64::engine::general_purpose::STANDARD;
+use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use base64::Engine as _;
-use colophon_core::v05::account::{Change, RevokeKeep};
+use colophon_core::v05::account::{Change, Incoming, RevokeKeep};
 use colophon_core::v05::calls::home_call_args;
-use colophon_core::v05::encoding::digest;
+use colophon_core::v05::encoding::{canonical, digest};
+use colophon_core::v05::history::Objects;
 use colophon_core::v05::write::authority::TransitionRule;
+use colophon_core::v05::write::format_date;
 use colophon_home_wasm::handle;
 use serde_json::{json, Value};
 use support::*;
@@ -23,6 +27,13 @@ use support_relay::{appoint_homes, call_as, create_with, entries_json, HomeKeys,
 
 const NOW: i64 = T0 + 3 * HOUR;
 const NS: &str = "listening.podcasts";
+const BATCH: &str = "/records/batch";
+
+fn batch_request(home: &Home, now: i64, body: &str, authorization: Value) -> Value {
+    json!({"op": "access", "state": home.state, "now": now, "base": BASE_A,
+           "method": "POST", "section": "records", "rest": "batch",
+           "path": BATCH, "batchBody": b(body.as_bytes()), "call": authorization})
+}
 
 /// A driver: the module, its state, and the home's key (the host's part).
 struct Home {
@@ -155,15 +166,33 @@ fn transition(s: &mut Setup, window: u64, by: &[String]) -> (String, Value) {
 }
 
 #[test]
-fn a_batch_uses_one_bound_call_and_the_same_read_access_as_get_and_head() {
+fn a_batch_uses_one_bound_call_for_records_and_members_only_history() {
     let mut f = create_with(&[NS, "notes"], "members", 1);
     let member = f.host.identity(31);
     let revoked = f.host.identity(32);
     let expired = f.host.identity(33);
     let terms = terms_for(&[(NS, "read")]);
-    for id in [&member, &revoked] {
-        admit(&mut f, id, "Reader", "device", terms.clone(), terms.clone());
-    }
+    let mut delegating_terms = terms.clone();
+    delegating_terms["services"] =
+        json!([{"audience": BASE_A, "purposes": ["colophon.home.read"]}]);
+    delegating_terms["depth"] = json!(1);
+    admit(
+        &mut f,
+        &member,
+        "Reader",
+        "device",
+        delegating_terms.clone(),
+        delegating_terms,
+    );
+    admit(
+        &mut f,
+        &revoked,
+        "Revoked reader",
+        "device",
+        terms.clone(),
+        terms.clone(),
+    );
+    let delegate = f.host.identity(34);
     let mut expiring_terms = terms.clone();
     expiring_terms["expires"] = json!(colophon_core::v05::write::format_date(NOW - HOUR));
     admit(
@@ -213,11 +242,7 @@ fn a_batch_uses_one_bound_call_and_the_same_read_access_as_get_and_head() {
             [n; 32],
         ))
     };
-    let request = |body: &str, authorization: Value| {
-        json!({"op": "access", "state": home.state, "now": NOW, "base": BASE_A,
-               "method": "POST", "section": "records", "rest": "batch",
-               "path": "/records/batch", "batchBody": b(body.as_bytes()), "call": authorization})
-    };
+    let request = |body: &str, authorization: Value| batch_request(&home, NOW, body, authorization);
     let sign_batch = |id: &str, purpose: &str, body: &str, at, n| {
         json!(auth(id, purpose, "POST", "/records/batch", body, at, n))
     };
@@ -239,6 +264,37 @@ fn a_batch_uses_one_bound_call_and_the_same_read_access_as_get_and_head() {
             assert_eq!(single["allowed"], true, "{method} {path}: {single}");
         }
     }
+    let delegate_point = f.host.ids[&delegate].public().signing;
+    let link_body = canonical(&json!({
+        "protocol": "colophon/link/5", "account": f.account.id().as_str(), "from": member,
+        "to": {"signing": b(&delegate_point)}, "session": 0,
+        "terms": {"services": [{"audience": BASE_A, "purposes": [read]}], "depth": 0},
+        "notBefore": format_date(NOW - 1_000), "expires": format_date(NOW + 60_000),
+        "created": format_date(NOW - 1_000),
+    }))
+    .unwrap();
+    let link_signature = f.host.ids[&member].sign(&link_body);
+    let linked_call = |signature: &[u8], signed_body: &str| {
+        let link = canonical(&json!({"body": b(&link_body), "signature": b(signature)})).unwrap();
+        let (seq, digest_at_seq) = f.account.head();
+        let call_body = canonical(&json!({
+            "protocol": "colophon/call/5", "account": f.account.id().as_str(),
+            "asOf": {"seq": seq, "digest": digest_at_seq}, "signer": {"member": member},
+            "key": b(&delegate_point), "links": [b(&link)], "audience": BASE_A, "purpose": read,
+            "args": home_call_args("POST", BATCH, &digest(signed_body.as_bytes())),
+            "requestId": URL_SAFE_NO_PAD.encode([10; 32]), "created": format_date(NOW),
+        }))
+        .unwrap();
+        json!(b(&canonical(&json!({
+            "body": b(&call_body), "signature": b(&f.host.ids[&delegate].sign(&call_body)),
+        }))
+        .unwrap()))
+    };
+    let linked = call(request(&body, linked_call(&link_signature, &body)));
+    assert_eq!(linked["records"], allowed["records"], "{linked}");
+    assert_eq!(linked["reserve"]["signer"], format!("member:{member}"));
+    let mut forged_link = link_signature;
+    forged_link[0] ^= 1;
     let mut replay = valid.clone();
     replay["existing"] = allowed["reserve"].clone();
     let mut over_share = valid;
@@ -249,6 +305,16 @@ fn a_batch_uses_one_bound_call_and_the_same_read_access_as_get_and_head() {
     for (req, status, result) in [
         (request(&body, Value::Null), 401, Value::Null),
         (request(&body, json!(b(b"{}"))), 403, json!("malformed")),
+        (
+            request(&body, linked_call(&forged_link, &body)),
+            403,
+            json!("badSignature"),
+        ),
+        (
+            request(&body, linked_call(&link_signature, "{}")),
+            403,
+            json!("refused:outOfScope"),
+        ),
         (
             request(&body, sign_batch(&revoked, read, &body, NOW, 3)),
             403,
@@ -295,10 +361,10 @@ fn a_batch_uses_one_bound_call_and_the_same_read_access_as_get_and_head() {
         json!({"paths": ["requests/one.json"]}).to_string(),
         too_many.to_string(),
     ] {
-        let mut req = request(&invalid, sign_batch(&member, read, &invalid, NOW, 7));
-        // A malformed batch must be refused even when no state can be loaded.
-        req["state"] = Value::Null;
-        let answer = call(req);
+        let answer = call(request(
+            &invalid,
+            sign_batch(&member, read, &invalid, NOW, 7),
+        ));
         assert_eq!(answer["status"], 400, "{answer}");
         assert!(answer.get("reserve").is_none());
     }
@@ -310,6 +376,184 @@ fn a_batch_uses_one_bound_call_and_the_same_read_access_as_get_and_head() {
         ))["status"],
         413
     );
+    let waiting = Home::new(HomeKeys::new(0x77), f.account.id().as_str());
+    for (body, credential) in [
+        (&body[..], Value::Null),
+        ("{", sign_batch(&member, read, "{", NOW, 11)),
+    ] {
+        let answer = call(batch_request(&waiting, NOW, body, credential));
+        assert_eq!(answer["status"], 404, "{answer}");
+        assert!(answer.get("reserve").is_none());
+    }
+}
+
+#[test]
+fn recover_only_and_suspended_controllers_cannot_batch_history() {
+    let mut recovery = setup("members");
+    assert!(recovery.home.head(NOW).is_some());
+    assert_history_only(
+        &recovery.f,
+        &recovery.home,
+        &recovery.f.k,
+        NOW,
+        "refused:outOfScope",
+    );
+
+    let keys = HomeKeys::new(0x77);
+    let mut f = stopped_support::fixture("members", &[(&keys, BASE_A)]);
+    let mut home = Home::new(keys, f.account.id().as_str());
+    let entries: Vec<_> = entries_json(&f)
+        .into_iter()
+        .map(|(_, entry)| entry)
+        .collect();
+    let now = f.account.now_ms();
+    assert_eq!(home.authority(1, &entries, now)["outcome"], "ok");
+    let remove = f
+        .account
+        .begin_remove_controller(
+            &[f.d.clone()],
+            &[],
+            &[f.k.clone()],
+            TransitionRule::Control,
+            None,
+        )
+        .unwrap();
+    let done = run(&mut f.account, &f.host, remove);
+    let transition = &done.pending[0];
+    let response = home.pending(&[stopped_support::value(transition)], now);
+    assert_eq!(response["outcome"], "ok", "{response}");
+    let receipts = home.sign_receipts(&response, now);
+    assert_eq!(receipts.len(), 1, "{response}");
+    f.account
+        .merge(
+            Incoming {
+                objects: Objects {
+                    pending: vec![canonical(&receipts[0]).unwrap()],
+                    ..Default::default()
+                },
+                records: vec![],
+            },
+            now,
+        )
+        .unwrap();
+    let suspend = f
+        .account
+        .begin_suspend(&f.d, &stopped_support::object_digest(transition), &f.k)
+        .unwrap();
+    run(&mut f.account, &f.host, suspend);
+    let (seq, entry) = entries_json(&f).pop().unwrap();
+    let outcome = home.authority(seq, &[entry], now);
+    assert_eq!(outcome["outcome"], "ok", "{outcome}");
+    let now = now + 1_000;
+    assert!(home.head(now).is_some());
+    assert_history_only(&f, &home, &f.d, now, "refused:revoked");
+}
+
+fn assert_history_only(f: &Fixture, home: &Home, controller: &str, now: i64, refusal: &str) {
+    let history = "authority/00000001.json";
+    let path = format!("/records/{history}");
+    let auth = |purpose, method, path, body: &[u8]| {
+        json!(b(&call_as(
+            &f.host,
+            &f.account,
+            "controller",
+            controller,
+            BASE_A,
+            purpose,
+            home_call_args(method, path, &digest(body)),
+            now,
+            [12; 32],
+        )))
+    };
+    let get = call(
+        json!({"op": "access", "state": home.state, "now": now, "base": BASE_A,
+        "method": "GET", "section": "records", "rest": history, "path": path,
+        "bodySha256": digest(b""), "call": auth("colophon.history.read", "GET", &path, b"")}),
+    );
+    assert_eq!(get["allowed"], true, "{get}");
+    let body = json!({"paths": [history]}).to_string();
+    for (purpose, result) in [
+        ("colophon.history.read", "refused:outOfScope"),
+        ("colophon.home.read", refusal),
+    ] {
+        let batch = call(batch_request(
+            home,
+            now,
+            &body,
+            auth(purpose, "POST", BATCH, body.as_bytes()),
+        ));
+        assert_eq!(batch["status"], 403, "{batch}");
+        assert_eq!(batch["result"], result);
+        assert!(batch.get("records").is_none());
+        assert!(batch.get("reserve").is_none());
+    }
+}
+
+#[test]
+fn public_history_requires_a_batch_call_and_a_stopped_home_refuses_it() {
+    use stopped_support::{activate, final_entry, head, transition, value, DUE};
+
+    let keys = HomeKeys::new(0x77);
+    let f = stopped_support::fixture("public", &[(&keys, BASE_A)]);
+    let mut home = Home::new(keys, f.account.id().as_str());
+    let entries: Vec<_> = entries_json(&f)
+        .into_iter()
+        .map(|(_, entry)| entry)
+        .collect();
+    assert_eq!(home.authority(1, &entries, T0)["outcome"], "ok");
+    assert!(home.head(NOW).is_some());
+    let history = "authority/00000001.json";
+    let body = json!({"paths": [history]}).to_string();
+    let signed = |now| {
+        json!(b(&call_as(
+            &f.host,
+            &f.account,
+            "controller",
+            &f.d,
+            BASE_A,
+            "colophon.home.read",
+            home_call_args("POST", BATCH, &digest(body.as_bytes())),
+            now,
+            [13; 32],
+        )))
+    };
+    let get = |home: &Home, now| {
+        call(json!({
+            "op": "access", "state": home.state, "now": now, "base": BASE_A,
+            "method": "GET", "section": "records", "rest": history, "path": format!("/records/{history}"),
+        }))
+    };
+    assert_eq!(get(&home, NOW)["via"], "public");
+    assert_eq!(
+        call(batch_request(&home, NOW, &body, Value::Null))["status"],
+        401
+    );
+    let allowed = call(batch_request(&home, NOW, &body, signed(NOW)));
+    assert_eq!(allowed["allowed"], true, "{allowed}");
+
+    let raise = transition(&f, json!({"layout": 3}), &f.k, NOW);
+    let response = home.pending(&[value(&raise)], NOW);
+    let receipts = home.sign_receipts(&response, NOW);
+    assert_eq!(receipts.len(), 1, "{response}");
+    let mut objects = f.account.objects().clone();
+    objects
+        .pending
+        .extend([raise.clone(), canonical(&receipts[0]).unwrap()]);
+    let activation = activate(&mut objects, &raise, DUE);
+    objects.heads.push(head(&home.keys, &objects, DUE));
+    let finality = final_entry(&mut objects, entry_seq(&activation), DUE);
+    let stopped = home.authority(
+        entry_seq(&activation),
+        &[value(&activation), value(&finality)],
+        DUE,
+    );
+    assert_eq!(stopped["outcome"], "ok", "{stopped}");
+    assert_eq!(get(&home, DUE)["via"], "public");
+    let batch = call(batch_request(&home, DUE, &body, signed(DUE)));
+    assert_eq!(batch["status"], 503, "{batch}");
+    assert_eq!(batch["result"], "unavailable");
+    assert!(batch.get("records").is_none());
+    assert!(batch.get("reserve").is_none());
 }
 
 #[test]

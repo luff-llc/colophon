@@ -182,6 +182,7 @@ export class HomeSlot {
       if (st.error) throw new Error(st.error);
       if (st.home !== this.key.memberId) throw new Error('state belongs to another home key');
       if (st.account !== this.account) throw new Error(`state belongs to account ${st.account}, not ${this.account}`);
+      this.appointed = st.appointed;
       files = this.wasm.call({ op: 'objects', state: this.state, now: this.clock() }).files;
     } catch (error) {
       throw new Error(`Home slot ${this.slot.name}: cannot open ${this.file('home-state.json')}: ${error.message}; restore the state file from a backup`);
@@ -509,6 +510,10 @@ export class HomeSlot {
   async handle(req, res, url, section, rest) {
     const { HttpError, send, readBody, clampInt } = this.deps;
     await this.keepLease();
+    if (section === 'records' && rest === 'batch' && !this.appointed) {
+      req.resume();
+      throw new HttpError(404, 'Not found');
+    }
     if (!this.rate.take(this.deps.clientAddress(req), this.clock())) {
       throw new HttpError(429, 'Too many requests', { 'retry-after': '60' });
     }
@@ -671,6 +676,8 @@ export class HomeSlot {
     const { send } = this.deps;
     const r = this.wasm.call({ op: 'post_authority', state: this.state, now: this.clock(), body: b64(body) });
     await this.commit(r.state); // even a refusal changes state (§13.1)
+    // The first successful appointment in a committed upload is permanent for this slot.
+    if (r.appointed) this.appointed = true;
     await this.materialize(r.store);
     const receipts = await this.signReceipts(r.sign);
     const head = r.appointed ? await this.settle() : 'fresh';

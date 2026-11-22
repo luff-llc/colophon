@@ -106,6 +106,7 @@ describe('home batch record fetch', { skip: existsSync(wasm) ? false : 'build co
   let dir, running, base, slot, member, revoked;
   const route = '/records/batch';
   const history = 'authority/00000001.json';
+  const waitingBase = new URL('../waiting', fixture.base + '/').href;
 
   // The fixture's signed history grants the device from seed 31 read access to
   // listening.podcasts and revokes the device from seed 32. Both keys are test keys.
@@ -125,7 +126,10 @@ describe('home batch record fetch', { skip: existsSync(wasm) ? false : 'build co
     dir = await mkdtemp(path.join(tmpdir(), 'colophon-home-batch-'));
     running = await startRelay({
       port: 0, dataDir: dir, clock: () => fixture.now,
-      libraries: { home: { home: true, base: fixture.base, account: fixture.account } },
+      libraries: {
+        home: { home: true, base: fixture.base, account: fixture.account },
+        waiting: { home: true, base: waitingBase, account: fixture.account },
+      },
       home: { wasm, key: fixture.key }, limits: { requestsPerMinute: 0 },
       cors: { origins: ['https://client.example'] },
     });
@@ -173,6 +177,28 @@ describe('home batch record fetch', { skip: existsSync(wasm) ? false : 'build co
   };
   const record = (name, ns = 'listening.podcasts') => `state/${member.id}/${ns}/${name}.json`;
   const okRecord = (path, bytes) => ({ path, status: 200, etag: `"${sha256(bytes)}"`, bytes: bytes.toString('base64') });
+
+  test('an unappointed home returns 404 before checking the call or parsing the body', async () => {
+    const body = batchBody([history]);
+    const url = new URL('../waiting/records/batch', base + '/');
+    const signedMalformed = await sign('{', { audience: waitingBase });
+    for (const [payload, authorization] of [[body, undefined], ['{', undefined], ['{', signedMalformed]]) {
+      const res = await fetch(url, {
+        method: 'POST', body: payload,
+        headers: { 'content-type': 'application/json', ...(authorization ? { authorization } : {}) },
+      });
+      assert.equal(res.status, 404);
+      assert.equal(res.headers.get('www-authenticate'), null);
+    }
+  });
+
+  test('a public head still requires a call in a batch', async () => {
+    const head = `heads/${slot.home.key.memberId}.json`;
+    assert.equal((await fetch(`${base}/records/${head}`)).status, 200);
+    const res = await post(batchBody([head]));
+    assert.equal(res.status, 401);
+    assert.equal(res.headers.get('www-authenticate'), 'Colophon');
+  });
 
   test('returns ordered records across namespaces like single-record GET and HEAD', async () => {
     const op = `ops/${member.id}/listening.podcasts/000000000001-${'ab'.repeat(16)}.json`;
@@ -306,6 +332,38 @@ describe('home batch record fetch', { skip: existsSync(wasm) ? false : 'build co
       assert.equal(next.status, 200);
       assert.deepEqual(await next.json(), { records: [okRecord(paths[2], bytes), { path: paths[3], status: 404 }], truncated: false });
     } finally { slot.readFile = readFile; }
+  });
+
+  test('an unavailable own head returns a 503 item without serving the stored head', async () => {
+    const head = `heads/${slot.home.key.memberId}.json`;
+    assert.ok(slot.current.has(head));
+    const settleForRead = slot.home.settleForRead;
+    slot.home.settleForRead = async () => 'due';
+    try {
+      const res = await batch([head, history]);
+      assert.equal(res.status, 200);
+      assert.deepEqual(await res.json(), {
+        records: [{ path: head, status: 503 }, okRecord(history, await slot.readFile(history))],
+        truncated: false,
+      });
+    } finally { slot.home.settleForRead = settleForRead; }
+  });
+
+  test('one corrupt home record fails the entire batch without returning record bytes', async () => {
+    const corrupt = record('corrupt');
+    await slot.putImmutable(corrupt, Buffer.from('good'));
+    await writeFile(path.join(slot.root, 'records', corrupt), 'evil');
+    const body = batchBody([history, corrupt]);
+    const authorization = await sign(body);
+    const res = await post(body, authorization);
+    assert.equal(res.status, 500);
+    const error = await res.text();
+    assert.equal(error.includes('evil'), false);
+    assert.equal(error.includes((await slot.readFile(history)).toString('base64')), false);
+    assert.equal(JSON.parse(error).records, undefined);
+    const replay = await post(body, authorization);
+    assert.equal(replay.status, 403);
+    assert.deepEqual(await replay.json(), { result: 'refused:replay' });
   });
 
   test('rate limits batch requests before reading or authenticating their bodies', async () => {
