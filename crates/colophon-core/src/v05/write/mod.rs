@@ -107,6 +107,11 @@ pub enum Kind {
         /// Epoch objects sorted by namespace.
         epochs: Vec<Value>,
     },
+    /// Declares namespaces after genesis and introduces their first epochs (0.6 F5).
+    AddNamespaces {
+        /// Epoch 1 objects sorted by namespace.
+        epochs: Vec<Value>,
+    },
     /// Admits a member (§9.2).
     Grant {
         /// The embedded request envelope.
@@ -216,6 +221,7 @@ impl Kind {
         match self {
             Self::Genesis { .. } => "genesis",
             Self::Rekey { .. } => "rekey",
+            Self::AddNamespaces { .. } => "namespace.add",
             Self::Grant { .. } => "grant",
             Self::Renew { .. } => "renew",
             Self::Revoke { .. } => "revoke",
@@ -258,7 +264,9 @@ impl Kind {
                     put("predecessor", p.clone());
                 }
             }
-            Self::Rekey { epochs } => put("epochs", Value::Array(epochs.clone())),
+            Self::Rekey { epochs } | Self::AddNamespaces { epochs } => {
+                put("epochs", Value::Array(epochs.clone()))
+            }
             Self::Grant {
                 request,
                 terms,

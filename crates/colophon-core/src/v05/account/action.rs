@@ -34,8 +34,8 @@ use crate::v05::write::calls::{
     PreparedCall, PreparedLink,
 };
 use crate::v05::write::records::{
-    prepare_grant, prepare_rekey, prepare_renew, prepare_resolution, prepare_revoke, Keep,
-    OperationSpec, PreparedOperation,
+    prepare_add_namespaces, prepare_grant, prepare_rekey, prepare_renew, prepare_resolution,
+    prepare_revoke, Keep, OperationSpec, PreparedOperation,
 };
 use crate::v05::write::{format_date, KeptHead, Kind, SignatureResult, SigningStep};
 use crate::v05::{malformed, require, Failure, Reason, Result};
@@ -695,6 +695,29 @@ impl Account {
             s.keys = keys;
         }
         Ok(a)
+    }
+
+    /// Add namespaces to this account and introduce their epoch 1 keys (0.6 F5).
+    pub fn begin_add_namespaces(
+        &self,
+        namespaces: &[String],
+        signers: &[String],
+        seed: [u8; 32],
+    ) -> Result<PendingAction> {
+        self.require_writable()?;
+        let (batch, keys) = prepare_add_namespaces(
+            &self.d.effective,
+            self.now_ms,
+            signers,
+            self.now_ms,
+            namespaces,
+            seed,
+        )?;
+        let mut action = self.batch_action("namespace.add", batch);
+        if let Stage::Sign(stage) = &mut action.stage {
+            stage.keys = keys;
+        }
+        Ok(action)
     }
 
     // -----------------------------------------------------------------------------------------

@@ -168,6 +168,99 @@ fn a_first_upload_appoints_the_home_and_a_head_is_due_then_guarded() {
 }
 
 #[test]
+fn a_home_admits_a_post_genesis_namespace_and_checks_scoped_writes() {
+    use colophon_core::v05::encoding::digest;
+    use colophon_core::v05::records::Level;
+    use support_relay::{fresh_request_id, home_call};
+
+    const SAVED: &str = "reading.saved";
+    const FOUNDRY: &str = "game.foundry";
+    let keys = HomeKeys::new(0x77);
+    let mut f = create_with(&[NS, SAVED], "public", 1);
+    appoint_homes(&mut f, &[(&keys, BASE_A)]);
+    let mut home = Home::new(keys, f.account.id().as_str());
+    let entries: Vec<_> = entries_json(&f)
+        .into_iter()
+        .map(|(_, entry)| entry)
+        .collect();
+    let admitted = home.authority(1, &entries, T0 + 1_000);
+    assert_eq!(admitted["outcome"], "ok", "{admitted}");
+    assert_eq!(admitted["appointed"], true);
+
+    let from = f.account.head().0 + 1;
+    f.account.advance(NOW).unwrap();
+    let add = f
+        .account
+        .begin_add_namespaces(
+            &[FOUNDRY.into()],
+            std::slice::from_ref(&f.d),
+            f.host.fresh(),
+        )
+        .unwrap();
+    run(&mut f.account, &f.host, add);
+    let member = f.host.identity(91);
+    let terms = terms_for(&[(FOUNDRY, "write")]);
+    admit(&mut f, &member, "AI Foreman", "agent", terms.clone(), terms);
+    let suffix: Vec<_> = entries_json(&f)
+        .into_iter()
+        .filter_map(|(seq, entry)| (seq >= from).then_some(entry))
+        .collect();
+    let admitted = home.authority(from, &suffix, NOW);
+    assert_eq!(admitted["outcome"], "ok", "{}", admitted["result"]);
+    assert!(home
+        .kinds()
+        .ends_with(&["namespace.add".into(), "grant".into()]));
+    assert!(home.head(NOW).is_some());
+
+    let src = MemSource::new();
+    src.store_account(&f.account);
+    let mut engine = member_engine(&f, &f.host, &src, &member, NOW);
+    let refused = engine.begin_write(SAVED, "save", json!({}), Level::Write, f.host.fresh());
+    assert_eq!(refused.unwrap().err().unwrap().reason, "notGranted");
+    let written = engine_write(
+        &mut engine,
+        &mut f.host,
+        &src,
+        FOUNDRY,
+        "machine.place",
+        json!({"machine": "smelter"}),
+    );
+    let (record_path, bytes) = written
+        .stores
+        .iter()
+        .find(|(p, _)| p.starts_with("ops/"))
+        .unwrap();
+    let access = |record_path: &str| {
+        let path = format!("/records/{record_path}");
+        let signed = home_call(
+            &f.host,
+            engine.account(),
+            BASE_A,
+            "PUT",
+            &path,
+            bytes,
+            NOW,
+            fresh_request_id(),
+        );
+        call(json!({
+            "op": "access", "state": home.state, "now": NOW, "base": BASE_A, "method": "PUT",
+            "section": "records", "rest": record_path, "path": path,
+            "bodySha256": digest(bytes), "call": b(&signed),
+        }))
+    };
+    let allowed = access(record_path);
+    assert_eq!(allowed["allowed"], true, "{allowed}");
+    let checked = call(json!({
+        "op": "check_record", "state": home.state, "now": NOW,
+        "path": record_path, "bytes": b(bytes),
+    }));
+    assert_eq!(checked["allowed"], true, "{checked}");
+    let refused = access(&record_path.replace(FOUNDRY, SAVED));
+    assert_eq!(refused["status"], 403, "{refused}");
+    assert_eq!(refused["result"], "refused:outOfScope", "{refused}");
+}
+
+#[test]
 fn a_transition_is_receipted_once_then_due_activated_and_recorded() {
     let mut s = setup("public");
     let d = s.f.d.clone();

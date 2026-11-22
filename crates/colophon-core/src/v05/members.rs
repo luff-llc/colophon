@@ -240,7 +240,11 @@ pub struct EpochSeals {
     /// Recipient IDs sealed to.
     pub recipients: BTreeSet<String>,
 }
-fn parse_epochs(items: Vec<Value>, field: &str, unknown: &mut Unknown) -> Result<Vec<EpochSeals>> {
+pub(crate) fn parse_epochs(
+    items: Vec<Value>,
+    field: &str,
+    unknown: &mut Unknown,
+) -> Result<Vec<EpochSeals>> {
     items
         .into_iter()
         .map(|item| {

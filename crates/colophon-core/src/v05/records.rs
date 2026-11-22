@@ -651,7 +651,6 @@ pub struct RecordAuthority {
     authority_seq: u64,
     fork_seq: Option<u64>,
     stop: Option<Stop>,
-    namespaces: Vec<String>,
     introductions: Vec<(u64, String, u64)>,
     sealed: BTreeMap<(String, u64), BTreeMap<String, SealedBox>>,
     revokes: BTreeMap<String, RevokeInfo>,
@@ -714,23 +713,22 @@ impl RecordAuthority {
                 }
             }
         }
-        let mut namespaces = Vec::new();
         let mut introductions = Vec::new();
         let mut sealed: BTreeMap<(String, u64), BTreeMap<String, SealedBox>> = BTreeMap::new();
         let mut revokes = BTreeMap::new();
         for (seq, v) in &by_seq {
-            if *seq == 1 {
-                namespaces = v
-                    .get("namespaces")
-                    .and_then(Value::as_array)
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|n| n.as_str().map(str::to_string))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-            }
-            for (field, introduces) in [("epochs", true), ("shares", false)] {
+            // For /5, use only the fields replay recognizes on each kind. In particular,
+            // an ignored field on an earlier entry cannot preempt a later declaration's seal.
+            let fields: &[(&str, bool)] = if v["protocol"] == "colophon/authority/5" {
+                match v["kind"].as_str() {
+                    Some("rekey" | "revoke" | "namespace.add") => &[("epochs", true)],
+                    Some("grant" | "renew") => &[("shares", false)],
+                    _ => &[],
+                }
+            } else {
+                &[("epochs", true), ("shares", false)]
+            };
+            for &(field, introduces) in fields {
                 let Some(items) = v.get(field).and_then(Value::as_array) else {
                     continue;
                 };
@@ -796,7 +794,6 @@ impl RecordAuthority {
             state,
             fork_seq,
             stop: verdict.stop,
-            namespaces,
             introductions,
             sealed,
             revokes,
@@ -832,9 +829,9 @@ impl RecordAuthority {
     pub fn upgrade_seq(&self) -> Option<u64> {
         self.state.upgrade_seq
     }
-    /// Declared namespaces, from the genesis.
+    /// Namespaces declared on the verified branch.
     pub fn namespaces(&self) -> &[String] {
-        &self.namespaces
+        self.state.namespaces()
     }
     /// A member by ID (revoked members included).
     pub fn member(&self, id: &str) -> Option<&MemberRecord> {

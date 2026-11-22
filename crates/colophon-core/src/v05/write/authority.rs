@@ -332,6 +332,9 @@ fn immediate_rule(
                     .ok_or_else(unmet)
             }
         }
+        Kind::AddNamespaces { .. } => control_rule(k, signers, k.threshold)
+            .then_some(AuthorityRule::Control)
+            .ok_or_else(unmet),
         Kind::Keyring { keyring } => {
             let all_control = signers
                 .iter()
@@ -536,6 +539,9 @@ pub fn prepare_signed(
         )?;
     }
     let rule = immediate_rule(&state, &kind, signers, issued_ms)?;
+    if let Kind::AddNamespaces { epochs } = &kind {
+        state.check_namespace_add(epochs.clone())?;
+    }
     let header = next_header(&state, issued_ms, &signers[0])?;
     let body = kind.body(&header)?;
     let path = authority_path(header.seq);

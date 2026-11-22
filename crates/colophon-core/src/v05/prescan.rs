@@ -237,6 +237,7 @@ pub fn authority_fields(kind: &str, body: &Value) -> Option<Unknown> {
         "grant" => &["request", "terms", "shares"],
         "renew" => &["member", "expires", "shares"],
         "revoke" => &["member", "kept", "heads", "epochs"],
+        "namespace.add" => &["epochs"],
         "endSessions" => &["member"],
         "genesis" => &["label", "namespaces", "keyring", "predecessor"],
         _ => return None,
@@ -251,6 +252,7 @@ pub fn authority_fields(kind: &str, body: &Value) -> Option<Unknown> {
             epochs(m.get("shares"), "shares", &mut out);
         }
         "renew" => epochs(m.get("shares"), "shares", &mut out),
+        "namespace.add" => epochs(m.get("epochs"), "epochs", &mut out),
         "revoke" => {
             for h in m
                 .get("heads")

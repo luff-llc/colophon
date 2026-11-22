@@ -17,9 +17,10 @@
 //! key and the nonce, and prepare refuses a nonce already used under the same key by a header
 //! it can see.
 //!
-//! **While the vault is retiring (§8.3)** no epoch is introduced: [`build_epochs`] and
-//! [`prepare_rekey`] refuse, and [`prepare_revoke`] carries empty `epochs` and says a `rekey`
-//! is owed ([`PreparedRevoke::rekey_owed`]) once the new vault is in place.
+//! **While the vault is retiring (§8.3)** no epoch is introduced: [`build_epochs`],
+//! [`prepare_rekey`] and [`prepare_add_namespaces`] refuse, and [`prepare_revoke`] carries
+//! empty `epochs` and says a `rekey` is owed ([`PreparedRevoke::rekey_owed`]) once the new
+//! vault is in place.
 //!
 //! **Prepare, then finish.** Prepared state has private fields and read-only accessors. The
 //! only thing a host can change between the two calls is the signature, and `finish` judges
@@ -88,9 +89,7 @@ pub fn build_epochs(
         ));
     }
     let namespaces = sorted_distinct(namespaces)?;
-    let mut entropy = Entropy::new(seed);
-    let mut epochs = Vec::new();
-    let mut keys = EpochKeys::new();
+    let mut introductions = Vec::with_capacity(namespaces.len());
     for ns in namespaces {
         require(
             auth.namespaces().contains(&ns),
@@ -101,6 +100,22 @@ pub fn build_epochs(
             .checked_add(1)
             .ok_or_else(|| malformed("epoch overflow"))?;
         require(epoch <= bounds::MAX_INTEGER, "epoch too large")?;
+        introductions.push((ns, epoch));
+    }
+    seal_epochs(auth, introductions, issued_ms, exclude, seed)
+}
+
+fn seal_epochs(
+    auth: &RecordAuthority,
+    introductions: Vec<(String, u64)>,
+    issued_ms: i64,
+    exclude: Option<&str>,
+    seed: [u8; 32],
+) -> Result<(Vec<Value>, EpochKeys)> {
+    let mut entropy = Entropy::new(seed);
+    let mut epochs = Vec::with_capacity(introductions.len());
+    let mut keys = EpochKeys::new();
+    for (ns, epoch) in introductions {
         let mut bytes = entropy.take::<32>().map_err(entropy_error)?;
         let key = EpochKey::from_secret(auth.account(), &ns, epoch, bytes);
         bytes = [0; 32];
@@ -168,6 +183,26 @@ pub fn prepare_rekey(
     }
     let (epochs, keys) = build_epochs(&auth, namespaces, issued_ms, None, seed)?;
     let batch = prepare_signed(objects, now_ms, Kind::Rekey { epochs }, issued_ms, signers)?;
+    Ok((batch, keys))
+}
+
+/// Declare new namespaces and seal their epoch 1 keys to the current vault (0.6 F5).
+pub fn prepare_add_namespaces(
+    objects: &Objects,
+    now_ms: i64,
+    signers: &[String],
+    issued_ms: i64,
+    namespaces: &[String],
+    seed: [u8; 32],
+) -> Result<(PendingBatch, EpochKeys)> {
+    let auth = RecordAuthority::from_objects(objects, now_ms)?;
+    auth.require_clean()?;
+    let names = sorted_distinct(namespaces)?;
+    auth.state()
+        .check_namespace_add_names(names.iter().map(String::as_str))?;
+    let introductions = names.into_iter().map(|ns| (ns, 1)).collect();
+    let (epochs, keys) = seal_epochs(&auth, introductions, issued_ms, None, seed)?;
+    let batch = prepare_signed(objects, now_ms, Kind::AddNamespaces { epochs }, issued_ms, signers)?;
     Ok((batch, keys))
 }
 

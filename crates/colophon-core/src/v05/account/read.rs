@@ -1126,6 +1126,7 @@ impl Account {
                     format!("{who} created this account. Its namespaces are sealed with keys only its members hold."),
                 ),
                 "rekey" => ("rekeyed", format!("{who} introduced new namespace keys.")),
+                "namespace.add" => ("namespaceAdded", format!("{who} added namespaces.")),
                 "grant" => {
                     let granted = v
                         .get("request")

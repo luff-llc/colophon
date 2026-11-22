@@ -6,12 +6,13 @@ use crate::v05::descriptor::{Controller, Policy, Role};
 use crate::v05::encoding::{bounds, Obj};
 use crate::v05::ids::{key_id, AccountId};
 use crate::v05::members::{
-    AuthorityHeader, Grant, GrantContext, MemberKind, Renew, Request, Revoke,
+    parse_epochs, AuthorityHeader, EpochSeals, Grant, GrantContext, MemberKind, Renew, Request,
+    Revoke,
 };
 use crate::v05::signature::{
     verify_authority_signature_with, AuthorityRule, Checked, PreparedKeys, RawEnvelope,
 };
-use crate::v05::terms::{Terms, TermsKind};
+use crate::v05::terms::{valid_namespace, Terms, TermsKind};
 use crate::v05::{bad_signature, malformed, Failure, Result};
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -271,6 +272,58 @@ impl State {
     /// Held history digests from seq 1.
     pub fn history(&self) -> &[String] {
         &self.digests
+    }
+    /// Declared namespaces in sorted order.
+    pub(crate) fn namespaces(&self) -> &[String] {
+        &self.namespaces
+    }
+
+    pub(crate) fn check_namespace_add_names<'a>(
+        &self,
+        names: impl ExactSizeIterator<Item = &'a str>,
+    ) -> Result<()> {
+        use crate::v05::require;
+        require(self.digests.len() >= 2, "namespace.add: starts at seq 3")?;
+        require(
+            self.retiring.is_none(),
+            "namespace.add: the vault is retiring",
+        )?;
+        require(
+            names.len() > 0 && names.len() <= 256usize.saturating_sub(self.namespaces.len()),
+            "namespace.add: add at least one namespace, with at most 256 in the account",
+        )?;
+        let mut previous = None;
+        for name in names {
+            require(valid_namespace(name), "namespace.add: invalid namespace")?;
+            if name.starts_with("colophon.") {
+                return Err(Failure::NewerFormat(format!("reserved namespace {name}")));
+            }
+            require(
+                previous.is_none_or(|p| p < name),
+                "namespace.add: namespaces must be sorted and distinct",
+            )?;
+            require(
+                !self.namespaces.iter().any(|declared| declared == name),
+                "namespace.add: namespace already declared",
+            )?;
+            previous = Some(name);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn check_namespace_add(&self, items: Vec<Value>) -> Result<Vec<EpochSeals>> {
+        let mut unknown = crate::v05::Unknown::default();
+        let epochs = parse_epochs(items, "namespace.add.epochs", &mut unknown)?;
+        unknown.check()?;
+        self.check_namespace_add_names(epochs.iter().map(|e| e.namespace.as_str()))?;
+        let vault = crate::v05::vault::VaultPublic::from_pair(&self.keyring.vault).id();
+        for epoch in &epochs {
+            crate::v05::require(
+                epoch.epoch == 1 && epoch.recipients.len() == 1 && epoch.recipients.contains(&vault),
+                "namespace.add: epoch 1 must be sealed only to the current vault",
+            )?;
+        }
+        Ok(epochs)
     }
     /// The current keyring.
     pub fn keyring(&self) -> &Keyring {
@@ -3010,6 +3063,7 @@ fn immediate(s: &State, e: &Entry) -> Step<State> {
                 single
             }
         }
+        "namespace.add" => control_rule,
         "rekey" => {
             if member_rule_control {
                 control_rule
@@ -3228,6 +3282,17 @@ fn immediate(s: &State, e: &Entry) -> Step<State> {
             {
                 m.end_sessions.push(e.seq);
             }
+        }
+        "namespace.add" => {
+            super::prescan("namespace.add", v).check()?;
+            let (_, mut fields) = AuthorityHeader::split(v.clone())?;
+            let epochs = s.check_namespace_add(fields.array("epochs")?)?;
+            charge_rate(&mut n, e, false)?;
+            for ep in epochs {
+                n.epochs.insert(ep.namespace.clone(), ep.epoch);
+                n.namespaces.push(ep.namespace);
+            }
+            n.namespaces.sort();
         }
         "rekey" => {
             let epochs = v
