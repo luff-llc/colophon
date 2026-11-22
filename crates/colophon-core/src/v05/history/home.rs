@@ -1268,9 +1268,7 @@ fn admit_full(
                 admitted_head = Some(incoming.to_vec());
             }
             "colophon/authority/5" => {
-                if let Some(notice) = admit_entry(&mut next, &persisted, &st, &env, incoming, now_ms, fork, later)? {
-                    notices.push(notice);
-                }
+                notices.extend(admit_entry(&mut next, &persisted, &st, &env, incoming, now_ms, fork, later)?);
             }
             _ => return Err(malformed("unknown home object protocol").into()),
         }
@@ -1445,7 +1443,7 @@ fn admit_entry(
     now_ms: i64,
     fork: Option<u64>,
     later: &[Vec<u8>],
-) -> AdmitResult<Option<Notice>> {
+) -> AdmitResult<Vec<Notice>> {
     let entry = parse_entry(incoming)?;
     let held: Vec<Vec<u8>> = persisted
         .objects()
@@ -1454,7 +1452,7 @@ fn admit_entry(
     let held_entries: Vec<super::Entry> = held.iter().filter_map(|b| parse_entry(b).ok()).collect();
     // Equality is by body: an entry held already, on the branch or as a candidate, is stored.
     if held_entries.iter().any(|e| e.env.digest == env.digest) {
-        return Ok(None);
+        return Ok(Vec::new());
     }
     let recording = matches!(
         entry.kind.as_str(),
@@ -1507,7 +1505,7 @@ fn admit_entry(
             &held_entries,
             covered,
             later,
-        ).map(|()| None);
+        );
     }
     let mut objects = Objects {
         entries: vec![incoming.to_vec()],
@@ -1553,14 +1551,17 @@ fn admit_entry(
     }
     objects.pending = next.pending.iter().map(|p| p.envelope.clone()).collect();
     next.checkpoint = Persisted::checkpoint(&objects, persisted, now_ms).to_bytes()?;
+    Ok(suspend_notice(&entry, st).into_iter().collect())
+}
+
+fn suspend_notice(entry: &super::Entry, before: &State) -> Option<Notice> {
     if entry.kind != "suspend" {
-        return Ok(None);
+        return None;
     }
-    let notice = embedded_bytes(&env.value["transition"], "transition", bounds::TRANSITION_ENVELOPE)
-        .and_then(|transition| state::check_transition(st, &transition, &[], false, false))
+    embedded_bytes(&entry.env.value["transition"], "transition", bounds::TRANSITION_ENVELOPE)
+        .and_then(|transition| state::check_transition(before, &transition, &[], false, false))
         .ok()
-        .map(|checked| Notice::new(env, "suspend", entry.issued, checked.deadline_ms));
-    Ok(notice)
+        .map(|checked| Notice::new(&entry.env, "suspend", entry.issued, checked.deadline_ms))
 }
 
 fn endpoints_of(st: &State, home: &str) -> Vec<String> {
@@ -1704,7 +1705,7 @@ fn admit_candidate(
     held: &[super::Entry],
     covered: bool,
     later: &[Vec<u8>],
-) -> AdmitResult<()> {
+) -> AdmitResult<Vec<Notice>> {
     let recording = matches!(
         entry.kind.as_str(),
         "activate" | "vetoed" | "final" | "successionVetoed"
@@ -1801,6 +1802,7 @@ fn admit_candidate(
             slots.insert(h, entry.env.digest.clone());
         }
         let mut p = Persisted::checkpoint(&objects, persisted, now_ms);
+        let mut notices = Vec::new();
         if stands {
             // A grinding controller may replace the winner arbitrarily often. Keep only
             // the new winner and one piece of evidence per current covering home at this seq.
@@ -1816,9 +1818,24 @@ fn admit_candidate(
             let mut rebuilt = Persisted::rebuild(&kept, &p.to_bytes()?, now_ms);
             rebuilt.high_water = p.high_water.clone();
             p = rebuilt;
+            // A replacement can also bring previously held descendants onto the branch.
+            let common = old_branch.iter().zip(&verdict.branch).take_while(|(a, b)| a == b).count();
+            let suspends: BTreeMap<_, _> = held.iter().chain(std::iter::once(entry))
+                .filter(|e| e.kind == "suspend")
+                .map(|e| (e.env.digest.as_str(), e))
+                .collect();
+            for digest in &verdict.branch[common..] {
+                let Some(suspend) = suspends.get(digest.as_str()) else { continue };
+                if suspend.env.digest == entry.env.digest {
+                    notices.extend(suspend_notice(suspend, &before));
+                } else if let Some(parent) = &suspend.previous {
+                    let parent_state = branch_state(&p, parent, now_ms.max(suspend.issued))?;
+                    notices.extend(suspend_notice(suspend, &parent_state));
+                }
+            }
         }
         next.checkpoint = p.to_bytes()?;
-        return Ok(());
+        return Ok(notices);
     }
     // Non-standing evidence consumes one durable slot of a current covering home; the
     // standing entry is retained alongside at most eight evidence slots.

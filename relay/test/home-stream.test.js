@@ -29,10 +29,18 @@ const routePath = `/routes/${routeId}`;
 const rawBody = (envelope) => Buffer.from(envelope.body, 'base64');
 
 function canonical(value) {
+  if (Array.isArray(value)) return '[' + value.map(canonical).join(',') + ']';
   if (value && typeof value === 'object') {
     return '{' + Object.keys(value).sort().map((key) => JSON.stringify(key) + ':' + canonical(value[key])).join(',') + '}';
   }
   return JSON.stringify(value);
+}
+
+async function signBody(value, key) {
+  const signingKey = await crypto.subtle.importKey('jwk', key, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign']);
+  const bytes = Buffer.from(canonical(value));
+  const signature = Buffer.from(await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, signingKey, bytes));
+  return { body: bytes.toString('base64'), signature: signature.toString('base64') };
 }
 
 function testHome(name, run) {
@@ -42,7 +50,7 @@ function testHome(name, run) {
     let running;
     const files = (name) => path.join(dir, 'home', name);
     const clock = () => now;
-    const advance = () => { now += 1000; };
+    const advance = (ms = 1000) => { now += ms; };
     const restart = async () => {
       await running?.close();
       running = await startRelay({
@@ -57,15 +65,13 @@ function testHome(name, run) {
       asOf = fixture.asOf } = {}) => {
       const { id, key } = fixture[signer];
       const point = Buffer.concat([Buffer.from([4]), Buffer.from(key.x, 'base64url'), Buffer.from(key.y, 'base64url')]);
-      const signingKey = await crypto.subtle.importKey('jwk', key, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign']);
-      const bytes = Buffer.from(canonical({
+      const envelope = await signBody({
         protocol: 'colophon/call/5', account: fixture.account, asOf, audience, purpose,
         signer: { [kind]: id }, key: point.toString('base64'),
         args: { method, path: relative, body: sha(body) },
         requestId: randomBytes(32).toString('base64url'), created: stamp(now),
-      }));
-      const signature = Buffer.from(await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, signingKey, bytes));
-      return `Colophon ${Buffer.from(JSON.stringify({ body: bytes.toString('base64'), signature: signature.toString('base64') })).toString('base64url')}`;
+      }, key);
+      return `Colophon ${Buffer.from(JSON.stringify(envelope)).toString('base64url')}`;
     };
     const host = () => `127.0.0.1:${running.port}`;
     const request = (relative, method = 'GET', body, authorization, extra) => fetch(`http://${host()}${prefix}${relative}`, {
@@ -126,6 +132,8 @@ testHome('notice route CRUD verifies calls, redacts addresses and persists acros
   assert.equal((await request('/routes')).status, 401);
   const wrong = await signed(`/routes/${'0'.repeat(64)}`, 'PUT', route);
   assert.equal(wrong.status, 400);
+  const reflecting = route.replace('Phone', ' PRIVATE-DEVICE-TOKEN ');
+  assert.equal((await signed(routePath, 'PUT', reflecting)).status, 400);
   const created = await request(routePath, 'PUT', route, `Colophon ${fixture.recoverCall}`);
   assert.equal(created.status, 201, await created.text());
   const listing = await signed('/routes', 'GET', undefined, { signer: 'member' });
@@ -143,6 +151,26 @@ testHome('notice route CRUD verifies calls, redacts addresses and persists acros
   assert.equal((await signed(routePath, 'DELETE')).status, 204);
   assert.equal((await signed(routePath, 'DELETE')).status, 404);
   assert.deepEqual(await (await signed('/routes')).json(), { routes: [] });
+});
+
+testHome('notice routes cap new IDs at 64 and allow updates and reuse of freed capacity', async ({ signed }) => {
+  const id = (i) => `/routes/${sha(`push\0device-${i}`)}`;
+  const put = (i, reaches = 'Phone') => signed(id(i), 'PUT', JSON.stringify({
+    kind: 'push', address: `device-${i}`, reaches,
+  }));
+  for (let i = 0; i < 64; i++) {
+    const response = await put(i);
+    assert.equal(response.status, 201, await response.text());
+  }
+  const refused = await put(64);
+  assert.equal(refused.status, 507);
+  assert.deepEqual(await refused.json(), { result: 'refused:overQuota' });
+  assert.equal((await put(0, 'Tablet')).status, 200);
+  assert.equal((await signed(id(1), 'DELETE')).status, 204);
+  assert.equal((await put(64)).status, 201);
+  const { routes } = await (await signed('/routes')).json();
+  assert.equal(routes.length, 64);
+  assert.equal(routes.find((r) => `/routes/${r.id}` === id(0)).reaches, 'Tablet');
 });
 
 testHome('stream rejects missing, invalid, misbound and replayed calls, then pushes record changes', async ({ call, signed, host, slot }) => {
@@ -174,12 +202,116 @@ testHome('stream rejects missing, invalid, misbound and replayed calls, then pus
     assert.deepEqual(await next, { type: 'change', cursor: cursor + 1 });
   } finally {
     const { sockets } = (await slot()).home;
-    const detached = once([...sockets][0], 'close');
+    const detached = once(sockets.keys().next().value, 'close');
     const closed = once(ws, 'close');
     ws.close();
     await Promise.all([closed, detached]);
     assert.equal(sockets.size, 0);
   }
+});
+
+async function endSessions(issued) {
+  return signBody({
+    protocol: 'colophon/authority/5', kind: 'endSessions', seq: fixture.asOf.seq + 1,
+    previous: fixture.asOf.digest, issued, by: fixture.member.id, member: fixture.member.id,
+  }, fixture.member.key);
+}
+
+async function revoke(issued) {
+  return signBody({
+    protocol: 'colophon/authority/5', kind: 'revoke', seq: fixture.asOf.seq + 1,
+    previous: fixture.asOf.digest, issued, by: fixture.controller.id, member: fixture.member.id,
+    kept: [], heads: [], epochs: [{ namespace: 'notes', epoch: 2, seals: {} }],
+  }, fixture.controller.key);
+}
+
+for (const makeEntry of [endSessions, revoke]) {
+  testHome(`${makeEntry.name} closes an open member stream before pushing the new head`, async ({ call, request, host, advance, slot }) => {
+    const ws = await connect(host(), await call('GET', '/stream', '', { signer: 'member' }));
+    const controller = await connect(host(), await call('GET', '/stream'));
+    const received = [];
+    ws.on('message', (data) => received.push(JSON.parse(data)));
+    try {
+      const closed = once(ws, 'close');
+      const head = nextFrame(controller, 'head');
+      advance();
+      const entry = await makeEntry(stamp(fixture.now + 1000));
+      const seq = fixture.asOf.seq + 1;
+      const response = await request('/authority', 'POST', JSON.stringify({ from: seq, entries: [entry], receipts: [] }));
+      assert.equal(response.status, 200, await response.text());
+      assert.deepEqual(await head, { type: 'head', seq, digest: sha(rawBody(entry)) });
+      assert.equal((await closed)[0], 1008);
+      assert.deepEqual(received, []);
+      assert.equal((await slot()).home.sockets.size, 1);
+    } finally {
+      ws.terminate();
+      controller.terminate();
+    }
+  });
+}
+
+testHome('an expired member stream closes instead of receiving further pushes', async ({ call, request, signed, host, advance }) => {
+  const grant = JSON.parse(rawBody(fixture.entries[3]));
+  const expires = Date.parse(grant.terms.expires);
+  advance(expires - fixture.now - 1000);
+  assert.equal((await request('/head')).status, 200);
+  const ws = await connect(host(), await call('GET', '/stream', '', { signer: 'member' }));
+  const controller = await connect(host(), await call('GET', '/stream'));
+  const received = [];
+  ws.on('message', (data) => received.push(JSON.parse(data)));
+  try {
+    const closed = once(ws, 'close');
+    const pushed = nextFrame(controller, 'change');
+    advance(1001);
+    const record = 'another encrypted chunk';
+    const response = await signed(`/records/blobs/${sha(record)}`, 'PUT', record, undefined, { 'if-none-match': '*' });
+    assert.equal(response.status, 201, await response.text());
+    await pushed;
+    assert.equal((await closed)[0], 1008);
+    assert.deepEqual(received, []);
+  } finally {
+    ws.terminate();
+    controller.terminate();
+  }
+});
+
+testHome('a suspend committed on a replacement branch queues and pushes its notice', async ({
+  call, request, host, files, advance, slot,
+}) => {
+  const ws = await connect(host(), await call('GET', '/stream'));
+  const seq = fixture.asOf.seq + 1;
+  const postEntry = (entry) => request('/authority', 'POST', JSON.stringify({ from: seq, entries: [entry], receipts: [] }));
+  try {
+    const ownHead = await (await request('/head')).json();
+    const { by } = JSON.parse(rawBody(ownHead));
+    const first = await postEntry(await endSessions(stamp(fixture.now)));
+    assert.equal(first.status, 200, await first.text());
+    // The clock did not move while the first entry committed, so no head covers it.
+    advance();
+    const object = sha(rawBody(fixture.suspend));
+    const covering = await signBody({
+      protocol: 'colophon/head/5', account: fixture.account, by,
+      authority: { seq, digest: object }, issued: stamp(fixture.now + 1000),
+    }, fixture.homeKey);
+    // Seed the verifier with the covering head on this single-home fixture.
+    const { home } = await slot();
+    await home.lock(async () => {
+      const bytes = Buffer.from(JSON.stringify(covering)).toString('base64');
+      const head = home.wasm.call({ op: 'admit_one', state: home.state, now: fixture.now + 1000, bytes });
+      assert.equal(head.outcome, 'ok', JSON.stringify(head));
+      await home.commit(head.state);
+      await home.materialize(head.store);
+    });
+
+    const notice = nextFrame(ws, 'notice');
+    const replacement = await postEntry(fixture.suspend);
+    assert.equal(replacement.status, 200, await replacement.text());
+    const deadline = stamp(fixture.now + 3_600_000);
+    assert.deepEqual(await notice, { type: 'notice', object, kind: 'suspend', deadline });
+    assert.deepEqual(JSON.parse(await readFile(files('notices.jsonl'), 'utf8')), {
+      account: fixture.account, object, kind: 'suspend', issued: stamp(fixture.now), deadline,
+    });
+  } finally { ws.terminate(); }
 });
 
 testHome('admitted transitions, suspends and vetoes queue public metadata and push live notices', async ({
@@ -189,6 +321,7 @@ testHome('admitted transitions, suspends and vetoes queue public metadata and pu
   const email = { kind: 'email', address: 'private@example.test', reaches: 'Mail' };
   assert.equal((await signed(`/routes/${sha(`${email.kind}\0${email.address}`)}`, 'PUT', JSON.stringify(email))).status, 201);
   const ws = await connect(host(), await call('GET', '/stream'));
+  const suspended = await connect(host(), await call('GET', '/stream', '', { signer: 'secondController' }));
   const pending = (envelope) => request('/pending', 'POST', JSON.stringify({ objects: [envelope] }));
   const expected = [];
   const deadline = stamp(fixture.now + 3_600_000);
@@ -209,11 +342,13 @@ testHome('admitted transitions, suspends and vetoes queue public metadata and pu
 
     advance();
     const head = nextFrame(ws, 'head');
+    const closed = once(suspended, 'close');
     const seq = fixture.asOf.seq + 1;
     await assertNotice('suspend', fixture.suspend, () =>
       request('/authority', 'POST', JSON.stringify({ from: seq, entries: [fixture.suspend], receipts: [] })));
     const digest = sha(rawBody(fixture.suspend));
     assert.deepEqual(await head, { type: 'head', seq, digest });
+    assert.equal((await closed)[0], 1008);
     // A suspended controller may still maintain its route.
     assert.equal((await signed(routePath, 'PUT', route, { signer: 'secondController', asOf: { seq, digest } })).status, 200);
     await assertNotice('veto', fixture.veto, () => pending(fixture.veto));
@@ -228,5 +363,8 @@ testHome('admitted transitions, suspends and vetoes queue public metadata and pu
     await writeFile(files('notices.jsonl'), Buffer.from(queue).subarray(0, offset + 3));
     await restart();
     assert.equal(await readFile(files('notices.jsonl'), 'utf8'), queue);
-  } finally { ws.terminate(); }
+  } finally {
+    ws.terminate();
+    suspended.terminate();
+  }
 });

@@ -521,6 +521,24 @@ impl AccountView {
     pub fn history(&self) -> &[String] {
         &self.v.history
     }
+    /// The member's expiry and session generation for a long-lived stream opened by a
+    /// verified call. A delegated stream also expires with its last (narrowest) link.
+    pub fn stream_grant(&self, verified: &VerifiedCall) -> Option<(Option<i64>, u64)> {
+        let CallSigner::Member(id) = &verified.call.signer else {
+            return None;
+        };
+        let member = self.v.members.iter().find(|m| &m.id == id)?;
+        let links = &verified.call.links;
+        let expires = links
+            .last()
+            .map(|link| link.expires_ms)
+            .or_else(|| member.expiry_at(verified.evaluated_at));
+        let session = links
+            .first()
+            .and_then(|link| link.session)
+            .unwrap_or(member.end_sessions.len() as u64);
+        Some((expires, session))
+    }
     fn policy_at(&self, seq: u64) -> Option<&Policy> {
         self.v
             .policies
