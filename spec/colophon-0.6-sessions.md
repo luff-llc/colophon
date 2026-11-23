@@ -1,6 +1,6 @@
 # Colophon 0.6: sessions
 
-**Status:** unfrozen draft, revision 12, 2026-11-23. Revision 2 adopted the findings of the
+**Status:** unfrozen draft, revision 13, 2026-11-23. Revision 2 adopted the findings of the
 reference machine (`docs/colophon-0.6-sessions-findings.md`, F1–F20); revision 3 added `via` to passed claims (F12, F21); revision 4 answers the first
 independent design review (R1–R9 in the findings document): evidence instead of hearsay,
 no silent loss of state, key bootstrap and freshness, bounded state; revision 5 adopts what
@@ -57,8 +57,8 @@ timely from a time T when, from T on:
    member it concerns within that same length of time after it is first sent, counting the
    resends this document requires.
 
-Loss is allowed as long as these hold: two beats lost in a row are within the condition,
-three are not. A home that delivers every frame within `beatMs` and loses none satisfies it
+Loss is allowed as long as these hold: with the default policy one beat lost in a row is
+within the condition, and two in a row are not. A home that delivers every frame within `beatMs` and loses none satisfies it
 with room to spare. Before that moment claims may change;
 they never go backwards and nothing is dropped silently.
 
