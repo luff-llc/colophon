@@ -1,7 +1,7 @@
 # Colophon 0.6: sessions
 
-**Status:** unfrozen draft, revision 2, 2026-11-22. Revision 2 adopts the findings of the
-reference machine (`docs/colophon-0.6-sessions-findings.md`, F1–F20). Additive to `colophon-0.5.md`; nothing here changes a
+**Status:** unfrozen draft, revision 3, 2026-11-23. Revision 2 adopted the findings of the
+reference machine (`docs/colophon-0.6-sessions-findings.md`, F1–F20); revision 3 adds `via` to passed claims (F12, F21). Additive to `colophon-0.5.md`; nothing here changes a
 0.5 object, verdict or path. A 0.5 host that ignores this document stays conformant with 0.5.
 
 The words MUST, SHOULD and MAY are used as in 0.5 §0. "0.5 §N" refers to `colophon-0.5.md`.
@@ -107,7 +107,7 @@ The plaintext is `{"kind": …, …}`. Kinds and their fields:
 | `refuse` | holder | `id`, `reason` | The holder declined a `submit`. |
 | `presence` | any | `payload` | Latest value for this member. |
 | `ask` | writer | `claim` (the claim the asker believes current) | Ask the holder for the role. |
-| `pass` | holder | `claim` (current), `next` (`{term, rank:1, holder}`), `seq`, `snapshot` | Hand the role over. |
+| `pass` | holder | `claim` (current), `next` (`{term, rank:1, holder, via}`), `seq`, `snapshot` | Hand the role over. |
 | `decline` | holder | `claim` | The holder will not pass now. |
 | `take` | writer | `claim` (`{term, rank:0, holder}`) | Assume the role. |
 | `ping` / `pong` | any | `t` (sender ms); `pong` adds `echo`, `hold` | Round-trip and clock offset (§S7). |
@@ -118,9 +118,12 @@ The plaintext is `{"kind": …, …}`. Kinds and their fields:
 
 ## S4. Claims and the holder
 
-A **claim** is `{term, rank, holder}`: `term` a positive integer at most 2^53−1, `rank` 0
-(taken) or 1 (passed), `holder` a member ID. Claims are ordered by `term`, then `rank`, then
-`holder` compared as lowercase hex strings. Each member keeps the **greatest claim it has
+A **claim** is `{term, rank, holder, via}`: `term` a positive integer at most 2^53−1,
+`rank` 0 (taken) or 1 (passed), `holder` a member ID, and `via` the member ID of the passer,
+present exactly when `rank` is 1. Claims are ordered by `term`, then `rank`, then `holder`,
+then `via`, member IDs compared as lowercase hex strings. Two passes to one member at one
+term, from two holders that could not reach each other, are therefore different claims, and
+the ordinary rules below settle them. Each member keeps the **greatest claim it has
 accepted**, persisted across restarts, and treats its `holder` as the holder. The cell with
 no accepted claim, or whose holder said `bye`, has **no holder**.
 
@@ -128,8 +131,8 @@ A member accepts a claim it meets in any frame when all of these hold:
 
 1. The frame passed §S3 and its sender is entitled (§S1).
 2. For rank 0, the frame is from `claim.holder` itself.
-3. For rank 1, the frame is from `claim.holder`, or is a `pass` from `pass.claim.holder`
-   with `next` equal to this claim.
+3. For rank 1, the frame is from `claim.holder`, or is a `pass` from `claim.via` with
+   `next` equal to this claim and `pass.claim.holder` equal to `claim.via`.
 4. It is greater than the member's accepted claim.
 
 Rule 3 does not defend against a member that breaks this document (it could take at any
@@ -148,14 +151,15 @@ whose holder has gone quiet still reaches everyone who can be reached.
 
 **Ask and pass.** A writer that wants the role sends `ask` to the holder. The holder's
 application decides. To pass, the application first stops whatever the role controls, then
-the holder sends `pass` with `next = {term: current+1, rank: 1, holder: asker}`, the final
+the holder sends `pass` with `next = {term: current+1, rank: 1, holder: asker, via: self}`, the final
 `seq` and the final `snapshot`, to all members, and from that moment is not holder: it
 accepts `next` itself, with `snapshot` as its state. It resends the same `pass`, unchanged,
 when it next hears the asker speak under an older claim. The asker becomes holder on
 receiving the `pass`; its state is exactly `snapshot`; its `seq` restarts at 0 for the new
-term. A holder made by a pass that later meets a different `pass` naming its own claim
-(two holders, partitioned from each other, each passed to it) renews (below), so that one
-state prevails.
+term. A holder that learns of a greater claim naming itself that it has not acted under (a
+second pass to it from another holder) renews (below), so that one state prevails; because
+any member holding that greater claim corrects the holder's lesser frames (§S4), this does
+not depend on any one frame arriving.
 
 An asker that has heard holder frames from the holder but neither `pass` nor `decline`
 within `askTimeoutMs` of its `ask` sends `ask` again.
@@ -179,8 +183,8 @@ and `leaving: false`. It stays in the session.
 
 - from a `hello.seen` naming another member that has sent no holder frame or `take` for
   `holderTimeoutMs`;
-- from a `hello.seen` naming itself under a greater claim (a pass to it that it never
-  received);
+- from a `hello.seen` or a `pass` naming itself under a greater claim (a pass to it that it
+  never received, or a second pass from another holder);
 - from a `bye` (a released claim has no holder);
 - from a `hello` sent by the named holder itself (a `hello` cannot say whether its sender
   still holds; a sender that does hold then yields to the resulting `state`).
