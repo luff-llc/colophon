@@ -11,6 +11,7 @@ import { webcrypto } from 'node:crypto';
 import path from 'node:path';
 import { ProvisionTable, TABLE_FILE, clientAddressConfig, provisionConfig } from './provision.js';
 import { corsOrigins, newToken, startRelay } from './relay.js';
+import { streamOptions } from './stream.js';
 
 /** A test hook: wait at `point` the first time it is reached, until `file` exists. */
 function pauseOnce(point, file) {
@@ -75,11 +76,13 @@ function loadConfig(argv, env) {
   // createRelay).
   provisionConfig(config.provision);
   clientAddressConfig(config.clientAddress);
+  streamOptions(config.stream);
   const tracing = Boolean(clockFile) && env.COLOPHON_RELAY_TRACE === '1';
   return {
     cors: { origins: origins ?? [] },
     provision: config.provision,
     clientAddress: config.clientAddress,
+    stream: config.stream,
     // Test hooks with the trace: the relay kills itself at the named point, or waits there (the
     // first time it is reached) until the file COLOPHON_RELAY_RESUME_FILE exists.
     crashAt: tracing ? env.COLOPHON_RELAY_CRASH_AT : undefined,

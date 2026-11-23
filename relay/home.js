@@ -11,9 +11,10 @@
 // Storage follows state: every mutation commits the module's new state, then stores the files the
 // module lists, under one lock; at start-up the files are reconciled with the state before
 // anything is served.
-import { createHash } from 'node:crypto';
-import { promises as fsp, writeSync } from 'node:fs';
+import { createHash, randomBytes } from 'node:crypto';
+import { constants as fsc, promises as fsp, writeSync } from 'node:fs';
 import path from 'node:path';
+import { HomeStream } from './stream.js';
 
 const b64 = (bytes) => Buffer.from(bytes).toString('base64');
 const unb64 = (text) => Buffer.from(text, 'base64');
@@ -23,6 +24,9 @@ function colophonCall(req) {
   const match = /^Colophon ([A-Za-z0-9_-]+)$/.exec(req.headers.authorization ?? '');
   return match ? b64(Buffer.from(match[1], 'base64url')) : null;
 }
+
+const ROUTE_BODY_BYTES = 4096;
+const NOTICE_COMMIT = 'notice-commit.json';
 
 // Forwarding (§13.1), per peer: each request's own time limit, a pass's wall-time budget, how many
 // newly listed objects and how many backlog objects one pass offers, and how soon the same
@@ -136,7 +140,8 @@ export class HomeSlot {
    * @param {object} o `slot` (the relay's Slot), `wasm` (HomeModule), `key` (HomeKey), `base` (the
    * URL accounts name as this home's endpoint, also the call audience), `account` (the account ID
    * the operator provisioned the slot for), `clock`, `resolve` (maps another home's endpoint to
-   * the URL to reach it), `deps` (the relay's HttpError, send, readBody, clampInt), `limits`.
+   * the URL to reach it), `deps` (the relay's HttpError, send, readBody, clampInt), `limits`,
+   * `stream` (HomeStream options) and `scheduled` (whether the relay's scheduler ticks).
    */
   constructor(o) {
     Object.assign(this, o);
@@ -149,6 +154,10 @@ export class HomeSlot {
     this.forward = { peers: {} };
     this.rate = new RateLimit(o.limits.requestsPerMinute);
     this.said = new Map();
+    this.routes = new Map();
+    this.noticeSeq = 0;
+    this.lastHead = null;
+    this.stream = new HomeStream(this, o.stream ?? {});
   }
 
   file(name) { return path.join(this.slot.root, name); }
@@ -189,9 +198,16 @@ export class HomeSlot {
     }
     await this.slot.open();
     if (fresh) await this.writeJson('home-state.json', this.state);
+    await this.loadRoutes();
+    this.noticeCommit = await this.readOptionalJson(NOTICE_COMMIT);
+    await this.flushNotices();
+    this.noticeSeq = await this.lastNoticeSeq();
     // Reconcile storage with the state before serving: a crash between a commit and its files
     // (a missing entry, a head file older than the committed head) heals here, not later.
     await this.materialize(files);
+    this.lastHead = await this.ownHeadMark();
+    // Every change-log entry is pushed to the stream with the cursor `/changes` gives it.
+    this.slot.onEntry = (index) => this.stream.change(index);
     await this.openReplay();
     this.forward = await this.readJson('forward.json', { peers: {} });
     // Serving intervals (§13.1). The module decides from the last lease recorded (the home may
@@ -213,7 +229,7 @@ export class HomeSlot {
       try { return await fsp.lstat(this.file(name)); }
       catch (error) { if (error.code !== 'ENOENT') throw error; return null; }
     };
-    for (const name of ['replay.log', 'alive.json', 'forward.json']) if (await stat(name)) return true;
+    for (const name of ['replay.log', 'alive.json', 'forward.json', 'routes.json', 'notices.jsonl', NOTICE_COMMIT]) if (await stat(name)) return true;
     const log = await stat('log.jsonl');
     if (log && (!log.isFile() || log.size > 0)) return true;
     const records = await stat('records');
@@ -248,10 +264,20 @@ export class HomeSlot {
   async readJson(name, fallback) {
     try { return JSON.parse(await fsp.readFile(this.file(name), 'utf8')); } catch { return fallback; }
   }
+  async readOptionalJson(name) {
+    let handle;
+    try { handle = await fsp.open(this.file(name), fsc.O_RDONLY | fsc.O_NOFOLLOW); }
+    catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+    try {
+      if (!(await handle.stat()).isFile()) throw new Error(`${name} must be a regular file`);
+      return JSON.parse(await handle.readFile('utf8'));
+    } finally { await handle.close(); }
+  }
+
   async writeJson(name, value) {
     const staged = path.join(this.slot.root, 'tmp', `${name}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}`);
-    const handle = await fsp.open(staged, 'w', 0o600);
-    try { await handle.write(JSON.stringify(value)); await handle.sync(); } finally { await handle.close(); }
+    const handle = await fsp.open(staged, 'wx', 0o600);
+    try { await handle.writeFile(JSON.stringify(value)); await handle.sync(); } finally { await handle.close(); }
     await fsp.rename(staged, this.file(name));
     // The rename must be durable too: in particular, a refused unknown-format entry's
     // stop has no stored entry to replay if a crash were to lose the checkpoint update.
@@ -259,10 +285,138 @@ export class HomeSlot {
     try { await directory.sync(); } finally { await directory.close(); }
   }
 
-  async commit(state) {
+  async commit(state, notices = []) {
+    await this.flushNotices();
     if (!state || state === this.state) return;
+    if (notices.length) {
+      const file = this.file('notices.jsonl');
+      const stat = await fsp.lstat(file).catch((error) => { if (error.code !== 'ENOENT') throw error; });
+      if (stat && !stat.isFile()) throw new Error('notices.jsonl must be a regular file');
+      const offset = stat?.size ?? 0;
+      // One line per notice, numbered (increasing, never reused; a failed commit may skip a
+      // number), naming the routes registered when it was queued. A sender keeps its own
+      // cursor per route; the stream's `notice` frames carry the same number.
+      const routes = [...this.routes.keys()];
+      const lines = notices.map((notice) => {
+        notice.seq = ++this.noticeSeq;
+        return JSON.stringify({ seq: notice.seq, account: this.account, ...notice, routes }) + '\n';
+      }).join('');
+      // A restart finishes the append only if the corresponding checkpoint committed.
+      // The offset makes replay safe after a torn or already completed append.
+      const journal = { state: sha(state), offset, lines };
+      await this.writeJson(NOTICE_COMMIT, journal);
+      this.noticeCommit = journal;
+    }
     await this.writeJson('home-state.json', state);
     this.state = state;
+    await this.flushNotices();
+    // Every authority commit re-checks every open stream (§S9: only current, entitled members)
+    // and the owners of notice routes.
+    this.stream.revalidate();
+    await this.pruneRoutes();
+  }
+
+  /** The number of the last notice queued (0 for none). */
+  async lastNoticeSeq() {
+    let text;
+    try { text = await fsp.readFile(this.file('notices.jsonl'), 'utf8'); } catch (error) { if (error.code === 'ENOENT') return 0; throw error; }
+    const lines = text.split('\n').filter(Boolean);
+    if (!lines.length) return 0;
+    try {
+      const seq = JSON.parse(lines[lines.length - 1]).seq;
+      if (Number.isSafeInteger(seq) && seq > 0) return seq;
+    } catch { /* an older line without a number */ }
+    return lines.length;
+  }
+
+  /** `{seq, digest}` of the head this home last stored, for the stream's hello. */
+  async ownHeadMark() {
+    const head = await this.headEnvelope().catch(() => null);
+    if (!head) return null;
+    try {
+      const { seq, digest } = JSON.parse(unb64(head.body)).authority;
+      return { seq, digest };
+    } catch { return null; }
+  }
+
+  /** Routes and the slot's secret route key (route IDs are keyed by it, so a listed ID reveals
+   * no address). `routes.json` is `{"key","routes":[[id, route]…]}`. A file of the unshipped W2
+   * layout (a bare list, IDs an unkeyed digest of the address) is re-keyed on load. */
+  async loadRoutes() {
+    const held = await this.readOptionalJson('routes.json');
+    if (held && !Array.isArray(held)) {
+      if (typeof held.key !== 'string' || !/^[0-9a-f]{64}$/.test(held.key) || !Array.isArray(held.routes)) {
+        throw new Error('routes.json is damaged');
+      }
+      this.routeKey = held.key;
+      this.routes = new Map(held.routes);
+      return;
+    }
+    this.routeKey = randomBytes(32).toString('hex');
+    this.routes = new Map();
+    if (!held) return;
+    for (const [, r] of held) {
+      const { id } = this.wasm.call({ op: 'route_id', key: this.routeKey, principal: r.by, kind: r.kind, address: r.address });
+      this.routes.set(id, r);
+    }
+    await this.saveRoutes(this.routes);
+  }
+
+  async saveRoutes(routes) {
+    await this.writeJson('routes.json', { key: this.routeKey, routes: [...routes] });
+  }
+
+  /** Drop the routes of principals that are no longer principals of the account (the module
+   * decides), so a revoked device's routes neither linger nor hold the slot's capacity. */
+  async pruneRoutes() {
+    if (!this.routes.size) return;
+    const owners = [...new Set([...this.routes.values()].map((r) => r.by))];
+    let current;
+    try { ({ current } = this.wasm.call({ op: 'principals_current', state: this.state, now: this.clock(), principals: owners })); }
+    catch (error) { this.note('routes', `route owners could not be checked: ${error.message}`); return; }
+    const gone = new Set(owners.filter((_, i) => !current[i]));
+    if (!gone.size) return;
+    const routes = new Map([...this.routes].filter(([, r]) => !gone.has(r.by)));
+    await this.saveRoutes(routes);
+    const dropped = [...this.routes.keys()].filter((id) => !routes.has(id));
+    this.routes = routes;
+    for (const id of dropped) this.stream.route(id, 'delete');
+  }
+
+  async flushNotices() {
+    if (!this.noticeCommit) return;
+    const { state, offset, lines } = this.noticeCommit;
+    if (state === sha(this.state)) {
+      const handle = await fsp.open(this.file('notices.jsonl'), fsc.O_WRONLY | fsc.O_APPEND | fsc.O_CREAT | fsc.O_NOFOLLOW, 0o600);
+      try {
+        const stat = await handle.stat();
+        if (!stat.isFile() || stat.size < offset) throw new Error('Invalid notices.jsonl at the committed offset');
+        await handle.truncate(offset);
+        await handle.writeFile(lines);
+        await handle.sync();
+      } finally { await handle.close(); }
+      const directory = await fsp.open(this.slot.root, 'r');
+      try { await directory.sync(); } finally { await directory.close(); }
+    }
+    await fsp.unlink(this.file(NOTICE_COMMIT));
+    this.noticeCommit = null;
+  }
+
+  publishNotices(notices) {
+    for (const notice of notices ?? []) this.stream.notice(notice);
+  }
+
+  /** A WebSocket upgrade of `GET {base}/stream?ticket=…[&after=<cursor>]` (0.6 draft). */
+  async upgrade(req, url, connect) {
+    // The ticket is burnt first: no later refusal (a body, the rate, a bad parameter) leaves a
+    // presented ticket usable.
+    const taken = this.stream.take(url);
+    const { HttpError } = this.deps;
+    if (req.headers['transfer-encoding'] || (req.headers['content-length'] ?? '0') !== '0') {
+      throw new HttpError(400, 'A stream request takes no body');
+    }
+    await this.rateGate(req);
+    await this.stream.connect(url, taken, connect);
   }
 
   /** Store the files the module listed. A path the module marks `replace` (a head; an entry
@@ -277,6 +431,12 @@ export class HomeSlot {
       if (replace) await this.slot.replaceRequest(p, body);
       else if (!have) await this.slot.putImmutable(p, body);
       else throw new Error(`Home slot ${this.slot.name}: ${p} on disk differs from the state`);
+      if (p === `heads/${this.key.memberId}.json`) {
+        const signed = JSON.parse(body);
+        const { seq, digest } = JSON.parse(unb64(signed.body)).authority;
+        this.lastHead = { seq, digest };
+        this.stream.head(seq, digest);
+      }
     }
   }
 
@@ -333,8 +493,9 @@ export class HomeSlot {
       const r = this.wasm.call({ op: 'record_due', state: this.state, now });
       const said = r.result === 'ok' && !r.note ? '' : `recording entries for slot ${this.slot.name}: ${r.result} ${r.note ?? ''}`;
       this.note('record', said);
-      await this.commit(r.state);
+      await this.commit(r.state, r.notify);
       await this.materialize(r.store);
+      this.publishNotices(r.notify);
       await this.signReceipts(r.sign);
       this.trace('record_due end');
       // When what is due now could not be determined, no head is produced now (it stays due:
@@ -507,8 +668,8 @@ export class HomeSlot {
   // HTTP. Returns true when it answered; false to let the relay's generic code serve the file,
   // the change feed or `GET {base}` (after the module allowed it).
 
-  async handle(req, res, url, section, rest) {
-    const { HttpError, send, readBody, clampInt } = this.deps;
+  async rateGate(req, section, rest) {
+    const { HttpError } = this.deps;
     await this.keepLease();
     if (section === 'records' && rest === 'batch' && !this.appointed) {
       req.resume();
@@ -516,6 +677,18 @@ export class HomeSlot {
     }
     if (!this.rate.take(this.deps.clientAddress(req), this.clock())) {
       throw new HttpError(429, 'Too many requests', { 'retry-after': '60' });
+    }
+  }
+
+  async handle(req, res, url, section, rest) {
+    const { HttpError, send, readBody, clampInt } = this.deps;
+    await this.rateGate(req, section, rest);
+    if (section === 'routes') {
+      if (this.relativePath(req) !== (rest === undefined ? '/routes' : `/routes/${rest}`)) {
+        throw new HttpError(400, 'Invalid notice route URL');
+      }
+      await this.handleRoutes(req, res, rest);
+      return true;
     }
     if (section === 'records' && rest === 'batch') {
       const call = colophonCall(req);
@@ -531,6 +704,24 @@ export class HomeSlot {
         const ownHead = records.find((r) => r.status === 200 && r.path === `heads/${this.key.memberId}.json`);
         if (ownHead && await this.settleForRead() === 'due') ownHead.status = 503;
         await this.deps.serveBatch(res, this.slot, records);
+      });
+      return true;
+    }
+    if (section === 'stream') {
+      if (rest === undefined) throw new HttpError(426, 'WebSocket upgrade required', { upgrade: 'websocket' });
+      if (rest !== 'ticket' || this.relativePath(req) !== '/stream/ticket') throw new HttpError(404, 'Not found');
+      if (req.method !== 'POST') throw new HttpError(405, 'Method not allowed', { allow: 'POST' });
+      if (req.headers['transfer-encoding'] || (req.headers['content-length'] ?? '0') !== '0') {
+        req.resume();
+        throw new HttpError(400, 'A ticket request takes no body');
+      }
+      // Mint under the lock: the standing the module judged is the committed state's.
+      await this.lock(async () => {
+        const allowed = await this.access(req, section, rest, null, Buffer.alloc(0));
+        try {
+          if (this.slot.closing) throw new HttpError(503, 'Home unavailable');
+          send(res, 200, this.stream.mint(allowed), { 'cache-control': 'no-store' });
+        } finally { await this.complete(allowed.reserve.key, 'completed'); }
       });
       return true;
     }
@@ -631,6 +822,51 @@ export class HomeSlot {
     throw new HttpError(404, 'Not found');
   }
 
+  async handleRoutes(req, res, id) {
+    const { HttpError, send, readBody, isJsonType } = this.deps;
+    const posting = req.method === 'POST' && id === undefined;
+    let body;
+    if ((req.method === 'GET' || req.method === 'DELETE')
+        && (req.headers['transfer-encoding'] || (req.headers['content-length'] ?? '0') !== '0')) {
+      throw new HttpError(400, 'This request takes no body');
+    }
+    if (posting) {
+      if (!isJsonType(req.headers['content-type'])) throw new HttpError(415, 'Content-Type must be application/json');
+      body = await readBody(req, ROUTE_BODY_BYTES);
+    }
+    await this.lock(async () => {
+      const allowed = await this.access(req, 'routes', id ?? null, null, body);
+      const key = allowed.reserve.key;
+      try {
+        if (req.method === 'GET') {
+          const routes = Array.from(this.routes, ([id, { kind, reaches, by }]) => ({ id, kind, reaches, by }));
+          send(res, 200, { routes });
+          return;
+        }
+        // The keyed ID, ownership, caps and the route's form are the module's.
+        const principal = allowed.signer;
+        const r = this.wasm.call({
+          op: 'route_change', method: req.method, key: this.routeKey, principal,
+          routes: Array.from(this.routes, ([id, { by }]) => ({ id, by })),
+          ...(posting ? { body: b64(body) } : { id }),
+        });
+        if (!r.allowed) {
+          if (r.status === 400) throw new HttpError(400, r.error ?? 'Invalid notice route');
+          if (r.status === 404) throw new HttpError(404, 'Route not found');
+          throw new HttpError(r.status, 'Refused', {}, { result: r.result });
+        }
+        const routes = new Map(this.routes);
+        if (posting) routes.set(r.id, { ...r.route, by: principal });
+        else routes.delete(r.id);
+        await this.saveRoutes(routes);
+        this.routes = routes;
+        this.stream.route(r.id, posting ? 'put' : 'delete', posting ? routes.get(r.id) : null);
+        if (posting) send(res, r.created ? 201 : 200, { id: r.id });
+        else { res.writeHead(204); res.end(); }
+      } finally { await this.complete(key, 'completed'); }
+    });
+  }
+
   /** A head forwarded by another current home (§13.1). Anyone may send one: the module checks
    * it, and says which head to serve for that home. */
   async putHead(req, res, recordPath) {
@@ -675,10 +911,11 @@ export class HomeSlot {
   async postAuthority(res, body) {
     const { send } = this.deps;
     const r = this.wasm.call({ op: 'post_authority', state: this.state, now: this.clock(), body: b64(body) });
-    await this.commit(r.state); // even a refusal changes state (§13.1)
+    await this.commit(r.state, r.notify); // even a refusal changes state (§13.1)
     // The first successful appointment in a committed upload is permanent for this slot.
     if (r.appointed) this.appointed = true;
     await this.materialize(r.store);
+    this.publishNotices(r.notify);
     const receipts = await this.signReceipts(r.sign);
     const head = r.appointed ? await this.settle() : 'fresh';
     if (r.outcome !== 'ok') return this.answerOutcome(res, r);
@@ -689,8 +926,9 @@ export class HomeSlot {
   async postPending(res, body) {
     const { send } = this.deps;
     const r = this.wasm.call({ op: 'post_pending', state: this.state, now: this.clock(), body: b64(body) });
-    await this.commit(r.state);
+    await this.commit(r.state, r.notify);
     await this.materialize(r.store);
+    this.publishNotices(r.notify);
     const receipts = await this.signReceipts(r.sign);
     if (r.outcome !== 'ok') return send(res, 422, r.results);
     return send(res, 200, { receipts });

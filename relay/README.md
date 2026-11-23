@@ -451,7 +451,7 @@ first upload is sent again. One entry per seq, at most the claimed head's seq, 5
 8 MiB per slot; bytes that do not fit the chain are refused and nothing of them is kept, so
 flooding cannot take a place the genuine entry needs. Nothing staged is served.
 
-**Notices are not built** (§13.1, §17.5): see "Notices" below.
+**Notice routes and the stream** are available on home slots. See “Notices” and “Stream” below. Nothing of a session frame or a stream ticket is ever stored.
 
 ## Storage layout
 
@@ -465,6 +465,9 @@ flooding cannot take a place the genuine entry needs. Nothing staged is served.
                                   fsynced before any effect; a completion line after it)
 <dataDir>/<slot>/forward.json     home slots: what each other home has been sent
 <dataDir>/<slot>/alive.json       home slots: the serving lease's end (serving intervals, §13.1)
+<dataDir>/<slot>/routes.json      home slots: registered notice routes (includes private addresses)
+<dataDir>/<slot>/notices.jsonl   home slots: durable queue of public notice metadata
+<dataDir>/<slot>/notice-commit.json  home slots: temporary journal for crash recovery of a queue append
 ```
 
 Home slots add `authority/<8 digits>.json`, `transitions/<digest>.json`, `vetoes/<digest>.json`,
@@ -532,38 +535,113 @@ this relay as a process (`crates/colophon-home-wasm/tests`, including the kill l
 here. **CI runs that script.** With `CI` or `COLOPHON_REQUIRE_RELAY=1` set, a missing Bun or module
 fails those tests; otherwise they are skipped with a printed `SKIPPED:` line naming what is missing.
 
-## Notices (not built: the contract is missing)
+## Notices
 
-Notice delivery and route registration are deferred to 0.6 (spec §17.5, revision 18). 0.5 requires
-a home to keep and serve pending objects until they are settled, and a syncing host to show them
-with their due time; this home does both. The contract below remains the proposal for 0.6. 0.5 gives a notice no signed body and no wire format, and nothing defines how
-a host registers a route with a home. The Swift and Kotlin sessions expect one: a
-`DeliveryRoute {kind: push|email|sms|webhook|other, address, reaches}` and a host-supplied
-`registerRoutes(account, routes) -> Bool` closure (`swift/Sources/ColophonSession/HostDuties.swift`,
-`SessionTypes.swift`; `sdk/kotlin/.../SessionTypes.kt`), with the HTTP call left to the host. So
-this home builds no route store, queue or sender: there is nothing for a session to call that a
-second implementation would also implement.
+A host registers delivery routes with each home (§17.5). Use `Authorization: Colophon <call>`
+with the slot's base URL as the audience. Bind the call to the method, the path relative to
+that base, and the lowercase SHA-256 digest of the request body (empty bytes for GET and DELETE).
+The `kind` is one of `push`, `email`, `sms`, `webhook` or `other`. The `address` is the delivery
+destination and `reaches` describes the device or service reached.
 
-What is missing, and the smallest contract that would close it (a proposal, not built):
+| Request | Purpose | Result |
+| --- | --- | --- |
+| `POST {base}/routes` with JSON `{"kind","address","reaches"}` | `colophon.home.write` | 201 `{"id"}` on creation, 200 `{"id"}` when it replaces the caller's route for that kind and address |
+| `DELETE {base}/routes/<route ID>` | `colophon.home.write` | 204 on removal or 404 when absent |
+| `GET {base}/routes` | `colophon.home.read` | 200 with `{"routes":[{"id","kind","reaches","by"}]}` |
 
-- **Register.** `PUT {base}/routes/<route ID>` with body `{"kind","address","reaches"}`, under a
-  `colophon.home.write` call by a controller (any role, suspended or not: a recover-only key must
-  be able to keep a route) or a current member; the route ID is the lowercase hex SHA-256 of
-  `kind ‖ 0x00 ‖ address`. 200 or 201. `DELETE` the same path removes it. `GET {base}/routes`
-  (same call, `colophon.home.read`) lists `{"routes":[{"id","kind","reaches","by"}]}`, never the
-  addresses. The `Bool` the sessions expect is "201 or 200".
-- **What triggers a notice.** The module returns, with every admission that receipted a
-  transition, a veto or a `suspend`, a `notify` list: `{"object","kind","issued","deadline"}`.
-  The relay appends one queue line per route (`notices.jsonl`, fsynced before the receipt is
-  returned), and a sender drains it with retries; the queue survives restarts like the replay log.
-- **The text.** Fixed by the home, carrying only public facts: the account ID, the object's kind
-  and digest, its veto deadline, and the §17.5 sentence about what the delay protects. Nothing
-  from a private record.
-- **The sender.** Pluggable (`deliver(route, notice) -> ok | retry | drop`), a test sender that
-  writes to a file, and production senders that each need operator credentials outside this
-  repository: APNs (a token-signing key and topic per app), FCM (a service account), e-mail (an
-  SMTP or provider API key with a verified sender domain), webhooks (an allow-list, since an
-  account would otherwise make the home call arbitrary addresses, finding L7 of the H1 check).
+**Route IDs reveal no address.** An ID is the HMAC-SHA256, under the slot's secret route key,
+of the principal, `kind` and `address`. The key is 32 random bytes kept in `routes.json` and
+never served. A reader of the list cannot test guessed numbers or emails against the IDs, and
+the same address registered by two principals gives two unrelated IDs. A `routes.json` in the
+unshipped W2 layout is re-keyed on load.
+
+Route upkeep (listing, and changing one's own routes) is open to every current controller,
+including recover-only and suspended ones. A current member can use its own key, and member
+links need explicit service grants. `by` identifies the registering principal as
+`controller:<ID>` or `member:<ID>`. **A principal deletes only its own routes**: another
+principal's route answers 403 `{"result":"refused:notGranted"}`. Each principal holds at most 8
+routes, and the slot at most 64; a new route past either cap answers 507
+`{"result":"refused:overQuota"}`. The home module derives the ID and decides ownership, caps and
+the route's form. It checks the address per kind; a `webhook` must be `https://` to a public DNS
+name, with no IP literal, port, user information or local-only name. It also requires that
+`reaches` does not contain the address. The route list omits delivery addresses. POST takes an
+`application/json` body up to 4 KiB. The home stages, fsyncs and renames the route file before
+acknowledging a change. Routes of a principal that is no longer one are dropped on the next
+authority commit.
+
+**Delivery senders** (none is built in) MUST, for a webhook, resolve the host at delivery time
+and refuse loopback, private, link-local, unique-local, CGNAT, multicast and other non-global
+addresses. They MUST pin the checked address for the request, verify TLS for the host name,
+and follow no redirect. See
+[docs/colophon-0.6-stream.md §6](../docs/colophon-0.6-stream.md#6-notices-and-routes).
+
+When the home admits a suspend or agrees to receipt a new transition or veto, it fsyncs
+`notices.jsonl` before responding. It writes **one line per notice**:
+`{"seq","account","object","kind","issued","deadline","routes":[…]}`. `seq` is the notice's
+number (increasing, never reused, possibly skipping after a failed commit). `routes` holds the
+IDs of the routes registered when the notice was queued, so a delivery sender keeps a cursor per
+route. Retrying an already-held object does not duplicate notices. The queue survives restarts.
+Delivery providers and signed notice payloads are outside this implementation.
+
+## Stream
+
+The stream is a draft for Colophon 0.6, and
+[docs/colophon-0.6-stream.md](../docs/colophon-0.6-stream.md) is its full description. It is a
+two-way WebSocket at `GET {base}/stream`. It pushes what the home commits and carries sealed
+session frames between the account's connected members. The home never reads those frames.
+
+1. **Mint a ticket:** `POST {base}/stream/ticket`, no body, with a call of purpose
+   `colophon.home.stream` bound to `{"method":"POST","path":"/stream/ticket","body":"<SHA-256 of
+   empty bytes>"}`. Whoever may read records at the home may mint one, including a member
+   through links whose terms grant `colophon.home.stream` at `{base}` (a device whose member key
+   is locked). The answer is 200 `{"ticket","expires","path"}`. A ticket is opaque, single use
+   and lives 30 s. The home keeps only its hash and never logs it.
+2. **Connect:** `GET {base}/stream?ticket=<ticket>[&after=<cursor>]`. Browsers can do this.
+   A missing ticket answers 401 and a used or expired one 403 `{"result":"refused:ticket"}`.
+   A principal that lost access answers 403 `refused:revoked`. Past 4 connections per principal
+   or 64 per account, the answer is 429.
+3. The first frame is `hello` (`instance`, `cursor`, `head`, `notice`, `namespaces`, `limits`).
+   Every frame carries `n`, its number on the connection, with no gap. With `after`, the missed
+   change-log entries follow as `change` frames, or a `resync` when they cannot be replayed.
+
+| Home → client | |
+| --- | --- |
+| `change` `{cursor, entry}` | The `/changes` entry and cursor, so either can resume the other |
+| `head` `{home, seq, digest}` | The home stored a new head |
+| `notice` `{notice, object, kind, deadline}` | A notice was queued (`notice` is its number) |
+| `route` `{id, change, kind?, reaches?, by?}` | A route changed |
+| `session` `{frame, retained?}` | A sealed frame from another member |
+| `subscribed`, `unsubscribed`, `pong`, `error {code, ref?}`, `resync {reason, after}`, `bye {reason, resume}` | |
+
+| Client → home | |
+| --- | --- |
+| `subscribe` / `unsubscribe` `{namespace, cell, id?}` | Members entitled to the namespace only |
+| `session` `{frame, id?}` | Forwarded to the other subscribed, entitled members, or only to `to`. Never echoed |
+| `ping` `{t?, id?}` | |
+
+A session frame is checked by the home module: at most 16,384 bytes, its outer fields well
+formed, `from` the connection's member, and that member holding a `records` entry for the
+namespace. Unknown or malformed client frames answer `error` without closing.
+The latest `retain: true` frame per (namespace, cell, sender) is kept **in memory only** for at
+most 60 s and given to members when they subscribe. Session frames are never written to disk.
+
+Limits: WebSocket messages up to 20,480 bytes (larger closes 1009). The inbound rate is capped
+per connection at 50 frames/s and 256 KiB/s; excess frames are dropped and counted, with an
+`error rateLimited`. A connection with more than 1 MiB unsent is closed with 4013. The home pings
+every 20 s, and a connection silent for 60 s is closed with 4008. Every authority commit, and a
+sweep that runs while any connection is open (every `sweepMs`, at most 5 s, and never off),
+re-judges each connection; one whose access ended is closed with 1008. Shutdown
+sends `bye` and closes with 1012 (resume). A released slot closes with 1001. All of these are
+settings under `stream` in the config file (`ticketMs`, `streamsPerPrincipal`,
+`streamsPerAccount`, `framesPerSecond`, `bufferedBytes`, `retainMs`, `pingMs`, `idleMs`,
+`sweepMs` and the rest; see `relay/stream.js`).
+
+**Bun only for homes.** The stream uses Bun's built-in WebSocket server. A relay with home slots
+refuses to start on another runtime instead of silently serving no stream. A relay with only
+0.3 token slots runs anywhere.
+
+Clients of 0.5 are unaffected. `GET {base}/changes`, `GET {base}/pending` and every other request
+behave as before.
 
 ## A stopped home
 

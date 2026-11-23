@@ -35,11 +35,16 @@ use std::collections::{BTreeMap, BTreeSet};
 /// The purpose a `recover`-only (or suspended) controller may call (§12.3 step 5, §13.4).
 pub const HISTORY_READ: &str = "colophon.history.read";
 /// The purposes a home accepts at its own endpoints without configuration (§12.3 step 7).
-pub const HOME_PURPOSES: [&str; 3] = [HISTORY_READ, HOME_READ, HOME_WRITE];
+pub const HOME_PURPOSES: [&str; 4] = [HISTORY_READ, HOME_READ, HOME_WRITE, HOME_STREAM];
 /// The purpose of a call that reads at a home (§14).
 pub const HOME_READ: &str = "colophon.home.read";
 /// The purpose of a call that writes at a home (§14).
 pub const HOME_WRITE: &str = "colophon.home.write";
+/// The purpose of a call that mints a home stream ticket (Colophon 0.6 draft,
+/// `docs/colophon-0.6-stream.md`): accepted only for `POST {base}/stream/ticket`, from the
+/// principals that may read records at the home (§14 `colophon.home.read`), through links only
+/// when every link's terms grant this purpose there.
+pub const HOME_STREAM: &str = "colophon.home.stream";
 
 /// A controller's status from pending transitions (§8.7), supplied by the history verifier.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -520,6 +525,24 @@ impl AccountView {
     /// Held history digests.
     pub fn history(&self) -> &[String] {
         &self.v.history
+    }
+    /// The member's expiry and session generation for a long-lived stream opened by a
+    /// verified call. A delegated stream also expires with its last (narrowest) link.
+    pub fn stream_grant(&self, verified: &VerifiedCall) -> Option<(Option<i64>, u64)> {
+        let CallSigner::Member(id) = &verified.call.signer else {
+            return None;
+        };
+        let member = self.v.members.iter().find(|m| &m.id == id)?;
+        let links = &verified.call.links;
+        let expires = links
+            .last()
+            .map(|link| link.expires_ms)
+            .or_else(|| member.expiry_at(verified.evaluated_at));
+        let session = links
+            .first()
+            .and_then(|link| link.session)
+            .unwrap_or(member.end_sessions.len() as u64);
+        Some((expires, session))
     }
     fn policy_at(&self, seq: u64) -> Option<&Policy> {
         self.v
@@ -1199,6 +1222,8 @@ pub fn home_call_purpose(method: &str) -> &'static str {
 pub fn home_purposes(method: &str, path: &str) -> &'static [&'static str] {
     if method == "POST" && path == "/records/batch" {
         &[HOME_READ]
+    } else if method == "POST" && path == "/stream/ticket" {
+        &[HOME_STREAM]
     } else if !is_read(method) {
         &[HOME_WRITE]
     } else if home_path_serves_history(path) {
@@ -1382,9 +1407,25 @@ fn home_request_with(
             signer,
             purposes: Some(purposes),
             names_writes: false,
+            // Route upkeep (listing, registering and deleting its own routes) is available
+            // even to a suspended or recover-only controller: it is how such a key keeps
+            // hearing of pending changes. Member links still need an explicit service grant.
+            route_write: is_route_upkeep(req.method, req.path),
             batch_paths,
         },
     )
+}
+
+/// Whether a request at a home is notice-route upkeep: `GET /routes`, `POST /routes` (register
+/// or replace one's own route), or `DELETE /routes/<64 lowercase hex>`.
+pub fn is_route_upkeep(method: &str, path: &str) -> bool {
+    match method {
+        "GET" | "POST" => path == "/routes",
+        "DELETE" => path
+            .strip_prefix("/routes/")
+            .is_some_and(super::home_stream::is_route_id),
+        _ => false,
+    }
 }
 
 /// Whether the member `m` may make `writes` under its own author ID (see [`verify_home_write`]).
@@ -1422,6 +1463,7 @@ struct Mode<'a> {
     purposes: Option<&'a [&'a str]>,
     /// A home write must name what it writes (`malformed` otherwise), judged at the same point.
     names_writes: bool,
+    route_write: bool,
     /// The record paths a batch read serves ([`verify_home_batch`]): the conditions of the
     /// member's and every link's terms must also hold for the `args` a single `GET` of each.
     batch_paths: &'a [String],
@@ -1518,7 +1560,7 @@ fn verify(
                 id,
                 Claim::Controller {
                     roles: &[],
-                    suspended_ok: call.purpose == HISTORY_READ,
+                    suspended_ok: call.purpose == HISTORY_READ || (at_home && mode.route_write),
                 },
                 cfg.now_ms,
             )
@@ -1528,7 +1570,8 @@ fn verify(
                 && [at_s, latest]
                     .iter()
                     .all(|c| c.audiences().is_some_and(|a| a.contains(&call.audience)));
-            let role_ok = both(&Role::Approve)
+            let role_ok = (at_home && mode.route_write)
+                || both(&Role::Approve)
                 || both(&Role::Control)
                 || sign_ok
                 || (both(&Role::Recover) && call.purpose == HISTORY_READ);
@@ -1619,7 +1662,7 @@ fn verify(
             let home_read = at_home && call.links.is_empty() && call.purpose != HOME_WRITE;
             let home_write = at_home
                 && call.purpose == HOME_WRITE
-                && own_writes(m, writes)
+                && (own_writes(m, writes) || (mode.route_write && call.links.is_empty()))
                 && call
                     .links
                     .iter()
