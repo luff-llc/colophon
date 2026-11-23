@@ -272,6 +272,16 @@ impl Delegation {
             body,
         })
     }
+    /// Parse an envelope carried in a frame from `from` under session key `key`: the shape
+    /// [`Delegation::parse`] checks, and the body names that member and that key. Nothing is
+    /// verified. A receiver and a home carrier apply this same check.
+    pub fn parse_carried(envelope: &[u8], from: &str, key: &str) -> Result<Self, String> {
+        let d = Self::parse(envelope)?;
+        if d.body.member != from || d.key_id() != key {
+            return Err("names another (from, key)".into());
+        }
+        Ok(d)
+    }
     /// Assemble the envelope for body bytes and the host's raw signature, and parse it.
     pub fn assemble(body: &[u8], signature: &[u8]) -> Result<Self, String> {
         let mut m = Map::new();

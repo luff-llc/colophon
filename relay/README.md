@@ -135,7 +135,7 @@ home holds no account secret: no controller or member key, no PRF output, no see
 | TLS | `COLOPHON_RELAY_TLS_CERT`, `COLOPHON_RELAY_TLS_KEY`, or `"tls":{…}` | off |
 | CORS origins | `COLOPHON_RELAY_CORS_ORIGINS="https://app.example,…"` or `cors.origins`: each exactly `scheme://host[:port]`, lower case, compared whole; `*`, `null`, a path or a default port refuse start-up | none: no CORS header |
 | Provisioning | config `provision` (below) | off |
-| Client address | config `clientAddress`: `{"header": "CF-Connecting-IP", "trustedPeers": ["127.0.0.1", "::1"]}` | the socket address |
+| Client address | config `clientAddress`: `{"header": "CF-Connecting-IP", "trustedPeers": ["127.0.0.1", "::1", "172.16.0.0/12"]}` (addresses or CIDR ranges; a `/0` or a range with host bits set refuses start-up) | the socket address |
 
 **Provisioning.** A home slot serves one account, by its account ID, from before anything is
 uploaded. Its first upload is accepted only if it starts with the genesis whose digest is that ID;
@@ -359,6 +359,9 @@ real time. Without `--test-clock` stdin is not read.
 
 Production use is over TLS (directly, or behind Caddy/nginx or Tailscale, as for the 0.3 relay:
 pass `Authorization`, `If-None-Match`, `If-Match` and `Content-Length`, do not buffer bodies).
+
+A container image configured by environment variables, with its key, token and data on one
+volume, is described in [`docs/self-hosting/docker.md`](../docs/self-hosting/docker.md).
 
 ## What a home serves
 
@@ -616,24 +619,40 @@ session frames between the account's connected members. The home never reads tho
 | Client → home | |
 | --- | --- |
 | `subscribe` / `unsubscribe` `{namespace, cell, id?}` | Members entitled to the namespace only |
-| `session` `{frame, id?}` | Forwarded to the other subscribed, entitled members, or only to `to`. Never echoed |
+| `session` `{frame, id?}` | Forwarded to every other subscribed, entitled member, whether or not it carries `to`. Never echoed |
 | `ping` `{t?, id?}` | |
 
-A session frame is checked by the home module: at most 16,384 bytes, its outer fields well
-formed, `from` the connection's member, and that member holding a `records` entry for the
-namespace. Unknown or malformed client frames answer `error` without closing.
+A session frame is the session codec's frame (sessions §S3), carried as the JSON value of
+`frame`: one canonical JSON object with exactly the codec's fields (`protocol`, `account`,
+`namespace`, `cell`, `from`, `key`, `to`?, `n`, `epoch`, `retain`?, `ciphertext`, `signature`,
+`delegation`?). The home module checks it with the codec's own parser, without verifying or
+decrypting anything: at most 16,384 bytes, strict and canonical JSON with exactly those fields,
+every field in its grammar (key IDs, canonical base64 of the right lengths, a well-formed
+delegation envelope naming the sender's key), `from` the connection's member, and that member
+holding a `records` entry for the namespace. Anything else, including a `{"body","signature"}`
+envelope, answers `error badFrame`. Receivers get the checked frame, which for a conforming
+sender is its exact bytes (`docs/colophon-0.6-stream.md` §5.2). A client message nested more than
+65 deep, unknown or malformed client frames answer `error` without closing.
 The latest `retain: true` frame per (namespace, cell, sender) is kept **in memory only** for at
 most 60 s and given to members when they subscribe. Session frames are never written to disk.
+A frame's `to` is checked as a member ID but is advice to receivers, not a route: the home
+forwards an addressed frame to every other subscribed, entitled member (a member reachable only
+through a bridge must still get it), and the sender's answer does not depend on whether the
+named member is connected. The home learns the account, namespace, cell, sender, `to`, the
+`retain` flag, sizes and timing, never the payload. Each frame reaches at most
+`streamsPerAccount − 1` connections (63 by default). An account's connections share a budget
+for session frames, 100 frames/s and 512 KiB/s by default, so one account can cause at most
+about 6,300 frames/s or 31.5 MiB/s of outbound traffic (see `docs/colophon-0.6-stream.md` §5.2).
 
 Limits: WebSocket messages up to 20,480 bytes (larger closes 1009). The inbound rate is capped
-per connection at 50 frames/s and 256 KiB/s; excess frames are dropped and counted, with an
-`error rateLimited`. A connection with more than 1 MiB unsent is closed with 4013. The home pings
+per connection at 50 frames/s and 256 KiB/s, and session frames per account at 100 frames/s and
+512 KiB/s; excess frames are dropped and counted, with an `error rateLimited`. A connection with more than 1 MiB unsent is closed with 4013. The home pings
 every 20 s, and a connection silent for 60 s is closed with 4008. Every authority commit, and a
 sweep that runs while any connection is open (every `sweepMs`, at most 5 s, and never off),
 re-judges each connection; one whose access ended is closed with 1008. Shutdown
 sends `bye` and closes with 1012 (resume). A released slot closes with 1001. All of these are
 settings under `stream` in the config file (`ticketMs`, `streamsPerPrincipal`,
-`streamsPerAccount`, `framesPerSecond`, `bufferedBytes`, `retainMs`, `pingMs`, `idleMs`,
+`streamsPerAccount`, `framesPerSecond`, `sessionFramesPerSecond`, `sessionBytesPerSecond`, `bufferedBytes`, `retainMs`, `pingMs`, `idleMs`,
 `sweepMs` and the rest; see `relay/stream.js`).
 
 **Bun only for homes.** The stream uses Bun's built-in WebSocket server. A relay with home slots

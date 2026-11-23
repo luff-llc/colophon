@@ -24,6 +24,12 @@ export const STREAM_DEFAULTS = Object.freeze({
   frameBurst: 100,
   bytesPerSecond: 262_144,
   byteBurst: 524_288,
+  // Session frames the whole account may send, all connections together. Each one is copied to
+  // every other subscriber, so this is what bounds the home's outbound work for an account.
+  sessionFramesPerSecond: 100,
+  sessionFrameBurst: 200,
+  sessionBytesPerSecond: 524_288,
+  sessionByteBurst: 1_048_576,
   bufferedBytes: 1_048_576, // a connection whose unsent bytes exceed this is cut off (4013)
   resumeEntries: 1024, // most missed changes replayed on connect; more answers `resync`
   retainMs: 60_000, // retained-frame life (at most 60 s, §S9)
@@ -85,8 +91,18 @@ export class HomeStream {
     this.o.retainMs = Math.min(this.o.retainMs, 60_000);
     this.tickets = new Map(); // sha256(ticket) -> grant
     this.conns = new Set();
-    this.retained = new Map(); // namespace \0 cell \0 from -> { frame, to, from, namespace, cell, at }
-    this.counters = { forwarded: 0, dropped: 0, refused: 0, slow: 0, idle: 0 };
+    this.retained = new Map(); // namespace \0 cell \0 from -> { frame, from, namespace, cell, at }
+    this.counters = { forwarded: 0, dropped: 0, limited: 0, refused: 0, slow: 0, idle: 0 };
+    this.session = {
+      frames: new Bucket(this.o.sessionFramesPerSecond, this.o.sessionFrameBurst),
+      bytes: new Bucket(this.o.sessionBytesPerSecond, this.o.sessionByteBurst),
+    };
+    // Retained frames replayed to new subscribers, at the same rates. Kept apart from the budget
+    // for live frames so that subscribing over and over cannot starve them.
+    this.replay = {
+      frames: new Bucket(this.o.sessionFramesPerSecond, this.o.sessionFrameBurst),
+      bytes: new Bucket(this.o.sessionBytesPerSecond, this.o.sessionByteBurst),
+    };
     this.timers = null;
   }
 
@@ -183,7 +199,11 @@ export class HomeStream {
     clearTimeout(conn.timer);
     if (!this.conns.has(conn)) { ws.terminate(); return; }
     conn.ws = ws;
-    ws.on('message', (data, isBinary) => this.receive(conn, data, isBinary));
+    // A client message that makes the host code or the module fail answers `badFrame`; it never
+    // reaches the process as an uncaught exception.
+    ws.on('message', (data, isBinary) => {
+      try { this.receive(conn, data, isBinary); } catch { this.error(conn, 'badFrame'); }
+    });
     ws.on('pong', () => { conn.lastSeen = Date.now(); });
     ws.on('close', () => this.drop(conn));
     ws.on('error', () => ws.terminate());
@@ -198,6 +218,7 @@ export class HomeStream {
       limits: {
         frameBytes: 16_384, messageBytes: this.o.messageBytes, subscriptions: this.o.subscriptions,
         framesPerSecond: this.o.framesPerSecond, bytesPerSecond: this.o.bytesPerSecond,
+        sessionFramesPerSecond: this.o.sessionFramesPerSecond, sessionBytesPerSecond: this.o.sessionBytesPerSecond,
         retainMs: this.o.retainMs, pingMs: this.o.pingMs, idleMs: this.o.idleMs,
         resumeEntries: this.o.resumeEntries,
       },
@@ -302,25 +323,31 @@ export class HomeStream {
     this.send(conn, { type: 'error', code, ...(ref !== undefined ? { ref } : {}), ...extra });
   }
 
+  /** Count a frame dropped for a rate cap, and tell its sender at most once a second. */
+  limited(conn) {
+    conn.dropped += 1;
+    this.counters.dropped += 1;
+    const now = Date.now();
+    if (now - conn.warnedAt >= 1000) {
+      conn.warnedAt = now;
+      this.error(conn, 'rateLimited', undefined, { dropped: conn.dropped });
+    }
+  }
+
   receive(conn, data, isBinary) {
     conn.lastSeen = Date.now();
     if (!conn.live) return;
     const size = data.length ?? data.byteLength ?? 0;
     // Over the rate: dropped and counted, never queued. The sender hears of it at most once a
     // second, with its running total.
-    if (!conn.frames.take(1) || !conn.bytes.take(size)) {
-      conn.dropped += 1;
-      this.counters.dropped += 1;
-      const now = Date.now();
-      if (now - conn.warnedAt >= 1000) {
-        conn.warnedAt = now;
-        this.error(conn, 'rateLimited', undefined, { dropped: conn.dropped });
-      }
-      return;
-    }
+    if (!conn.frames.take(1) || !conn.bytes.take(size)) { this.limited(conn); return; }
     if (isBinary) { this.error(conn, 'binary'); return; }
+    const bytes = Buffer.from(data);
+    // Nesting is bounded before parsing, so no client structure can exhaust the stack in
+    // JSON.parse, JSON.stringify or a module call; whatever the message type.
+    if (nestingOver(bytes, MAX_MESSAGE_NESTING)) { this.error(conn, 'badFrame'); return; }
     let msg;
-    try { msg = JSON.parse(Buffer.from(data).toString('utf8')); } catch { msg = null; }
+    try { msg = JSON.parse(bytes.toString('utf8')); } catch { msg = null; }
     if (!msg || typeof msg !== 'object' || Array.isArray(msg) || typeof msg.type !== 'string') {
       this.error(conn, 'badFrame');
       return;
@@ -349,14 +376,21 @@ export class HomeStream {
     const r = this.home.wasm.call({ op: 'subscription', namespace, cell, entitled: conn.namespaces });
     if (!r.allowed) { this.error(conn, r.code, ref); return; }
     const key = `${namespace}\0${cell}`;
-    if (!conn.subs.has(key) && conn.subs.size >= this.o.subscriptions) { this.error(conn, 'tooMany', ref); return; }
+    const already = conn.subs.has(key);
+    if (!already && conn.subs.size >= this.o.subscriptions) { this.error(conn, 'tooMany', ref); return; }
     conn.subs.add(key);
     this.send(conn, { type: 'subscribed', namespace, cell, ...(ref !== undefined ? { ref } : {}) });
-    // The latest retained frame of every other member in the cell (§S9), still in its time.
+    // Subscribing again to a cell replays nothing: the connection has had those frames.
+    if (already) return;
+    // The latest retained frame of every other member in the cell (§S9), still in its time,
+    // whatever its `to` says: receivers ignore frames not addressed to them (§S3).
     const now = Date.now();
     for (const [k, r2] of this.retained) {
       if (now - r2.at > this.o.retainMs) { this.retained.delete(k); continue; }
-      if (r2.namespace === namespace && r2.cell === cell && r2.from !== conn.member && (!r2.to || r2.to === conn.member)) {
+      if (r2.namespace === namespace && r2.cell === cell && r2.from !== conn.member) {
+        // Replay is best effort and bounded for the account: over the budget the rest is left
+        // out, and the subscriber gets each member's state with that member's next frame.
+        if (!this.replay.frames.take(1) || !this.replay.bytes.take(r2.size)) { this.counters.limited += 1; return; }
         if (!this.send(conn, { type: 'session', retained: true, frame: r2.frame })) return;
       }
     }
@@ -366,7 +400,17 @@ export class HomeStream {
     if (!conn.member) { conn.refused += 1; this.counters.refused += 1; this.error(conn, 'notEntitled', ref); return; }
     const { frame } = msg;
     if (!frame || typeof frame !== 'object' || Array.isArray(frame)) { this.error(conn, 'badFrame', ref); return; }
-    const encoded = JSON.stringify(frame);
+    // The frame is the session codec's: one canonical JSON object (sessions §S3). The module
+    // checks this serialisation and refuses it unless it is canonical. A codec frame holds only
+    // strings, `true`, integers up to 2^53 − 1 and objects of those (the delegation), which
+    // JSON.parse and JSON.stringify carry without loss and, for keys already in byte order and
+    // none of them integer-like, in the same order: so `encoded` is the sender's exact bytes.
+    // The object is never changed after this, and `send` serialises it with the same function,
+    // so every receiver, live or by retained replay, gets `encoded` byte for byte.
+    let encoded;
+    try { encoded = JSON.stringify(frame); } catch { this.error(conn, 'badFrame', ref); return; }
+    // Budgets and sizes are wire bytes (UTF-8), not UTF-16 code units.
+    const bytes = Buffer.byteLength(encoded, 'utf8');
     const r = this.home.wasm.call({ op: 'session_frame', frame: encoded, account: this.home.account, member: conn.member, entitled: conn.namespaces });
     if (!r.allowed) {
       conn.refused += 1;
@@ -374,17 +418,29 @@ export class HomeStream {
       this.error(conn, r.code, ref);
       return;
     }
+    // The account's budget for session frames, charged for every valid frame whoever is
+    // listening: the answer cannot depend on how many members are connected or subscribed. Over
+    // it the frame is dropped like one over the connection's own rate, and never retained.
+    if (!this.session.frames.take(1) || !this.session.bytes.take(bytes)) {
+      this.counters.limited += 1;
+      this.limited(conn);
+      return;
+    }
     const out = { type: 'session', frame };
     if (r.retain) {
       const key = `${r.namespace}\0${r.cell}\0${r.from}`;
       if (this.retained.has(key) || this.retained.size < this.o.retainedPerSlot) {
-        this.retained.set(key, { frame, to: r.to, from: r.from, namespace: r.namespace, cell: r.cell, at: Date.now() });
+        this.retained.set(key, { frame, size: bytes, from: r.from, namespace: r.namespace, cell: r.cell, at: Date.now() });
       }
     }
+    // `to` is advice to receivers, not a route (§S3, §S9): a member reachable only through
+    // another member must still get addressed frames, so every other subscribed, entitled member
+    // receives the frame. The sender hears nothing either way, so it cannot learn from the home
+    // whether the member `to` names is connected.
     const sub = `${r.namespace}\0${r.cell}`;
     this.counters.forwarded += 1;
     this.broadcast(out, (c) => c !== conn && c.member && c.member !== r.from && c.subs.has(sub)
-      && c.namespaces.includes(r.namespace) && (!r.to || c.member === r.to));
+      && c.namespaces.includes(r.namespace));
   }
 
   // -------------------------------------------------------------------------------------------
@@ -509,6 +565,27 @@ export class HomeStream {
     this.retained.clear();
     this.stopTimers();
   }
+}
+
+/** Deepest nesting of objects and arrays a client message may have: a session frame nests at
+ * most 64 deep (sessions §S3), and the message adds one. */
+export const MAX_MESSAGE_NESTING = 65;
+
+/** Whether JSON text nests objects and arrays more than `max` deep. A single pass over the
+ * bytes that skips string contents; malformed text is left to the parser. */
+export function nestingOver(bytes, max) {
+  let depth = 0;
+  let inString = false;
+  for (let i = 0; i < bytes.length; i++) {
+    const b = bytes[i];
+    if (inString) {
+      if (b === 0x5c) i += 1; // backslash: skip the escaped byte
+      else if (b === 0x22) inString = false;
+    } else if (b === 0x22) inString = true;
+    else if (b === 0x7b || b === 0x5b) { if (++depth > max) return true; }
+    else if (b === 0x7d || b === 0x5d) depth -= 1;
+  }
+  return false;
 }
 
 function minExpiry(a, b) {
