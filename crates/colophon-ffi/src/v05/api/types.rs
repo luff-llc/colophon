@@ -1239,17 +1239,18 @@ record! {
     pub struct SessionDrop { pub reason: String, pub hello_to: Option<String> }
 }
 record! {
-    /// What one endpoint call produced. `effects` in order; `dropped` the drop of the frame this
-    /// call received; `drops` the drops of queued frames this call ran, in arrival order. When
-    /// the last effect is a `Persist`, `awaiting_persist` is its acknowledgement ID: what follows
-    /// it waits inside the endpoint until the host has stored the claim and calls `persisted`.
-    /// `queued` says this call's input was queued behind that `Persist` instead of run now.
+    /// What one endpoint call produced: `effects` in order (perform them in order); `drops` the
+    /// frames this call judged and dropped, in order, with their reasons (`queueFull` for a frame
+    /// that could not be kept). When the last effect is a `Persist`, `awaiting_persist` is its
+    /// acknowledgement ID: store it, then call `persisted` with it. `queued` says this call's
+    /// input is kept to run after that acknowledgement. `discarded` counts effects decided under
+    /// an older authority head that were dropped instead of released.
     pub struct SessionStep {
         pub effects: Vec<SessionEffect>,
-        pub dropped: Option<SessionDrop>,
         pub drops: Vec<SessionDrop>,
         pub awaiting_persist: Option<u64>,
         pub queued: bool,
+        pub discarded: u32,
     }
 }
 record! {

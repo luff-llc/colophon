@@ -150,13 +150,31 @@ fn v06_through_the_engine(
     assert_eq!(req.method, HttpMethod::Post);
     assert!(req.url.ends_with("/stream/ticket"), "{}", req.url);
 
-    let view = ea.session_account(NOW).unwrap();
+    let view = ea.session_account("notes".into(), NOW).unwrap();
     assert_eq!(view.account(), account);
     assert!(view.writers("notes".into(), NOW).contains(&m1.to_string()));
     let clock = |t: u64| SessionClock {
         mono_ms: t,
         wall_ms: NOW,
     };
+    let make = |acct: &str, ns: &str| {
+        SessionEndpoint::new(
+            acct.into(),
+            ns.into(),
+            "now-playing".into(),
+            m1.into(),
+            session_default_policy().unwrap(),
+            None,
+            view.clone(),
+            vec![7; 32],
+            vec![7; 16],
+            clock(1_000),
+        )
+    };
+    // A view backs only an endpoint of its own account and namespace.
+    for (acct, ns) in [(&"c".repeat(64)[..], "notes"), (account, "other")] {
+        assert_eq!(make(acct, ns).err().unwrap().code(), "session:wrongView", "{acct} {ns}");
+    }
     let ep = SessionEndpoint::new(
         account.into(),
         "notes".into(),
@@ -171,6 +189,11 @@ fn v06_through_the_engine(
     )
     .unwrap();
     assert!(ep.entitled().unwrap() && ep.can_write().unwrap());
+    let other_ns = ea.session_account("other".into(), NOW).unwrap();
+    assert_eq!(
+        ep.set_account(&other_ns, ea, clock(1_000)).err().unwrap().code(),
+        "session:wrongView"
+    );
     let body = ep.begin_delegation(NOW - 1_000, NOW + HOUR).unwrap();
     let signature = host.sign_one(&body, m1, false).signature;
     // Only the body begin_delegation returned installs: a changed field (member, key, bounds,
@@ -186,16 +209,25 @@ fn v06_through_the_engine(
         assert!(text.contains(from), "{from}");
         let changed = text.replacen(from, to, 1).into_bytes();
         let sig = host.sign_one(&changed, m1, false).signature;
-        let e = ep.finish_delegation(changed, sig, clock(1_000)).err().unwrap();
+        let e = ep
+            .finish_delegation(changed, sig, clock(1_000))
+            .err()
+            .unwrap();
         assert_eq!(e.code(), "session:delegation", "{from}");
     }
     let mut forged = signature.clone();
     forged[5] ^= 1;
-    let e = ep.finish_delegation(body.clone(), forged, clock(1_000)).err().unwrap();
+    let e = ep
+        .finish_delegation(body.clone(), forged, clock(1_000))
+        .err()
+        .unwrap();
     assert_eq!(e.code(), "session:delegation", "a bad signature");
     ep.finish_delegation(body.clone(), signature.clone(), clock(1_000))
         .unwrap();
-    let e = ep.finish_delegation(body, signature, clock(1_000)).err().unwrap();
+    let e = ep
+        .finish_delegation(body, signature, clock(1_000))
+        .err()
+        .unwrap();
     assert_eq!(e.code(), "consumed", "a delegation installs once");
 
     // Joining seals under the engine's epoch key: frames are sent, none is unsent.
@@ -208,7 +240,10 @@ fn v06_through_the_engine(
         .find(|e| e.kind == SessionEffectKind::Send)
         .map(|e| e.bytes.clone())
         .expect("a join says hello");
-    assert!(!joined.effects.iter().any(|e| e.kind == SessionEffectKind::Unsent));
+    assert!(!joined
+        .effects
+        .iter()
+        .any(|e| e.kind == SessionEffectKind::Unsent));
     assert!(joined.awaiting_persist.is_none());
 
     // Taking the role persists a claim: the step stops at the Persist.
@@ -217,60 +252,59 @@ fn v06_through_the_engine(
         .unwrap();
     let ack = taken.awaiting_persist.expect("a take persists its claim");
     assert_eq!(taken.effects.last().unwrap().kind, SessionEffectKind::Persist);
-    assert!(taken.effects.last().unwrap().persisted_json.is_some());
     assert_eq!(ep.awaiting_persist().unwrap(), Some(ack));
 
-    // A slow durable write: the tick that falls due meanwhile is queued (twice: coalesced), the
-    // deadline stays the machine's, and frames are queued in arrival order.
+    // While it waits: a command is refused (not queued) and changes nothing; ticks coalesce to
+    // one and link changes to the latest; frames are kept up to 64 and 1 MiB.
+    let presence = r#"{"command":"presence","payload":"AA=="}"#;
+    let e = ep.command(presence.into(), ea, clock(1_150)).err().unwrap();
+    assert_eq!(e.code(), "session:persistPending");
+    assert_eq!(ep.queued().unwrap(), 0);
     let deadline = ep.next_deadline().unwrap();
     for t in [1_200, 1_300] {
         let q = ep.tick(ea, clock(t)).unwrap();
         assert!(q.queued && q.effects.is_empty() && q.awaiting_persist == Some(ack));
     }
+    ep.link_down(ea, clock(1_300)).unwrap();
+    ep.link_up(ea, clock(1_300)).unwrap();
+    assert_eq!(ep.queued().unwrap(), 2, "one tick and one link state");
     assert_eq!(ep.next_deadline().unwrap(), deadline);
-    assert_eq!(ep.queued().unwrap(), 1, "ticks coalesce");
-    let frames = [b"x".to_vec(), vec![b' '; 20_000], own_hello];
-    for f in &frames {
-        assert!(ep.receive(f.clone(), ea, clock(1_300)).unwrap().queued);
+    let big = vec![b' '; 400 << 10];
+    for f in [b"x".to_vec(), vec![b' '; 20_000], own_hello, big.clone(), big.clone()] {
+        assert!(ep.receive(f, ea, clock(1_300)).unwrap().queued);
     }
-    // The bound: past 64 queued inputs a frame is lost, a command is refused.
-    for _ in 3..64 {
+    let lost = ep.receive(big, ea, clock(1_300)).unwrap();
+    assert!(!lost.queued, "past 1 MiB the newest frame is lost");
+    assert_eq!(lost.drops[0].reason, "queueFull");
+    for _ in 5..64 {
         assert!(ep.receive(b"y".to_vec(), ea, clock(1_300)).unwrap().queued);
     }
     let lost = ep.receive(b"z".to_vec(), ea, clock(1_300)).unwrap();
-    assert!(!lost.queued);
-    assert_eq!(lost.dropped.unwrap().reason, "queueFull");
-    let e = ep
-        .command(r#"{"command":"release"}"#.into(), ea, clock(1_300))
-        .err()
-        .unwrap();
-    assert_eq!(e.code(), "session:queueFull");
-    assert_eq!(ep.queued().unwrap(), 65, "64 frames and one tick");
+    assert!(!lost.queued, "past 64 frames the newest is lost");
+    assert_eq!(lost.drops[0].reason, "queueFull");
+    assert_eq!(ep.queued().unwrap(), 66);
     assert_eq!(
-        ep.set_account(&view, ea, clock(1_300)).err().unwrap().code(),
-        "session:persistPending",
-        "a view cannot be queued"
+        ep.persisted(ack + 1, ea, clock(1_400)).err().unwrap().code(),
+        "session:wrongAck"
     );
-    assert_eq!(ep.persisted(ack + 1, ea, clock(1_400)).err().unwrap().code(), "session:wrongAck");
 
-    // The acknowledgement releases what the Persist held, then the queue in arrival order.
+    // The acknowledgement releases what the Persist held, then what waited: the link state,
+    // the frames in arrival order, one tick.
     let mut effects = Vec::new();
     let mut drops = Vec::new();
-    let rest = ep.persisted(ack, ea, clock(1_500)).unwrap();
+    let mut next = Some(ack);
+    while let Some(id) = next {
+        let r = ep.persisted(id, ea, clock(1_500)).unwrap();
+        assert_eq!(r.discarded, 0);
+        next = r.awaiting_persist;
+        effects.extend(r.effects);
+        drops.extend(r.drops);
+    }
     assert_eq!(
         ep.persisted(ack, ea, clock(1_500)).err().unwrap().code(),
         "session:wrongAck",
         "acknowledged once"
     );
-    let mut next = rest.awaiting_persist;
-    effects.extend(rest.effects);
-    drops.extend(rest.drops);
-    while let Some(id) = next {
-        let r = ep.persisted(id, ea, clock(1_500)).unwrap();
-        next = r.awaiting_persist;
-        effects.extend(r.effects);
-        drops.extend(r.drops);
-    }
     assert!(
         effects.iter().any(|e| e.kind == SessionEffectKind::Send),
         "the frames that reveal the claim come only after the acknowledgement"
@@ -280,68 +314,73 @@ fn v06_through_the_engine(
     assert_eq!(reasons.len(), 64);
     assert_eq!(ep.queued().unwrap(), 0);
     assert!(ep.is_holder().unwrap());
+    assert!(ep.command(presence.into(), ea, clock(1_600)).is_ok(), "the command now runs");
 
-    // A new authority head (a controller added) reaches the member's engine: until the endpoint
-    // is given the new view, every call that consults the account is refused and changes nothing.
-    let before = ea.head_seq().unwrap();
-    assert!(sync_pass(ctl, auth, home, sim, host, NOW).is_empty(), "the controller catches up");
-    let tablet = host.identity(12);
-    let a = ctl
-        .begin_add_controller(
-            host.raw_controller(&tablet, "Tablet", &["approve"]),
-            AddMode::Immediate,
-            vec![d.to_string()],
-            RuleKind::Control,
-            vec![],
-        )
+    // The head moves before a Persist is acknowledged: what it held is discarded, never sent.
+    let released = ep
+        .command(r#"{"command":"release"}"#.into(), ea, clock(1_700))
         .unwrap();
-    auth.store(&finish(ctl, host, a).stores);
-    assert!(sync_pass(ctl, auth, home, sim, host, NOW).is_empty());
-    assert!(sync_pass(ea, sa, home, sim, host, NOW).is_empty());
-    assert!(ea.head_seq().unwrap() > before, "the engine took the new head");
+    let ack2 = released.awaiting_persist.expect("a release persists its tombstone");
+    bump(ctl, auth, ea, sa, sim, host, d, home, 12);
+    let r = ep.persisted(ack2, ea, clock(1_800)).unwrap();
+    assert!(r.discarded > 0, "the bye decided under the old head is discarded");
+    assert!(r.effects.is_empty());
+    assert_eq!(ep.tick(ea, clock(1_800)).err().unwrap().code(), "session:staleAccount");
+    ep.set_account(&ea.session_account("notes".into(), NOW).unwrap(), ea, clock(1_800))
+        .unwrap();
+
+    // set_account while a Persist waits: the held effects go, the Persist still needs its ack.
+    let taken = ep
+        .command(r#"{"command":"take","state":null}"#.into(), ea, clock(1_900))
+        .unwrap();
+    let ack3 = taken.awaiting_persist.expect("a take persists its claim");
+    bump(ctl, auth, ea, sa, sim, host, d, home, 13);
+    let fresh = ea.session_account("notes".into(), NOW).unwrap();
+    let r = ep.set_account(&fresh, ea, clock(2_000)).unwrap();
+    assert!(r.discarded > 0, "frames decided under the old head are discarded");
+    assert_eq!(r.awaiting_persist, Some(ack3));
+    let e = ep.command(presence.into(), ea, clock(2_000)).err().unwrap();
+    assert_eq!(e.code(), "session:persistPending", "the Persist still needs its ack");
+    let r = ep.persisted(ack3, ea, clock(2_100)).unwrap();
+    assert_eq!(r.discarded, 0);
+    let mut next = r.awaiting_persist;
+    while let Some(id) = next {
+        next = ep.persisted(id, ea, clock(2_100)).unwrap().awaiting_persist;
+    }
+
+    // A new head reaches the engine: every call that runs the session is refused and changes
+    // nothing until set_account.
+    bump(ctl, auth, ea, sa, sim, host, d, home, 14);
     let digest = ep.digest().unwrap();
     for e in [
-        ep.tick(ea, clock(2_000)).err(),
-        ep.command(r#"{"command":"release"}"#.into(), ea, clock(2_000)).err(),
-        ep.receive(b"{}".to_vec(), ea, clock(2_000)).err(),
-        ep.link_down(ea, clock(2_000)).err(),
-        ep.set_account(&view, ea, clock(2_000)).err(),
+        ep.tick(ea, clock(2_200)).err(),
+        ep.command(r#"{"command":"release"}"#.into(), ea, clock(2_200))
+            .err(),
+        ep.receive(b"{}".to_vec(), ea, clock(2_200)).err(),
+        ep.link_down(ea, clock(2_200)).err(),
+        ep.set_account(&fresh, ea, clock(2_200)).err(),
     ] {
         assert_eq!(e.unwrap().code(), "session:staleAccount");
     }
     assert_eq!(ep.digest().unwrap(), digest, "a refused call changes nothing");
-    let fresh = ea.session_account(NOW).unwrap();
-    ep.set_account(&fresh, ea, clock(2_000)).unwrap();
-    assert!(ep.tick(ea, clock(2_000)).is_ok());
-    // An engine of another session is not this endpoint's.
+    let fresh = ea.session_account("notes".into(), NOW).unwrap();
+    ep.set_account(&fresh, ea, clock(2_200)).unwrap();
+    assert!(ep.tick(ea, clock(2_200)).is_ok());
     assert_eq!(
-        ep.set_account(&ctl.session_account(NOW).unwrap(), ea, clock(2_000)).err().unwrap().code(),
-        "session:staleAccount"
+        ep.set_account(&ctl.session_account("notes".into(), NOW).unwrap(), ea, clock(2_200))
+            .err()
+            .unwrap()
+            .code(),
+        "session:wrongView",
+        "a view of another engine"
     );
 
-    // A head change racing the endpoint: while another thread accepts a new authority head,
-    // every endpoint call either completes under the view of the head it ran with or is
-    // refused as stale; once the new head is in, nothing runs until set_account. The calls
-    // hold the engine's lock for their whole run (engine, then endpoint), so the head cannot
-    // change between the check and the mutation; the race also shows the lock order cannot
-    // deadlock against an exchange pass.
+    // A head change racing the endpoint on another thread: every call either runs under the
+    // head the engine had installed or is refused as stale, never after one was refused; and
+    // nothing deadlocks.
     let mut seen_stale = false;
     std::thread::scope(|scope| {
-        let writer = scope.spawn(|| {
-            let other = host.identity(13);
-            let a = ctl
-                .begin_add_controller(
-                    host.raw_controller(&other, "Watch", &["approve"]),
-                    AddMode::Immediate,
-                    vec![d.to_string()],
-                    RuleKind::Control,
-                    vec![],
-                )
-                .unwrap();
-            auth.store(&finish(ctl, host, a).stores);
-            assert!(sync_pass(ctl, auth, home, sim, host, NOW).is_empty());
-            assert!(sync_pass(ea, sa, home, sim, host, NOW).is_empty());
-        });
+        let writer = scope.spawn(|| bump(ctl, auth, ea, sa, sim, host, d, home, 15));
         let mut t = 3_000;
         while !writer.is_finished() {
             t += 1;
@@ -355,11 +394,72 @@ fn v06_through_the_engine(
         }
         writer.join().unwrap();
     });
-    let after = ea.session_account(NOW).unwrap();
     assert_eq!(ep.tick(ea, clock(9_000)).err().unwrap().code(), "session:staleAccount");
-    assert_eq!(ep.set_account(&fresh, ea, clock(9_000)).err().unwrap().code(), "session:staleAccount");
+    let after = ea.session_account("notes".into(), NOW).unwrap();
     ep.set_account(&after, ea, clock(9_000)).unwrap();
-    assert!(ep.tick(ea, clock(9_001)).is_ok());
+
+    // A long engine call (every record read slow, the engine's lock held throughout) does not
+    // hold up a tick: endpoint calls read the gate, never the engine's lock.
+    // A record path the engine has not read: refreshing reads it, slowly, under its lock.
+    let probe = sa.copy_of();
+    let probe_path = format!(
+        "ops/{}/notes/000000000001-{}.json",
+        "ab".repeat(16),
+        "cd".repeat(16)
+    );
+    sa.put(&probe_path, vec![0xff; 40]);
+    probe.put(&probe_path, vec![0xff; 40]);
+    *sa.mode.lock().unwrap() = 3;
+    let reads = *sa.reads.lock().unwrap();
+    std::thread::scope(|scope| {
+        let slow = scope.spawn(|| {
+            let _ = ea.refresh(probe.listing());
+        });
+        let started = std::time::Instant::now();
+        while *sa.reads.lock().unwrap() == reads {
+            assert!(started.elapsed().as_secs() < 10, "the long call never read");
+            std::thread::yield_now();
+        }
+        let t0 = std::time::Instant::now();
+        ep.tick(ea, clock(9_100)).unwrap();
+        let took = t0.elapsed();
+        assert!(!slow.is_finished(), "the long call was still running");
+        assert!(took.as_millis() < 100, "a tick waited {took:?} for the engine");
+        slow.join().unwrap();
+    });
+    *sa.mode.lock().unwrap() = 0;
+    sa.files.lock().unwrap().remove(&probe_path);
+    ea.refresh(sa.listing()).unwrap();
+}
+/// A new authority head: the controller adds a controller and both engines sync with the home.
+#[allow(clippy::too_many_arguments)]
+fn bump(
+    ctl: &Arc<AccountEngine>,
+    auth: &MemSource,
+    ea: &Arc<AccountEngine>,
+    sa: &MemSource,
+    sim: &mut SimHome,
+    host: &mut Host,
+    d: &str,
+    home: &str,
+    seed: u8,
+) {
+    let before = ea.head_seq().unwrap();
+    assert!(sync_pass(ctl, auth, home, sim, host, NOW).is_empty());
+    let other = host.identity(seed);
+    let a = ctl
+        .begin_add_controller(
+            host.raw_controller(&other, "Another", &["approve"]),
+            AddMode::Immediate,
+            vec![d.to_string()],
+            RuleKind::Control,
+            vec![],
+        )
+        .unwrap();
+    auth.store(&finish(ctl, host, a).stores);
+    assert!(sync_pass(ctl, auth, home, sim, host, NOW).is_empty());
+    assert!(sync_pass(ea, sa, home, sim, host, NOW).is_empty());
+    assert!(ea.head_seq().unwrap() > before, "the engine took the new head");
 }
 fn notes(engine: &AccountEngine) -> Vec<Value> {
     let v: Value = serde_json::from_str(&engine.view_json("notes".into()).unwrap()).unwrap();
