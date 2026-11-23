@@ -1,10 +1,11 @@
 //! What goes into and comes out of [`super::Session::handle`].
-use super::types::{Bytes, Claim, Frame, MemberId};
+use super::types::{Bytes, Claim, Frame, Id, MemberId};
 use serde::{Deserialize, Serialize};
 
 /// One input. Time is passed beside it, in the member's own monotonic ms.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "input", rename_all = "camelCase")]
+#[allow(clippy::large_enum_variant)]
 pub enum Input {
     /// A frame that passed §S3 (parsed, signed by an accepted session key, opened).
     Frame {
@@ -12,6 +13,13 @@ pub enum Input {
         frame: Frame,
         /// Whether the sender's entry for the namespace has access `write` (§S1).
         writer: bool,
+        /// The sender's session key ID and the frame's `n` (§S3), for the freshness gate.
+        /// Without them (tests, or a codec that gates freshness itself) the gate is open.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        key: Option<String>,
+        /// The frame's `n`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        n: Option<u64>,
     },
     /// Time passed; the host calls this at least every few hundred ms.
     Tick,
@@ -60,15 +68,15 @@ pub enum Command {
     Release,
     /// Order a message (holder).
     Publish {
-        /// Caller-chosen id.
-        id: Bytes,
+        /// Caller-chosen id (16 random bytes).
+        id: Id,
         /// Application bytes.
         payload: Bytes,
     },
     /// Ask the holder to order a message (writer).
     Submit {
-        /// Caller-chosen id.
-        id: Bytes,
+        /// Caller-chosen id (16 random bytes).
+        id: Id,
         /// Application bytes.
         payload: Bytes,
     },
@@ -139,7 +147,7 @@ pub enum Event {
         /// Who asked for it.
         origin: MemberId,
         /// Its id.
-        id: Bytes,
+        id: Id,
         /// Application bytes.
         payload: Bytes,
     },
@@ -155,7 +163,7 @@ pub enum Event {
     /// The holder refused this member's submit.
     Refused {
         /// The submit's id.
-        id: Bytes,
+        id: Id,
         /// Why.
         reason: String,
     },
@@ -180,6 +188,34 @@ pub enum Event {
         /// `ceil(rtt / 2)`.
         error: u64,
     },
+    /// A pass naming this member arrived after it already held under a lesser claim (it
+    /// took, or another holder passed to it): the pass's snapshot, which the member did not
+    /// install. It renewed with its own state; the application may publish a correction
+    /// (§S5, revision 4, G11).
+    LatePass {
+        /// The passer.
+        from: MemberId,
+        /// The pass's `next`.
+        claim: Claim,
+        /// The pass's snapshot.
+        snapshot: Bytes,
+    },
+    /// A member that yielded to this member's take reported what it held (§S5, G11).
+    Displaced {
+        /// The displaced holder.
+        from: MemberId,
+        /// The claim it held.
+        claim: Claim,
+        /// Its last `seq`.
+        seq: u64,
+        /// Its state.
+        snapshot: Bytes,
+    },
+    /// A submit was resent 8 times without an answer (§S8, revision 4).
+    SubmitFailed {
+        /// Its id.
+        id: Id,
+    },
     /// A command could not be carried out now.
     Rejected {
         /// The command's name.
@@ -198,10 +234,20 @@ pub enum Output {
         /// The frame.
         frame: Frame,
     },
-    /// Store this claim before sending anything else (it survives restarts).
+    /// Store this before any later output (it survives restarts).
     Persist {
         /// The accepted claim.
         claim: Claim,
+        /// The member released that claim (tombstone).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        released: bool,
+    },
+    /// Send another member's frame unchanged to `to` (evidence, §S4, revision 4).
+    Forward {
+        /// The recipient.
+        to: MemberId,
+        /// The origin's frame, as it was received.
+        frame: Frame,
     },
     /// Tell the application.
     Event {

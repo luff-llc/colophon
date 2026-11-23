@@ -1,0 +1,29 @@
+Verdict: **not sound** for the stated asynchronous model.
+
+### High
+
+- **Permanent renew livelock (§S4–S6, G4).** A holds `1.0.a`, C holds `1.0.c`; only A↔B and B↔C work. B accepts C, then corrects A’s lesser beat with `hello(seen=C)`. After 15 s, A considers unreachable C absent and renews to `2.0.a`. B accepts A and similarly causes C to renew to `3.0.c`; this repeats forever despite lossless working links and live holders. The “link has worked” guard measures any link, not reachability to the named holder. Fix: gossip/relay signed holder evidence across members, or require eventual full connectivity/bounded delay and state that assumption explicitly.
+
+- **Take/pass and restart silently discard state.** A holds term 1; B asks. At 1,500 ms B takes `2.0.b` with state `SB`; A’s delayed pass `2.1.b.via=a` contains final state `SA`. B renews to `3.0.b` using `SB`, silently losing `SA`. Similarly, `ff` releases term 1, `00` takes term 2, then `ff` restarts with only its persisted claim; if B’s frames are delayed for `askTimeoutMs`, it retakes `2.0.ff`, beats `2.0.00`, and overwrites newer state. Fix: higher passes naming the current holder must install/report their snapshot; persist release tombstones; reconcile state before retake. Bounded takeover and preservation of an arbitrarily delayed live holder’s state cannot both be guaranteed without an eventual-synchrony assumption.
+
+- **Pass is emitted before its claim is persisted.** [mod.rs:1230](/Users/mikelxc/projects/colophon-wt/live-06-review/crates/colophon-core/src/v06/session/mod.rs:1230) outputs `Send(pass)` before [mod.rs:1241](/Users/mikelxc/projects/colophon-wt/live-06-review/crates/colophon-core/src/v06/session/mod.rs:1241) emits `Persist(next)`, contradicting the output contract at [io.rs:201](/Users/mikelxc/projects/colophon-wt/live-06-review/crates/colophon-core/src/v06/session/io.rs:201). A crash between effects restarts the passer under its old claim, violating G1–G3. Persist/adopt before exposing the pass; add crash-prefix testing.
+
+- **S2/S3 cannot bootstrap a new session key.** The unknown-key frame must wait for a `hello`, but that hello’s delegation is inside ciphertext that cannot be opened or signature-verified without that key. Put the delegation in an authenticated outer announcement or define a safe hello-specific verification order. Also derive per-session-key encryption keys and nonce=`n`; random nonces shared under one namespace AES-GCM key permit cross-member nonce collision/reuse. Persist replay windows or rotate keys on restart; clarify expiry rechecks and revocation latency.
+
+### Medium
+
+- **Submit delivery is neither at-most-once nor reliably acknowledged (§S8).** An old holder can order ID X, lose its `msg`, pass, and the new holder—whose dedupe set reset—orders X again; alternatively, a submit arriving after pass is silently dropped. Carry dedupe/pending IDs across handoff or specify explicit at-least-once semantics and require application dedupe.
+
+- **Unbounded authenticated-input growth.** `ordered` grows for the whole term ([mod.rs:89](/Users/mikelxc/projects/colophon-wt/live-06-review/crates/colophon-core/src/v06/session/mod.rs:89), [mod.rs:612](/Users/mikelxc/projects/colophon-wt/live-06-review/crates/colophon-core/src/v06/session/mod.rs:612)); append-fold snapshots grow without limit ([types.rs:305](/Users/mikelxc/projects/colophon-wt/live-06-review/crates/colophon-core/src/v06/session/types.rs:305)) and eventually exceed `maxPayload`. Bound both or checkpoint them. Sequence/deadline arithmetic can overflow at [mod.rs:594](/Users/mikelxc/projects/colophon-wt/live-06-review/crates/colophon-core/src/v06/session/mod.rs:594), [mod.rs:606](/Users/mikelxc/projects/colophon-wt/live-06-review/crates/colophon-core/src/v06/session/mod.rs:606), and [mod.rs:1120](/Users/mikelxc/projects/colophon-wt/live-06-review/crates/colophon-core/src/v06/session/mod.rs:1120); use checked/saturating operations and specify exhaustion.
+
+- **Pass need not correspond to an asker.** [mod.rs:1211](/Users/mikelxc/projects/colophon-wt/live-06-review/crates/colophon-core/src/v06/session/mod.rs:1211) permits passing to an arbitrary or departed member, contrary to §S5. Track and consume outstanding asks plus current entitlement.
+
+### Low
+
+- IDs use standard base64 rather than specified base64url ([types.rs:28](/Users/mikelxc/projects/colophon-wt/live-06-review/crates/colophon-core/src/v06/session/types.rs:28)); ID length and snapshot limits are not enforced. Unbounded `u64` JSON values, including the vector at [v06_session_vectors.rs:310](/Users/mikelxc/projects/colophon-wt/live-06-review/crates/colophon-core/tests/v06_session_vectors.rs:310), cannot replay exactly through ordinary JavaScript numbers. Cap at `2^53−1` or encode decimal strings.
+
+The explorer’s G4 completion heals to a full mesh and runs one FIFO lossless suffix ([v06_session_explore.rs:433](/Users/mikelxc/projects/colophon-wt/live-06-review/crates/colophon-core/tests/v06_session_explore.rs:433)); it proves neither all fair schedules nor persistent asymmetric topology. Its G5 check accepts another reachable holder rather than the asking writer ([v06_session_explore.rs:491](/Users/mikelxc/projects/colophon-wt/live-06-review/crates/colophon-core/tests/v06_session_explore.rs:491)). Vectors are self-replay and omit these races.
+
+**Most valuable missing check:** a three-member, per-directed-edge explorer profile holding A↔B↔C but A↮C indefinitely, with fair delivery and state-provenance—not merely final equality—assertions.
+
+I did not run builds/tests, inspect unimplemented codecs, or verify external Swift/Kotlin/JS implementations. Simultaneous asks, release/ask, `seen.seq:null`, and bounded tail resume appeared locally consistent.

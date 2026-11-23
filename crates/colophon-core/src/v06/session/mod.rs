@@ -1,14 +1,20 @@
-//! One member of one cell (§S4–§S8), as a deterministic state machine.
+//! One member of one cell (§S3–§S8), as a deterministic state machine.
 //!
 //! [`Session::handle`] takes one [`Input`] and the member's monotonic clock and returns the
-//! [`Output`]s in order. Nothing inside reads a clock, draws randomness or does IO; ids come
-//! from the caller. The type is `Clone + Eq + Hash` so explorers can deduplicate states, and
-//! [`Session::view`] / [`Session::digest`] give the protocol-visible state.
+//! [`Output`]s in order. Nothing inside reads a clock, draws randomness or does IO; ids and
+//! the `fresh` seed come from the caller. The type is `Clone + Eq + Hash` so explorers can
+//! deduplicate states, and [`Session::view`] / [`Session::digest`] give the protocol-visible
+//! state.
 //!
-//! The machine follows revision 2 of the draft, which adopted the findings in
-//! `docs/colophon-0.6-sessions-findings.md`; [`Fixes::LITERAL`] reproduces revision 1.
-//! Choices still local to this layer: submits are ordered automatically (the only refusal
-//! is `too-large`), and the fold is the cell's `policy.fold`.
+//! The machine follows revision 4 of the draft (`Fixes::ALL`). [`Fixes::LITERAL`] reproduces
+//! revision 1 and [`Fixes::REV3`] revision 3, so every finding stays reproducible
+//! (`docs/colophon-0.6-sessions-findings.md`). Outputs are ordered so that a crash between
+//! any two of them breaks no guarantee (G12): every `Persist` precedes the frames that
+//! reveal it.
+//!
+//! The §S3 freshness gate is in the machine, and is used when the codec passes the sender's
+//! key and `n` with each frame and the host seeds `fresh` ([`Session::with_fresh_seed`]).
+//! The 128-wide `n` window, signatures and sealing stay in the codec layer.
 
 pub mod clock;
 pub mod io;
@@ -17,7 +23,8 @@ pub mod types;
 pub use clock::{sample, Sample, Samples};
 pub use io::{Command, Event, Input, Output, Via};
 pub use types::{
-    Body, Bytes, Claim, Fixes, Fold, Frame, MemberId, Policy, Seen, TakeRule, MAX_TERM,
+    Body, Bytes, Claim, Fixes, Fold, Frame, Heard, Id, MemberId, Persisted, Policy, Seen,
+    TakeRule, MAX_ECHO, MAX_INT, MAX_TERM,
 };
 
 use serde::Serialize;
@@ -28,7 +35,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct Held {
     origin: MemberId,
-    id: Bytes,
+    id: Id,
     payload: Bytes,
 }
 
@@ -39,6 +46,9 @@ struct Want {
     asked_at: Option<u64>,
     /// The holder declined that ask.
     declined: bool,
+    /// A holder frame from the holder arrived since the ask (a flag, not a time comparison:
+    /// a beat accepted in the same millisecond as the ask must count).
+    heard_since: bool,
     /// The application's projection to start from.
     snapshot: Option<Bytes>,
 }
@@ -51,6 +61,23 @@ struct SentPass {
     seq: u64,
     snapshot: Bytes,
 }
+
+/// An unanswered submit (§S8, revision 4).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct PendingSubmit {
+    payload: Bytes,
+    tries: u8,
+    last: u64,
+}
+
+/// Resends of an unanswered submit before it is reported failed.
+pub const SUBMIT_TRIES: u8 = 8;
+/// Resends of `yielded` (finding R2d: one resend does not survive two losses).
+pub const YIELDED_RESENDS: u8 = 8;
+/// §S8: gap `hello`s at most once per second.
+pub const GAP_HELLO_MS: u64 = 1_000;
+/// Own `fresh` values remembered (§S3 freshness).
+const OWN_FRESH: usize = 32;
 
 /// The protocol-visible state of a member, for digests and cross-implementation vectors.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
@@ -86,8 +113,23 @@ pub struct Session {
     state: Bytes,
     early: BTreeMap<u64, Held>,
     tail: VecDeque<(u64, Held)>,
-    ordered: BTreeSet<Bytes>,
+    /// The last `tail` ids ordered in this term (§S8 dedupe).
+    ordered: VecDeque<Id>,
     sent_pass: Option<SentPass>,
+    /// Members whose `ask` was accepted under the current claim and is unanswered (§S5).
+    asks: BTreeSet<MemberId>,
+    /// The last broadcast holder frame accepted under the accepted claim from its holder,
+    /// and when: the evidence a member forwards (§S4, revision 4).
+    evidence: Option<(Frame, u64)>,
+    /// A `yielded` frame to resend to the new holder (§S5), with resends left and when last
+    /// sent.
+    pending_yielded: Option<(MemberId, Body, u8, u64)>,
+    /// The claim each member's last `hello` named (finding R1c): a member that names a lesser
+    /// claim or none is sent evidence as soon as this member has it.
+    peers_seen: BTreeMap<MemberId, Option<Claim>>,
+    /// Displaced reports already given, by sender and claim (at most 8).
+    reported: VecDeque<(MemberId, Claim)>,
+    submits: BTreeMap<Id, PendingSubmit>,
     /// When the last gap `hello` was sent (§S8: at most one per second).
     last_gap_hello: Option<u64>,
     want: Option<Want>,
@@ -102,16 +144,22 @@ pub struct Session {
     heard_holding: BTreeMap<MemberId, u64>,
     presence: BTreeMap<MemberId, (Bytes, u64)>,
     clocks: BTreeMap<MemberId, Samples>,
+    /// Freshness (§S3): the seed `fresh` values derive from, how many were made, the last
+    /// ones sent, open windows per (member, key) with their lowest accepted `n`, and the
+    /// last `fresh` answered per member.
+    fresh_seed: Option<[u8; 16]>,
+    fresh_count: u64,
+    own_fresh: VecDeque<Id>,
+    windows: BTreeMap<(MemberId, String), u64>,
+    answered: BTreeMap<MemberId, Id>,
+    to_echo: VecDeque<Id>,
 }
 
 type Out = Vec<Output>;
 
-/// §S8: gap `hello`s at most once per second.
-pub const GAP_HELLO_MS: u64 = 1_000;
-
 impl Session {
-    /// A member before `join`. `persisted` is the claim it stored with [`Output::Persist`].
-    pub fn new(me: &str, can_write: bool, policy: Policy, persisted: Option<Claim>) -> Self {
+    /// A member before `join`. `persisted` is what it stored with [`Output::Persist`].
+    pub fn new(me: &str, can_write: bool, policy: Policy, persisted: Option<Persisted>) -> Self {
         Self::with_fixes(me, can_write, policy, persisted, Fixes::default())
     }
 
@@ -120,24 +168,34 @@ impl Session {
         me: &str,
         can_write: bool,
         policy: Policy,
-        persisted: Option<Claim>,
+        persisted: Option<Persisted>,
         fixes: Fixes,
     ) -> Self {
+        let persisted = persisted.filter(|p| p.claim.well_formed());
+        let released = persisted
+            .as_ref()
+            .is_some_and(|p| p.released && fixes.persist_release);
         Self {
             me: me.to_ascii_lowercase(),
             can_write,
             policy,
             fixes,
             joined: false,
-            accepted: persisted.filter(Claim::well_formed),
-            released: false,
+            accepted: persisted.map(|p| p.claim),
+            released,
             synced: false,
             seq: 0,
             state: Bytes::default(),
             early: BTreeMap::new(),
             tail: VecDeque::new(),
-            ordered: BTreeSet::new(),
+            ordered: VecDeque::new(),
             sent_pass: None,
+            asks: BTreeSet::new(),
+            evidence: None,
+            pending_yielded: None,
+            peers_seen: BTreeMap::new(),
+            reported: VecDeque::new(),
+            submits: BTreeMap::new(),
             last_gap_hello: None,
             want: None,
             gate: None,
@@ -151,7 +209,21 @@ impl Session {
             heard_holding: BTreeMap::new(),
             presence: BTreeMap::new(),
             clocks: BTreeMap::new(),
+            fresh_seed: None,
+            fresh_count: 0,
+            own_fresh: VecDeque::new(),
+            windows: BTreeMap::new(),
+            answered: BTreeMap::new(),
+            to_echo: VecDeque::new(),
         }
+    }
+
+    /// Seed the `fresh` values of this process's hellos (16 random bytes from the host, new
+    /// for every process start). Without a seed every `fresh` is zero, which is only for
+    /// tests and model checking without the freshness gate.
+    pub fn with_fresh_seed(mut self, seed: [u8; 16]) -> Self {
+        self.fresh_seed = Some(seed);
+        self
     }
 
     // -----------------------------------------------------------------------------------
@@ -169,6 +241,17 @@ impl Session {
     pub fn accepted(&self) -> Option<&Claim> {
         self.accepted.as_ref()
     }
+    /// Whether the accepted claim has been released (no holder).
+    pub fn released(&self) -> bool {
+        self.released
+    }
+    /// What this member has persisted (claim and tombstone).
+    pub fn persisted(&self) -> Option<Persisted> {
+        self.accepted.clone().map(|claim| Persisted {
+            released: self.released && claim.holder == self.me,
+            claim,
+        })
+    }
     /// The holder this member sees, `None` when there is none.
     pub fn holder(&self) -> Option<&str> {
         match (&self.accepted, self.released) {
@@ -184,10 +267,14 @@ impl Session {
     pub fn sends_as_holder(&self) -> bool {
         self.is_holder() && self.gate.is_none()
     }
-    /// Whether a timer can still change this member without input: it wants the role, or it
-    /// is a gated holder (§S6).
+    /// Whether a timer can still change this member without input: it wants the role, it is
+    /// a gated holder (§S6), or it has unanswered submits.
     pub fn pending(&self) -> bool {
-        self.joined && (self.want.is_some() || self.gate.is_some())
+        self.joined && (self.want.is_some() || self.gate.is_some() || !self.submits.is_empty())
+    }
+    /// Members whose ask is pending (§S5).
+    pub fn asks(&self) -> impl Iterator<Item = &MemberId> {
+        self.asks.iter()
     }
     /// The ordered state.
     pub fn state(&self) -> &Bytes {
@@ -264,6 +351,17 @@ impl Session {
         self.tail.hash(h);
         self.ordered.hash(h);
         self.sent_pass.hash(h);
+        self.asks.hash(h);
+        self.evidence.as_ref().map(|(f, t)| (f, age(*t))).hash(h);
+        self.pending_yielded
+            .as_ref()
+            .map(|(to, b, n, t)| (to, b, n, age(*t)))
+            .hash(h);
+        self.peers_seen.hash(h);
+        self.reported.hash(h);
+        for (k, p) in &self.submits {
+            (k, &p.payload, p.tries, age(p.last)).hash(h);
+        }
         self.last_gap_hello
             .map(|t| now.saturating_sub(t).min(GAP_HELLO_MS))
             .hash(h);
@@ -272,7 +370,7 @@ impl Session {
             Some(w) => {
                 1u8.hash(h);
                 w.asked_at.map(age).hash(h);
-                w.asked_at.map(|a| self.last_heard_holder <= a).hash(h);
+                w.heard_since.hash(h);
                 w.declined.hash(h);
                 w.snapshot.hash(h);
             }
@@ -299,6 +397,12 @@ impl Session {
             (k, v, age(*t)).hash(h);
         }
         self.clocks.hash(h);
+        self.fresh_seed.hash(h);
+        self.fresh_count.hash(h);
+        self.own_fresh.hash(h);
+        self.windows.hash(h);
+        self.answered.hash(h);
+        self.to_echo.hash(h);
     }
 
     // -----------------------------------------------------------------------------------
@@ -308,7 +412,12 @@ impl Session {
     pub fn handle(&mut self, input: Input, now: u64) -> Vec<Output> {
         let mut out = Vec::new();
         match input {
-            Input::Frame { frame, writer } => self.on_frame(frame, writer, now, &mut out),
+            Input::Frame {
+                frame,
+                writer,
+                key,
+                n,
+            } => self.on_frame(frame, writer, key, n, now, &mut out),
             Input::Tick => self.on_tick(now, &mut out),
             Input::LinkUp => self.on_link_up(now, &mut out),
             Input::LinkDown => {
@@ -344,6 +453,14 @@ impl Session {
             },
         );
     }
+    fn persist(&self, out: &mut Out) {
+        if let Some(p) = self.persisted() {
+            out.push(Output::Persist {
+                claim: p.claim,
+                released: p.released && self.fixes.persist_release,
+            });
+        }
+    }
 
     fn seen(&self) -> Option<Seen> {
         self.accepted.as_ref().map(|c| Seen {
@@ -355,17 +472,71 @@ impl Session {
             },
         })
     }
-    fn send_hello(&self, out: &mut Out, to: Option<&str>, lapsed: bool) {
+    /// `hello.heard` about the accepted claim's holder (§S4, revision 4).
+    fn heard_of_holder(&self, now: u64) -> Heard {
+        let Some(h) = self.accepted.as_ref().map(|c| c.holder.clone()) else {
+            return Heard::Unknown;
+        };
+        if h == self.me {
+            return Heard::Live;
+        }
+        let timeout = self.policy.holder_timeout_ms;
+        if self
+            .heard_holding
+            .get(&h)
+            .is_some_and(|t| now.saturating_sub(*t) < timeout)
+        {
+            Heard::Live
+        } else if self.link_up && now.saturating_sub(self.link_since) >= timeout {
+            Heard::Lapsed
+        } else {
+            Heard::Unknown
+        }
+    }
+    fn next_fresh(&mut self) -> Id {
+        let Some(seed) = self.fresh_seed else {
+            return Id::default();
+        };
+        self.fresh_count = self.fresh_count.saturating_add(1);
+        let mut d = Sha256::new();
+        d.update(seed);
+        d.update(self.fresh_count.to_be_bytes());
+        let mut b = [0u8; 16];
+        b.copy_from_slice(&d.finalize()[..16]);
+        let id = Id(b);
+        self.own_fresh.push_back(id);
+        while self.own_fresh.len() > OWN_FRESH {
+            self.own_fresh.pop_front();
+        }
+        id
+    }
+    fn send_hello_echo(
+        &mut self,
+        out: &mut Out,
+        to: Option<&str>,
+        lapsed: bool,
+        echo: Vec<Id>,
+        now: u64,
+    ) {
+        let fresh = self.next_fresh();
+        let heard = self.heard_of_holder(now);
+        let seen = self.seen();
         self.send(
             out,
             to,
             false,
             Body::Hello {
-                session_key: Bytes::default(),
-                seen: self.seen(),
+                fresh,
+                echo,
+                seen,
+                heard,
                 lapsed,
             },
         );
+    }
+    fn send_hello(&mut self, out: &mut Out, to: Option<&str>, lapsed: bool, now: u64) {
+        let echo: Vec<Id> = self.to_echo.drain(..).collect();
+        self.send_hello_echo(out, to, lapsed, echo, now);
     }
     /// A gap `hello` (§S8), rate-limited to one per [`GAP_HELLO_MS`].
     fn gap_hello(&mut self, out: &mut Out, to: &str, now: u64) {
@@ -376,7 +547,7 @@ impl Session {
             return;
         }
         self.last_gap_hello = Some(now);
-        self.send_hello(out, Some(to), false);
+        self.send_hello(out, Some(to), false, now);
     }
     fn send_state(&mut self, out: &mut Out, to: Option<&str>, now: u64) {
         let Some(claim) = self.accepted.clone() else {
@@ -396,6 +567,7 @@ impl Session {
             },
         );
     }
+    /// Revision 3's hearsay test for renewing (kept for `Fixes::REV3` and earlier).
     fn present(&self, member: &str, now: u64) -> bool {
         if self.fixes.renew_needs_contact
             && (!self.link_up || now.saturating_sub(self.link_since) < self.policy.holder_timeout_ms)
@@ -428,12 +600,15 @@ impl Session {
     fn may_take(&self) -> bool {
         self.joined && self.can_write && self.policy.take == TakeRule::Free
     }
+    fn term_left(&self) -> bool {
+        self.accepted.as_ref().is_none_or(|c| c.term < MAX_TERM)
+    }
 
     /// Whether a rank-1 claim carried by a non-pass frame from `from` is acceptable (§S4 3).
     fn rank1_ok(&self, c: &Claim, from: &str) -> bool {
         self.fixes.rank1_from_holder && c.holder == from
     }
-    /// The claim as this member orders it (§S4 3: unverified rank 1 orders as rank 0).
+    /// The claim as this member orders it (revision 1: unverified rank 1 orders as rank 0).
     fn ordering(&self, c: &Claim, from: &str) -> Claim {
         if c.rank == 1 && !self.rank1_ok(c, from) && self.accepted.as_ref() != Some(c) {
             c.as_rank0()
@@ -462,16 +637,23 @@ impl Session {
         ok
     }
 
-    /// Accept `c` (greater than the current claim), optionally with its initial state.
-    fn adopt(&mut self, c: Claim, snapshot: Option<Bytes>, now: u64, out: &mut Out) {
-        let was_holder = self.is_holder();
-        self.accepted = Some(c.clone());
-        self.released = false;
-        self.gate = None;
+    fn reset_lane(&mut self) {
         self.early.clear();
         self.tail.clear();
         self.ordered.clear();
+        self.asks.clear();
+        self.evidence = None;
         self.seq = 0;
+    }
+
+    /// Accept `c` (greater than the current claim), optionally with its initial state.
+    fn adopt(&mut self, c: Claim, snapshot: Option<Bytes>, now: u64, out: &mut Out) {
+        let was_holder = self.is_holder();
+        let old = (self.accepted.clone(), self.seq, self.state.clone());
+        self.accepted = Some(c.clone());
+        self.released = false;
+        self.gate = None;
+        self.reset_lane();
         self.lapse_reported = false;
         self.last_heard_holder = now;
         if self.sent_pass.as_ref().is_some_and(|p| p.next < c) {
@@ -485,9 +667,20 @@ impl Session {
             }
             None => self.synced = mine,
         }
-        out.push(Output::Persist { claim: c.clone() });
+        self.persist(out);
         if was_holder && !mine {
             Self::event(out, Event::Yielded { to: c.clone() });
+            // §S5 yielding state (revision 4): tell the taker what this member held.
+            if let (true, 0, Some(held)) = (self.fixes.state_reports, c.rank, old.0) {
+                let body = Body::Yielded {
+                    claim: held,
+                    seq: old.1,
+                    snapshot: old.2,
+                };
+                self.send(out, Some(&c.holder), false, body.clone());
+                let resends = if self.fixes.yielded_retry { YIELDED_RESENDS } else { 1 };
+                self.pending_yielded = Some((c.holder.clone(), body, resends, now));
+            }
         }
         if !mine {
             Self::event(
@@ -507,14 +700,16 @@ impl Session {
                 );
             } else {
                 // §S8: changed claim without a snapshot.
-                self.send_hello(out, Some(&c.holder), false);
+                self.send_hello(out, Some(&c.holder), false, now);
             }
             if let Some(w) = &mut self.want {
                 // Ask the new holder.
                 w.asked_at = Some(now);
                 w.declined = false;
+                w.heard_since = false;
                 self.send(out, Some(&c.holder), false, Body::Ask { claim: c.clone() });
             }
+            self.resend_submits(now, out);
         }
     }
 
@@ -530,9 +725,8 @@ impl Session {
             self.state = s;
         }
         self.become_holder(claim.clone(), now, out);
-        self.send(out, None, false, Body::Take { claim });
+        self.send(out, None, false, Body::Take { claim: claim.clone() });
         self.send_state(out, None, now);
-        let claim = self.accepted.clone().unwrap_or_else(|| Claim::new(t, 0, &self.me));
         Self::event(
             out,
             Event::BecameHolder {
@@ -541,22 +735,20 @@ impl Session {
                 via,
             },
         );
+        self.order_own_submits(now, out);
     }
     fn become_holder(&mut self, claim: Claim, now: u64, out: &mut Out) {
-        self.accepted = Some(claim.clone());
+        self.accepted = Some(claim);
         self.released = false;
         self.gate = None;
         self.want = None;
         self.synced = true;
-        self.seq = 0;
-        self.early.clear();
-        self.tail.clear();
-        self.ordered.clear();
+        self.reset_lane();
         self.last_heard_holder = now;
-        out.push(Output::Persist { claim });
+        self.persist(out);
     }
 
-    /// §S5 renewing: raise the claim above `term`.
+    /// §S5 renewing: raise the claim above `term` (never past 2^53 − 1).
     fn renew(&mut self, term: u64, now: u64, out: &mut Out) {
         let Some(t) = term.checked_add(1).filter(|t| *t <= MAX_TERM) else {
             return;
@@ -575,8 +767,14 @@ impl Session {
     }
 
     fn apply(&mut self, seq: u64, h: Held, out: &mut Out) {
-        self.state = self.policy.fold.apply(&self.state, &h.payload);
+        self.state = self
+            .policy
+            .fold
+            .apply(&self.state, &h.payload, self.policy.tail);
         self.seq = seq;
+        if h.origin == self.me {
+            self.submits.remove(&h.id);
+        }
         if let Some(claim) = self.accepted.clone() {
             Self::event(
                 out,
@@ -591,25 +789,33 @@ impl Session {
         }
     }
     fn drain_early(&mut self, out: &mut Out) {
-        while let Some(h) = self.early.remove(&(self.seq + 1)) {
-            self.apply(self.seq + 1, h, out);
+        while let Some(next) = self.seq.checked_add(1) {
+            let Some(h) = self.early.remove(&next) else {
+                break;
+            };
+            self.apply(next, h, out);
         }
         let seq = self.seq;
         self.early.retain(|k, _| *k > seq);
     }
 
-    /// Order one message as holder (publish or submit).
-    fn order(&mut self, origin: MemberId, id: Bytes, payload: Bytes, now: u64, out: &mut Out) {
+    /// Order one message as holder (publish or submit). Returns false at seq exhaustion.
+    fn order(&mut self, origin: MemberId, id: Id, payload: Bytes, now: u64, out: &mut Out) -> bool {
         let Some(claim) = self.accepted.clone() else {
-            return;
+            return false;
         };
-        let seq = self.seq + 1;
+        let Some(seq) = self.seq.checked_add(1).filter(|s| *s <= MAX_INT) else {
+            return false;
+        };
         let h = Held {
             origin: origin.clone(),
-            id: id.clone(),
+            id,
             payload: payload.clone(),
         };
-        self.ordered.insert(id.clone());
+        self.ordered.push_back(id);
+        while self.ordered.len() as u64 > self.policy.tail {
+            self.ordered.pop_front();
+        }
         self.tail.push_back((seq, h.clone()));
         while self.tail.len() as u64 > self.policy.tail {
             self.tail.pop_front();
@@ -630,12 +836,112 @@ impl Session {
                 },
             );
         }
+        true
+    }
+
+    /// A member that became holder orders its own unanswered submits.
+    fn order_own_submits(&mut self, now: u64, out: &mut Out) {
+        let pending: Vec<(Id, Bytes)> = self
+            .submits
+            .iter()
+            .map(|(k, p)| (*k, p.payload.clone()))
+            .collect();
+        for (id, payload) in pending {
+            let me = self.me.clone();
+            if !self.ordered.contains(&id) {
+                self.order(me, id, payload, now, out);
+            }
+            self.submits.remove(&id);
+        }
+    }
+    /// §S8 (revision 4): resend unanswered submits to the (new) holder.
+    fn resend_submits(&mut self, now: u64, out: &mut Out) {
+        if !self.fixes.submit_retry {
+            return;
+        }
+        let Some(h) = self.holder().map(str::to_owned).filter(|h| *h != self.me) else {
+            return;
+        };
+        let ids: Vec<Id> = self.submits.keys().copied().collect();
+        for id in ids {
+            self.retry_submit(id, &h, now, out);
+        }
+    }
+    fn retry_submit(&mut self, id: Id, holder: &str, now: u64, out: &mut Out) {
+        let Some(p) = self.submits.get_mut(&id) else {
+            return;
+        };
+        if p.tries >= SUBMIT_TRIES {
+            self.submits.remove(&id);
+            Self::event(out, Event::SubmitFailed { id });
+            return;
+        }
+        p.tries += 1;
+        p.last = now;
+        let payload = p.payload.clone();
+        self.send(out, Some(holder), false, Body::Submit { id, payload });
     }
 
     // -----------------------------------------------------------------------------------
     // Frames.
 
-    fn on_frame(&mut self, f: Frame, writer: bool, now: u64, out: &mut Out) {
+    /// §S3 freshness. Returns whether to process the frame in full; a `hello` from a key
+    /// without an open window is answered and otherwise only its `fresh`/`echo` are used.
+    fn freshness(
+        &mut self,
+        f: &Frame,
+        key: Option<String>,
+        n: Option<u64>,
+        now: u64,
+        out: &mut Out,
+    ) -> bool {
+        let Body::Hello { fresh, echo, .. } = &f.body else {
+            // Non-hello: only through an open window, at or above its floor.
+            return match (key, n) {
+                (Some(k), Some(n)) => self
+                    .windows
+                    .get(&(f.from.clone(), k))
+                    .is_some_and(|floor| n >= *floor),
+                _ => true,
+            };
+        };
+        let (Some(k), Some(n)) = (key, n) else {
+            return true;
+        };
+        let wk = (f.from.clone(), k);
+        let mut opened = false;
+        match self.windows.get(&wk) {
+            Some(floor) if n < *floor => return false,
+            Some(_) => {}
+            None => {
+                if echo.iter().any(|e| self.own_fresh.contains(e)) {
+                    self.windows.insert(wk.clone(), n);
+                    opened = true;
+                }
+            }
+        }
+        let open = self.windows.contains_key(&wk);
+        // Answer a fresh we have not answered, unless the hello is itself an answer to us
+        // through a window that was already open (finding R4a: otherwise the two members
+        // answer each other's answers forever).
+        let answers_us = echo.iter().any(|e| self.own_fresh.contains(e));
+        if self.answered.get(&f.from) != Some(fresh) && (!answers_us || opened) {
+            self.answered.insert(f.from.clone(), *fresh);
+            let to = f.from.clone();
+            self.send_hello_echo(out, Some(&to), false, vec![*fresh], now);
+        }
+        open
+    }
+
+    fn on_frame(
+        &mut self,
+        f: Frame,
+        writer: bool,
+        key: Option<String>,
+        n: Option<u64>,
+        now: u64,
+        out: &mut Out,
+    ) {
         if !self.joined || f.from == self.me {
             return;
         }
@@ -645,8 +951,42 @@ impl Session {
         if f.body.needs_writer() && !writer {
             return;
         }
-        let from = f.from;
+        if !f.body.in_range(self.policy.max_payload) {
+            return;
+        }
+        if !self.freshness(&f, key, n, now, out) {
+            return;
+        }
+        if let Body::Hello { fresh, seen, .. } = &f.body {
+            if self.fixes.evidence {
+                self.peers_seen
+                    .insert(f.from.clone(), seen.as_ref().map(|s| s.claim.clone()));
+            }
+            if self.fresh_seed.is_some() && !self.to_echo.contains(fresh) {
+                self.to_echo.push_back(*fresh);
+                while self.to_echo.len() > MAX_ECHO {
+                    self.to_echo.pop_front();
+                }
+            }
+        }
+        let from = f.from.clone();
         self.heard.insert(from.clone(), now);
+        // §S5 yielding state: resend `yielded` when the new holder is heard, at most once per
+        // askTimeoutMs and a bounded number of times (finding R2d: revision 4's single resend
+        // does not survive two losses; resending only when the link has just worked keeps a
+        // long partition from using the resends up).
+        let ask = self.policy.ask_timeout_ms;
+        if let Some((to, body, left, last)) = self.pending_yielded.as_mut() {
+            if *to == from && now.saturating_sub(*last) >= ask {
+                let (to, body) = (to.clone(), body.clone());
+                *left -= 1;
+                *last = now;
+                if *left == 0 {
+                    self.pending_yielded = None;
+                }
+                self.send(out, Some(&to), false, body);
+            }
+        }
         let holding_frame = f.body.is_holder_frame() || matches!(f.body, Body::Take { .. });
         if holding_frame && f.body.claim().is_some_and(|c| c.holder == from) {
             self.heard_holding.insert(from.clone(), now);
@@ -657,6 +997,11 @@ impl Session {
         if alive && self.holder() == Some(from.as_str()) {
             self.last_heard_holder = now;
             self.lapse_reported = false;
+            if let Some(w) = &mut self.want {
+                if w.asked_at.is_some() {
+                    w.heard_since = true;
+                }
+            }
         }
         // §S5: resend the pass when the asker speaks under an older claim.
         if let Some(p) = &self.sent_pass {
@@ -670,41 +1015,11 @@ impl Session {
                 self.send(out, Some(&from), false, body);
             }
         }
-        // F5: a lost `bye` is answered again.
-        let released_mine = self.released
-            && self.accepted.as_ref().is_some_and(|a| a.holder == self.me);
-        if self.fixes.bye_resend
-            && self.released
-            && self.accepted.as_ref().is_some_and(|a| a.holder == self.me)
-            && holding_frame
-            && f.body.claim().is_some_and(|c| Some(c) < self.accepted.as_ref())
-            && !matches!(f.body, Body::Bye { .. })
-        {
-            let claim = self.accepted.clone();
-            self.send(
-                out,
-                Some(&from),
-                false,
-                Body::Bye {
-                    claim,
-                    leaving: false,
-                },
-            );
-        }
-        // F6: tell a sender holding under a lesser claim what this member accepted.
-        if self.fixes.answer_lesser
-            && holding_frame
-            && !self.is_holder()
-            && !(self.fixes.bye_resend && released_mine)
-            && !matches!(f.body, Body::Pass { .. })
-            && f.body
-                .claim()
-                .is_some_and(|c| c.holder == from && self.is_lesser(c, &from))
-        {
-            self.send_hello(out, Some(&from), false);
-        }
+
+        self.correct_lesser(&f, holding_frame, now, out);
+        let frame_for_evidence = f.clone();
         match f.body {
-            Body::Hello { seen, .. } => self.on_hello(&from, seen, now, out),
+            Body::Hello { seen, heard, .. } => self.on_hello(&from, seen, heard, now, out),
             Body::State {
                 claim,
                 seq,
@@ -734,7 +1049,7 @@ impl Session {
                 self.consider(&claim, &from, now, out);
                 if self.accepted.as_ref() == Some(&claim) && claim.holder == from {
                     if !self.is_holder() && !self.synced {
-                        self.send_hello(out, Some(&from), false);
+                        self.send_hello(out, Some(&from), false, now);
                     } else if !self.is_holder() && seq > self.seq {
                         self.gap_hello(out, &from, now);
                     }
@@ -759,12 +1074,16 @@ impl Session {
                         id,
                         payload,
                     };
-                    if self.synced && seq == self.seq + 1 {
+                    if self.synced && Some(seq) == self.seq.checked_add(1) {
                         self.apply(seq, h, out);
                         self.drain_early(out);
-                    } else if seq > self.seq + 1 || !self.synced {
+                    } else if seq > self.seq.saturating_add(1) || !self.synced {
                         if seq <= self.seq.saturating_add(self.policy.tail) {
                             self.early.insert(seq, h);
+                            // §S8: at most `tail` early messages.
+                            while self.early.len() as u64 > self.policy.tail {
+                                self.early.pop_last();
+                            }
                         }
                         if self.synced && !fresh {
                             // §S8 gap.
@@ -776,25 +1095,15 @@ impl Session {
                 }
             }
             Body::Submit { id, payload } => {
+                // §S8: dedupe over the last `tail` ids of the term.
                 if !self.sends_as_holder() || self.ordered.contains(&id) {
-                    return;
-                }
-                if payload.len() as u64 > self.policy.max_payload {
-                    self.send(
-                        out,
-                        Some(&from),
-                        false,
-                        Body::Refuse {
-                            id,
-                            reason: "too-large".into(),
-                        },
-                    );
                     return;
                 }
                 self.order(from, id, payload, now, out);
             }
             Body::Refuse { id, reason } => {
                 if self.holder() == Some(from.as_str()) {
+                    self.submits.remove(&id);
                     Self::event(out, Event::Refused { id, reason });
                 }
             }
@@ -811,6 +1120,7 @@ impl Session {
             Body::Ask { claim } => {
                 self.consider(&claim, &from, now, out);
                 if self.sends_as_holder() {
+                    self.asks.insert(from.clone());
                     Self::event(out, Event::AskReceived { from });
                 }
             }
@@ -839,13 +1149,35 @@ impl Session {
                     self.stale(&claim, &from, now, out);
                 }
             }
+            Body::Yielded {
+                claim,
+                seq,
+                snapshot,
+            } => {
+                let key = (from.clone(), claim.clone());
+                if self.fixes.state_reports && !self.reported.contains(&key) {
+                    self.reported.push_back(key);
+                    while self.reported.len() > 8 {
+                        self.reported.pop_front();
+                    }
+                    Self::event(
+                        out,
+                        Event::Displaced {
+                            from,
+                            claim,
+                            seq,
+                            snapshot,
+                        },
+                    );
+                }
+            }
             Body::Ping { t } => {
                 self.send(
                     out,
                     Some(&from),
                     false,
                     Body::Pong {
-                        t: now,
+                        t: now.min(MAX_INT),
                         echo: t,
                         hold: 0,
                     },
@@ -864,7 +1196,7 @@ impl Session {
                     );
                 }
             }
-            Body::Bye { claim, leaving: _ } => {
+            Body::Bye { claim, leaving } => {
                 if self.presence.remove(&from).is_some() {
                     Self::event(
                         out,
@@ -874,13 +1206,16 @@ impl Session {
                         },
                     );
                 }
+                if leaving {
+                    self.asks.remove(&from);
+                }
                 if let Some(c) = claim {
                     if self.fixes.renew_wider
                         && self.sends_as_holder()
                         && c.holder == from
                         && self.accepted.as_ref().is_some_and(|a| c > *a)
                     {
-                        // F7: a released claim has no holder; stay holder above it.
+                        // A released claim has no holder; stay holder above it.
                         self.renew(c.term, now, out);
                         return;
                     }
@@ -892,21 +1227,102 @@ impl Session {
                 }
             }
         }
+        // Keep the latest broadcast holder frame of the accepted claim as evidence.
+        let fe = frame_for_evidence;
+        if fe.to.is_none()
+            && matches!(fe.body, Body::State { .. } | Body::Beat { .. } | Body::Msg { .. })
+            && fe.body.claim() == self.accepted.as_ref()
+            && fe.body.claim().is_some_and(|c| c.holder == fe.from)
+        {
+            // Members whose last hello named a lesser claim or none get this evidence now.
+            if self.fixes.evidence && self.fixes.evidence_push && !self.is_holder() {
+                let accepted = self.accepted.clone();
+                for (to, seen) in self.peers_seen.iter_mut() {
+                    if *to != fe.from && seen.as_ref() < accepted.as_ref() {
+                        out.push(Output::Forward {
+                            to: to.clone(),
+                            frame: fe.clone(),
+                        });
+                        *seen = accepted.clone();
+                    }
+                }
+            }
+            self.evidence = Some((fe, now));
+        }
     }
 
-    /// §S4 stale holders: a holder answers a lesser claim with `state`.
+    /// §S4 correcting lesser claims, for a member that is not the holder.
+    fn correct_lesser(&mut self, f: &Frame, holding_frame: bool, now: u64, out: &mut Out) {
+        let from = f.from.clone();
+        // Finding R1b: a member with no claim or a lesser one that is not a holder sends no
+        // holder frame, so the evidence rule must also answer its `hello`.
+        let lesser_hello = self.fixes.evidence
+            && self.fixes.evidence_push
+            && match &f.body {
+                Body::Hello { seen, .. } => seen
+                    .as_ref()
+                    .is_none_or(|s| self.accepted.as_ref().is_some_and(|a| s.claim < *a)),
+                _ => false,
+            };
+        let lesser = holding_frame
+            && !matches!(f.body, Body::Pass { .. })
+            && f.body
+                .claim()
+                .is_some_and(|c| c.holder == from && self.is_lesser(c, &from));
+        if !(lesser || lesser_hello) || self.is_holder() || self.accepted.is_none() {
+            return;
+        }
+        let released_mine =
+            self.released && self.accepted.as_ref().is_some_and(|a| a.holder == self.me);
+        if released_mine {
+            if self.fixes.bye_resend && lesser {
+                let claim = self.accepted.clone();
+                self.send(
+                    out,
+                    Some(&from),
+                    false,
+                    Body::Bye {
+                        claim,
+                        leaving: false,
+                    },
+                );
+            }
+            return;
+        }
+        if !self.fixes.answer_lesser {
+            return;
+        }
+        if self.fixes.evidence {
+            let timeout = self.policy.holder_timeout_ms;
+            let ev = self.evidence.as_ref().filter(|(e, t)| {
+                now.saturating_sub(*t) < timeout && e.body.claim() == self.accepted.as_ref()
+            });
+            if let Some((frame, _)) = ev {
+                out.push(Output::Forward {
+                    to: from,
+                    frame: frame.clone(),
+                });
+                return;
+            }
+        }
+        if lesser {
+            self.send_hello(out, Some(&from), false, now);
+        }
+    }
+
+    /// §S4: a holder answers a lesser claim in a holder frame or `take` with `state`.
     fn stale(&mut self, claim: &Claim, from: &str, now: u64, out: &mut Out) {
         if self.sends_as_holder() && self.is_lesser(claim, from) {
             self.send_state(out, Some(from), now);
         }
     }
 
-    fn on_hello(&mut self, from: &str, seen: Option<Seen>, now: u64, out: &mut Out) {
+    fn on_hello(&mut self, from: &str, seen: Option<Seen>, heard: Heard, now: u64, out: &mut Out) {
         if let Some(s) = &seen {
             if s.claim.holder == from {
                 let greater = self.accepted.as_ref().is_none_or(|a| s.claim > *a);
                 if self.fixes.renew_wider && self.sends_as_holder() && greater {
-                    // F7: a hello does not say whether its sender still holds (it may have
+                    // A hello does not say whether its sender still holds (it may have
                     // released); a holder raises its claim instead of yielding to it. A
                     // sender that does hold accepts the resulting state and yields.
                     self.renew(s.claim.term, now, out);
@@ -928,7 +1344,7 @@ impl Session {
         if s.claim == mine {
             match s.seq {
                 Some(q) if q >= self.seq => {}
-                Some(q) if self.tail.front().is_some_and(|(first, _)| *first <= q + 1) => {
+                Some(q) if self.tail.front().is_some_and(|(first, _)| *first <= q.saturating_add(1)) => {
                     let missing: Vec<_> = self
                         .tail
                         .iter()
@@ -955,7 +1371,17 @@ impl Session {
             return;
         }
         // §S5 renewing.
-        let other = s.claim.holder != self.me && !self.present(&s.claim.holder, now);
+        let other = s.claim.holder != self.me
+            && if self.fixes.evidence {
+                // Revision 4: only the testimony of a member that listened for that holder
+                // (and, R1e, only once this holder has itself been listening that long).
+                heard == Heard::Lapsed
+                    && (!self.fixes.renew_guard
+                        || (self.link_up
+                            && now.saturating_sub(self.link_since) >= self.policy.holder_timeout_ms))
+            } else {
+                !self.present(&s.claim.holder, now)
+            };
         let own_greater = self.fixes.renew_wider && s.claim.holder == self.me && s.claim > mine;
         if s.claim >= mine && (other || own_greater) {
             self.renew(s.claim.term, now, out);
@@ -975,7 +1401,7 @@ impl Session {
         now: u64,
         out: &mut Out,
     ) {
-        // §S4 rule 3 (revision 3): a `pass` from `next.via`, which held `claim`.
+        // §S4 rule 3: a `pass` from `next.via`, which held `claim`.
         let shaped = next.well_formed()
             && claim.well_formed()
             && next.rank == 1
@@ -986,7 +1412,7 @@ impl Session {
             && if self.fixes.rank1_from_holder {
                 true
             } else {
-                // §S4 3: from the holder of the member's previous accepted claim.
+                // Revision 1: from the holder of the member's previous accepted claim.
                 self.accepted.as_ref().is_some_and(|a| a.holder == from)
             };
         if verified
@@ -995,12 +1421,49 @@ impl Session {
             && self.is_holder()
             && self.accepted.as_ref().is_some_and(|a| next > *a)
         {
-            // §S5 (revision 3): a greater claim naming this holder that it has not acted under
-            // (a second pass from another holder): renew with the current state.
+            // §S5: a greater claim naming this holder that it has not acted under (a pass
+            // after it took, or a second pass): report the pass's state, renew with its own.
+            if self.fixes.state_reports {
+                self.reported.push_back((from.to_owned(), next.clone()));
+                while self.reported.len() > 8 {
+                    self.reported.pop_front();
+                }
+                Self::event(
+                    out,
+                    Event::LatePass {
+                        from: from.to_owned(),
+                        claim: next.clone(),
+                        snapshot,
+                    },
+                );
+            }
             self.renew(next.term, now, out);
             return;
         }
         if !verified || self.accepted.as_ref().is_some_and(|a| next <= *a) {
+            // R2e: a pass naming this holder that arrives after it already moved past that
+            // claim (it renewed on a `hello` naming the pass's claim) is still reported once.
+            let key = (from.to_owned(), next.clone());
+            if verified
+                && self.fixes.state_reports
+                && next.holder == self.me
+                && self.is_holder()
+                && self.accepted.as_ref() != Some(&next)
+                && !self.reported.contains(&key)
+            {
+                self.reported.push_back(key);
+                while self.reported.len() > 8 {
+                    self.reported.pop_front();
+                }
+                Self::event(
+                    out,
+                    Event::LatePass {
+                        from: from.to_owned(),
+                        claim: next,
+                        snapshot,
+                    },
+                );
+            }
             return;
         }
         if next.holder == self.me {
@@ -1018,6 +1481,7 @@ impl Session {
                     via: Via::Pass,
                 },
             );
+            self.order_own_submits(now, out);
         } else {
             self.adopt(next, Some(snapshot), now, out);
         }
@@ -1046,11 +1510,44 @@ impl Session {
                 },
             );
         }
+        // §S5 yielding state: also resend on time while the new holder has been heard within
+        // holderTimeoutMs (it may never speak to this member again).
+        let ask = self.policy.ask_timeout_ms;
+        let timeout = self.policy.holder_timeout_ms;
+        let heard = &self.heard;
+        if let Some((to, body, left, last)) = self.pending_yielded.as_mut() {
+            let recent = heard.get(to).is_some_and(|t| now.saturating_sub(*t) < timeout);
+            if recent && now.saturating_sub(*last) >= ask {
+                let (to, body) = (to.clone(), body.clone());
+                *left -= 1;
+                *last = now;
+                if *left == 0 {
+                    self.pending_yielded = None;
+                }
+                self.send(out, Some(&to), false, body);
+            }
+        }
+        // §S8 (revision 4): resend unanswered submits every askTimeoutMs.
+        if self.fixes.submit_retry {
+            if let Some(h) = self.holder().map(str::to_owned).filter(|h| *h != self.me) {
+                let due: Vec<Id> = self
+                    .submits
+                    .iter()
+                    .filter(|(_, p)| now.saturating_sub(p.last) >= self.policy.ask_timeout_ms)
+                    .map(|(k, _)| *k)
+                    .collect();
+                for id in due {
+                    self.retry_submit(id, &h, now, out);
+                }
+            }
+        }
         if let Some(until) = self.gate {
             if now >= until && self.is_holder() {
                 // §S6: nobody else claimed within askTimeoutMs; retake.
                 self.gate = None;
-                self.take(None, Via::Take, now, out);
+                if self.term_left() {
+                    self.take(None, Via::Take, now, out);
+                }
                 return;
             }
         }
@@ -1072,24 +1569,20 @@ impl Session {
             if let Some(h) = self.holder() {
                 let holder = h.to_owned();
                 if self.fixes.bye_resend {
-                    self.send_hello(out, None, false);
+                    self.send_hello(out, None, false, now);
                 }
                 Self::event(out, Event::HolderLapsed { holder });
             }
         }
         if let Some(w) = &self.want {
-            if self.is_holder() || !self.may_take() {
+            if self.is_holder() || !self.may_take() || !self.term_left() {
                 return;
             }
             let ask_expired = w.asked_at.is_some_and(|at| {
-                !w.declined
-                    && now.saturating_sub(at) >= self.policy.ask_timeout_ms
-                    && self.last_heard_holder <= at
+                !w.declined && now.saturating_sub(at) >= self.policy.ask_timeout_ms && !w.heard_since
             });
             let unanswered = w.asked_at.is_some_and(|at| {
-                !w.declined
-                    && now.saturating_sub(at) >= self.policy.ask_timeout_ms
-                    && self.last_heard_holder > at
+                !w.declined && now.saturating_sub(at) >= self.policy.ask_timeout_ms && w.heard_since
             });
             if self.no_holder() || lapsed || ask_expired {
                 let snapshot = w.snapshot.clone();
@@ -1097,6 +1590,7 @@ impl Session {
             } else if unanswered && self.fixes.ask_resend {
                 if let (Some(c), Some(w)) = (self.accepted.clone(), self.want.as_mut()) {
                     w.asked_at = Some(now);
+                    w.heard_since = false;
                     let to = c.holder.clone();
                     self.send(out, Some(&to), false, Body::Ask { claim: c });
                 }
@@ -1117,9 +1611,10 @@ impl Session {
         let lapsed = self.sends_as_holder()
             && was_down.is_some_and(|d| now.saturating_sub(d) >= self.policy.holder_timeout_ms);
         if lapsed {
-            self.gate = Some(now + self.policy.ask_timeout_ms);
+            self.gate = Some(now.saturating_add(self.policy.ask_timeout_ms));
         }
-        self.send_hello(out, None, lapsed || self.gate.is_some());
+        let gated = lapsed || self.gate.is_some();
+        self.send_hello(out, None, gated, now);
     }
 
     // -----------------------------------------------------------------------------------
@@ -1142,18 +1637,20 @@ impl Session {
                 self.joined = true;
                 self.link_since = now;
                 self.last_heard_holder = now;
-                // A holder that lost its state (restart, or rejoin after leaving as holder
-                // keeps `released`) retakes like an out-of-contact holder (§S6).
+                // A holder that lost its state (restart) retakes like an out-of-contact
+                // holder (§S6). A released claim (tombstone) is not resurrected.
                 let restarted = self.is_holder() && !self.synced;
                 if restarted {
-                    self.gate = Some(now + self.policy.ask_timeout_ms);
+                    self.gate = Some(now.saturating_add(self.policy.ask_timeout_ms));
                 }
-                self.send_hello(out, None, restarted);
+                self.send_hello(out, None, restarted, now);
             }
             Command::Leave => {
                 let claim = self.is_holder().then(|| self.accepted.clone()).flatten();
                 if claim.is_some() {
                     self.released = true;
+                    // R3: persist the tombstone before the `bye` reveals it.
+                    self.persist(out);
                 }
                 self.send(out, None, false, Body::Bye { claim, leaving: true });
                 self.joined = false;
@@ -1168,6 +1665,7 @@ impl Session {
                 let claim = self.accepted.clone();
                 self.released = true;
                 self.gate = None;
+                self.persist(out);
                 self.send(out, None, false, Body::Bye { claim, leaving: false });
             }
             Command::Ask => {
@@ -1181,6 +1679,7 @@ impl Session {
                 let mut w = Want {
                     asked_at: None,
                     declined: false,
+                    heard_since: false,
                     snapshot: None,
                 };
                 if let (Some(c), false) = (self.accepted.clone(), self.no_holder()) {
@@ -1201,9 +1700,11 @@ impl Session {
                 }
                 let asked_at = self.want.as_ref().and_then(|w| w.asked_at);
                 let declined = self.want.as_ref().is_some_and(|w| w.declined);
+                let heard_since = self.want.as_ref().is_some_and(|w| w.heard_since);
                 self.want = Some(Want {
                     asked_at,
                     declined,
+                    heard_since,
                     snapshot,
                 });
                 self.on_tick(now, out);
@@ -1211,6 +1712,15 @@ impl Session {
             Command::Pass { to, snapshot } => {
                 if !self.sends_as_holder() || to == self.me {
                     Self::reject(out, "pass", "not-holder");
+                    return;
+                }
+                // R7: only to a member whose ask is pending under this claim.
+                if !self.asks.contains(&to) {
+                    Self::reject(out, "pass", "no-ask");
+                    return;
+                }
+                if snapshot.len() as u64 > self.policy.max_payload {
+                    Self::reject(out, "pass", "too-large");
                     return;
                 }
                 let Some(claim) = self.accepted.clone() else {
@@ -1227,18 +1737,19 @@ impl Session {
                     seq: self.seq,
                     snapshot: snapshot.clone(),
                 };
+                // R3: accept and persist `next` before the pass reveals it.
+                self.adopt(next.clone(), Some(snapshot.clone()), now, out);
                 self.send(
                     out,
                     None,
                     false,
                     Body::Pass {
                         claim,
-                        next: next.clone(),
+                        next,
                         seq: p.seq,
-                        snapshot: snapshot.clone(),
+                        snapshot,
                     },
                 );
-                self.adopt(next, Some(snapshot), now, out);
                 self.sent_pass = Some(p);
             }
             Command::Decline { to } => {
@@ -1246,6 +1757,7 @@ impl Session {
                     Self::reject(out, "decline", "not-holder");
                     return;
                 }
+                self.asks.remove(&to);
                 if let Some(claim) = self.accepted.clone() {
                     self.send(out, Some(&to), false, Body::Decline { claim });
                 }
@@ -1260,7 +1772,9 @@ impl Session {
                     return;
                 }
                 let me = self.me.clone();
-                self.order(me, id, payload, now, out);
+                if !self.order(me, id, payload, now, out) {
+                    Self::reject(out, "publish", "seq-exhausted");
+                }
             }
             Command::Submit { id, payload } => {
                 if !self.can_write {
@@ -1273,10 +1787,28 @@ impl Session {
                 }
                 if self.is_holder() {
                     let me = self.me.clone();
-                    self.order(me, id, payload, now, out);
-                } else if let Some(h) = self.holder().map(str::to_owned) {
+                    if !self.order(me, id, payload, now, out) {
+                        Self::reject(out, "submit", "seq-exhausted");
+                    }
+                    return;
+                }
+                if self.fixes.submit_retry {
+                    if self.submits.len() as u64 >= self.policy.tail {
+                        Self::reject(out, "submit", "too-many-pending");
+                        return;
+                    }
+                    self.submits.insert(
+                        id,
+                        PendingSubmit {
+                            payload: payload.clone(),
+                            tries: 0,
+                            last: now,
+                        },
+                    );
+                }
+                if let Some(h) = self.holder().map(str::to_owned) {
                     self.send(out, Some(&h), false, Body::Submit { id, payload });
-                } else {
+                } else if !self.fixes.submit_retry {
                     Self::reject(out, "submit", "no-holder");
                 }
             }
@@ -1284,7 +1816,7 @@ impl Session {
                 self.send(out, None, false, Body::Presence { payload });
             }
             Command::Ping { to } => {
-                self.send(out, Some(&to), false, Body::Ping { t: now });
+                self.send(out, Some(&to), false, Body::Ping { t: now.min(MAX_INT) });
             }
         }
     }

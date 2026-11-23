@@ -1,5 +1,8 @@
 //! Claims, frames and the cell policy (§S1, §S3, §S4).
-use base64::{engine::general_purpose::STANDARD, Engine};
+use base64::{
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+    Engine,
+};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// A member ID: lowercase hex, compared as a string (§S4).
@@ -7,6 +10,64 @@ pub type MemberId = String;
 
 /// The greatest term a claim may carry (§S4): 2^53 − 1.
 pub const MAX_TERM: u64 = (1 << 53) - 1;
+/// Every integer in a frame is at most this (§S3, revision 4).
+pub const MAX_INT: u64 = MAX_TERM;
+/// At most this many `echo` values in a `hello` (§S3).
+pub const MAX_ECHO: usize = 8;
+
+/// A 16-byte id or `fresh` value, unpadded base64url in JSON (§S3, revision 4).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Id(pub [u8; 16]);
+impl Id {
+    /// An id derived from a label (tests, tools and deterministic hosts).
+    pub fn from_label(label: &str) -> Self {
+        use sha2::{Digest, Sha256};
+        let d = Sha256::digest(label.as_bytes());
+        let mut b = [0u8; 16];
+        b.copy_from_slice(&d[..16]);
+        Id(b)
+    }
+}
+impl Serialize for Id {
+    fn serialize<S: Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        s.serialize_str(&URL_SAFE_NO_PAD.encode(self.0))
+    }
+}
+impl<'de> Deserialize<'de> for Id {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        let v = URL_SAFE_NO_PAD
+            .decode(s.as_bytes())
+            .map_err(serde::de::Error::custom)?;
+        let b: [u8; 16] = v
+            .try_into()
+            .map_err(|_| serde::de::Error::custom("an id is 16 bytes"))?;
+        Ok(Id(b))
+    }
+}
+
+/// `hello.heard` (§S4, revision 4): has the sender itself received holder frames from
+/// `seen.holder`?
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Heard {
+    /// A holder frame from it within `holderTimeoutMs`.
+    Live,
+    /// Its own link worked for `holderTimeoutMs` and no holder frame from it arrived.
+    Lapsed,
+    /// It has not listened long enough to say.
+    Unknown,
+}
+
+/// What a member persists (§S4, §S5 release, revision 4): its greatest accepted claim and
+/// whether it released that claim.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Persisted {
+    /// The greatest accepted claim.
+    pub claim: Claim,
+    /// It released that claim (a tombstone: after a restart it does not act as its holder).
+    pub released: bool,
+}
 
 /// Opaque application bytes (payloads, snapshots, ids), base64 in JSON (§S3).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -110,12 +171,15 @@ pub struct Seen {
 pub enum Body {
     /// Join or rejoin; sent on every link-up.
     Hello {
-        /// The §S2 envelope; opaque in this layer.
-        #[serde(rename = "sessionKey")]
-        session_key: Bytes,
+        /// 16 random bytes, new for this `hello` (freshness, §S3).
+        fresh: Id,
+        /// The `fresh` values of the hellos this one answers (at most 8).
+        echo: Vec<Id>,
         /// The sender's accepted claim and position.
         seen: Option<Seen>,
-        /// An out-of-contact holder returning (§S6).
+        /// Whether the sender itself hears `seen.holder` (§S4).
+        heard: Heard,
+        /// An out-of-contact holder returning (§S6); informational.
         lapsed: bool,
     },
     /// Full state, from the holder.
@@ -143,21 +207,21 @@ pub enum Body {
         /// Who asked for it (the holder for its own `publish`).
         origin: MemberId,
         /// The submit or publish id.
-        id: Bytes,
+        id: Id,
         /// Application bytes.
         payload: Bytes,
     },
     /// Ask the holder to order a message.
     Submit {
-        /// Caller-chosen id (16 random bytes in the protocol).
-        id: Bytes,
+        /// Caller-chosen id (16 random bytes).
+        id: Id,
         /// Application bytes.
         payload: Bytes,
     },
     /// The holder declined a submit.
     Refuse {
         /// The submit's id.
-        id: Bytes,
+        id: Id,
         /// Why.
         reason: String,
     },
@@ -191,6 +255,15 @@ pub enum Body {
     Take {
         /// `{term, rank: 0, holder: sender}`.
         claim: Claim,
+    },
+    /// A member that yielded to a take tells the new holder what it held (§S5, revision 4).
+    Yielded {
+        /// The claim it held.
+        claim: Claim,
+        /// Its last `seq` under that claim.
+        seq: u64,
+        /// Its state.
+        snapshot: Bytes,
     },
     /// Round trip and offset (§S7).
     Ping {
@@ -230,6 +303,32 @@ impl Body {
             _ => None,
         }
     }
+    /// §S3 bounds: integers at most 2^53 − 1, payloads and snapshots at most `max_payload`,
+    /// claims well formed, at most 8 `echo` values. A frame that fails is dropped.
+    pub fn in_range(&self, max_payload: u64) -> bool {
+        let int = |x: u64| x <= MAX_INT;
+        let size = |b: &Bytes| b.len() as u64 <= max_payload;
+        let claim_ok = self.claim().is_none_or(Claim::well_formed);
+        claim_ok
+            && match self {
+                Body::Hello { echo, seen, .. } => {
+                    echo.len() <= MAX_ECHO && seen.as_ref().is_none_or(|s| s.seq.is_none_or(int))
+                }
+                Body::State { seq, snapshot, .. } => int(*seq) && size(snapshot),
+                Body::Beat { seq, .. } => int(*seq),
+                Body::Msg { seq, payload, .. } => int(*seq) && size(payload),
+                Body::Submit { payload, .. } | Body::Presence { payload } => size(payload),
+                Body::Pass {
+                    next, seq, snapshot, ..
+                } => next.well_formed() && int(*seq) && size(snapshot),
+                Body::Yielded {
+                    claim, seq, snapshot,
+                } => claim.well_formed() && int(*seq) && size(snapshot),
+                Body::Ping { t } => int(*t),
+                Body::Pong { t, echo, hold } => int(*t) && int(*echo) && int(*hold),
+                _ => true,
+            }
+    }
     /// Whether only the holder sends this kind (§S4 yielding list).
     pub fn is_holder_frame(&self) -> bool {
         matches!(
@@ -264,6 +363,7 @@ impl Body {
             Body::Ping { .. } => "ping",
             Body::Pong { .. } => "pong",
             Body::Bye { .. } => "bye",
+            Body::Yielded { .. } => "yielded",
         }
     }
 }
@@ -303,16 +403,45 @@ pub enum Fold {
     Append,
 }
 impl Fold {
-    /// Fold one message payload into a state.
-    pub fn apply(self, state: &Bytes, payload: &Bytes) -> Bytes {
+    /// Fold one message payload into a state. `append` keeps the last `tail` payloads
+    /// (§S1, revision 4), each framed as a 4-byte big-endian length and the bytes.
+    pub fn apply(self, state: &Bytes, payload: &Bytes, tail: u64) -> Bytes {
         match self {
             Fold::Latest => payload.clone(),
             Fold::Append => {
-                let mut v = state.0.clone();
-                v.extend_from_slice(&payload.0);
-                Bytes(v)
+                let mut entries = Self::entries(state);
+                entries.push(payload.clone());
+                let keep = usize::try_from(tail.max(1)).unwrap_or(usize::MAX);
+                let drop = entries.len().saturating_sub(keep);
+                Self::framed(&entries[drop..])
             }
         }
+    }
+    /// The payloads of an `append` state (a state that is not framed is one entry).
+    pub fn entries(state: &Bytes) -> Vec<Bytes> {
+        let mut out = Vec::new();
+        let b = &state.0;
+        let mut i = 0usize;
+        while i < b.len() {
+            let Some(len) = b.get(i..i + 4).map(|h| u32::from_be_bytes([h[0], h[1], h[2], h[3]]) as usize) else {
+                return vec![state.clone()];
+            };
+            let Some(body) = b.get(i + 4..i + 4 + len) else {
+                return vec![state.clone()];
+            };
+            out.push(Bytes(body.to_vec()));
+            i += 4 + len;
+        }
+        out
+    }
+    /// An `append` state from payloads.
+    pub fn framed(entries: &[Bytes]) -> Bytes {
+        let mut v = Vec::new();
+        for e in entries {
+            v.extend_from_slice(&u32::try_from(e.len()).unwrap_or(u32::MAX).to_be_bytes());
+            v.extend_from_slice(&e.0);
+        }
+        Bytes(v)
     }
 }
 
@@ -358,8 +487,8 @@ impl Default for Policy {
 /// Departures from the draft text that the explorer showed necessary
 /// (`docs/colophon-0.6-sessions-findings.md`). [`Fixes::default`] is the reference reading;
 /// [`Fixes::LITERAL`] reproduces the revision 1 draft so the counterexamples stay
-/// reproducible. Revisions 2 and 3 of the draft adopt every fix; F12/F21 are settled by
-/// `Claim::via` (revision 3) rather than a switch.
+/// reproducible, and [`Fixes::REV3`] the revision 3 draft. Revision 4 adopts every fix
+/// (`ALL`); F12/F21 are settled by `Claim::via` rather than a switch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Fixes {
@@ -390,6 +519,29 @@ pub struct Fixes {
     /// F10: a holder judges another holder "not present" for §S5 renewing only after its own
     /// link has worked for `holderTimeoutMs` (a returning member has heard nobody yet).
     pub renew_needs_contact: bool,
+    /// R1 (revision 4): a non-holder corrects a lesser holder frame with the greater claim's
+    /// holder frame as evidence, or with `hello.heard`; a holder renews over another member's
+    /// claim only on `heard: lapsed`. Off: revision 3's hearsay renewing ("not present").
+    pub evidence: bool,
+    /// R2a/b (revision 4): a late pass naming the holder and a yielded holder's state are
+    /// reported to the application (`LatePass`, `yielded` / `Displaced`).
+    pub state_reports: bool,
+    /// R2c (revision 4): a release is persisted, so a restart does not resurrect the claim.
+    pub persist_release: bool,
+    /// R5 (revision 4): unanswered submits are resent on holder change and every
+    /// `askTimeoutMs`, at most 8 times, then reported failed.
+    pub submit_retry: bool,
+    /// R1b/R1c (beyond revision 4's text): evidence also answers a `hello` naming a lesser
+    /// claim or none, and is pushed to members whose last `hello` did, as soon as this member
+    /// has it. Off: revision 4 as written (only holder frames and `take` are corrected).
+    pub evidence_push: bool,
+    /// R2d (beyond revision 4's text): `yielded` is resent every `askTimeoutMs` up to 8
+    /// times. Off: revision 4 as written (resent once).
+    pub yielded_retry: bool,
+    /// R1e (beyond revision 4's text): a holder renews on `heard: lapsed` only once its own
+    /// link has worked for `holderTimeoutMs` (a returning holder must not win on the word of
+    /// a member that merely missed the live holder's beats). Off: revision 4 as written.
+    pub renew_guard: bool,
 }
 impl Fixes {
     /// The revision 1 draft as written.
@@ -402,6 +554,38 @@ impl Fixes {
         liveness_holder_frames: false,
         ask_resend: false,
         renew_needs_contact: false,
+        evidence: false,
+        state_reports: false,
+        persist_release: false,
+        submit_retry: false,
+        evidence_push: false,
+        yielded_retry: false,
+        renew_guard: false,
+    };
+    /// The revision 3 draft: revisions 2 and 3 fixes, none of revision 4.
+    pub const REV3: Fixes = Fixes {
+        rank1_from_holder: true,
+        seen_unsynced: true,
+        bye_resend: true,
+        answer_lesser: true,
+        renew_wider: true,
+        liveness_holder_frames: true,
+        ask_resend: true,
+        renew_needs_contact: true,
+        evidence: false,
+        state_reports: false,
+        persist_release: false,
+        submit_retry: false,
+        evidence_push: false,
+        yielded_retry: false,
+        renew_guard: false,
+    };
+    /// Revision 4 as written (`ALL` without the fixes the explorer found beyond it).
+    pub const REV4: Fixes = Fixes {
+        evidence_push: false,
+        yielded_retry: false,
+        renew_guard: false,
+        ..Fixes::ALL
     };
     /// Every fix.
     pub const ALL: Fixes = Fixes {
@@ -413,6 +597,13 @@ impl Fixes {
         liveness_holder_frames: true,
         ask_resend: true,
         renew_needs_contact: true,
+        evidence: true,
+        state_reports: true,
+        persist_release: true,
+        submit_retry: true,
+        evidence_push: true,
+        yielded_retry: true,
+        renew_guard: true,
     };
 }
 impl Default for Fixes {
