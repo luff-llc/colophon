@@ -135,6 +135,38 @@ testHome('session frames are capped for the whole account, whoever is listening'
   assert.equal(stream.counters.limited, 3);
 }, { stream: { sessionFramesPerSecond: 1, sessionFrameBurst: 3, framesPerSecond: 1000, frameBurst: 1000 } });
 
+testHome('retained replay is not repeated for a duplicate subscribe and is capped for the account', async ({ open, slot }) => {
+  const [a, b, d] = [await open('a'), await open('b'), await open('d')];
+  a.send({ type: 'session', frame: frame('a', { n: 1, retain: true }) });
+  await settle(a);
+  assert.equal((await subscribe(b)).type, 'subscribed');
+  await b.next('session', (f) => f.retained);
+  // Subscribing again while subscribed replays nothing.
+  assert.equal((await subscribe(b)).type, 'subscribed');
+  await settle(b);
+  assert.equal(b.all('session').length, 1);
+  // Leaving and returning replays until the account's replay budget (two frames here) is spent,
+  // on whichever connection asks.
+  const again = async (m) => {
+    m.send({ type: 'unsubscribe', namespace: 'notes', cell: CELL });
+    await m.next('unsubscribed');
+    assert.equal((await subscribe(m)).type, 'subscribed');
+    await settle(m);
+  };
+  await again(b);
+  assert.equal(b.all('session').length, 2);
+  await again(b);
+  assert.equal((await subscribe(d)).type, 'subscribed');
+  await settle(b, d);
+  assert.deepEqual([b.all('session').length, d.all('session').length], [2, 0]);
+  const { stream } = (await slot()).home;
+  assert.equal(stream.counters.limited, 2);
+  // Live frames have their own budget and still flow.
+  const live = frame('a', { n: 2 });
+  a.send({ type: 'session', frame: live });
+  assert.deepEqual((await d.next('session')).frame, live);
+}, { stream: { sessionFramesPerSecond: 1, sessionFrameBurst: 2, framesPerSecond: 1000, frameBurst: 1000 } });
+
 testHome('spoofed senders and unentitled members cannot send', async ({ open }) => {
   const [a, b, c] = [await open('a'), await open('b'), await open('c')];
   await subscribe(b);

@@ -97,6 +97,12 @@ export class HomeStream {
       frames: new Bucket(this.o.sessionFramesPerSecond, this.o.sessionFrameBurst),
       bytes: new Bucket(this.o.sessionBytesPerSecond, this.o.sessionByteBurst),
     };
+    // Retained frames replayed to new subscribers, at the same rates. Kept apart from the budget
+    // for live frames so that subscribing over and over cannot starve them.
+    this.replay = {
+      frames: new Bucket(this.o.sessionFramesPerSecond, this.o.sessionFrameBurst),
+      bytes: new Bucket(this.o.sessionBytesPerSecond, this.o.sessionByteBurst),
+    };
     this.timers = null;
   }
 
@@ -362,15 +368,21 @@ export class HomeStream {
     const r = this.home.wasm.call({ op: 'subscription', namespace, cell, entitled: conn.namespaces });
     if (!r.allowed) { this.error(conn, r.code, ref); return; }
     const key = `${namespace}\0${cell}`;
-    if (!conn.subs.has(key) && conn.subs.size >= this.o.subscriptions) { this.error(conn, 'tooMany', ref); return; }
+    const already = conn.subs.has(key);
+    if (!already && conn.subs.size >= this.o.subscriptions) { this.error(conn, 'tooMany', ref); return; }
     conn.subs.add(key);
     this.send(conn, { type: 'subscribed', namespace, cell, ...(ref !== undefined ? { ref } : {}) });
+    // Subscribing again to a cell replays nothing: the connection has had those frames.
+    if (already) return;
     // The latest retained frame of every other member in the cell (§S9), still in its time,
     // whatever its `to` says: receivers ignore frames not addressed to them (§S3).
     const now = Date.now();
     for (const [k, r2] of this.retained) {
       if (now - r2.at > this.o.retainMs) { this.retained.delete(k); continue; }
       if (r2.namespace === namespace && r2.cell === cell && r2.from !== conn.member) {
+        // Replay is best effort and bounded for the account: over the budget the rest is left
+        // out, and the subscriber gets each member's state with that member's next frame.
+        if (!this.replay.frames.take(1) || !this.replay.bytes.take(r2.size)) { this.counters.limited += 1; return; }
         if (!this.send(conn, { type: 'session', retained: true, frame: r2.frame })) return;
       }
     }
@@ -400,7 +412,7 @@ export class HomeStream {
     if (r.retain) {
       const key = `${r.namespace}\0${r.cell}\0${r.from}`;
       if (this.retained.has(key) || this.retained.size < this.o.retainedPerSlot) {
-        this.retained.set(key, { frame, from: r.from, namespace: r.namespace, cell: r.cell, at: Date.now() });
+        this.retained.set(key, { frame, size: encoded.length, from: r.from, namespace: r.namespace, cell: r.cell, at: Date.now() });
       }
     }
     // `to` is advice to receivers, not a route (§S3, §S9): a member reachable only through

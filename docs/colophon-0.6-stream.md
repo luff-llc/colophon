@@ -226,7 +226,10 @@ A frame over the budget is dropped, counted and not retained, and its sender get
 `rateLimited` error as for its own rate. With the defaults an account makes the home send at
 most 100 × 63 = 6,300 session frames/s or 512 KiB/s × 63 ≈ 31.5 MiB/s, with a burst of
 1 MiB × 63 = 63 MiB, however many of its connections send and whatever `to` says. The budget is
-shared: one connection sending at its own full rate uses half of it. Each receiver's queue is
+shared: one connection sending at its own full rate uses half of it. Retained frames replayed
+on subscribe (§5.3) draw on a second budget of the same size, kept apart so that subscribing
+repeatedly cannot starve live frames; each replayed frame goes to one connection, so replay adds
+at most 100 frames/s and 512 KiB/s per account. Each receiver's queue is
 bounded by `bufferedBytes` (1 MiB): a connection that falls further behind is closed with 4013,
 so memory held for undelivered frames is at most 64 MiB per account. Operators who host many
 accounts lower `sessionFramesPerSecond`, `sessionBytesPerSecond` or `streamsPerAccount`.
@@ -236,7 +239,9 @@ accounts lower `sessionFramesPerSecond`, `sessionBytesPerSecond` or `streamsPerA
 A frame with `retain: true` is also kept, in memory only, as the latest for
 `(namespace, cell, from)`. A newer one replaces it. When a member subscribes to the cell, it
 receives each retained frame of the other members, marked `retained: true`, whatever its `to`
-says. A retained frame lives `retainMs`: 60 s at most, whatever a cell
+says. Subscribing again while already subscribed replays nothing. Replay is best effort: it
+draws on the account's replay budget (§5.2), and when that is spent the remaining frames are left
+out and the subscriber learns each member's state from that member's next frame. A retained frame lives `retainMs`: 60 s at most, whatever a cell
 policy says (the home knows no cells). It is dropped earlier when its sender's access ends or
 narrows. A home holds at most 1,024 retained frames per account; when full, a new key is
 forwarded but not retained. Nothing retained survives a restart.
