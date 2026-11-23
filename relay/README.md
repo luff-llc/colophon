@@ -17,40 +17,76 @@ One home per account is the supported configuration in 0.5. Several homes for on
 the tests, but exchange between them (forwarding and candidate exchange) is experimental
 (spec §13.1; open issues in `docs/multi-home-open-issues.md`).
 
-## Batch record reads (plain slots)
+## Batch record reads
 
-`POST /v1/libraries/<slot>/records/batch` is an additive endpoint for plain relay
-slots. It uses the same bearer authorization as a single-record GET. Send
-`Content-Type: application/json`, `Content-Length`, and a body of at most 64 KiB:
-
-```json
-{"paths":["ops/member/one.json","blobs/<64 lowercase hex digits>"]}
-```
-
-`paths` must contain 1–256 unique valid record paths. Invalid JSON or paths return
-400, an unsupported content type returns 415, and a body over the bound returns
-413. A successful answer preserves request order:
+Home batches implement the [proposed Colophon 0.6 W1 exchange](../docs/colophon-0.6-w1-batch.md).
+`POST /v1/libraries/<slot>/records/batch` works on both plain slots and home slots.
+Plain slots use the same bearer authorization as single-record GET. On a home
+slot, send `Authorization: Colophon <base64url call>` with purpose
+`colophon.home.read`, audience equal to the slot's configured base URL, and
+these signed arguments:
 
 ```json
-{"records":[{"path":"ops/member/one.json","status":200,"etag":"\"<sha256>\"","bytes":"<base64>"},{"path":"ops/member/missing.json","status":404}],"truncated":false}
+{"method":"POST","path":"/records/batch","body":"<lowercase hex SHA-256 of the raw request body>"}
 ```
+
+Send `Content-Type: application/json`, `Content-Length`, and a body of at most
+64 KiB:
+
+```json
+{"paths":["state/0123456789abcdef0123456789abcdef/notes/current.json","state/0123456789abcdef0123456789abcdef/notes/draft.json"]}
+```
+
+`paths` must contain 1–256 unique record paths valid for the slot. Invalid JSON
+or paths return 400, a missing `Content-Length` returns 411, an unsupported
+content type returns 415, and a body over the bound returns 413. A successful
+answer preserves request order:
+
+```json
+{
+  "records": [
+    {"path":"state/0123456789abcdef0123456789abcdef/notes/current.json","status":200,"etag":"\"<sha256>\"","bytes":"<base64>"},
+    {"path":"state/0123456789abcdef0123456789abcdef/notes/draft.json","status":404}
+  ],
+  "truncated": false
+}
+```
+
+An unappointed home returns 404 before checking credentials or parsing the body.
+An appointed home applies its per-address rate limit and checks for a Colophon
+authorization header and valid batch structure before taking the slot lock.
+It then verifies the bound call under its replay rules. Any current member
+calling with its own key may read ciphertext records in any namespace. A batch
+reaches no further than single GETs: the conditions of the member's terms and of
+every link must hold for each path as a single GET of it would carry them, or the
+whole batch is refused with `refused:outOfScope` before anything is reserved or read. E2EE
+epoch keys control who can decrypt those records.
+
+- Every home batch requires a `colophon.home.read` call, including batches of
+  public history or heads. Single GET can serve those paths without a call.
+- Batch refuses `colophon.history.read`, so recover-only controllers cannot
+  batch history. They can read members-only history with single GET and that purpose.
+- A stopped home returns a whole-request 503 for a well-formed batch carrying a
+  call. Single GET can still serve public history while the home is stopped.
+
+A missing call returns 401. Refused calls, including revoked, expired, replayed
+or mismatched calls, return 403 for the whole request. Rate limits return 429
+with `Retry-After`. If the home's own head needs to be refreshed and cannot be
+signed, its entry returns 503.
 
 Records are checked against their indexed size and SHA-256 before serving; storage
-corruption fails the request with 500. Answers carry `Cache-Control: no-store,
+corruption, or an indexed record that is missing or unreadable, fails the whole request
+with 500, no path named and no per-item results. Clients can
+fall back to single-record GETs to fetch the unaffected paths. Answers carry `Cache-Control: no-store,
 no-transform` and the configured CORS headers. Each response has a strict 4 MiB
 encoded JSON/base64 budget, including response framing and per-record overhead.
 An individual record exceeding that budget is not read or base64-encoded; its
 entry is `{ "path": "…", "status": 413, "etag": "\"<sha256>\"", "size": 4194304 }`
-(with its actual raw byte size). Fetch such records via plain GET. These entries
+(with its actual raw byte size). Fetch such records via single-record GET. These entries
 count as returned paths so pagination always makes progress. When `truncated` is true,
-request the unreturned suffix of `paths` in the next batch. Slot metadata is
-unchanged; clients should probe the route and remember a 404/405 for fallback.
-
-The current 0.5 home authorization module does not support this route: home slots
-return 405 after their rate gate, without parsing the batch body or classifying
-its paths, and serve no batch bytes. Home reads still require their
-original individually bound Colophon calls. This endpoint alone does not change
-SDK sync scheduling.
+request the unreturned suffix of `paths` in the next batch. A home requires a new
+call bound to that next batch's body. Clients can probe the route and use single-record
+GET when an older relay returns 404 or 405.
 
 ## Run it
 
@@ -90,7 +126,7 @@ home holds no account secret: no controller or member key, no PRF output, no see
 | Config file | `COLOPHON_RELAY_CONFIG` or `--config` | none |
 | Plain tokens | `COLOPHON_RELAY_TOKENS="slot=token,…"` (or `tokenSha256` in a config file) | none |
 | Token-free slots (tests only) | `COLOPHON_RELAY_OPEN="slot"` | none |
-| Home slots | `COLOPHON_RELAY_HOME_SLOTS="slot=<account ID>@<base URL>,…"` (config: `libraries.slot = {"home":true,"account":…,"base":…}`) | none |
+| Home slots | `COLOPHON_RELAY_HOME_SLOTS="slot=<account ID>@<base URL>,…"` (config: `libraries.slot = {"home":true,"account":…,"base":…}`). Two home slots for one account at one base (after normalizing case and trailing slashes) are refused at start-up: replay tables are per slot, so one captured call could be taken once in each | none |
 | Home key | `COLOPHON_HOME_KEY_FILE` (preferred) or `home.keyFile` in the config; `COLOPHON_HOME_KEY` (the JWK itself) is readable from the process environment, so prefer a file | required for a home |
 | Home module | `COLOPHON_HOME_WASM`, or `home.wasm` | required for a home |
 | Scheduler tick | `COLOPHON_RELAY_TICK_MS` or `tickMs` | `2000` |
@@ -177,7 +213,7 @@ released after `unclaimedHours`, as any other.
 | 403 `{"result":"<code>"}` | A grant's call is refused, with the core's code: `malformed`, `badSignature`, `refused:audience`, `refused:outOfScope`, `refused:revoked`, `refused:expired`, `refused:ended`, `refused:notNarrower`, `refused:window`, `refused:replay`, `refused:conflict`, `refused:fork`. Final: it never falls back to another path |
 | 403 | The request carries an `Origin` not on the CORS list (checked before the body is read) |
 | 405 | Not `POST` |
-| 409 | The slot is held by another account, configured by the operator, or a directory of that name is in the data directory |
+| 409 | The slot is held by another account, configured by the operator, or a directory of that name is in the data directory; or another home slot already serves the account at that base (checked before the call is reserved or anything is written) |
 | 411, 413 | No `Content-Length`, or a body over 4 KiB |
 | 415 | The media type is not `application/json` (checked before the body is read; a browser must preflight such a request, and only a listed origin's preflight succeeds) |
 | 429 `{"result":"refused:overQuota"}` | The address is over `perAddressPerHour`, with `Retry-After` (checked first: a guesser over its share learns nothing about its token); for a grant request, the address is over its attempts or its refusals, the replay table is full, or the grant is over `grantPerHour`, each with `Retry-After` |
@@ -324,14 +360,16 @@ real time. Without `--test-clock` stdin is not read.
 Production use is over TLS (directly, or behind Caddy/nginx or Tailscale, as for the 0.3 relay:
 pass `Authorization`, `If-None-Match`, `If-Match` and `Content-Length`, do not buffer bodies).
 
-## What a home serves (0.5 §14)
+## What a home serves
 
-At `{base}` (`/v1/libraries/<slot>`), in addition to the 0.3 endpoints (`changes`, `records/...`):
+At `{base}` (`/v1/libraries/<slot>`), a home adds the endpoints from 0.5 §14 and the
+proposed 0.6 batch read to the 0.3 endpoints (`changes`, `records/...`).
 
 | Request | Answer |
 | --- | --- |
 | `GET {base}` | 200 as 0.3 plus `"home":{"member":"<ID>"}` |
 | `GET {base}/head` | 200 the latest head this home signed, after producing the due one (§13.3); 503 with `Retry-After: 1` when a head is due and cannot be signed yet (the clock has not passed the latest head's `issued`, or the history stops at a fork): the older head is never served in its place; 404 if none. Public. The same at `records/heads/<this home>.json`. |
+| `POST {base}/records/batch` | Ordered per-path results under a single `colophon.home.read` call. See [Batch record reads](#batch-record-reads). |
 | `GET {base}/authority?after=&limit=` | 200 `{"entries","receipts","more"}`, 1–64 from `after + 1`, under 13.4; `receipts` holds the receipts of a successor genesis. At a fork: the prefix, then every candidate held from the fork's seq, in seq then digest order |
 | `GET {base}/predecessor/authority/<8 digits>.json` | 200 a Swift predecessor's entry; 404. A history path (§13.4) |
 | `PUT {base}/predecessor/authority/<8 digits>.json` | a predecessor entry: 201 stored, 200 held already, 412 another entry at that seq, 422 `{"result"}`. Needs a `colophon.home.write` call by a controller (see "Predecessor entries") |
@@ -340,17 +378,18 @@ At `{base}` (`/v1/libraries/<slot>`), in addition to the 0.3 endpoints (`changes
 | `GET {base}/pending/{digest}` | 200 `{"envelope","receipts"}`; 404 |
 | `POST {base}/pending` | `{"objects":[…]}`, 1–16: 200 `{"receipts"}`; 422 a JSON array with the result string of each refused object, in request order. Receipts in a batch are taken first, so an object later in it finds them. No credential needed. |
 
-**Before it is appointed** a home serves nothing it holds: every path but `GET {base}` and the two
-`POST`s answers 404. **Once appointed**, every access decision is the Rust module's (§13.4, §14):
+**Before it is appointed** a home serves nothing it holds. It exposes its identity at `GET {base}`
+and accepts admission requests such as `POST {base}/authority` and `POST {base}/pending`.
+**Once appointed**, access decisions follow the Rust module's rules (§13.4, §14):
 the head (`/head`, `records/heads/*`) is public; the history (`authority`, `pending`, and
 `records/authority/`, `transitions/`, `vetoes/`, `receipts/`) follows `policy.history`: `public`,
 or a call; records, blob chunks and the change feed always need a call. A call is
 `Authorization: Colophon <base64url call envelope>`, verified under §12.3 with `{base}` as the
 audience, and bound to its request: its `args` are exactly
 `{"method": <HTTP method>, "path": <path and query relative to {base}, as sent>, "body": <hex SHA-256 of the body>}`,
-its purpose `colophon.home.read` for GET and HEAD (`colophon.history.read` is accepted on the
-history paths only, never for records, blob chunks or the change feed) and `colophon.home.write`
-otherwise. A current member may write records, live
+its purpose `colophon.home.read` for GET, HEAD and `POST /records/batch` (`colophon.history.read`
+is also accepted for GET and HEAD on history paths only) and `colophon.home.write` for writes.
+A current member may write records, live
 values and blob chunks under its own author ID in namespaces its terms grant; a revoked member is
 refused as soon as the revocation is in the history the home holds. Refused: 401 with
 `WWW-Authenticate: Colophon` when there is no call, 403 `{"result":"<§1 code>"}` for a call that

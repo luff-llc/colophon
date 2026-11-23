@@ -10,8 +10,8 @@
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use colophon_core::v05::account::{Account, Identity};
 use colophon_core::v05::calls::{
-    home_purposes, home_record_writes, verify_call, verify_home_request, AccountView, Call,
-    CallConfig, CallSigner, HomeRequest, HomeWrite,
+    home_purposes, home_record_writes, verify_call, verify_home_batch, verify_home_request,
+    AccountView, Call, CallConfig, CallSigner, HomeRequest, HomeWrite,
 };
 use colophon_core::v05::descriptor::HistoryAccess;
 use colophon_core::v05::encoding::{bounds, canonical, digest, parse_date, strict_parse};
@@ -37,7 +37,7 @@ use colophon_core::v05::write::succession::prepare_succession_vetoed;
 use colophon_core::v05::write::{format_date, SignatureResult};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 type R<T> = Result<T, String>;
 
@@ -54,6 +54,8 @@ const BOOTING_PREDECESSOR_BYTES: usize = 8 * 1024 * 1024;
 const MIN_SHARE: usize = 64;
 /// Replay rows of a slot when the host names no capacity.
 const DEFAULT_REPLAY_ROWS: usize = 65_536;
+const BATCH_BODY_BYTES: usize = 64 * 1024;
+const BATCH_PATHS: usize = 256;
 
 /// Run one request. The input is JSON, the output is JSON; nothing panics on bad input.
 pub fn handle(input: &[u8]) -> Vec<u8> {
@@ -80,6 +82,10 @@ fn run(input: &[u8]) -> R<Value> {
         "resume" => resume(&req),
         "lease" => lease(&req),
         "classify" => classify(&req),
+        "validate_batch" => Ok(match batch_input(&req) {
+            Ok(_) => json!({"allowed": true}),
+            Err(response) => response,
+        }),
         "access" => access(&req),
         "call_key" => call_key(&req),
         "replay_keep" => replay_keep(&req),
@@ -384,6 +390,8 @@ enum Class {
     History,
     /// Records, live values, blob chunks and the change feed.
     RecordsRead,
+    /// `POST /records/batch`, with one call for the raw JSON body.
+    BatchRead,
     /// Writes, with what they write.
     Write(Vec<HomeWrite>),
     /// `PUT {base}/predecessor/authority/<8 digits>.json` (§14): a predecessor entry published.
@@ -401,6 +409,42 @@ fn not_allowed(allow: &str) -> R<Value> {
     Ok(json!({"allowed": false, "status": 405, "allow": allow}))
 }
 
+fn record_kind(path: &str) -> Option<Kind> {
+    paths::classify(path).filter(|kind| !matches!(kind, Kind::Request))
+}
+
+/// Validate without slot state so the host can reject malformed batches before taking the lock.
+fn batch_input(req: &Value) -> Result<(Vec<u8>, Vec<String>), Value> {
+    let bad_request = |error: String| json!({"allowed": false, "status": 400, "error": error});
+    let body = bytes_of(req, "batchBody").map_err(bad_request)?;
+    if body.len() > BATCH_BODY_BYTES {
+        return Err(json!({"allowed": false, "status": 413}));
+    }
+    let paths = batch_paths(&body).map_err(bad_request)?;
+    Ok((body, paths))
+}
+
+fn batch_paths(body: &[u8]) -> R<Vec<String>> {
+    let body = body.strip_prefix(b"\xef\xbb\xbf").unwrap_or(body);
+    let parsed: Value = serde_json::from_slice(body).map_err(|_| "Invalid JSON")?;
+    let invalid = "Expected 1–256 unique valid record paths";
+    let paths = parsed["paths"].as_array().ok_or(invalid)?;
+    if !(1..=BATCH_PATHS).contains(&paths.len()) {
+        return Err(invalid.into());
+    }
+    let mut seen = BTreeSet::new();
+    paths
+        .iter()
+        .map(|path| {
+            let path = path.as_str().ok_or(invalid)?;
+            if !seen.insert(path) || record_kind(path).is_none() {
+                return Err(invalid.into());
+            }
+            Ok(path.to_string())
+        })
+        .collect()
+}
+
 /// The whole access decision for one request (§13.4, §14, §12.3, §12.4):
 /// `{"allowed":true,"via":…,"kind":…,"reserve":…}` or `{"allowed":false,"status":…}` with a
 /// `result` for 403 and 429. A home that is not appointed serves nothing it holds: everything
@@ -409,7 +453,6 @@ fn not_allowed(allow: &str) -> R<Value> {
 /// what §13.4 and §14 allow. The replay table's share is per principal (a member or controller,
 /// with every link key under it), so one caller over its share is refused alone.
 fn access(req: &Value) -> R<Value> {
-    let l = load(req)?;
     let now_ms = i64_of(req, "now")?;
     let method = str_of(req, "method")?;
     let section = req.get("section").and_then(Value::as_str).unwrap_or("");
@@ -446,8 +489,12 @@ fn access(req: &Value) -> R<Value> {
             (_, Some(Kind::Predecessor(_))) => return not_allowed("GET, PUT"),
             _ => return answer(404),
         },
+        ("records", Some("batch")) => match method {
+            "POST" => Class::BatchRead,
+            _ => return not_allowed("POST"),
+        },
         ("records", Some(p)) => {
-            let Some(kind) = paths::classify(p).filter(|k| !matches!(k, Kind::Request)) else {
+            let Some(kind) = record_kind(p) else {
                 return Ok(json!({"allowed": false, "status": 400, "error": "Invalid record path"}));
             };
             match (read, method, kind) {
@@ -471,6 +518,7 @@ fn access(req: &Value) -> R<Value> {
         }
         _ => return answer(404),
     };
+    let l = load(req)?;
     if matches!(class, Class::Identity | Class::Admit) {
         return Ok(json!({"allowed": true, "via": "open"}));
     }
@@ -481,6 +529,21 @@ fn access(req: &Value) -> R<Value> {
     }
     let Some(h) = l.home.as_ref() else {
         return answer(404);
+    };
+    let call_text = req.get("call").and_then(Value::as_str);
+    let batch = if matches!(class, Class::BatchRead) {
+        if str_of(req, "path")? != "/records/batch" {
+            return answer(400);
+        }
+        if call_text.is_none() {
+            return answer(401);
+        }
+        match batch_input(req) {
+            Ok((body, paths)) => Some((digest(&body), paths)),
+            Err(response) => return Ok(response),
+        }
+    } else {
+        None
     };
     if matches!(class, Class::Head) {
         return Ok(json!({"allowed": true, "via": "public"}));
@@ -493,7 +556,7 @@ fn access(req: &Value) -> R<Value> {
     if v.stopped {
         return Ok(json!({"allowed": false, "status": 503, "result": "unavailable"}));
     }
-    let Some(call_text) = req.get("call").and_then(Value::as_str) else {
+    let Some(call_text) = call_text else {
         return answer(401);
     };
     let call = B64.decode(call_text).map_err(|e| e.to_string())?;
@@ -539,10 +602,21 @@ fn access(req: &Value) -> R<Value> {
     let request = HomeRequest {
         method,
         path,
-        body_sha256: str_of(req, "bodySha256")?,
+        body_sha256: match &batch {
+            Some((digest, _)) => digest,
+            None => str_of(req, "bodySha256")?,
+        },
         writes,
     };
-    let vc = match verify_home_request(&call, &account_view, &cfg, &mut store, &request) {
+    // A batch reaches no further than single-record reads: the call's conditions must hold for
+    // each path as a single GET of it would carry them, or the whole batch is refused.
+    let verified = match &batch {
+        Some((_, paths)) => {
+            verify_home_batch(&call, &account_view, &cfg, &mut store, &request, paths)
+        }
+        None => verify_home_request(&call, &account_view, &cfg, &mut store, &request),
+    };
+    let vc = match verified {
         Ok(vc) => vc,
         Err(f) => return refuse(f.code()),
     };
@@ -584,11 +658,19 @@ fn access(req: &Value) -> R<Value> {
         return Ok(json!({"allowed": false, "status": 429, "result": "refused:window",
                          "retryAfter": (wait_ms + 999) / 1000, "drop": drop}));
     }
-    Ok(json!({
+    let mut result = json!({
         "allowed": true, "via": "call", "signer": signer, "drop": drop,
         "reserve": {"key": key_text(&vc.replay_key), "signer": signer, "at": now_ms,
                     "digest": vc.call.digest},
-    }))
+    });
+    if let Some((_, paths)) = batch {
+        // The verified home read also meets the call requirement for members-only history.
+        result["records"] = json!(paths
+            .into_iter()
+            .map(|path| json!({"path": path, "status": 200}))
+            .collect::<Vec<_>>());
+    }
+    Ok(result)
 }
 
 fn signer_text(s: &CallSigner) -> String {

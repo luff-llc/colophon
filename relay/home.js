@@ -19,6 +19,11 @@ const b64 = (bytes) => Buffer.from(bytes).toString('base64');
 const unb64 = (text) => Buffer.from(text, 'base64');
 const sha = (bytes) => createHash('sha256').update(bytes).digest('hex');
 
+function colophonCall(req) {
+  const match = /^Colophon ([A-Za-z0-9_-]+)$/.exec(req.headers.authorization ?? '');
+  return match ? b64(Buffer.from(match[1], 'base64url')) : null;
+}
+
 // Forwarding (§13.1), per peer: each request's own time limit, a pass's wall-time budget, how many
 // newly listed objects and how many backlog objects one pass offers, and how soon the same
 // entries are offered again while the peer's head lags. PASS_MS bounds all network request
@@ -177,6 +182,7 @@ export class HomeSlot {
       if (st.error) throw new Error(st.error);
       if (st.home !== this.key.memberId) throw new Error('state belongs to another home key');
       if (st.account !== this.account) throw new Error(`state belongs to account ${st.account}, not ${this.account}`);
+      this.appointed = st.appointed;
       files = this.wasm.call({ op: 'objects', state: this.state, now: this.clock() }).files;
     } catch (error) {
       throw new Error(`Home slot ${this.slot.name}: cannot open ${this.file('home-state.json')}: ${error.message}; restore the state file from a backup`);
@@ -344,12 +350,7 @@ export class HomeSlot {
    * request (503, retryable) and the older head is never served. */
   async serveOwnHead(res) {
     const { HttpError, send } = this.deps;
-    let outcome;
-    try { outcome = await this.lock(async () => this.settle()); }
-    catch (error) {
-      if (!(error instanceof ModuleError)) throw error;
-      outcome = 'due';
-    }
+    const outcome = await this.lock(() => this.settleForRead());
     if (outcome === 'due') throw new HttpError(503, 'The head is due and cannot be signed yet', { 'retry-after': '1' }, { result: 'unavailable' });
     const head = await this.headEnvelope();
     if (!head) throw new HttpError(404, 'No head');
@@ -358,10 +359,13 @@ export class HomeSlot {
 
   /** The stored head, only when no other head is due (§13.3); null otherwise. Under the lock. */
   async headIfFresh() {
-    let outcome;
-    try { outcome = await this.settle(); }
-    catch (error) { if (!(error instanceof ModuleError)) throw error; outcome = 'due'; }
+    const outcome = await this.settleForRead();
     return outcome === 'due' ? null : this.headEnvelope();
+  }
+
+  async settleForRead() {
+    try { return await this.settle(); }
+    catch (error) { if (!(error instanceof ModuleError)) throw error; return 'due'; }
   }
 
   async headEnvelope() {
@@ -454,11 +458,8 @@ export class HomeSlot {
   // -------------------------------------------------------------------------------------------
   // Who may do what (§13.4, §14): the module's `access` decision, all of it.
 
-  async access(req, section, rest, effect, body) {
+  async access(req, section, rest, effect, body, call = colophonCall(req)) {
     const { HttpError } = this.deps;
-    const header = req.headers.authorization ?? '';
-    const m = /^Colophon ([A-Za-z0-9_-]+)$/.exec(header);
-    const call = m ? b64(Buffer.from(m[1], 'base64url')) : null;
     return this.replayLock(async () => {
       let existing = null; let signerRows = [];
       if (call) {
@@ -472,7 +473,10 @@ export class HomeSlot {
       const r = this.wasm.call({
         op: 'access', state: this.state, now: this.clock(), method: req.method, section, rest,
         call, existing, signerRows, replayRows: this.limits.replayRows, base: this.base,
-        path: this.relativePath(req), bodySha256: sha(body ?? Buffer.alloc(0)),
+        path: this.relativePath(req),
+        ...(section === 'records' && rest === 'batch'
+          ? { batchBody: b64(body) }
+          : { bodySha256: sha(body ?? Buffer.alloc(0)) }),
       });
       this.dropRows(r.drop);
       if (r.allowed) {
@@ -506,12 +510,29 @@ export class HomeSlot {
   async handle(req, res, url, section, rest) {
     const { HttpError, send, readBody, clampInt } = this.deps;
     await this.keepLease();
+    if (section === 'records' && rest === 'batch' && !this.appointed) {
+      req.resume();
+      throw new HttpError(404, 'Not found');
+    }
     if (!this.rate.take(this.deps.clientAddress(req), this.clock())) {
       throw new HttpError(429, 'Too many requests', { 'retry-after': '60' });
     }
-    // Batch reads have no home call format. Refuse uniformly, without inspecting the body.
     if (section === 'records' && rest === 'batch') {
-      throw new HttpError(405, 'Method not allowed', { allow: 'GET' });
+      const call = colophonCall(req);
+      if (req.method === 'POST' && !call) {
+        req.resume();
+        throw new HttpError(401, 'A Colophon call is required', { 'www-authenticate': 'Colophon' });
+      }
+      const body = await this.deps.readBatchBody(req, url);
+      const validation = this.wasm.call({ op: 'validate_batch', batchBody: b64(body) });
+      if (!validation.allowed) throw new HttpError(validation.status, validation.error ?? 'Record exceeds the relay limit');
+      await this.lock(async () => {
+        const { records } = await this.access(req, section, rest, null, body, call);
+        const ownHead = records.find((r) => r.status === 200 && r.path === `heads/${this.key.memberId}.json`);
+        if (ownHead && await this.settleForRead() === 'due') ownHead.status = 503;
+        await this.deps.serveBatch(res, this.slot, records);
+      });
+      return true;
     }
     const method = req.method;
     const writing = section === 'records' && method === 'PUT';
@@ -655,6 +676,8 @@ export class HomeSlot {
     const { send } = this.deps;
     const r = this.wasm.call({ op: 'post_authority', state: this.state, now: this.clock(), body: b64(body) });
     await this.commit(r.state); // even a refusal changes state (§13.1)
+    // The first successful appointment in a committed upload is permanent for this slot.
+    if (r.appointed) this.appointed = true;
     await this.materialize(r.store);
     const receipts = await this.signReceipts(r.sign);
     const head = r.appointed ? await this.settle() : 'fresh';

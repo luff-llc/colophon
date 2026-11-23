@@ -448,6 +448,45 @@ function readBody(req, max) {
   });
 }
 
+function readBatchBody(req, url) {
+  if (req.method !== 'POST') throw new HttpError(405, 'Method not allowed', { allow: 'POST' });
+  if (url.search) throw new HttpError(400, 'Record URLs take no query');
+  if (!isJsonType(req.headers['content-type'])) throw new HttpError(415, 'Content-Type must be application/json');
+  return readBody(req, 64 * 1024);
+}
+
+/** A home base as compared for duplicates: scheme and host case and trailing slashes ignored. */
+function normalBase(base) {
+  try { return new URL(base).href.replace(/\/+$/, ''); } catch { return String(base).replace(/\/+$/, ''); }
+}
+function basePair(account, base) { return `${account} ${normalBase(base)}`; }
+
+async function serveBatch(res, slot, decisions) {
+  const records = [];
+  // Include the envelope (false is longer than true), commas, and JSON path escaping.
+  const envelopeBytes = Buffer.byteLength(JSON.stringify({ records: [], truncated: false }));
+  let total = envelopeBytes;
+  for (const { path: p, status } of decisions) {
+    const entry = status === 200 ? slot.current.get(p) : undefined;
+    const encodedSize = entry ? Math.ceil(entry.size / 3) * 4 + Buffer.byteLength(JSON.stringify(p)) + 128 : 0;
+    const refusal = !entry ? { path: p, status: status === 200 ? 404 : status }
+      : encodedSize + envelopeBytes > BATCH_BYTES ? { path: p, status: 413, etag: `"${entry.sha256}"`, size: entry.size } : null;
+    const cost = (refusal ? Buffer.byteLength(JSON.stringify(refusal)) : encodedSize) + (records.length ? 1 : 0);
+    if (total + cost > BATCH_BYTES) break;
+    total += cost;
+    if (refusal) { records.push(refusal); continue; }
+    const max = slot.classify(p) === 'blob' ? slot.limits.blobBytes : slot.limits.recordBytes;
+    if (entry.size > max) throw new HttpError(500, 'Stored record exceeds its limit');
+    // Indexed, so it must be there: a missing or unreadable file is a storage failure (500,
+    // naming no path), never a whole-request 404. The call is spent either way.
+    let bytes;
+    try { bytes = await slot.readFile(p); } catch { throw new HttpError(500, 'Stored record failed integrity check'); }
+    if (bytes.length !== entry.size || sha256(bytes) !== entry.sha256) throw new HttpError(500, 'Stored record failed integrity check');
+    records.push({ path: p, status: 200, etag: `"${entry.sha256}"`, bytes: bytes.toString('base64') });
+  }
+  return send(res, 200, { records, truncated: records.length < decisions.length });
+}
+
 /**
  * Creates the relay. `libraries` maps slot names to `{ tokenSha256 }`, `{ token }` or
  * `{ open: true }` (no bearer token; local testing only).
@@ -516,6 +555,22 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
     else throw new Error(`Library slot ${name} needs tokenSha256, a token of at least 16 characters, or open: true`);
   }
   for (const [name, e] of table.rows) if (!homeSlots.has(name)) homeSlots.set(name, { base: e.base, account: e.account });
+  // Replay tables are per slot: two slots serving one account at one base would each take the
+  // same captured call once. One account, one home slot per base.
+  // The door checks the same pair under its lock (`baseHolder`) before it reserves or writes.
+  const bases = new Map();
+  for (const [name, { base, account }] of homeSlots) {
+    const pair = basePair(account, base);
+    const other = bases.get(pair);
+    if (other !== undefined) throw new Error(`Home slots ${other} and ${name} both serve account ${account} at base ${normalBase(base)}: a base names one home slot per account`);
+    bases.set(pair, name);
+  }
+  /** Another home slot serving `account` at `base`, if any (not `except`). */
+  const baseHolder = (account, base, except) => {
+    const pair = basePair(account, base);
+    for (const [name, e] of homeSlots) if (name !== except && basePair(e.account, e.base) === pair) return name;
+    return undefined;
+  };
   const configured = new Set(Object.keys(libraries ?? {}));
   // Gate "grant": the operator account is one of this home's own slots, and the door's audience
   // is its own. A slot named but not set up yet is not a start-up failure (every grant request is
@@ -552,7 +607,7 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
           s.home = new HomeSlot({
             slot: s, wasm: homeModule, key: homeKey, base: homeSlots.get(name).base, account: homeSlots.get(name).account,
             clock, resolve, tracing,
-            deps: { HttpError, send, readBody, clampInt, clientAddress, reach },
+            deps: { HttpError, send, readBody, readBatchBody, serveBatch, clampInt, clientAddress, reach },
             limits: { ...effective, requestsPerMinute: effective.requestsPerMinute ?? 0 },
           });
           await s.home.open();
@@ -735,6 +790,11 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
           if (reserve) await provisionReplay.reserve(reserve, null);
           return Buffer.from(verdict.existing.request, 'base64');
         }
+        // One account, one home slot per base: a slot that would repeat another's (account,
+        // base) would let one captured call be taken once in each. Refused before any effect.
+        if (baseHolder(asked.account, asked.base, asked.slot) !== undefined) {
+          throw new HttpError(409, 'Another home slot already serves this account at this base');
+        }
         // Verify, reserve, make the slot (the durable write names the call's digest), complete.
         if (reserve) { await provisionReplay.reserve(reserve, { slot: asked.slot }); await reach('grant reserved'); }
         const request = await memberRequest({ wasm: homeModule, key: homeKey, account: asked.account, base: asked.base, now: clock() });
@@ -774,12 +834,7 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
     enter(s); work.slot = s;
     if (s.home && await s.home.handle(req, res, url, section, recordPath)) return undefined;
     if (section === 'records' && recordPath === 'batch') {
-      // Home authorization and rate limiting run before any batch parsing/classification.
-      if (s.home) throw new HttpError(405, 'Batch reads require home module support', { allow: 'GET' });
-      if (req.method !== 'POST') throw new HttpError(405, 'Method not allowed', { allow: 'POST' });
-      if (url.search) throw new HttpError(400, 'Record URLs take no query');
-      if (!isJsonType(req.headers['content-type'])) throw new HttpError(415, 'Content-Type must be application/json');
-      const body = await readBody(req, 64 * 1024);
+      const body = await readBatchBody(req, url);
       let parsed;
       try { parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(body)); } catch { throw new HttpError(400, 'Invalid JSON'); }
       const paths = parsed?.paths;
@@ -787,26 +842,7 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
           new Set(paths).size !== paths.length || paths.some((p) => typeof p !== 'string' || !s.classify(p))) {
         throw new HttpError(400, 'Expected 1–256 unique valid record paths');
       }
-      const records = [];
-      // Include the envelope (false is longer than true), commas, and JSON path escaping.
-      const envelopeBytes = Buffer.byteLength(JSON.stringify({ records: [], truncated: false }));
-      let total = envelopeBytes;
-      for (const p of paths) {
-        const entry = s.current.get(p);
-        const encodedSize = entry ? Math.ceil(entry.size / 3) * 4 + Buffer.byteLength(JSON.stringify(p)) + 128 : 0;
-        const refusal = !entry ? { path: p, status: 404 }
-          : encodedSize + envelopeBytes > BATCH_BYTES ? { path: p, status: 413, etag: `"${entry.sha256}"`, size: entry.size } : null;
-        const cost = (refusal ? Buffer.byteLength(JSON.stringify(refusal)) : encodedSize) + (records.length ? 1 : 0);
-        if (total + cost > BATCH_BYTES) break;
-        total += cost;
-        if (refusal) { records.push(refusal); continue; }
-        const max = s.classify(p) === 'blob' ? effective.blobBytes : effective.recordBytes;
-        if (entry.size > max) throw new HttpError(500, 'Stored record exceeds its limit');
-        const bytes = await s.readFile(p);
-        if (bytes.length !== entry.size || sha256(bytes) !== entry.sha256) throw new HttpError(500, 'Stored record failed integrity check');
-        records.push({ path: p, status: 200, etag: `"${entry.sha256}"`, bytes: bytes.toString('base64') });
-      }
-      return send(res, 200, { records, truncated: records.length < paths.length });
+      return serveBatch(res, s, paths.map((path) => ({ path, status: 200 })));
     }
     if (!s.home && ['head', 'authority', 'pending', 'predecessor'].includes(section)) throw new HttpError(404, 'Not found');
     if (!section) {
