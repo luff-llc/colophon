@@ -1,6 +1,6 @@
 # Colophon 0.6: sessions
 
-**Status:** unfrozen draft, revision 15, 2026-11-23. Revision 2 adopted the findings of the
+**Status:** unfrozen draft, revision 16, 2026-11-23. Revision 2 adopted the findings of the
 reference machine (`docs/colophon-0.6-sessions-findings.md`, F1–F20); revision 3 added `via` to passed claims (F12, F21); revision 4 answers the first
 independent design review (R1–R9 in the findings document): evidence instead of hearsay,
 no silent loss of state, key bootstrap and freshness, bounded state; revision 5 adopts what
@@ -120,8 +120,10 @@ key when the envelope verifies, the member is a current member with a `records` 
 session number, and the verifier's clock is within the window widened by 60 s; the window
 is checked again for every frame. A verifier
 that later accepts a history in which the member is no longer a current member (0.5
-§8.5), no longer has the `records` entry, or has a higher session number MUST drop that
-member's session keys and every frame signed by them from then on. A member MAY sign a new
+§8.5), no longer has the `records` entry, or has a higher session number MUST stop
+accepting that member's session keys and every frame signed by them from then on. It keeps
+their replay floors (§S3) until the delegations expire, so that an old key presented again
+under a new delegation cannot replay old frames. A member MAY sign a new
 delegation for the same session key before the old one expires; receivers keep that key's
 window.
 
@@ -241,8 +243,11 @@ A member accepts a claim it meets in any frame when all of these hold:
 
 1. The frame passed §S3 and its sender is a **writer** at the member's accepted authority
    head (§S1). A claim met in a frame from a member that may only read, in any field
-   (`claim`, `next`, `hello.seen`, `bye`, `yielded`), is ignored, and so is a claim that
-   names as holder a member that is not a writer. Readers take part in freshness, presence
+   (`claim`, `next`, `hello.seen`, `bye`, `yielded`), is ignored, with one exception: a
+   `bye` releasing the sender's own claim is honoured even after the sender has lost write
+   access, so a demoted holder can say that it has stopped. A claim that names as holder a
+   member that is not a writer is never accepted; when a writer's `hello.seen` reports
+   one, a holder still renews over it (§S5) so that the reporter can move on. Readers take part in freshness, presence
    and the ordered lane as listeners only.
 2. For rank 0, the frame is from `claim.holder` itself.
 3. For rank 1, the frame is from `claim.holder`, or is a `pass` from `claim.via` with
@@ -277,8 +282,9 @@ its accepted claim; then
 the holder sends `pass` with `next = {term: current+1, rank: 1, holder: asker, via: self}`, the final
 `seq` and the final `snapshot`, to all members, and from that moment is not holder: it
 accepts `next` itself, with `snapshot` as its state. Until it receives an `ack`
-whose `passed` names `next`, it resends the same `pass`, unchanged, whenever it hears a
-frame from the asker, at most once per `askTimeoutMs`. A member that receives a `pass`
+whose `passed` names `next`, it resends the same `pass`, unchanged, once per
+`askTimeoutMs`, whether or not it hears the asker; it stops if the asker ceases to be a
+writer. A member that receives a `pass`
 naming it gives the snapshot to its application (as its starting state, or as a late pass
 if it has already moved to a greater claim) and answers `ack`, every time, so a passed
 state always reaches the application it was passed to. The asker becomes holder on
