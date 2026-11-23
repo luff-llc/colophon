@@ -447,7 +447,7 @@ first upload is sent again. One entry per seq, at most the claimed head's seq, 5
 8 MiB per slot; bytes that do not fit the chain are refused and nothing of them is kept, so
 flooding cannot take a place the genuine entry needs. Nothing staged is served.
 
-**Notice routes and live streams** are available on home slots. See “Notices” and “Live stream” below.
+**Notice routes and the stream** are available on home slots. See “Notices” and “Stream” below. Nothing of a session frame or a stream ticket is ever stored.
 
 ## Storage layout
 
@@ -546,38 +546,85 @@ hex SHA-256 of the UTF-8 bytes of `kind`, one zero byte, and the UTF-8 bytes of 
 | `DELETE {base}/routes/<route ID>` | `colophon.home.write` | 204 on removal or 404 when absent |
 | `GET {base}/routes` | `colophon.home.read` | 200 with `{"routes":[{"id","kind","reaches","by"}]}` |
 
-Any current controller can register or delete a route, including recovery-only and suspended
-controllers. A current member can use its own key. Member links use their explicit service
-grants. `by` identifies the registering principal as `controller:<ID>` or `member:<ID>`.
-The route list omits delivery addresses. PUT takes an `application/json` body up to 4 KiB.
-The home stages, fsyncs and renames the route file before acknowledging a change.
+Route upkeep (listing, and changing one's own routes) is open to every current controller,
+including recover-only and suspended ones. A current member can use its own key, and member
+links need explicit service grants. `by` identifies the registering principal as
+`controller:<ID>` or `member:<ID>`. **A principal changes and deletes only its own routes**:
+another principal's route answers 403 `{"result":"refused:notGranted"}`. Each principal holds at
+most 8 routes, and the slot at most 64; a new route past either cap answers 507
+`{"result":"refused:overQuota"}`. The home module decides ownership, caps and the route's form.
+It checks the address per kind; a `webhook` must be `https://` to a public DNS name, with no IP
+literal, port, user information or local-only name. It also requires that `reaches` does not
+contain the address. The route list omits delivery addresses. PUT takes an `application/json`
+body up to 4 KiB. The home stages, fsyncs and renames the route file before acknowledging a
+change. Routes of a principal that is no longer one are dropped on the next authority commit.
 
 When the home admits a suspend or agrees to receipt a new transition or veto, it fsyncs
-`notices.jsonl` before responding. It writes one line per registered route, or one line when
-no routes are registered. Each line has the account ID, object digest, kind, signed issue
-time and veto deadline, in fields `account`, `object`, `kind`, `issued` and `deadline`. Retrying an
-already-held object does not duplicate notices. The queue survives restarts. Delivery
-providers and signed notice payloads are outside this implementation.
+`notices.jsonl` before responding. It writes **one line per notice**:
+`{"seq","account","object","kind","issued","deadline","routes":[…]}`. `seq` is the notice's
+number (increasing, never reused, possibly skipping after a failed commit). `routes` holds the
+IDs of the routes registered when the notice was queued, so a delivery sender keeps a cursor per
+route. Retrying an already-held object does not duplicate notices. The queue survives restarts.
+Delivery providers and signed notice payloads are outside this implementation.
 
-## Live stream
+## Stream
 
-On Bun, connect to `GET {base}/stream` using a WebSocket client that can set the
-`Authorization: Colophon <call>` header. Use a fresh `colophon.home.read` call bound to
-`{"method":"GET","path":"/stream","body":"<SHA-256 of empty bytes>"}` and the slot's audience.
-An appointed home answers a missing call with 401 and a refused call with 403. Reconnecting
-requires a fresh call.
+The stream is a draft for Colophon 0.6, and
+[docs/colophon-0.6-stream.md](../docs/colophon-0.6-stream.md) is its full description. It is a
+two-way WebSocket at `GET {base}/stream`. It pushes what the home commits and carries sealed
+session frames between the account's connected members. The home never reads those frames.
 
-The home sends compact JSON text frames after committing an event.
+1. **Mint a ticket:** `POST {base}/stream/ticket`, no body, with a call of purpose
+   `colophon.home.stream` bound to `{"method":"POST","path":"/stream/ticket","body":"<SHA-256 of
+   empty bytes>"}`. Whoever may read records at the home may mint one, including a member
+   through links whose terms grant `colophon.home.stream` at `{base}` (a device whose member key
+   is locked). The answer is 200 `{"ticket","expires","path"}`. A ticket is opaque, single use
+   and lives 30 s. The home keeps only its hash and never logs it.
+2. **Connect:** `GET {base}/stream?ticket=<ticket>[&after=<cursor>]`. Browsers can do this.
+   A missing ticket answers 401 and a used or expired one 403 `{"result":"refused:ticket"}`.
+   A principal that lost access answers 403 `refused:revoked`. Past 4 connections per principal
+   or 64 per account, the answer is 429.
+3. The first frame is `hello` (`instance`, `cursor`, `head`, `notice`, `namespaces`, `limits`).
+   Every frame carries `n`, its number on the connection, with no gap. With `after`, the missed
+   change-log entries follow as `change` frames, or a `resync` when they cannot be replayed.
 
-| Frame | When |
+| Home → client | |
 | --- | --- |
-| `{"type":"head","seq":N,"digest":"..."}` | The slot stores a new signed head |
-| `{"type":"change","cursor":N}` | A record write adds a change-log entry |
-| `{"type":"notice","object":"...","kind":"...","deadline":"..."}` | A new notice is queued |
+| `change` `{cursor, entry}` | The `/changes` entry and cursor, so either can resume the other |
+| `head` `{home, seq, digest}` | The home stored a new head |
+| `notice` `{notice, object, kind, deadline}` | A notice was queued (`notice` is its number) |
+| `route` `{id, change, kind?, reaches?, by?}` | A route changed |
+| `session` `{frame, retained?}` | A sealed frame from another member |
+| `subscribed`, `unsubscribed`, `pong`, `error {code, ref?}`, `resync {reason, after}`, `bye {reason, resume}` | |
 
-The numeric cursor is the slot's change-log position. Record frames carry no path names.
-Use the normal authenticated HTTP endpoints to catch up after reconnecting and fetch records
-or verify signed objects. The stream only sends live events and accepts no application messages.
+| Client → home | |
+| --- | --- |
+| `subscribe` / `unsubscribe` `{namespace, cell, id?}` | Members entitled to the namespace only |
+| `session` `{frame, id?}` | Forwarded to the other subscribed, entitled members, or only to `to`. Never echoed |
+| `ping` `{t?, id?}` | |
+
+A session frame is checked by the home module: at most 16,384 bytes, its outer fields well
+formed, `from` the connection's member, and that member holding a `records` entry for the
+namespace. Unknown or malformed client frames answer `error` without closing.
+The latest `retain: true` frame per (namespace, cell, sender) is kept **in memory only** for at
+most 60 s and given to members when they subscribe. Session frames are never written to disk.
+
+Limits: WebSocket messages up to 20,480 bytes (larger closes 1009). The inbound rate is capped
+per connection at 50 frames/s and 256 KiB/s; excess frames are dropped and counted, with an
+`error rateLimited`. A connection with more than 1 MiB unsent is closed with 4013. The home pings
+every 20 s, and a connection silent for 60 s is closed with 4008. Every authority commit, and a
+sweep every 5 s, re-judges each connection; one whose access ended is closed with 1008. Shutdown
+sends `bye` and closes with 1012 (resume). A released slot closes with 1001. All of these are
+settings under `stream` in the config file (`ticketMs`, `streamsPerPrincipal`,
+`streamsPerAccount`, `framesPerSecond`, `bufferedBytes`, `retainMs`, `pingMs`, `idleMs`,
+`sweepMs` and the rest; see `relay/stream.js`).
+
+**Bun only for homes.** The stream uses Bun's built-in WebSocket server. A relay with home slots
+refuses to start on another runtime instead of silently serving no stream. A relay with only
+0.3 token slots runs anywhere.
+
+Clients of 0.5 are unaffected. `GET {base}/changes`, `GET {base}/pending` and every other request
+behave as before.
 
 ## A stopped home
 
