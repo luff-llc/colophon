@@ -10,6 +10,10 @@
 //!
 //! What never crosses in either direction: seed bytes, epoch key bytes, a PRF output or a raw
 //! ECDH result read back, a prepared action's state, a verified state supplied by the host.
+//! (The one exception is `SessionEpochs::with_keys`, which takes epoch keys inward for the
+//! conformance vectors and tests; an application's session keys come from its engine.)
+//!
+//! The 0.6 home stream (`stream.rs`) and sessions (`sessions.rs`) are part of this surface.
 #![allow(missing_docs, clippy::too_many_arguments)]
 
 #[cfg(all(feature = "native05", feature = "web05"))]
@@ -28,6 +32,8 @@ mod join;
 mod moving;
 mod pairing;
 mod session;
+mod sessions;
+mod stream;
 mod successor;
 mod types;
 mod verify;
@@ -43,6 +49,11 @@ pub use session::{
     AccountCopyWrite, SwiftCopyDestination, SwiftCopyPlan, SwiftCopyResult, SwiftSource,
     SwiftTranslator,
 };
+pub use sessions::{
+    session_clock_sample, session_default_policy, session_validate_policy, SessionAccountView,
+    SessionEndpoint, SessionEpochs, SessionMachine, SessionWireReceiver,
+};
+pub use stream::{stream_default_config, stream_redact_url, HomeStream};
 pub use successor::SwiftSuccessorCreation;
 pub use types::*;
 pub use verify::*;

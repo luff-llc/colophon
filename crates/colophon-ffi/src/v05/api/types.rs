@@ -1121,6 +1121,180 @@ record! {
     }
 }
 
+// --- The 0.6 home stream (`stream.rs`) ---------------------------------------------------------
+
+record! {
+    /// The host's choices for one stream; `stream_default_config` gives the documented values.
+    pub struct StreamConfig {
+        pub backoff_base_ms: i64,
+        pub backoff_cap_ms: i64,
+        pub coalesce_ms: i64,
+        pub seed: u64,
+        pub ping_ms: i64,
+        pub idle_ms: i64,
+        pub stable_ms: i64,
+        pub mint_budget: u32,
+        pub mint_window_ms: i64,
+        pub safety_poll_ms: i64,
+        pub suspend_after: u32,
+        pub suspend_ms: i64,
+        pub max_mints_per_day: u32,
+        pub retry_allowance: u32,
+    }
+}
+cenum! {
+    /// What the host does next for a stream.
+    pub enum StreamStepKind { Wake, NeedTicketCall, Connect, Send, Close, Waiting, Sleep }
+}
+record! {
+    /// The next thing to do. `url` (Connect) carries the ticket, a bearer credential: open the
+    /// socket with it and log `log_url` (the ticket redacted) instead. `text` is set for Send,
+    /// `code` for Close, `until` for Sleep (absent: nothing is scheduled).
+    pub struct StreamStep {
+        pub kind: StreamStepKind,
+        pub url: Option<String>,
+        pub log_url: Option<String>,
+        pub text: Option<String>,
+        pub code: Option<u32>,
+        pub until: Option<i64>,
+    }
+}
+cenum! {
+    /// Why a stream will not be tried again until the history changes.
+    pub enum StreamBlockedKind { AccessEnded, Released, Refused, Unsupported }
+}
+cenum! {
+    /// Where a stream stands.
+    pub enum StreamStatusKind { Backoff, Connecting, Live, Closing, Blocked, Throttled, Suspended }
+}
+record! {
+    /// Where a stream stands. `until` is set for Backoff, Throttled and Suspended; `blocked`
+    /// for Blocked, with `refused` the home's result of a refused ticket mint.
+    pub struct StreamStatus {
+        pub kind: StreamStatusKind,
+        pub until: Option<i64>,
+        pub blocked: Option<StreamBlockedKind>,
+        pub refused: Option<String>,
+    }
+}
+cenum! {
+    /// What a frame or a transport event told the host.
+    pub enum StreamEventKind {
+        Connected, Cursor, Notice, Route, Session, Ack, Error, Resync, Bye, Violation, Down, Blocked
+    }
+}
+record! {
+    /// One stream event. Connected: `principal`, `expires_at`. Cursor: `cursor` (absent: forget
+    /// the saved one). Notice, Route, Ack: the frame as JSON in `json`. Session: the server's
+    /// message byte for byte in `text`, for the session layer. Error: `code` and `reference`.
+    /// Resync, Bye, Violation: `reason`. Down: `retry_at`. Blocked: `blocked` and `refused`.
+    pub struct StreamEvent {
+        pub kind: StreamEventKind,
+        pub principal: Option<String>,
+        pub expires_at: Option<i64>,
+        pub cursor: Option<String>,
+        pub json: Option<String>,
+        pub text: Option<String>,
+        pub code: Option<String>,
+        pub reference: Option<String>,
+        pub reason: Option<String>,
+        pub retry_at: Option<i64>,
+        pub blocked: Option<StreamBlockedKind>,
+        pub refused: Option<String>,
+    }
+}
+
+// --- 0.6 sessions (`sessions.rs`) --------------------------------------------------------------
+
+cenum! {
+    /// A member's `records` access to a namespace (§S1).
+    pub enum SessionAccess { Read, Write }
+}
+record! {
+    /// One `records` entry of a member in a session account view.
+    pub struct SessionRecordEntry { pub namespace: String, pub access: SessionAccess }
+}
+record! {
+    /// A member as a session verifier sees it: its signing point (65 bytes), session number,
+    /// expiry and `records` entries. For conformance vectors and tests; an application takes
+    /// its view from its engine (`session_account`).
+    pub struct SessionMemberEntry {
+        pub signing: Vec<u8>,
+        pub session: u64,
+        pub expires_ms: Option<i64>,
+        pub records: Vec<SessionRecordEntry>,
+    }
+}
+secret_record! {
+    /// One epoch key supplied for conformance vectors and tests (32 bytes, wiped once read).
+    pub struct SessionEpochKey { pub epoch: u64, pub key: Vec<u8> }
+}
+record! {
+    /// The host's clocks at a call: monotonic ms (every session timer) and wall-clock ms since
+    /// the Unix epoch (delegation windows, member expiry).
+    pub struct SessionClock { pub mono_ms: u64, pub wall_ms: i64 }
+}
+cenum! {
+    /// One effect for the host, in order.
+    pub enum SessionEffectKind { Send, Persist, Event, Unsent }
+}
+record! {
+    /// One effect. Send: broadcast `bytes` (the sealed frame) to every member of the cell;
+    /// `to` is advice and `frame_kind` names the plaintext kind for logs. Persist: store
+    /// `persisted_json` before carrying out any later effect, and pass it back when the
+    /// endpoint is made again. Event: tell the application `event_json` (tagged by `event`, the
+    /// same JSON the conformance vectors use). Unsent: a frame of `frame_kind` could not be
+    /// sealed, for the reason `unsent`; to the protocol that is loss.
+    pub struct SessionEffect {
+        pub kind: SessionEffectKind,
+        pub bytes: Vec<u8>,
+        pub to: Option<String>,
+        pub frame_kind: Option<String>,
+        pub persisted_json: Option<String>,
+        pub event: Option<String>,
+        pub event_json: Option<String>,
+        pub unsent: Option<String>,
+    }
+}
+record! {
+    /// A received frame that was dropped: the §S3 reason code (as in the wire vectors) and the
+    /// member §S3 asks this one to send `hello` to, if any. Silent on the wire.
+    pub struct SessionDrop { pub reason: String, pub hello_to: Option<String> }
+}
+record! {
+    /// What one endpoint call produced: the effects in order and, for `receive`, the drop.
+    pub struct SessionStep { pub effects: Vec<SessionEffect>, pub dropped: Option<SessionDrop> }
+}
+record! {
+    /// A frame that passed every §S3 check (conformance receiver): its canonical plaintext, the
+    /// sender, `to`, whether the sender may write, its session key, `n` and epoch.
+    pub struct SessionOpened {
+        pub plaintext: Vec<u8>,
+        pub from: String,
+        pub to: Option<String>,
+        pub writer: bool,
+        pub key: String,
+        pub n: u64,
+        pub epoch: u64,
+    }
+}
+record! {
+    /// The conformance receiver's judgement of one frame: exactly one of the two is set.
+    pub struct SessionOpenResult { pub opened: Option<SessionOpened>, pub dropped: Option<SessionDrop> }
+}
+record! {
+    /// A member's session key.
+    pub struct SessionKeyRef { pub member: String, pub key: String }
+}
+record! {
+    /// What a new account view removed from a conformance receiver (§S2).
+    pub struct SessionForgotten { pub members: Vec<String>, pub keys: Vec<SessionKeyRef> }
+}
+record! {
+    /// One §S7 clock sample: round trip, offset (`peer ≈ mine + offset`) and error, ms.
+    pub struct SessionClockSample { pub rtt: u64, pub offset: i64, pub error: u64 }
+}
+
 // --- Argument limits ---------------------------------------------------------------------------
 
 /// Most items in any list argument.
