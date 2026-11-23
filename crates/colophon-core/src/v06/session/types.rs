@@ -15,6 +15,14 @@ pub const MAX_INT: u64 = MAX_TERM;
 /// At most this many `echo` values in a `hello` (§S3).
 pub const MAX_ECHO: usize = 8;
 
+/// The longest `refuse.reason` (§S3, revision 15).
+pub const MAX_REASON: usize = 64;
+/// `refuse.reason` (§S3, revision 15): at most 64 bytes of `a–z 0–9 -`.
+pub fn valid_reason(s: &str) -> bool {
+    s.len() <= MAX_REASON
+        && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
 /// A 16-byte id or `fresh` value, unpadded base64url in JSON (§S3, revision 4).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Id(pub [u8; 16]);
@@ -266,10 +274,15 @@ pub enum Body {
         /// Its state.
         snapshot: Bytes,
     },
-    /// The holder reported a `yielded` to its application (§S5, revision 5).
+    /// The sender's application has been given a `yielded` or a passed state (§S5,
+    /// revisions 5 and 15). Exactly one of the two fields is present.
     Ack {
-        /// The claim named by the `yielded` it answers.
-        yielded: Claim,
+        /// The claim named by the `yielded` it answers (sent by the holder).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        yielded: Option<Claim>,
+        /// The `next` of the `pass` it answers (sent by the member the pass named).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        passed: Option<Claim>,
     },
     /// Round trip and offset (§S7).
     Ping {
@@ -330,7 +343,11 @@ impl Body {
                 Body::Yielded {
                     claim, seq, snapshot,
                 } => claim.well_formed() && int(*seq) && size(snapshot),
-                Body::Ack { yielded } => yielded.well_formed(),
+                Body::Ack { yielded, passed } => match (yielded, passed) {
+                    (Some(c), None) | (None, Some(c)) => c.well_formed(),
+                    _ => false,
+                },
+                Body::Refuse { reason, .. } => valid_reason(reason),
                 Body::Ping { t } => int(*t),
                 Body::Pong { t, echo, hold } => int(*t) && int(*echo) && int(*hold),
                 _ => true,
@@ -344,15 +361,22 @@ impl Body {
                 | Body::Beat { .. }
                 | Body::Msg { .. }
                 | Body::Refuse { .. }
-                | Body::Ack { .. }
                 | Body::Pass { .. }
                 | Body::Decline { .. }
         )
     }
-    /// Whether only a writer may send this kind (§S1).
+    /// Whether only a writer may send this kind (§S1, §S3 table: holder frames, `submit`,
+    /// `ask`, `take`, `yielded` and `ack`).
     pub fn needs_writer(&self) -> bool {
         self.is_holder_frame()
-            || matches!(self, Body::Submit { .. } | Body::Ask { .. } | Body::Take { .. })
+            || matches!(
+                self,
+                Body::Submit { .. }
+                    | Body::Ask { .. }
+                    | Body::Take { .. }
+                    | Body::Yielded { .. }
+                    | Body::Ack { .. }
+            )
     }
     /// The protocol `kind`.
     pub fn kind(&self) -> &'static str {
@@ -515,7 +539,7 @@ impl Default for Policy {
 /// (`docs/colophon-0.6-sessions-findings.md`). [`Fixes::default`] is the reference reading;
 /// [`Fixes::LITERAL`] reproduces the revision 1 draft so the counterexamples stay
 /// reproducible, [`Fixes::REV3`] to [`Fixes::REV7`] those drafts. [`Fixes::ALL`] is the
-/// current revision (10). The revision 4–6 evidence rules (`evidence*` switches) are reached
+/// current revision (15). The revision 4–6 evidence rules (`evidence*` switches) are reached
 /// only through the hidden `Input::LegacyEvidence`, for those regression presets.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -596,6 +620,16 @@ pub struct Fixes {
     /// window sends that sender a `hello`, at most once per `askTimeoutMs`, so a lost
     /// handshake is retried.
     pub freshness_probe: bool,
+    /// Revision 15 §S4 rule 1: a claim in any field of a frame from a member that may only
+    /// read, or one naming a non-writer as holder, or more than 2^20 terms above the
+    /// accepted term, is ignored.
+    #[serde(default)]
+    pub writer_claims: bool,
+    /// Revision 15 §S5: the passer resends its `pass` on hearing any frame from the asker,
+    /// at most once per `askTimeoutMs`, until an `ack {passed}`; the member a pass names
+    /// gives its snapshot to the application and acknowledges it every time.
+    #[serde(default)]
+    pub pass_ack: bool,
 }
 impl Fixes {
     /// The revision 1 draft as written.
@@ -622,6 +656,8 @@ impl Fixes {
         window_cap: false,
         append_bound: false,
         freshness_probe: false,
+        writer_claims: false,
+        pass_ack: false,
     };
     /// The revision 3 draft: revisions 2 and 3 fixes, none of revision 4.
     pub const REV3: Fixes = Fixes {
@@ -647,6 +683,8 @@ impl Fixes {
         window_cap: false,
         append_bound: false,
         freshness_probe: false,
+        writer_claims: false,
+        pass_ack: false,
     };
     /// Revision 4 as written.
     pub const REV4: Fixes = Fixes {
@@ -686,6 +724,8 @@ impl Fixes {
         window_cap: false,
         append_bound: false,
         freshness_probe: false,
+        writer_claims: false,
+        pass_ack: false,
     };
     /// Revision 8, plus finding B5: carriers bridge (`crate::v06::bridge`), so the session
     /// rules assume a fully reachable group; no evidence forwarding, no `hello.heard`.
@@ -699,11 +739,21 @@ impl Fixes {
         window_cap: true,
         append_bound: true,
         freshness_probe: true,
+        writer_claims: true,
+        pass_ack: true,
         ..Fixes::REV6
     };
     /// Revision 7 (and 8, whose changes are in the bridge and the `append` payload bound).
     pub const REV7: Fixes = Fixes {
         freshness_probe: false,
+        writer_claims: false,
+        pass_ack: false,
+        ..Fixes::ALL
+    };
+    /// Revision 14: everything before revision 15's writer-only claims and pass `ack`.
+    pub const REV14: Fixes = Fixes {
+        writer_claims: false,
+        pass_ack: false,
         ..Fixes::ALL
     };
 }

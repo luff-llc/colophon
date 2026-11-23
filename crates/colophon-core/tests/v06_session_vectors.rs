@@ -493,6 +493,47 @@ fn scenarios() -> Vec<Script> {
     assert!(outs.is_empty());
     v.push(s);
 
+    let mut s = started("reader-claims-ignored", "r may only read (it is in no entitled set): its hello naming itself at 2^53 − 1, its bye releasing a's claim, a yielded and a take reach a and b, flagged by a host as from a writer or not; neither adopts, releases or reports anything, and b can still take one term up later (§S4 rule 1, revision 15).", p(), &["a", "b"]);
+    let max = Claim::new(MAX_TERM, 0, "r");
+    let reader = |body| Frame { from: "r".into(), to: None, retain: false, body };
+    let frames = [
+        reader(Body::Hello { fresh: id("r1"), echo: vec![], seen: Some(Seen { claim: max.clone(), seq: Some(0) }), heard: None, lapsed: false }),
+        reader(Body::Bye { claim: Some(Claim::new(1, 0, "a")), leaving: false }),
+        reader(Body::Bye { claim: Some(max.clone()), leaving: false }),
+        reader(Body::Yielded { claim: max.clone(), seq: 0, snapshot: b("evil") }),
+        reader(Body::Take { claim: max }),
+    ];
+    for (k, f) in frames.iter().enumerate() {
+        for m in ["a", "b"] {
+            s.step(m, 100 + k as u64, Input::Frame { frame: f.clone(), writer: k % 2 == 0, key: None, n: None });
+        }
+    }
+    s.deliver(200);
+    assert_eq!(s.session("a").accepted(), Some(&Claim::new(1, 0, "a")));
+    assert_eq!(s.session("b").holder(), Some("a"));
+    s.cmd("a", 300, Command::Release);
+    s.deliver(310);
+    s.cmd("b", 400, Command::Take { state: None });
+    s.deliver(410);
+    assert_eq!(s.session("b").accepted(), Some(&Claim::new(2, 0, "b")));
+    v.push(s);
+
+    let mut s = started("pass-ack", "a passes to b and the pass is lost; b takes on the ask timeout; a resends the same pass when it hears b (any frame, at most once per askTimeoutMs); b reports it as a late pass, renews over it and acknowledges; a stops resending (§S5, revision 15, G11).", p(), &["a", "b"]);
+    s.cmd("b", 1_000, Command::Ask);
+    s.deliver(1_010);
+    s.cmd("a", 1_020, Command::Pass { to: "b".into(), snapshot: b("stopped") });
+    s.lose_all();
+    s.tick("b", 2_600);
+    assert!(s.session("b").is_holder());
+    s.deliver(2_610);
+    s.tick("b", 7_700);
+    s.deliver(7_710);
+    assert_eq!(s.session("b").accepted(), Some(&Claim::new(3, 0, "b")));
+    assert_eq!(s.session("a").holder(), Some("b"));
+    s.tick("b", 12_800);
+    s.deliver(12_810);
+    v.push(s);
+
     v
 }
 

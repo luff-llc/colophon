@@ -173,6 +173,8 @@ struct Stats {
     reports: u64,
     /// Forwarded frames delivered.
     forwarded_delivered: u64,
+    /// Frames a read-only member injected (revision 15).
+    injected: u64,
 }
 
 const RATE: i64 = 1250;
@@ -275,7 +277,11 @@ impl Sim {
             }
         }
         check_step_input(&mut self.ghost, &self.m[i].id.clone(), &before, &self.m[i].s, &outs, delivered.as_ref())?;
-        if let Some(f) = delivered {
+        // Revision 15 §S4 rule 1: no claim of the reader is ever accepted.
+        if self.fixes.writer_claims && self.m[i].s.accepted().is_some_and(|c| c.holder == READER || c.via.as_deref() == Some(READER)) {
+            return Err(format!("§S4: {} accepted the reader's claim {:?}", self.m[i].id, self.m[i].s.accepted()));
+        }
+        if let Some(f) = delivered.filter(|f| f.from != READER) {
             check_g6(&f, &self.m[i].s)?;
         }
         let mut follow = Vec::new();
@@ -529,9 +535,48 @@ enum Act {
     Release(usize),
     Leave(usize),
     Join(usize),
+    /// A member that may only read (revision 15) sends this member a frame of a random kind,
+    /// with claims naming itself, at any term up to 2^53 − 1.
+    Inject(usize),
 }
 
+/// The read-only member of every run: in no entitled set.
+const READER: &str = "9r";
+
 impl Sim {
+    /// A frame body of any kind that a reader might send, with claims naming itself (or, for
+    /// a pass, naming a writer as passed to by the reader).
+    fn reader_body(&mut self) -> Body {
+        let term = match self.rng.below(3) {
+            0 => MAX_TERM,
+            1 => self.rng.range(1, 10),
+            _ => self.rng.range(1, MAX_TERM),
+        };
+        let c = Claim::new(term, 0, READER);
+        let to = IDS[self.rng.below(self.m.len() as u64) as usize];
+        let passed = Claim::passed(term.min(MAX_TERM - 1) + 1, to, READER);
+        let id = Id::from_label(&format!("r{}", self.rng.next()));
+        let b = Bytes(b"reader".to_vec());
+        match self.rng.below(16) {
+            0 => Body::Hello { fresh: id, echo: vec![], seen: Some(Seen { claim: c, seq: Some(1) }), heard: None, lapsed: self.rng.chance(500) },
+            1 => Body::State { claim: c, seq: 1, snapshot: b },
+            2 => Body::Beat { claim: c, seq: 1 },
+            3 => Body::Msg { claim: c, seq: 1, origin: READER.into(), id, payload: b },
+            4 => Body::Submit { id, payload: b },
+            5 => Body::Refuse { id, reason: "no".into() },
+            6 => Body::Presence { payload: b },
+            7 => Body::Ask { claim: c },
+            8 => Body::Pass { claim: c, next: passed, seq: 1, snapshot: b },
+            9 => Body::Decline { claim: c },
+            10 => Body::Take { claim: c },
+            11 => Body::Ping { t: 1 },
+            12 => Body::Pong { t: 1, echo: 1, hold: 0 },
+            13 => Body::Yielded { claim: c, seq: 1, snapshot: b },
+            14 => Body::Ack { yielded: Some(c), passed: None },
+            _ => Body::Bye { claim: Some(c), leaving: self.rng.chance(500) },
+        }
+    }
+
     fn holder_index(&self) -> Option<usize> {
         self.m.iter().position(|m| m.s.sends_as_holder())
     }
@@ -566,7 +611,7 @@ impl Sim {
                 self.m[i].pongs.clear();
                 // A member that restarts lost what it held (G11 excludes crashes).
                 let me = self.m[i].id.clone();
-                self.ghost.owed.retain(|(_, d, _)| *d != me);
+                self.ghost.restarted(&me);
                 if !self.m[i].up {
                     self.input(i, Input::LinkDown)?;
                 }
@@ -601,6 +646,21 @@ impl Sim {
             Act::Join(i) => {
                 if !self.m[i].s.joined() {
                     self.input(i, Input::App { command: Command::Join { state: None } })?;
+                }
+            }
+            Act::Inject(i) => {
+                // Before revision 15 a reader's `hello.seen` was adopted: not injected there.
+                if !self.fixes.writer_claims {
+                    return Ok(());
+                }
+                for _ in 0..self.rng.range(1, 6) {
+                    let body = self.reader_body();
+                    // The host may even (wrongly) flag it as a writer: the entitled set still
+                    // says no.
+                    let writer = self.rng.chance(500);
+                    let frame = Frame { from: READER.into(), to: None, retain: false, body };
+                    self.stats.injected += 1;
+                    self.input(i, Input::Frame { frame, writer, key: None, n: None })?;
                 }
             }
         }
@@ -696,6 +756,18 @@ impl Sim {
                 }
             }
         }
+        // G11 (revision 15): every pass reached the application of the member it named.
+        if self.fixes.pass_ack {
+            for (asker, passer, next) in &self.ghost.owed_passes {
+                let joined = |id: &str| self.m.iter().any(|m| m.id == id && m.s.joined());
+                if joined(asker) && joined(passer) {
+                    return Err(format!(
+                        "G11: {passer}'s pass {} never reached {asker}'s application",
+                        show_claim(next)
+                    ));
+                }
+            }
+        }
         Ok(())
     }
 }
@@ -745,7 +817,8 @@ fn random_run_with(seed: u64, fixes: Fixes) -> Result<Stats, (String, Vec<String
                 Act::Isolate(i)
             }
             60..=69 => Act::Restart(i),
-            70..=77 => Act::Seek(i),
+            70..=74 => Act::Seek(i),
+            75..=77 => Act::Inject(i),
             78..=84 => Act::Burst(i),
             85..=91 => Act::Release(i),
             _ => {
@@ -796,6 +869,7 @@ fn random_seeds_hold_the_guarantees() {
                 total.forwarded += s.forwarded;
                 total.reports += s.reports;
                 total.forwarded_delivered += s.forwarded_delivered;
+                total.injected += s.injected;
                 total.max_take_error = total.max_take_error.max(s.max_take_error);
                 total.max_take_bound = total.max_take_bound.max(s.max_take_bound);
                 n += 1;
@@ -810,6 +884,7 @@ fn random_seeds_hold_the_guarantees() {
     );
     // With the revision 2 window, reordered bursts are delivered and early hold applies them.
     assert!(n < 50 || total.early_applied > 0, "early hold never applied a message");
+    assert!(n < 50 || total.injected > 0, "the reader never injected a frame");
 }
 
 /// §S12 scripted, over seeds for clocks and links: an ask is passed and the new holder starts

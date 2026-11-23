@@ -19,9 +19,19 @@ pub struct Ghost {
     /// G11: state a displaced holder owes the member that took over: (new holder,
     /// displaced holder, the claim it held). Cleared when the new holder reports it.
     pub owed: BTreeSet<(String, String, Claim)>,
+    /// G11 (revision 15): passed states owed to the member each pass named: (asker, passer,
+    /// `next`). Cleared when the asker starts from it (`BecameHolder` by pass) or reports it
+    /// (`LatePass`).
+    pub owed_passes: BTreeSet<(String, String, Claim)>,
 }
 
 impl Ghost {
+    /// A member restarted: what it owed or was owed through state it held in memory is gone
+    /// (G11 is about members that keep running).
+    pub fn restarted(&mut self, me: &str) {
+        self.owed.retain(|(_, d, _)| d != me);
+        self.owed_passes.retain(|(a, p, _)| a != me && p != me);
+    }
     fn expose(&mut self, me: &str, c: &Claim) {
         let e = self.exposed.entry(me.to_owned()).or_insert_with(|| c.clone());
         if *c > *e {
@@ -116,9 +126,15 @@ pub fn check_step_input(
                     // Revision 5: any holder that reports it discharges it.
                     ghost.owed.retain(|(_, d, c)| !(d == from && c == claim));
                 }
-                Event::BecameHolder { .. } => {
+                Event::BecameHolder { claim, via, .. } => {
                     // A displaced member that holds again kept its own state.
                     ghost.owed.retain(|(_, d, _)| d != me);
+                    if *via == Via::Pass {
+                        ghost.owed_passes.retain(|(a, _, c)| !(a == me && c == claim));
+                    }
+                }
+                Event::LatePass { claim, .. } => {
+                    ghost.owed_passes.retain(|(a, _, c)| !(a == me && c == claim));
                 }
                 _ => {}
             }
@@ -160,6 +176,9 @@ pub fn check_step_input(
                         ));
                     }
                     ghost.sent.entry(me.to_owned()).or_default().insert(key);
+                    ghost
+                        .owed_passes
+                        .insert((next.holder.clone(), me.to_owned(), next.clone()));
                     ghost.expose(me, next);
                     let snaps = ghost.pass_snaps.entry(next.clone()).or_default();
                     snaps.insert(snapshot.clone());
@@ -384,7 +403,7 @@ pub fn show_body(b: &Body) -> String {
         Body::Yielded { claim, snapshot, .. } => {
             format!("yielded {} {:?}", show_claim(claim), s(snapshot))
         }
-        Body::Ack { yielded } => format!("ack {}", show_claim(yielded)),
+        Body::Ack { yielded, passed } => format!("ack yielded={:?} passed={:?}", yielded.as_ref().map(show_claim), passed.as_ref().map(show_claim)),
         other => other.kind().to_owned(),
     }
 }

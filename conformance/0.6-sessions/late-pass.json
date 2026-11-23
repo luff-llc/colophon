@@ -48,6 +48,7 @@
     "freshnessProbe": true,
     "helloCorrection": true,
     "livenessHolderFrames": true,
+    "passAck": true,
     "persistRelease": true,
     "rank1FromHolder": true,
     "renewGuard": true,
@@ -58,6 +59,7 @@
     "stateReports": true,
     "submitRetry": true,
     "windowCap": true,
+    "writerClaims": true,
     "yieldedAck": true
   },
   "format": "colophon/session-vectors/6",
@@ -721,6 +723,22 @@
             "via": "renew"
           },
           "output": "event"
+        },
+        {
+          "frame": {
+            "body": {
+              "kind": "ack",
+              "passed": {
+                "holder": "b",
+                "rank": 1,
+                "term": 2,
+                "via": "a"
+              }
+            },
+            "from": "b",
+            "to": "a"
+          },
+          "output": "send"
         }
       ]
     },
@@ -746,6 +764,29 @@
       },
       "member": "a",
       "outputs": [
+        {
+          "frame": {
+            "body": {
+              "claim": {
+                "holder": "a",
+                "rank": 0,
+                "term": 1
+              },
+              "kind": "pass",
+              "next": {
+                "holder": "b",
+                "rank": 1,
+                "term": 2,
+                "via": "a"
+              },
+              "seq": 0,
+              "snapshot": "U0E="
+            },
+            "from": "a",
+            "to": "b"
+          },
+          "output": "send"
+        },
         {
           "claim": {
             "holder": "b",
@@ -804,6 +845,74 @@
       "input": {
         "frame": {
           "body": {
+            "kind": "ack",
+            "passed": {
+              "holder": "b",
+              "rank": 1,
+              "term": 2,
+              "via": "a"
+            }
+          },
+          "from": "b",
+          "to": "a"
+        },
+        "input": "frame",
+        "writer": true
+      },
+      "member": "a",
+      "outputs": []
+    },
+    {
+      "at": 1800,
+      "input": {
+        "frame": {
+          "body": {
+            "claim": {
+              "holder": "a",
+              "rank": 0,
+              "term": 1
+            },
+            "kind": "pass",
+            "next": {
+              "holder": "b",
+              "rank": 1,
+              "term": 2,
+              "via": "a"
+            },
+            "seq": 0,
+            "snapshot": "U0E="
+          },
+          "from": "a",
+          "to": "b"
+        },
+        "input": "frame",
+        "writer": true
+      },
+      "member": "b",
+      "outputs": [
+        {
+          "frame": {
+            "body": {
+              "kind": "ack",
+              "passed": {
+                "holder": "b",
+                "rank": 1,
+                "term": 2,
+                "via": "a"
+              }
+            },
+            "from": "b",
+            "to": "a"
+          },
+          "output": "send"
+        }
+      ]
+    },
+    {
+      "at": 1800,
+      "input": {
+        "frame": {
+          "body": {
             "echo": [],
             "fresh": "AAAAAAAAAAAAAAAAAAAAAA",
             "kind": "hello",
@@ -842,6 +951,28 @@
           "output": "send"
         }
       ]
+    },
+    {
+      "at": 1800,
+      "input": {
+        "frame": {
+          "body": {
+            "kind": "ack",
+            "passed": {
+              "holder": "b",
+              "rank": 1,
+              "term": 2,
+              "via": "a"
+            }
+          },
+          "from": "b",
+          "to": "a"
+        },
+        "input": "frame",
+        "writer": true
+      },
+      "member": "a",
+      "outputs": []
     },
     {
       "at": 1800,

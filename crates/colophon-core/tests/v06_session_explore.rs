@@ -384,7 +384,7 @@ impl World {
         self.ghost.check_restart(&self.m[i])?;
         // A member that restarts lost what it held: it cannot report it (G11 is about
         // members that keep running).
-        self.ghost.owed.retain(|(_, d, _)| d != IDS[i]);
+        self.ghost.restarted(IDS[i]);
         self.asks[i].clear();
         if !self.up[i] {
             self.input(i, Input::LinkDown, b, None)?;
@@ -692,6 +692,7 @@ impl World {
             if mesh
                 && t < warm
                 && w.ghost.owed.is_empty()
+                && (!w.fixes.pass_ack || w.ghost.owed_passes.is_empty())
                 && !w.m.iter().any(Session::pending)
                 && check_converged_topo(&w.m, &w.reach).is_ok()
             {
@@ -730,6 +731,55 @@ impl World {
                             IDS[h]
                         ));
                     }
+                }
+            }
+        }
+        if w.fixes.pass_ack {
+            // G11 (revision 15), strictly: a pass reaches the application of the member it
+            // named whenever both keep running and can exchange frames.
+            for (asker, passer, next) in &w.ghost.owed_passes {
+                let (a, p) = (idx(asker), idx(passer));
+                if w.m[a].joined() && w.m[p].joined() && w.reach[a][p] && w.reach[p][a] {
+                    return Err(format!(
+                        "G11: {passer}'s pass {} never reached {asker}'s application {tag}",
+                        show_claim(next)
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Revision 15 §S4 rule 1, from every reachable state: a frame of any claim-bearing
+    /// kind from `r`, which may only read, naming itself at 2^53 − 1 (or releasing the
+    /// accepted claim), changes no member's claim, holder or state, and makes no member
+    /// report anything about the role.
+    fn readers_change_nothing(&self) -> Result<(), String> {
+        if !self.fixes.writer_claims {
+            return Ok(());
+        }
+        let max = Claim::new(MAX_TERM, 0, "r");
+        for (i, m) in self.m.iter().enumerate() {
+            let mut bodies = vec![
+                Body::Hello { fresh: Id::from_label("r"), echo: vec![], seen: Some(Seen { claim: max.clone(), seq: Some(0) }), heard: None, lapsed: false },
+                Body::Bye { claim: m.accepted().cloned(), leaving: false },
+                Body::Yielded { claim: max.clone(), seq: 0, snapshot: Bytes::default() },
+                Body::Take { claim: max.clone() },
+                Body::State { claim: max.clone(), seq: 0, snapshot: Bytes::default() },
+                Body::Pass { claim: max.clone(), next: Claim::passed(MAX_TERM, IDS[i], "r"), seq: 0, snapshot: Bytes::default() },
+            ];
+            if let Some(c) = m.accepted() {
+                bodies.push(Body::Ack { yielded: None, passed: Some(c.clone()) });
+            }
+            for body in bodies {
+                let mut s = m.clone();
+                let frame = Frame { from: "r".into(), to: None, retain: false, body };
+                let outs = s.handle(Input::Frame { frame: frame.clone(), writer: true, key: None, n: None }, self.now);
+                let reported = outs.iter().any(|o| {
+                    matches!(o, Output::Persist { .. } | Output::Event { event: Event::BecameHolder { .. } | Event::Yielded { .. } | Event::HolderChanged { .. } | Event::Displaced { .. } | Event::LatePass { .. } })
+                });
+                if s.accepted() != m.accepted() || s.holder() != m.holder() || s.state() != m.state() || reported {
+                    return Err(format!("§S4 rule 1: {} acted on the reader's {}", IDS[i], show_body(&frame.body)));
                 }
             }
         }
@@ -868,6 +918,14 @@ fn explore(b: Bounds, fixes: Fixes) -> Report {
                 continue;
             }
             parent.insert(nk, (wk, a.clone()));
+            if let Err(e) = n.readers_change_nothing() {
+                return Report {
+                    states: seen.len(),
+                    transitions,
+                    violation: Some((e, trace_to(&parent, nk))),
+                    truncated: false,
+                };
+            }
             if b.completions {
                 if let Err(e) = n.complete(&b).and_then(|_| n.complete_g5(&b)) {
                     return Report {
@@ -1543,7 +1601,7 @@ fn third_writer(fixes: Fixes) -> (bool, bool) {
     r.reach[0][1] = true;
     assert_eq!(r.m[0].accepted(), Some(&Claim::new(2, 0, "b")));
     // c forges an ack to a.
-    r.step(0, frame_to("c", "a", Body::Ack { yielded: Claim::new(1, 0, "a") }), 16_100);
+    r.step(0, frame_to("c", "a", Body::Ack { yielded: Some(Claim::new(1, 0, "a")), passed: None }), 16_100);
     // b's next beat: a resends (and b reports) only if the forged ack was ignored.
     r.tick_all(22_000);
     r.deliver(22_010);

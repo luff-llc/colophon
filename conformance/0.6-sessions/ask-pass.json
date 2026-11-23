@@ -68,6 +68,7 @@
     "freshnessProbe": true,
     "helloCorrection": true,
     "livenessHolderFrames": true,
+    "passAck": true,
     "persistRelease": true,
     "rank1FromHolder": true,
     "renewGuard": true,
@@ -78,6 +79,7 @@
     "stateReports": true,
     "submitRetry": true,
     "windowCap": true,
+    "writerClaims": true,
     "yieldedAck": true
   },
   "format": "colophon/session-vectors/6",
@@ -1045,6 +1047,22 @@
             "via": "pass"
           },
           "output": "event"
+        },
+        {
+          "frame": {
+            "body": {
+              "kind": "ack",
+              "passed": {
+                "holder": "b",
+                "rank": 1,
+                "term": 2,
+                "via": "a"
+              }
+            },
+            "from": "b",
+            "to": "a"
+          },
+          "output": "send"
         }
       ]
     },
@@ -1111,6 +1129,50 @@
           "output": "event"
         }
       ]
+    },
+    {
+      "at": 1030,
+      "input": {
+        "frame": {
+          "body": {
+            "kind": "ack",
+            "passed": {
+              "holder": "b",
+              "rank": 1,
+              "term": 2,
+              "via": "a"
+            }
+          },
+          "from": "b",
+          "to": "a"
+        },
+        "input": "frame",
+        "writer": true
+      },
+      "member": "a",
+      "outputs": []
+    },
+    {
+      "at": 1030,
+      "input": {
+        "frame": {
+          "body": {
+            "kind": "ack",
+            "passed": {
+              "holder": "b",
+              "rank": 1,
+              "term": 2,
+              "via": "a"
+            }
+          },
+          "from": "b",
+          "to": "a"
+        },
+        "input": "frame",
+        "writer": true
+      },
+      "member": "c",
+      "outputs": []
     }
   ]
 }

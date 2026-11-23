@@ -1,7 +1,7 @@
 # 0.6 session vectors
 
 Transcripts of the reference session machine (`colophon_core::v06::session`, spec
-`spec/colophon-0.6-sessions.md` revision 12, §S3–§S9), for replay by the Swift, Kotlin and JS bindings.
+`spec/colophon-0.6-sessions.md` revision 15, §S3–§S9), for replay by the Swift, Kotlin and JS bindings.
 They are generated and checked by `crates/colophon-core/tests/v06_session_vectors.rs`
 (`COLOPHON_REGEN_VECTORS=1` rewrites them). The draft is unfrozen: these files change with it.
 
@@ -56,7 +56,7 @@ machine with a new one built from what the member persisted (the last `persist` 
   the spec's field names. Claims are `{term, rank, holder, via}` (`via` only at rank 1).
   `hello` is `{fresh, echo, seen, heard, lapsed}`: `seen` is `{term, rank, holder, via,
   seq}` where `seq` may be `null`, `heard` is `live`, `lapsed` or `unknown`. `yielded` is
-  `{claim, seq, snapshot}` and `ack` is `{yielded}`. `bye` carries `leaving`. `hello.heard`
+  `{claim, seq, snapshot}` and `ack` is `{yielded}` or `{passed}` (exactly one). `bye` carries `leaving`. `hello.heard`
   appears only in revisions 4–6 and not in these files, nor does the revision 6 `forward`
   output.
 - Outputs are tagged by `output`: `send {frame}`, `persist {claim, released?}`, `event {event}`; events are
@@ -67,6 +67,9 @@ machine with a new one built from what the member persisted (the last `persist` 
   `state`) are standard base64. Every integer is at most 2^53 − 1. Under `fold: append` a
   state is a list of payloads, each a 4-byte big-endian length and the bytes, the last `tail`
   kept.
+- Frames may come from a member in no entitled set (`r` in `reader-claims-ignored`); its
+  `writer` flag may be either value, and every claim it carries is ignored (§S4 rule 1,
+  revision 15).
 - `view` is `{accepted, holder, holding, gated, synced, seq, state}`; `digest` is the SHA-256 of
   its JSON as written by the reference (fields in that order, no spaces).
 

@@ -6,7 +6,7 @@
 //! deduplicate states, and [`Session::view`] / [`Session::digest`] give the protocol-visible
 //! state.
 //!
-//! The machine follows revision 4 of the draft (`Fixes::ALL`). [`Fixes::LITERAL`] reproduces
+//! The machine follows revision 15 of the draft (`Fixes::ALL`). [`Fixes::LITERAL`] reproduces
 //! revision 1 and [`Fixes::REV3`] revision 3, so every finding stays reproducible
 //! (`docs/colophon-0.6-sessions-findings.md`). Outputs are ordered so that a crash between
 //! any two of them breaks no guarantee (G12): every `Persist` precedes the frames that
@@ -14,14 +14,16 @@
 //!
 //! The §S3 freshness gate is in the machine, and is used when the codec passes the sender's
 //! key and `n` with each frame and the host seeds `fresh` ([`Session::with_fresh_seed`]).
-//! The 128-wide `n` window, signatures and sealing stay in the codec layer.
+//! Signatures, sealing, the 128-wide `n` window and the lifecycle of session keys (open,
+//! closed with a replay floor, retired) are in [`codec`]; the codec tells the machine when it
+//! closes a key ([`Session::close_window`]). [`endpoint`] wires the two for the bindings.
 
 pub mod clock;
 pub mod codec;
 pub mod endpoint;
 pub mod io;
 pub mod keys;
-mod probe;
+mod hooks;
 pub mod types;
 pub mod wire;
 
@@ -70,6 +72,8 @@ struct SentPass {
     next: Claim,
     seq: u64,
     snapshot: Bytes,
+    /// When it was last sent (revision 15: resent at most once per `askTimeoutMs`).
+    last: u64,
 }
 
 /// A `yielded` not yet acknowledged (§S5).
@@ -96,6 +100,12 @@ struct PendingSubmit {
 pub const SUBMIT_TRIES: u8 = 8;
 /// §S8: gap `hello`s at most once per second.
 pub const GAP_HELLO_MS: u64 = 1_000;
+/// Passes awaiting an `ack` that a member keeps resending (revision 15).
+pub const MAX_SENT_PASSES: usize = 4;
+/// A claim more than this many terms above the accepted term is ignored (revision 15).
+pub const MAX_TERM_STEP: u64 = 1 << 20;
+/// Unknown-key hellos at most this many per second in all (revision 15 §S3 step 4).
+pub const PROBES_PER_SECOND: usize = 4;
 /// Freshness windows kept per member (§S3, revision 7).
 pub const MAX_KEYS_PER_MEMBER: usize = 4;
 /// Own `fresh` values remembered (§S3 freshness).
@@ -139,7 +149,9 @@ pub struct Session {
     tail: VecDeque<(u64, Held)>,
     /// The last `tail` ids ordered in this term (§S8 dedupe).
     ordered: VecDeque<Id>,
-    sent_pass: Option<SentPass>,
+    /// Passes sent and not yet acknowledged (revision 15; at most [`MAX_SENT_PASSES`],
+    /// newest last). Before revision 15, only the latest, until a greater claim.
+    sent_passes: VecDeque<SentPass>,
     /// Members whose `ask` was accepted under the current claim and is unanswered (§S5).
     asks: BTreeSet<MemberId>,
     /// The last broadcast holder frame accepted under the accepted claim from its holder,
@@ -188,8 +200,11 @@ pub struct Session {
     /// A `join` given before the host supplied the entitled set; it takes effect then.
     pending_join: Option<Option<Bytes>>,
     windows: BTreeMap<(MemberId, String), u64>,
-    /// When a freshness probe was last sent to each member (finding B5).
+    /// When a freshness probe was last sent to each member (finding B5), only entries younger
+    /// than `askTimeoutMs` (revision 15: bounded).
     probed: BTreeMap<MemberId, u64>,
+    /// When the last unknown-key hellos were sent, at most [`PROBES_PER_SECOND`] (revision 15).
+    probe_times: VecDeque<u64>,
     /// Keys with windows per member, oldest first (revision 7 cap).
     window_order: BTreeMap<MemberId, VecDeque<String>>,
     answered: BTreeMap<MemberId, Id>,
@@ -230,7 +245,7 @@ impl Session {
             early: BTreeMap::new(),
             tail: VecDeque::new(),
             ordered: VecDeque::new(),
-            sent_pass: None,
+            sent_passes: VecDeque::new(),
             asks: BTreeSet::new(),
             evidence: None,
             pending_yielded: None,
@@ -262,6 +277,7 @@ impl Session {
             windows: BTreeMap::new(),
             window_order: BTreeMap::new(),
             probed: BTreeMap::new(),
+            probe_times: VecDeque::new(),
             answered: BTreeMap::new(),
             to_echo: VecDeque::new(),
         }
@@ -305,6 +321,11 @@ impl Session {
         if let Some(until) = self.gate {
             if self.is_holder() {
                 at(until);
+            }
+        }
+        if self.fixes.pass_ack {
+            for sp in &self.sent_passes {
+                at(sp.last.saturating_add(p.ask_timeout_ms));
             }
         }
         if self.sends_as_holder() {
@@ -403,7 +424,11 @@ impl Session {
     /// Whether a timer can still change this member without input: it wants the role, it is
     /// a gated holder (§S6), or it has unanswered submits.
     pub fn pending(&self) -> bool {
-        self.joined && (self.want.is_some() || self.gate.is_some() || !self.submits.is_empty())
+        self.joined
+            && (self.want.is_some()
+                || self.gate.is_some()
+                || !self.submits.is_empty()
+                || (self.fixes.pass_ack && !self.sent_passes.is_empty()))
     }
     /// Members whose ask is pending (§S5).
     pub fn asks(&self) -> impl Iterator<Item = &MemberId> {
@@ -483,7 +508,9 @@ impl Session {
         self.early.hash(h);
         self.tail.hash(h);
         self.ordered.hash(h);
-        self.sent_pass.hash(h);
+        for p in &self.sent_passes {
+            (&p.claim, &p.next, p.seq, &p.snapshot, age(p.last)).hash(h);
+        }
         self.asks.hash(h);
         self.evidence.as_ref().map(|(f, t)| (f, age(*t))).hash(h);
         self.pending_yielded
@@ -546,6 +573,9 @@ impl Session {
         for (k, t) in &self.probed {
             (k, age(*t)).hash(h);
         }
+        for t in &self.probe_times {
+            age(*t).hash(h);
+        }
         self.answered.hash(h);
         self.to_echo.hash(h);
     }
@@ -567,6 +597,8 @@ impl Session {
             Input::Entitled { writers } => {
                 let set: BTreeSet<MemberId> = writers.into_iter().collect();
                 self.asks.retain(|a| set.contains(a));
+                // A pass to a member that is no longer a writer is no longer owed.
+                self.sent_passes.retain(|p| set.contains(&p.next.holder));
                 self.entitled = Some(set);
                 // §S1 (revision 12): a join waits for the entitled set.
                 if let Some(state) = self.pending_join.take() {
@@ -851,8 +883,8 @@ impl Session {
         self.reset_lane();
         self.lapse_reported = false;
         self.last_heard_holder = now;
-        if self.sent_pass.as_ref().is_some_and(|p| p.next < c) {
-            self.sent_pass = None;
+        if !self.fixes.pass_ack {
+            self.sent_passes.retain(|p| p.next >= c);
         }
         let mine = c.holder == self.me;
         match &snapshot {
@@ -1137,6 +1169,8 @@ impl Session {
                     .get(&f.from)
                     .is_none_or(|t| now.saturating_sub(*t) >= self.policy.ask_timeout_ms);
                 if due {
+                    let ask = self.policy.ask_timeout_ms;
+                    self.probed.retain(|_, t| now.saturating_sub(*t) < ask);
                     self.probed.insert(f.from.clone(), now);
                     let to = f.from.clone();
                     self.send_hello_echo(out, Some(&to), false, Vec::new(), now);
@@ -1199,7 +1233,12 @@ impl Session {
         }
         // §S1 (revision 12): a frame comes from a writer only if the host says so and the
         // sender is in the entitled set; with no set yet, from nobody.
-        if f.body.needs_writer() && !(writer && self.is_entitled(&f.from)) {
+        let from_writer = writer && self.is_entitled(&f.from);
+        if f.body.needs_writer() && !from_writer {
+            return;
+        }
+        let mut f = f;
+        if self.fixes.writer_claims && !self.admit_claims(&mut f, from_writer) {
             return;
         }
         if !f.body.in_range(self.policy.max_payload) {
@@ -1277,17 +1316,35 @@ impl Session {
                 }
             }
         }
-        // §S5: resend the pass when the asker speaks under an older claim.
-        if let Some(p) = &self.sent_pass {
-            if from == p.next.holder && f.body.claim().is_some_and(|c| *c < p.next) {
-                let body = Body::Pass {
+        // §S5: resend the pass. Revision 15: on any frame from the asker, at most once per
+        // askTimeoutMs, until it acknowledges; before, when it speaks under an older claim.
+        let acked = match &f.body {
+            Body::Ack { passed: Some(c), .. } => Some(c.clone()),
+            _ => None,
+        };
+        let pass_ack = self.fixes.pass_ack;
+        let mut resend = Vec::new();
+        for p in self.sent_passes.iter_mut() {
+            if from != p.next.holder || acked.as_ref() == Some(&p.next) {
+                continue;
+            }
+            let due = if pass_ack {
+                now.saturating_sub(p.last) >= ask
+            } else {
+                f.body.claim().is_some_and(|c| *c < p.next)
+            };
+            if due {
+                p.last = now;
+                resend.push(Body::Pass {
                     claim: p.claim.clone(),
                     next: p.next.clone(),
                     seq: p.seq,
                     snapshot: p.snapshot.clone(),
-                };
-                self.send(out, Some(&from), false, body);
+                });
             }
+        }
+        for body in resend {
+            self.send(out, Some(&from), false, body);
         }
 
         self.correct_lesser(&f, holding_frame, now, out);
@@ -1455,16 +1512,31 @@ impl Session {
                 }
                 if self.fixes.yielded_ack {
                     // Report first, then acknowledge (a crash between them loses no report).
-                    self.send(out, Some(&from), false, Body::Ack { yielded: claim });
+                    self.send(
+                        out,
+                        Some(&from),
+                        false,
+                        Body::Ack {
+                            yielded: Some(claim),
+                            passed: None,
+                        },
+                    );
                 }
             }
-            Body::Ack { yielded } => {
-                // Revision 7: only from the member this member accepts as holder.
-                if self.fixes.sender_checks && self.holder() != Some(from.as_str()) {
-                    return;
+            Body::Ack { yielded, passed } => {
+                if let Some(yielded) = yielded {
+                    // Revision 7: only from the member this member accepts as holder.
+                    if self.fixes.sender_checks && self.holder() != Some(from.as_str()) {
+                        return;
+                    }
+                    if self.pending_yielded.as_ref().is_some_and(|p| p.held == yielded) {
+                        self.pending_yielded = None;
+                    }
                 }
-                if self.pending_yielded.as_ref().is_some_and(|p| p.held == yielded) {
-                    self.pending_yielded = None;
+                if let Some(passed) = passed {
+                    // Revision 15: only from the member the pass named.
+                    self.sent_passes
+                        .retain(|p| !(p.next == passed && p.next.holder == from));
                 }
             }
             Body::Ping { t } => {
@@ -1548,6 +1620,45 @@ impl Session {
                 }
             }
             self.evidence = Some((fe, now));
+        }
+    }
+
+    /// Revision 15 §S4 rule 1 and the term step: a claim in a frame from a member that may
+    /// only read is ignored in every field, and so is a claim more than [`MAX_TERM_STEP`]
+    /// terms above the accepted term, or (outside `hello.seen`, which is only ever renewed
+    /// over) one naming a non-writer as holder. A `hello` or `bye` keeps its other fields (a
+    /// reader's `hello.seen` survives only when it names this member's own accepted claim, as
+    /// a resume position); any other frame whose claim is ignored is dropped. Returns whether
+    /// to go on.
+    fn admit_claims(&self, f: &mut Frame, from_writer: bool) -> bool {
+        let base = self.accepted.as_ref().map_or(0, |a| a.term);
+        let step = |c: &Claim| c.term <= base.saturating_add(MAX_TERM_STEP);
+        let ok = |c: &Claim| self.is_entitled(&c.holder) && step(c);
+        let accepted = self.accepted.as_ref();
+        match &mut f.body {
+            Body::Hello { seen, .. } => {
+                // A writer's `seen` is never adopted unless it names the writer itself (§S4
+                // rule 2), but a holder renews over it when nobody holds it; one naming a
+                // former writer therefore stays, so a claim accepted before a revocation was
+                // known still reaches the holder and is renewed over.
+                let keep = seen
+                    .as_ref()
+                    .is_none_or(|s| step(&s.claim) && (from_writer || Some(&s.claim) == accepted));
+                if !keep {
+                    *seen = None;
+                }
+                true
+            }
+            Body::Bye { claim, .. } => {
+                if claim.as_ref().is_some_and(|c| !from_writer || !ok(c)) {
+                    *claim = None;
+                }
+                true
+            }
+            Body::Pass { claim, next, .. } => ok(claim) && ok(next),
+            Body::Ack { yielded, passed } => yielded.iter().chain(passed.iter()).all(ok),
+            Body::Yielded { claim, .. } => ok(claim),
+            other => other.claim().is_none_or(ok),
         }
     }
 
@@ -1759,6 +1870,10 @@ impl Session {
                 // Revision 1: from the holder of the member's previous accepted claim.
                 self.accepted.as_ref().is_some_and(|a| a.holder == from)
             };
+        if verified && self.fixes.pass_ack && next.holder == self.me {
+            self.on_pass_to_me(from, next, snapshot, now, out);
+            return;
+        }
         if verified
             && self.fixes.renew_wider
             && next.holder == self.me
@@ -1832,12 +1947,90 @@ impl Session {
         }
     }
 
+    /// Revision 15 §S5: a verified `pass` naming this member. Its snapshot reaches the
+    /// application (as the starting state, or once as a late pass when this member is
+    /// already past it or took meanwhile), and the pass is acknowledged every time.
+    fn on_pass_to_me(&mut self, from: &str, next: Claim, snapshot: Bytes, now: u64, out: &mut Out) {
+        let greater = self.accepted.as_ref().is_none_or(|a| next > *a);
+        let key = (from.to_owned(), next.clone());
+        let late = |s: &mut Self, out: &mut Out| {
+            if !s.reported.contains(&key) {
+                s.reported.push_back(key.clone());
+                while s.reported.len() > 8 {
+                    s.reported.pop_front();
+                }
+                Self::event(
+                    out,
+                    Event::LatePass {
+                        from: from.to_owned(),
+                        claim: next.clone(),
+                        snapshot: snapshot.clone(),
+                    },
+                );
+            }
+        };
+        if greater && self.is_holder() {
+            // A pass after this member took: report it and renew over it with its own state.
+            late(self, out);
+            self.renew(next.term, now, out);
+        } else if greater && self.may_take() {
+            let claim = next.clone();
+            self.state = snapshot.clone();
+            self.become_holder(next.clone(), now, out);
+            Self::event(
+                out,
+                Event::BecameHolder {
+                    claim,
+                    snapshot: snapshot.clone(),
+                    via: Via::Pass,
+                },
+            );
+            self.order_own_submits(now, out);
+        } else if self.accepted.as_ref() != Some(&next) {
+            late(self, out);
+        }
+        // Report first, then acknowledge (a crash between them loses no report).
+        self.send(
+            out,
+            Some(from),
+            false,
+            Body::Ack {
+                yielded: None,
+                passed: Some(next),
+            },
+        );
+    }
+
     // -----------------------------------------------------------------------------------
     // Time and links.
 
     fn on_tick(&mut self, now: u64, out: &mut Out) {
         if !self.joined {
             return;
+        }
+        // Beyond revision 15's text: an unacknowledged pass is also resent on a timer, at
+        // most once per askTimeoutMs, since an asker that moved on and listens quietly may
+        // never send a frame the passer hears.
+        if self.fixes.pass_ack {
+            let ask = self.policy.ask_timeout_ms;
+            let mut resend = Vec::new();
+            for p in self.sent_passes.iter_mut() {
+                if now.saturating_sub(p.last) >= ask {
+                    p.last = now;
+                    resend.push((
+                        p.next.holder.clone(),
+                        Body::Pass {
+                            claim: p.claim.clone(),
+                            next: p.next.clone(),
+                            seq: p.seq,
+                            snapshot: p.snapshot.clone(),
+                        },
+                    ));
+                }
+            }
+            for (to, body) in resend {
+                self.send(out, Some(&to), false, body);
+            }
         }
         let expired: Vec<MemberId> = self
             .presence
@@ -2096,6 +2289,7 @@ impl Session {
                     next: next.clone(),
                     seq: self.seq,
                     snapshot: snapshot.clone(),
+                    last: now,
                 };
                 self.took_wanting = false;
                 // R3: accept and persist `next` before the pass reveals it.
@@ -2111,7 +2305,13 @@ impl Session {
                         snapshot,
                     },
                 );
-                self.sent_pass = Some(p);
+                if !self.fixes.pass_ack {
+                    self.sent_passes.clear();
+                }
+                self.sent_passes.push_back(p);
+                while self.sent_passes.len() > MAX_SENT_PASSES {
+                    self.sent_passes.pop_front();
+                }
             }
             Command::Decline { to } => {
                 if !self.sends_as_holder() {
