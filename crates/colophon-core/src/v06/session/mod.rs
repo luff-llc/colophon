@@ -17,8 +17,13 @@
 //! The 128-wide `n` window, signatures and sealing stay in the codec layer.
 
 pub mod clock;
+pub mod codec;
+pub mod endpoint;
 pub mod io;
+pub mod keys;
+mod probe;
 pub mod types;
+pub mod wire;
 
 pub use clock::{sample, Sample, Samples};
 pub use io::{Command, Event, Input, Output, Via};
