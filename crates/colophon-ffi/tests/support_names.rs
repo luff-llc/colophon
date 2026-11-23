@@ -16,6 +16,20 @@ pub fn api_dir() -> PathBuf {
 pub fn list_file() -> PathBuf {
     api_dir().join("surface-names.txt")
 }
+/// The names only the `conformance` feature exports (`api/conformance.rs`).
+pub fn conformance_list_file() -> PathBuf {
+    api_dir().join("surface-names-conformance.txt")
+}
+/// Names that must never be in a release build: each bypasses a trust boundary (an invented
+/// account view, supplied epoch keys, the machine or the receiver without the endpoint).
+pub const CONFORMANCE_ONLY: [&str; 6] = [
+    "SessionAccountView.supplied",
+    "SessionEpochs.with_keys",
+    "object:SessionEpochs",
+    "object:SessionMachine",
+    "object:SessionWireReceiver",
+    "AccountEngine.session_epochs",
+];
 
 /// Whether the attribute lines before an item export it for `feature` (`native05`/`web05`).
 fn exported(window: &[String], feature: &str) -> bool {
@@ -185,12 +199,15 @@ fn scan_text(text: &str, feature: &str, out: &mut BTreeSet<String>) {
     }
 }
 
-pub fn scan(feature: &str, glue: Option<&Path>) -> BTreeSet<String> {
+/// The names a build exports; `conformance` includes `api/conformance.rs`, which only the
+/// `conformance` feature compiles.
+pub fn scan(feature: &str, glue: Option<&Path>, conformance: bool) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     let mut files: Vec<PathBuf> = std::fs::read_dir(api_dir().join("api"))
         .unwrap()
         .map(|e| e.unwrap().path())
         .filter(|p| p.extension().is_some_and(|e| e == "rs"))
+        .filter(|p| conformance || !p.ends_with("conformance.rs"))
         .collect();
     files.sort();
     for f in files {
@@ -227,29 +244,60 @@ pub fn scan(feature: &str, glue: Option<&Path>) -> BTreeSet<String> {
     out
 }
 
-pub fn check(feature: &str, glue: Option<&Path>) {
-    let got = scan(feature, glue);
-    if std::env::var("UPDATE_NAMES").is_ok() {
-        let mut body = String::from(
-            "# The 0.5 export surface, one name per line. Both crates must produce exactly this list.\n# object:T an exported object; T.m a method or static; fn:f a free function;\n# callback:HostSource.m a host callback; error:AccountError.V an error variant.\n",
-        );
-        for n in &got {
-            body.push_str(n);
-            body.push('\n');
-        }
-        std::fs::write(list_file(), body).unwrap();
-        return;
-    }
-    let want: BTreeSet<String> = std::fs::read_to_string(list_file())
+fn read_list(path: &Path) -> BTreeSet<String> {
+    std::fs::read_to_string(path)
         .unwrap()
         .lines()
         .filter(|l| !l.is_empty() && !l.starts_with('#'))
         .map(str::to_string)
-        .collect();
-    let missing: Vec<_> = want.difference(&got).collect();
-    let extra: Vec<_> = got.difference(&want).collect();
+        .collect()
+}
+fn write_list(path: &Path, header: &str, names: &BTreeSet<String>) {
+    let mut body = String::from(header);
+    for n in names {
+        body.push_str(n);
+        body.push('\n');
+    }
+    std::fs::write(path, body).unwrap();
+}
+fn same(got: &BTreeSet<String>, want: &BTreeSet<String>, file: &str) {
+    let missing: Vec<_> = want.difference(got).collect();
+    let extra: Vec<_> = got.difference(want).collect();
     assert!(
         missing.is_empty() && extra.is_empty(),
-        "the exported names differ from surface-names.txt\n  missing here: {missing:?}\n  not in the list: {extra:?}"
+        "the exported names differ from {file}\n  missing here: {missing:?}\n  not in the list: {extra:?}"
+    );
+}
+
+/// The release names equal `surface-names.txt`, the names only a conformance build adds equal
+/// `surface-names-conformance.txt`, and no conformance-only name is in a release build.
+pub fn check(feature: &str, glue: Option<&Path>) {
+    let release = scan(feature, glue, false);
+    let full = scan(feature, glue, true);
+    let extra: BTreeSet<String> = full.difference(&release).cloned().collect();
+    for n in CONFORMANCE_ONLY {
+        assert!(!release.contains(n), "{n} is in the release surface");
+        if !n.starts_with("AccountEngine.") {
+            assert!(extra.contains(n), "{n} is not in the conformance surface");
+        }
+    }
+    if std::env::var("UPDATE_NAMES").is_ok() {
+        write_list(
+            &list_file(),
+            "# The 0.5 export surface, one name per line. Both crates must produce exactly this list.\n# object:T an exported object; T.m a method or static; fn:f a free function;\n# callback:HostSource.m a host callback; error:AccountError.V an error variant.\n",
+            &release,
+        );
+        write_list(
+            &conformance_list_file(),
+            "# The names only the `conformance` feature adds to the surface (`api/conformance.rs`). No\n# shipped artifact enables it; none of these may appear in surface-names.txt.\n",
+            &extra,
+        );
+        return;
+    }
+    same(&release, &read_list(&list_file()), "surface-names.txt");
+    same(
+        &extra,
+        &read_list(&conformance_list_file()),
+        "surface-names-conformance.txt",
     );
 }

@@ -114,10 +114,17 @@ fn finish(engine: &Arc<AccountEngine>, host: &Host, action: Arc<AccountAction>) 
 }
 /// 0.6 through the same engine, after a pass with the home: the stream's ticket call (a real
 /// `colophon.home.stream` call, signed by the member and judged by the core with the home's
-/// rule), and a session endpoint whose account view and epoch keys come from the engine, its
-/// first frame opened by a receiver of another member under those keys.
+/// rule), and a session endpoint driven by the engine: its view and epoch keys come from the
+/// engine, a delegation installs once, effects after a `Persist` wait for its acknowledgement,
+/// and a view older than the engine's authority head is refused until `set_account`.
+#[allow(clippy::too_many_arguments)]
 fn v06_through_the_engine(
     ea: &Arc<AccountEngine>,
+    sa: &MemSource,
+    ctl: &Arc<AccountEngine>,
+    auth: &MemSource,
+    sim: &mut SimHome,
+    d: &str,
     host: &mut Host,
     m1: &str,
     home: &str,
@@ -146,10 +153,8 @@ fn v06_through_the_engine(
     let view = ea.session_account(NOW).unwrap();
     assert_eq!(view.account(), account);
     assert!(view.writers("notes".into(), NOW).contains(&m1.to_string()));
-    let epochs = ea.session_epochs("notes".into()).unwrap();
-    assert!(epochs.current_epoch().is_some(), "the member's unlocked epoch");
-    let clock = || SessionClock {
-        mono_ms: 1_000,
+    let clock = |t: u64| SessionClock {
+        mono_ms: t,
         wall_ms: NOW,
     };
     let ep = SessionEndpoint::new(
@@ -162,35 +167,84 @@ fn v06_through_the_engine(
         view.clone(),
         host.fresh(32),
         host.fresh(16),
-        clock(),
+        clock(1_000),
     )
     .unwrap();
     assert!(ep.entitled().unwrap() && ep.can_write().unwrap());
     let body = ep.begin_delegation(NOW - 1_000, NOW + HOUR).unwrap();
     let signature = host.sign_one(&body, m1, false).signature;
-    ep.finish_delegation(body, signature, clock()).unwrap();
+    ep.finish_delegation(body.clone(), signature.clone(), clock(1_000))
+        .unwrap();
+    let e = ep.finish_delegation(body, signature, clock(1_000)).err().unwrap();
+    assert_eq!(e.code(), "consumed", "a delegation installs once");
+
+    // Joining seals under the engine's epoch key: frames are sent, none is unsent.
     let joined = ep
-        .command(r#"{"command":"join","state":null}"#.into(), &epochs, clock())
+        .command(r#"{"command":"join","state":null}"#.into(), ea, clock(1_000))
         .unwrap();
-    let frames: Vec<Vec<u8>> = joined
-        .effects
-        .into_iter()
-        .filter(|e| e.kind == SessionEffectKind::Send)
-        .map(|e| e.bytes)
-        .collect();
-    assert!(!frames.is_empty(), "a join says hello");
-    let rx = SessionWireReceiver::new(
-        account.into(),
-        "notes".into(),
-        "now-playing".into(),
-        "0".repeat(32),
+    assert!(joined.effects.iter().any(|e| e.kind == SessionEffectKind::Send));
+    assert!(!joined.effects.iter().any(|e| e.kind == SessionEffectKind::Unsent));
+    assert!(joined.awaiting_persist.is_none());
+
+    // Taking the role persists a claim: the step stops at the Persist, and nothing else runs
+    // until it is acknowledged with its own ID.
+    let taken = ep
+        .command(r#"{"command":"take","state":null}"#.into(), ea, clock(1_100))
+        .unwrap();
+    let ack = taken.awaiting_persist.expect("a take persists its claim");
+    assert_eq!(taken.effects.last().unwrap().kind, SessionEffectKind::Persist);
+    assert!(taken.effects.last().unwrap().persisted_json.is_some());
+    assert_eq!(ep.awaiting_persist().unwrap(), Some(ack));
+    assert_eq!(ep.tick(ea, clock(1_200)).err().unwrap().code(), "session:persistPending");
+    assert_eq!(ep.persisted(ack + 1).err().unwrap().code(), "session:wrongAck");
+    let rest = ep.persisted(ack).unwrap();
+    assert!(
+        rest.effects.iter().any(|e| e.kind == SessionEffectKind::Send),
+        "the frames that reveal the claim come only after the acknowledgement"
     );
-    let r = rx
-        .open(frames[0].clone(), &view, &epochs, NOW, 8_192)
+    assert_eq!(ep.persisted(ack).err().unwrap().code(), "session:wrongAck", "acknowledged once");
+    while let Some(next) = ep.awaiting_persist().unwrap() {
+        ep.persisted(next).unwrap();
+    }
+    assert!(ep.is_holder().unwrap());
+
+    // A new authority head (a controller added) reaches the member's engine: until the endpoint
+    // is given the new view, every call that consults the account is refused and changes nothing.
+    let before = ea.head_seq().unwrap();
+    assert!(sync_pass(ctl, auth, home, sim, host, NOW).is_empty(), "the controller catches up");
+    let tablet = host.identity(12);
+    let a = ctl
+        .begin_add_controller(
+            host.raw_controller(&tablet, "Tablet", &["approve"]),
+            AddMode::Immediate,
+            vec![d.to_string()],
+            RuleKind::Control,
+            vec![],
+        )
         .unwrap();
-    let o = r.opened.unwrap();
-    assert_eq!(o.from, m1);
-    assert!(o.writer);
+    auth.store(&finish(ctl, host, a).stores);
+    assert!(sync_pass(ctl, auth, home, sim, host, NOW).is_empty());
+    assert!(sync_pass(ea, sa, home, sim, host, NOW).is_empty());
+    assert!(ea.head_seq().unwrap() > before, "the engine took the new head");
+    let digest = ep.digest().unwrap();
+    for e in [
+        ep.tick(ea, clock(2_000)).err(),
+        ep.command(r#"{"command":"release"}"#.into(), ea, clock(2_000)).err(),
+        ep.receive(b"{}".to_vec(), ea, clock(2_000)).err(),
+        ep.link_down(ea, clock(2_000)).err(),
+        ep.set_account(&view, ea, clock(2_000)).err(),
+    ] {
+        assert_eq!(e.unwrap().code(), "session:staleAccount");
+    }
+    assert_eq!(ep.digest().unwrap(), digest, "a refused call changes nothing");
+    let fresh = ea.session_account(NOW).unwrap();
+    ep.set_account(&fresh, ea, clock(2_000)).unwrap();
+    assert!(ep.tick(ea, clock(2_000)).is_ok());
+    // An engine of another session is not this endpoint's.
+    assert_eq!(
+        ep.set_account(&ctl.session_account(NOW).unwrap(), ea, clock(2_000)).err().unwrap().code(),
+        "session:staleAccount"
+    );
 }
 fn notes(engine: &AccountEngine) -> Vec<Value> {
     let v: Value = serde_json::from_str(&engine.view_json("notes".into()).unwrap()).unwrap();
@@ -605,7 +659,7 @@ fn journey_one_create_approve_write_pair_and_sync_two_engines() {
         "the second device reads what the first wrote"
     );
     assert_eq!(notes(&ea), notes(&eb));
-    v06_through_the_engine(&ea, &mut host, &m1, &home_id, &account);
+    v06_through_the_engine(&ea, &sa, &ctl, &auth, &mut sim, &d, &mut host, &m1, &home_id, &account);
 
     // --- The rest of the session: read scope, batched versions, faults, abort, lock.
     assert!(eb.set_read_scope(vec!["notes".into()]).is_ok());

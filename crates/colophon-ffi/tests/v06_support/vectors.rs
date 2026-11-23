@@ -218,12 +218,35 @@ where
         mono_ms: 0,
         wall_ms: clock,
     };
-    ep.finish_delegation(body.clone(), sig.clone(), c())
-        .unwrap();
     let mut forged = sig.clone();
     forged[5] ^= 1;
-    let e = ep.finish_delegation(body, forged, c()).err().unwrap();
-    assert_eq!(e.code(), "session:delegation");
+    let e = ep
+        .finish_delegation(body.clone(), forged, c())
+        .err()
+        .unwrap();
+    assert_eq!(e.code(), "session:delegation", "a bad signature");
+    // Any changed field (member, key, bounds, namespace) is a body begin_delegation did not
+    // return; the signature does not matter.
+    let text = String::from_utf8(body.clone()).unwrap();
+    for (from, to) in [
+        ("\"member\":\"", "\"member\":\"0"),
+        ("\"key\":\"", "\"key\":\"A"),
+        ("\"expires\":\"2", "\"expires\":\"3"),
+        ("\"namespace\":\"", "\"namespace\":\"x"),
+        ("\"session\":0", "\"session\":1"),
+    ] {
+        assert!(text.contains(from), "{from}");
+        let changed = text.replacen(from, to, 1).into_bytes();
+        let e = ep
+            .finish_delegation(changed, sig.clone(), c())
+            .err()
+            .unwrap();
+        assert_eq!(e.code(), "session:delegation", "{from}");
+    }
+    ep.finish_delegation(body.clone(), sig.clone(), c())
+        .unwrap();
+    let e = ep.finish_delegation(body, sig, c()).err().unwrap();
+    assert_eq!(e.code(), "consumed", "a delegation is installed once");
 
     // Positive frames, in order, through one receiver.
     let rx = SessionWireReceiver::new(account.clone(), ns.clone(), cell.clone(), me.clone());
