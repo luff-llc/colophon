@@ -1,0 +1,14 @@
+# Build context for relay/Dockerfile: only the Rust workspace (for the home module) and the
+# relay's sources reach the builder.
+*
+!Cargo.toml
+!Cargo.lock
+!crates/
+!relay/
+**/target/
+relay/test/
+relay/relay-data/
+relay/*.md
+relay/Dockerfile
+relay/docker-compose.yml
+**/.DS_Store
