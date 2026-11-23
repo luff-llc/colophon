@@ -91,6 +91,8 @@ struct PendingSubmit {
 pub const SUBMIT_TRIES: u8 = 8;
 /// §S8: gap `hello`s at most once per second.
 pub const GAP_HELLO_MS: u64 = 1_000;
+/// Freshness windows kept per member (§S3, revision 7).
+pub const MAX_KEYS_PER_MEMBER: usize = 4;
 /// Own `fresh` values remembered (§S3 freshness).
 const OWN_FRESH: usize = 32;
 
@@ -172,6 +174,8 @@ pub struct Session {
     fresh_count: u64,
     own_fresh: VecDeque<Id>,
     windows: BTreeMap<(MemberId, String), u64>,
+    /// Keys with windows per member, oldest first (revision 7 cap).
+    window_order: BTreeMap<MemberId, VecDeque<String>>,
     answered: BTreeMap<MemberId, Id>,
     to_echo: VecDeque<Id>,
 }
@@ -237,9 +241,22 @@ impl Session {
             fresh_count: 0,
             own_fresh: VecDeque::new(),
             windows: BTreeMap::new(),
+            window_order: BTreeMap::new(),
             answered: BTreeMap::new(),
             to_echo: VecDeque::new(),
         }
+    }
+
+    /// The host no longer accepts `member` (§S2: revoked, suspended, expired or a newer
+    /// session): drop every freshness window for its keys, so none of its frames is accepted.
+    pub fn forget_member(&mut self, member: &str) {
+        self.windows.retain(|(m, _), _| m != member);
+        self.window_order.remove(member);
+        self.answered.remove(member);
+    }
+    /// The number of freshness windows held for `member`.
+    pub fn windows_for(&self, member: &str) -> usize {
+        self.windows.keys().filter(|(m, _)| m == member).count()
     }
 
     /// Seed the `fresh` values of this process's hellos (16 random bytes from the host, new
@@ -429,6 +446,7 @@ impl Session {
         self.fresh_count.hash(h);
         self.own_fresh.hash(h);
         self.windows.hash(h);
+        self.window_order.hash(h);
         self.answered.hash(h);
         self.to_echo.hash(h);
     }
@@ -555,7 +573,7 @@ impl Session {
         now: u64,
     ) {
         let fresh = self.next_fresh();
-        let heard = self.heard_of_holder(now);
+        let heard = self.fixes.evidence.then(|| self.heard_of_holder(now));
         let seen = self.seen();
         self.send(
             out,
@@ -837,10 +855,11 @@ impl Session {
     }
 
     fn apply(&mut self, seq: u64, h: Held, out: &mut Out) {
+        let max = self.fixes.append_bound.then_some(self.policy.max_payload);
         self.state = self
             .policy
             .fold
-            .apply(&self.state, &h.payload, self.policy.tail);
+            .apply_bounded(&self.state, &h.payload, self.policy.tail, max);
         self.seq = seq;
         if h.origin == self.me {
             self.submits.remove(&h.id);
@@ -990,6 +1009,16 @@ impl Session {
             None => {
                 if echo.iter().any(|e| self.own_fresh.contains(e)) {
                     self.windows.insert(wk.clone(), n);
+                    if self.fixes.window_cap {
+                        // Revision 7: at most 4 keys per member, the oldest dropped.
+                        let order = self.window_order.entry(wk.0.clone()).or_default();
+                        order.push_back(wk.1.clone());
+                        while order.len() > MAX_KEYS_PER_MEMBER {
+                            if let Some(old) = order.pop_front() {
+                                self.windows.remove(&(wk.0.clone(), old));
+                            }
+                        }
+                    }
                     opened = true;
                 }
             }
@@ -1246,6 +1275,10 @@ impl Session {
                 seq,
                 snapshot,
             } => {
+                // Revision 7: only from the member named as holder in the claim it carries.
+                if self.fixes.sender_checks && claim.holder != from {
+                    return;
+                }
                 let key = (from.clone(), claim.clone());
                 if self.fixes.yielded_ack && !self.sends_as_holder() {
                     // Revision 5: only the holder reports and acknowledges; the displaced
@@ -1273,6 +1306,10 @@ impl Session {
                 }
             }
             Body::Ack { yielded } => {
+                // Revision 7: only from the member this member accepts as holder.
+                if self.fixes.sender_checks && self.holder() != Some(from.as_str()) {
+                    return;
+                }
                 if self.pending_yielded.as_ref().is_some_and(|p| p.held == yielded) {
                     self.pending_yielded = None;
                 }
@@ -1384,8 +1421,8 @@ impl Session {
         let from = f.from.clone();
         // Finding R1b: a member with no claim or a lesser one that is not a holder sends no
         // holder frame, so the evidence rule must also answer its `hello`.
-        let lesser_hello = self.fixes.evidence
-            && self.fixes.evidence_push
+        let lesser_hello = ((self.fixes.evidence && self.fixes.evidence_push)
+            || self.fixes.hello_correction)
             && match &f.body {
                 Body::Hello { seen, .. } => seen
                     .as_ref()
@@ -1403,7 +1440,7 @@ impl Session {
         let released_mine =
             self.released && self.accepted.as_ref().is_some_and(|a| a.holder == self.me);
         if released_mine {
-            if self.fixes.bye_resend && lesser {
+            if self.fixes.bye_resend && (lesser || (lesser_hello && self.fixes.hello_correction)) {
                 let claim = self.accepted.clone();
                 self.send(
                     out,
@@ -1433,7 +1470,7 @@ impl Session {
                 return;
             }
         }
-        if lesser {
+        if lesser || (lesser_hello && self.fixes.hello_correction) {
             self.send_hello(out, Some(&from), false, now);
         }
     }
@@ -1445,7 +1482,14 @@ impl Session {
         }
     }
 
-    fn on_hello(&mut self, from: &str, seen: Option<Seen>, heard: Heard, now: u64, out: &mut Out) {
+    fn on_hello(
+        &mut self,
+        from: &str,
+        seen: Option<Seen>,
+        heard: Option<Heard>,
+        now: u64,
+        out: &mut Out,
+    ) {
         if let Some(s) = &seen {
             if s.claim.holder == from {
                 let greater = self.accepted.as_ref().is_none_or(|a| s.claim > *a);
@@ -1461,7 +1505,7 @@ impl Session {
         }
         // R1f: a member with fresh evidence answers a report that the holder lapsed.
         if self.fixes.evidence_refresh
-            && heard == Heard::Lapsed
+            && heard == Some(Heard::Lapsed)
             && seen.as_ref().map(|s| &s.claim) == self.accepted.as_ref()
         {
             if self.sends_as_holder() {
@@ -1522,7 +1566,7 @@ impl Session {
             && if self.fixes.evidence {
                 // Revision 4: only the testimony of a member that listened for that holder
                 // (and, R1e, only once this holder has itself been listening that long).
-                heard == Heard::Lapsed
+                heard == Some(Heard::Lapsed)
                     && (!self.fixes.renew_guard
                         || (self.link_up
                             && now.saturating_sub(self.link_since) >= self.policy.holder_timeout_ms))

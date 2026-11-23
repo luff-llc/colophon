@@ -177,8 +177,9 @@ pub enum Body {
         echo: Vec<Id>,
         /// The sender's accepted claim and position.
         seen: Option<Seen>,
-        /// Whether the sender itself hears `seen.holder` (§S4).
-        heard: Heard,
+        /// Whether the sender itself hears `seen.holder` (revisions 4–6; absent in 7).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        heard: Option<Heard>,
         /// An out-of-contact holder returning (§S6); informational.
         lapsed: bool,
     },
@@ -414,13 +415,31 @@ impl Fold {
     /// Fold one message payload into a state. `append` keeps the last `tail` payloads
     /// (§S1, revision 4), each framed as a 4-byte big-endian length and the bytes.
     pub fn apply(self, state: &Bytes, payload: &Bytes, tail: u64) -> Bytes {
+        self.apply_bounded(state, payload, tail, None)
+    }
+    /// As [`Fold::apply`], with `append` also keeping the encoded state at most `max_bytes`
+    /// (revision 7: oldest payloads dropped first; a payload that cannot fit with its
+    /// 4-byte frame even alone leaves the state empty).
+    pub fn apply_bounded(
+        self,
+        state: &Bytes,
+        payload: &Bytes,
+        tail: u64,
+        max_bytes: Option<u64>,
+    ) -> Bytes {
         match self {
             Fold::Latest => payload.clone(),
             Fold::Append => {
                 let mut entries = Self::entries(state);
                 entries.push(payload.clone());
                 let keep = usize::try_from(tail.max(1)).unwrap_or(usize::MAX);
-                let drop = entries.len().saturating_sub(keep);
+                let mut drop = entries.len().saturating_sub(keep);
+                if let Some(max) = max_bytes {
+                    let size = |e: &[Bytes]| e.iter().map(|x| 4 + x.len() as u64).sum::<u64>();
+                    while drop < entries.len() && size(&entries[drop..]) > max {
+                        drop += 1;
+                    }
+                }
                 Self::framed(&entries[drop..])
             }
         }
@@ -562,6 +581,16 @@ pub struct Fixes {
     /// link has worked for `holderTimeoutMs` (a returning holder must not win on the word of
     /// a member that merely missed the live holder's beats). Off: revision 4 as written.
     pub renew_guard: bool,
+    /// Revision 7: a non-holder answers a `hello` naming a lesser claim or none with `hello`
+    /// (with evidence off, this is how a quiet claim reaches the group).
+    pub hello_correction: bool,
+    /// Revision 7: `yielded` only from its claim's holder, `ack` only from the accepted
+    /// holder.
+    pub sender_checks: bool,
+    /// Revision 7: freshness windows for at most 4 keys per member.
+    pub window_cap: bool,
+    /// Revision 7: an `append` state is at most `maxPayload` bytes once encoded.
+    pub append_bound: bool,
 }
 impl Fixes {
     /// The revision 1 draft as written.
@@ -583,6 +612,10 @@ impl Fixes {
         evidence_keeps_want: false,
         evidence_refresh: false,
         renew_guard: false,
+        hello_correction: false,
+        sender_checks: false,
+        window_cap: false,
+        append_bound: false,
     };
     /// The revision 3 draft: revisions 2 and 3 fixes, none of revision 4.
     pub const REV3: Fixes = Fixes {
@@ -603,23 +636,27 @@ impl Fixes {
         evidence_keeps_want: false,
         evidence_refresh: false,
         renew_guard: false,
+        hello_correction: false,
+        sender_checks: false,
+        window_cap: false,
+        append_bound: false,
     };
-    /// Revision 4 as written (`ALL` without the fixes the explorer found beyond it).
+    /// Revision 4 as written.
     pub const REV4: Fixes = Fixes {
         evidence_push: false,
         yielded_ack: false,
         evidence_keeps_want: false,
         evidence_refresh: false,
         renew_guard: false,
-        ..Fixes::ALL
+        ..Fixes::REV6
     };
-    /// Revision 5 as written (`ALL` without R1f).
+    /// Revision 5 as written (revision 6 without R1f).
     pub const REV5: Fixes = Fixes {
         evidence_refresh: false,
-        ..Fixes::ALL
+        ..Fixes::REV6
     };
-    /// Every fix.
-    pub const ALL: Fixes = Fixes {
+    /// Revision 6: evidence forwarding over one hop, with every fix up to R1h.
+    pub const REV6: Fixes = Fixes {
         rank1_from_holder: true,
         seen_unsynced: true,
         bye_resend: true,
@@ -637,7 +674,26 @@ impl Fixes {
         evidence_keeps_want: true,
         evidence_refresh: true,
         renew_guard: true,
+        hello_correction: false,
+        sender_checks: false,
+        window_cap: false,
+        append_bound: false,
     };
+    /// Revision 7: carriers bridge (`crate::v06::bridge`), so the session rules assume a
+    /// fully reachable group; no evidence forwarding, no `hello.heard`.
+    pub const ALL: Fixes = Fixes {
+        evidence: false,
+        evidence_push: false,
+        evidence_keeps_want: false,
+        evidence_refresh: false,
+        hello_correction: true,
+        sender_checks: true,
+        window_cap: true,
+        append_bound: true,
+        ..Fixes::REV6
+    };
+    /// Revision 7 (the same as `ALL`).
+    pub const REV7: Fixes = Fixes::ALL;
 }
 impl Default for Fixes {
     fn default() -> Self {
