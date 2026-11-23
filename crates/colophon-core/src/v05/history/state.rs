@@ -316,6 +316,10 @@ impl State {
     }
     /// Whether the activation of the `successor` transition (F) is final: nothing more is
     /// admitted (§15.2). A state saved without F's seq counts as final.
+    /// Whether a `successor` activation (F, §15.1) is on the branch.
+    pub(crate) fn names_successor(&self) -> bool {
+        self.successor.is_some()
+    }
     pub(super) fn successor_final(&self) -> bool {
         self.successor.is_some()
             && self

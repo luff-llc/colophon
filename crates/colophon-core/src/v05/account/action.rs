@@ -25,9 +25,9 @@ use crate::v05::slots::{
 };
 use crate::v05::vault::VaultSeed;
 use crate::v05::write::authority::{
-    choose_receipts, prepare_activate, prepare_end_sessions_by_member, prepare_final,
-    prepare_resolve, prepare_signed, prepare_suspend, prepare_transition, prepare_veto,
-    prepare_vetoed, PendingBatch, TransitionParams, TransitionRule, VetoParams,
+    choose_receipts, prepare_end_sessions_by_member, prepare_resolve, prepare_signed,
+    prepare_suspend, prepare_transition, prepare_veto, PendingBatch, TransitionParams,
+    TransitionRule, VerifiedObjects, VetoParams,
 };
 use crate::v05::write::calls::{
     finish_call, finish_home_call, finish_link, prepare_call, prepare_link, CallSignerSpec, CallSpec, LinkSpec,
@@ -1546,22 +1546,27 @@ impl Account {
         }
         vetoes.sort();
         vetoes.dedup();
+        // The held objects verified once, for every candidate below: the same answers as
+        // `prepare_vetoed`, `prepare_activate` and `prepare_final` (which verify them again
+        // each), at one verification instead of one per held transition and activation.
+        let once = std::cell::OnceCell::new();
+        let verified = || once.get_or_init(|| VerifiedObjects::new(&self.d.effective, self.now_ms));
         for (_, digest) in &order {
             if !forked {
                 for (td, vd) in vetoes.iter().filter(|(td, _)| td == digest) {
-                    if let Ok(b) = prepare_vetoed(&self.d.effective, self.now_ms, td, vd) {
+                    if let Ok(b) = verified().prepare_vetoed(td, vd) {
                         return Some(b);
                     }
                 }
             }
-            if let Ok(b) = prepare_activate(&self.d.effective, self.now_ms, digest) {
+            if let Ok(b) = verified().prepare_activate(digest) {
                 return Some(b);
             }
         }
         if !forked {
             for a in st.activations() {
                 if !a.final_ {
-                    if let Ok(b) = prepare_final(&self.d.effective, self.now_ms, a.seq) {
+                    if let Ok(b) = verified().prepare_final(a.seq) {
                         return Some(b);
                     }
                 }
