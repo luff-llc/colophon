@@ -432,3 +432,27 @@ fn wake_at_is_never_later_than_what_the_clock_makes_due() {
     eprintln!("wakeAt: {bounded} readings bounded, {unbounded} not (asked again next pass), {exact} exactly on a due time");
     assert!(bounded > 0 && exact > 0, "some readings wait for a due time and it comes exactly then");
 }
+
+/// The 7-day bound on an `activate` is on its determined `issued` (the later of the last entry's
+/// `issued` and the due time), not on the clock: a receipted transition left alone for 8 days
+/// after its due time, with nothing appended since, can still be built, so it is not a
+/// transition that never comes due: no wake bound, ask again every pass. (This home then refuses
+/// its own late `activate` by the home's clock rule, `refused:late`, and gives no wake time
+/// either: every pass asks again, as before.)
+#[test]
+fn a_transition_due_long_ago_with_nothing_appended_since_is_still_due() {
+    use colophon_core::v05::write::authority::VerifiedObjects;
+    let mut w = World::new();
+    let digest = w.round(0, at(0), false, &mut |_, _| {});
+    let (_, objects) = w.home.held();
+    let early = VerifiedObjects::new(&objects, at(0) + 120_000);
+    let due = early.next_due_ms().expect("a receipted transition has a due time");
+    assert!(due > at(0) + 120_000 && due < at(0) + 2 * HOUR, "due within the delay: {due}");
+    let late = due + 8 * 24 * HOUR;
+    let verified = VerifiedObjects::new(&objects, late);
+    assert!(verified.state().unwrap().last_issued_ms() <= due, "nothing appended since");
+    assert!(verified.prepare_activate(&digest).is_ok(), "still activatable 8 days after its due time");
+    assert_eq!(verified.next_due_ms(), None, "due and not recorded: no wake bound");
+    let r = w.home.due(late);
+    assert_eq!(r["wakeAt"], Value::Null, "{}", r["result"]);
+}
