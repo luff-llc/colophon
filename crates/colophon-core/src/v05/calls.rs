@@ -1313,6 +1313,20 @@ pub fn check_home_call_as_signer(
     home_request(envelope, view, cfg, &mut store, req, true).map(|_| ())
 }
 
+/// [`check_home_call_as_signer`] for `POST /records/batch` serving `paths`: the signer's own
+/// judgement of a batch call by the home's rule ([`verify_home_batch`]), so a signer refuses
+/// exactly the batches a home refuses for a path out of the scope of its terms or links.
+pub fn check_home_batch_as_signer(
+    envelope: &[u8],
+    view: &AccountView,
+    cfg: &CallConfig<'_>,
+    req: &HomeRequest<'_>,
+    paths: &[String],
+) -> Result<()> {
+    let mut store = super::replay::MemoryReplayStore::new();
+    home_request_with(envelope, view, cfg, &mut store, req, true, paths).map(|_| ())
+}
+
 /// [`verify_home_request`] for `POST /records/batch` serving `paths` (record paths relative to
 /// `{base}/records/`). A batch must not reach further than single-record reads: besides the
 /// conditions on the batch's own `args`, the conditions of the member's terms and of every link

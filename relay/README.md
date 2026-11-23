@@ -213,7 +213,7 @@ released after `unclaimedHours`, as any other.
 | 403 `{"result":"<code>"}` | A grant's call is refused, with the core's code: `malformed`, `badSignature`, `refused:audience`, `refused:outOfScope`, `refused:revoked`, `refused:expired`, `refused:ended`, `refused:notNarrower`, `refused:window`, `refused:replay`, `refused:conflict`, `refused:fork`. Final: it never falls back to another path |
 | 403 | The request carries an `Origin` not on the CORS list (checked before the body is read) |
 | 405 | Not `POST` |
-| 409 | The slot is held by another account, configured by the operator, or a directory of that name is in the data directory |
+| 409 | The slot is held by another account, configured by the operator, or a directory of that name is in the data directory; or another home slot already serves the account at that base (checked before the call is reserved or anything is written) |
 | 411, 413 | No `Content-Length`, or a body over 4 KiB |
 | 415 | The media type is not `application/json` (checked before the body is read; a browser must preflight such a request, and only a listed origin's preflight succeeds) |
 | 429 `{"result":"refused:overQuota"}` | The address is over `perAddressPerHour`, with `Retry-After` (checked first: a guesser over its share learns nothing about its token); for a grant request, the address is over its attempts or its refusals, the replay table is full, or the grant is over `grantPerHour`, each with `Retry-After` |

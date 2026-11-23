@@ -15,7 +15,11 @@ mod support_relay;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use base64::Engine as _;
 use colophon_core::v05::account::{Change, Incoming, RevokeKeep};
-use colophon_core::v05::calls::home_call_args;
+use colophon_core::v05::account::HomeCall;
+use colophon_core::v05::calls::{
+    check_home_batch_as_signer, home_call_args, AccountView, CallConfig, HomeRequest,
+};
+use colophon_core::v05::history::{verify_history, Persisted};
 use colophon_core::v05::encoding::{canonical, digest};
 use colophon_core::v05::history::Objects;
 use colophon_core::v05::write::authority::TransitionRule;
@@ -412,7 +416,7 @@ fn a_conditional_delegation_cannot_batch_paths_it_could_not_get_one_at_a_time() 
     let mut home = Home::new(keys, f.account.id().as_str());
     let entries: Vec<Value> = entries_json(&f).into_iter().map(|(_, e)| e).collect();
     assert_eq!(home.authority(1, &entries, NOW)["appointed"], true);
-    assert!(home.head(NOW).is_some());
+    let home_head = serde_json::to_vec(&home.head(NOW).unwrap()).unwrap();
 
     let live = format!("state/{member}/{NS}/current.json");
     let op = format!("ops/{member}/{NS}/000000000001-{}.json", "a".repeat(32));
@@ -479,6 +483,58 @@ fn a_conditional_delegation_cannot_batch_paths_it_could_not_get_one_at_a_time() 
             assert!(answer.get("reserve").is_none());
         }
     }
+    // The signer's own preflight refuses exactly what the home refuses, by the same rule.
+    let mut objects = f.account.objects().clone();
+    objects.heads.push(home_head);
+    let verdict = verify_history(&objects, &Persisted::default(), NOW);
+    let view = AccountView::from_history_verifier(&verdict, &objects, NOW).unwrap();
+    let audiences = [BASE_A.to_string()];
+    let origins = Default::default();
+    let cfg = CallConfig {
+        now_ms: NOW,
+        audiences: &audiences,
+        call_origins: &origins,
+        controller_purposes: &[],
+        home_endpoints: &audiences,
+    };
+    let mixed = json!({"paths": [&live, &op]}).to_string();
+    for (body, paths) in [(&in_scope, vec![live.clone()]), (&mixed, vec![live.clone(), op.clone()])] {
+        for (who, n) in [(&linked as &dyn Fn(Value, u8) -> Value, 41u8), (&own, 42)] {
+            let credential = who(batch_args(body), n);
+            let envelope = STANDARD.decode(credential.as_str().unwrap()).unwrap();
+            let sha = digest(body.as_bytes());
+            let req = HomeRequest { method: "POST", path: BATCH, body_sha256: &sha, writes: &[] };
+            let signer = check_home_batch_as_signer(&envelope, &view, &cfg, &req, &paths)
+                .err()
+                .map(|e| e.code());
+            let home_said = call(batch_request(&home, NOW, body, credential));
+            let home_code = home_said["result"].as_str().map(str::to_string);
+            assert_eq!(signer, home_code, "{body}: home {home_said}");
+            assert_eq!(signer.is_none(), home_said["allowed"] == true);
+        }
+    }
+    // Through the account: a batch is begun with its body, judged path by path at finish.
+    let mut heads = Objects::default();
+    heads.heads.push(objects.heads.last().unwrap().clone());
+    f.account.merge(Incoming { objects: heads, ..Default::default() }, NOW).unwrap();
+    let controller = f.host.ids[&f.d].public().signing;
+    let generic = HomeCall {
+        audience: BASE_A.into(),
+        method: "POST".into(),
+        path: BATCH.into(),
+        body_sha256: digest(mixed.as_bytes()),
+        as_of: None,
+    };
+    assert!(f.account.begin_home_call(&controller, &generic, [50; 32]).is_err());
+    let action = f
+        .account
+        .begin_home_batch_call(&controller, &[], BASE_A, mixed.as_bytes(), None, [51; 32])
+        .unwrap();
+    let sigs = f.host.sign(action.steps());
+    let finished = f.account.finish(action, sigs).unwrap();
+    let built = json!(b(finished.artifact.as_ref().unwrap()));
+    let served = call(batch_request(&home, NOW, &mixed, built));
+    assert_eq!(served["allowed"], true, "{served}");
 }
 
 #[test]

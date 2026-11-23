@@ -455,6 +455,12 @@ function readBatchBody(req, url) {
   return readBody(req, 64 * 1024);
 }
 
+/** A home base as compared for duplicates: scheme and host case and trailing slashes ignored. */
+function normalBase(base) {
+  try { return new URL(base).href.replace(/\/+$/, ''); } catch { return String(base).replace(/\/+$/, ''); }
+}
+function basePair(account, base) { return `${account} ${normalBase(base)}`; }
+
 async function serveBatch(res, slot, decisions) {
   const records = [];
   // Include the envelope (false is longer than true), commas, and JSON path escaping.
@@ -551,14 +557,20 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
   for (const [name, e] of table.rows) if (!homeSlots.has(name)) homeSlots.set(name, { base: e.base, account: e.account });
   // Replay tables are per slot: two slots serving one account at one base would each take the
   // same captured call once. One account, one home slot per base.
+  // The door checks the same pair under its lock (`baseHolder`) before it reserves or writes.
   const bases = new Map();
   for (const [name, { base, account }] of homeSlots) {
-    let normal;
-    try { normal = new URL(base).href.replace(/\/+$/, ''); } catch { normal = base; }
-    const other = bases.get(`${account} ${normal}`);
-    if (other !== undefined) throw new Error(`Home slots ${other} and ${name} both serve account ${account} at base ${normal}: a base names one home slot per account`);
-    bases.set(`${account} ${normal}`, name);
+    const pair = basePair(account, base);
+    const other = bases.get(pair);
+    if (other !== undefined) throw new Error(`Home slots ${other} and ${name} both serve account ${account} at base ${normalBase(base)}: a base names one home slot per account`);
+    bases.set(pair, name);
   }
+  /** Another home slot serving `account` at `base`, if any (not `except`). */
+  const baseHolder = (account, base, except) => {
+    const pair = basePair(account, base);
+    for (const [name, e] of homeSlots) if (name !== except && basePair(e.account, e.base) === pair) return name;
+    return undefined;
+  };
   const configured = new Set(Object.keys(libraries ?? {}));
   // Gate "grant": the operator account is one of this home's own slots, and the door's audience
   // is its own. A slot named but not set up yet is not a start-up failure (every grant request is
@@ -777,6 +789,11 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
           // has no effect.
           if (reserve) await provisionReplay.reserve(reserve, null);
           return Buffer.from(verdict.existing.request, 'base64');
+        }
+        // One account, one home slot per base: a slot that would repeat another's (account,
+        // base) would let one captured call be taken once in each. Refused before any effect.
+        if (baseHolder(asked.account, asked.base, asked.slot) !== undefined) {
+          throw new HttpError(409, 'Another home slot already serves this account at this base');
         }
         // Verify, reserve, make the slot (the durable write names the call's digest), complete.
         if (reserve) { await provisionReplay.reserve(reserve, { slot: asked.slot }); await reach('grant reserved'); }
