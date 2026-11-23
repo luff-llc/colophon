@@ -616,7 +616,7 @@ session frames between the account's connected members. The home never reads tho
 | Client → home | |
 | --- | --- |
 | `subscribe` / `unsubscribe` `{namespace, cell, id?}` | Members entitled to the namespace only |
-| `session` `{frame, id?}` | Forwarded to the other subscribed, entitled members, or only to `to`. Never echoed |
+| `session` `{frame, id?}` | Forwarded to every other subscribed, entitled member, whether or not it carries `to`. Never echoed |
 | `ping` `{t?, id?}` | |
 
 A session frame is checked by the home module: at most 16,384 bytes, its outer fields well
@@ -624,6 +624,14 @@ formed, `from` the connection's member, and that member holding a `records` entr
 namespace. Unknown or malformed client frames answer `error` without closing.
 The latest `retain: true` frame per (namespace, cell, sender) is kept **in memory only** for at
 most 60 s and given to members when they subscribe. Session frames are never written to disk.
+A frame's `to` is checked as a member ID but is advice to receivers, not a route: the home
+forwards an addressed frame to every other subscribed, entitled member (a member reachable only
+through a bridge must still get it), and the sender's answer does not depend on whether the
+named member is connected. The home learns the account, namespace, cell, sender, `to`, the
+`retain` flag, sizes and timing, never the payload. Each frame reaches at most
+`streamsPerAccount − 1` connections (63 by default); with the per-connection rate caps below,
+one sending connection can cause at most about 3,150 frames/s or 15.75 MiB/s of outbound
+traffic (see `docs/colophon-0.6-stream.md` §5.2).
 
 Limits: WebSocket messages up to 20,480 bytes (larger closes 1009). The inbound rate is capped
 per connection at 50 frames/s and 256 KiB/s; excess frames are dropped and counted, with an

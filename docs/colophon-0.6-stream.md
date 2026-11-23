@@ -203,23 +203,42 @@ Everything else in the frame (`key`, `n`, `epoch`, `nonce`, `ciphertext`, the si
 opaque. It is not decoded, judged or kept. The home then sends `{"type":"session","frame":…}`
 to every connection that is open, belongs to a member other than `from` (never back to the
 sender, nor to the sender's other connections), is entitled to the namespace, and is subscribed
-to `(namespace, cell)`. When `to` is present, only `to`'s connections receive it.
+to `(namespace, cell)`, whether or not the frame carries `to`.
+
+`to` is advice to receivers, not a route (sessions §S3, §S9). A member reachable only through
+another member (a bridge) must still receive frames addressed to it, so the home does not narrow
+delivery to `to`; a receiver that `to` does not name ignores the frame. The home still checks
+that `to`, when present, is a member ID. A successful send has no answer, so the sender hears the
+same thing whether or not the member `to` names is connected.
+
+**Fan-out.** Each frame goes to every other subscribed connection of the account, at most
+`streamsPerAccount − 1` = 63 with the defaults. The inbound caps per connection bound what one
+sender can cause: 50 frames/s (burst 100) and 256 KiB/s (burst 512 KiB), each frame at most
+16,384 bytes. In the worst case one connection makes the home send 50 × 63 = 3,150 frames/s, or
+256 KiB/s × 63 ≈ 15.75 MiB/s, and a whole account (64 connections, all sending, all subscribed)
+about 64 × 15.75 MiB/s ≈ 1,008 MiB/s, for a burst of 512 KiB × 63 ≈ 31.5 MiB per sender. This is
+the amplification an unaddressed frame already had; addressing no longer reduces it. Each
+receiver's queue is bounded by `bufferedBytes` (1 MiB): a connection that falls further behind is
+closed with 4013, so memory held for undelivered frames is at most 64 MiB per account. Operators
+who host many accounts lower `streamsPerAccount` or the rates.
 
 ### 5.3 Retained frames
 
 A frame with `retain: true` is also kept, in memory only, as the latest for
 `(namespace, cell, from)`. A newer one replaces it. When a member subscribes to the cell, it
-receives each retained frame of the other members, marked `retained: true`, unless the frame is
-addressed `to` someone else. A retained frame lives `retainMs`: 60 s at most, whatever a cell
+receives each retained frame of the other members, marked `retained: true`, whatever its `to`
+says. A retained frame lives `retainMs`: 60 s at most, whatever a cell
 policy says (the home knows no cells). It is dropped earlier when its sender's access ends or
 narrows. A home holds at most 1,024 retained frames per account; when full, a new key is
 forwarded but not retained. Nothing retained survives a restart.
 
 ### 5.4 What the home learns
 
-For each frame: the account, namespace, cell, sender, recipient (when addressed), whether it is
-retained, its size and its timing. It learns nothing about the payload: the ciphertext is under
-an epoch key the home never holds (0.5 §11.1).
+For each frame: the account, namespace, cell, sender, the member it is addressed to (when `to`
+is present; the home reads it but does not route by it), whether it is retained, its size and its
+timing. It also knows which members are connected and subscribed, since it carries frames to
+them. It learns nothing about the payload: the ciphertext is under an epoch key the home never
+holds (0.5 §11.1).
 
 ## 6. Notices and routes
 

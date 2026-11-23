@@ -85,7 +85,7 @@ export class HomeStream {
     this.o.retainMs = Math.min(this.o.retainMs, 60_000);
     this.tickets = new Map(); // sha256(ticket) -> grant
     this.conns = new Set();
-    this.retained = new Map(); // namespace \0 cell \0 from -> { frame, to, from, namespace, cell, at }
+    this.retained = new Map(); // namespace \0 cell \0 from -> { frame, from, namespace, cell, at }
     this.counters = { forwarded: 0, dropped: 0, refused: 0, slow: 0, idle: 0 };
     this.timers = null;
   }
@@ -352,11 +352,12 @@ export class HomeStream {
     if (!conn.subs.has(key) && conn.subs.size >= this.o.subscriptions) { this.error(conn, 'tooMany', ref); return; }
     conn.subs.add(key);
     this.send(conn, { type: 'subscribed', namespace, cell, ...(ref !== undefined ? { ref } : {}) });
-    // The latest retained frame of every other member in the cell (§S9), still in its time.
+    // The latest retained frame of every other member in the cell (§S9), still in its time,
+    // whatever its `to` says: receivers ignore frames not addressed to them (§S3).
     const now = Date.now();
     for (const [k, r2] of this.retained) {
       if (now - r2.at > this.o.retainMs) { this.retained.delete(k); continue; }
-      if (r2.namespace === namespace && r2.cell === cell && r2.from !== conn.member && (!r2.to || r2.to === conn.member)) {
+      if (r2.namespace === namespace && r2.cell === cell && r2.from !== conn.member) {
         if (!this.send(conn, { type: 'session', retained: true, frame: r2.frame })) return;
       }
     }
@@ -378,13 +379,17 @@ export class HomeStream {
     if (r.retain) {
       const key = `${r.namespace}\0${r.cell}\0${r.from}`;
       if (this.retained.has(key) || this.retained.size < this.o.retainedPerSlot) {
-        this.retained.set(key, { frame, to: r.to, from: r.from, namespace: r.namespace, cell: r.cell, at: Date.now() });
+        this.retained.set(key, { frame, from: r.from, namespace: r.namespace, cell: r.cell, at: Date.now() });
       }
     }
+    // `to` is advice to receivers, not a route (§S3, §S9): a member reachable only through
+    // another member must still get addressed frames, so every other subscribed, entitled member
+    // receives the frame. The sender hears nothing either way, so it cannot learn from the home
+    // whether the member `to` names is connected.
     const sub = `${r.namespace}\0${r.cell}`;
     this.counters.forwarded += 1;
     this.broadcast(out, (c) => c !== conn && c.member && c.member !== r.from && c.subs.has(sub)
-      && c.namespaces.includes(r.namespace) && (!r.to || c.member === r.to));
+      && c.namespaces.includes(r.namespace));
   }
 
   // -------------------------------------------------------------------------------------------
