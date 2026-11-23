@@ -1,10 +1,12 @@
 # Colophon 0.6: sessions
 
-**Status:** unfrozen draft, revision 6, 2026-11-23. Revision 2 adopted the findings of the
+**Status:** unfrozen draft, revision 7, 2026-11-23. Revision 2 adopted the findings of the
 reference machine (`docs/colophon-0.6-sessions-findings.md`, F1–F20); revision 3 added `via` to passed claims (F12, F21); revision 4 answers the first
 independent design review (R1–R9 in the findings document): evidence instead of hearsay,
 no silent loss of state, key bootstrap and freshness, bounded state; revision 5 adopts what
-the rebuilt harness found wrong in revision 4 (R1c–R4a); revision 6 adopts R1f–R1h. Additive to `colophon-0.5.md`; nothing here changes a
+the rebuilt harness found wrong in revision 4 (R1c–R4a); revision 6 adopted R1f–R1h. Revision 7 answers the second design review by separating
+two layers: carriers make every connected group of members fully reachable (§S9
+bridging), and the session rules above them assume that and are simpler for it. Additive to `colophon-0.5.md`; nothing here changes a
 0.5 object, verdict or path. A 0.5 host that ignores this document stays conformant with 0.5.
 
 The words MUST, SHOULD and MAY are used as in 0.5 §0. "0.5 §N" refers to `colophon-0.5.md`.
@@ -29,15 +31,19 @@ Design rules that every later section follows:
 3. Safety never depends on a clock agreeing with another clock.
 4. The same frames give the same state whatever link carried them.
 
-**What is and is not promised.** The network may lose, duplicate, delay and reorder frames
-and separate members for any time. Under that model no protocol can both let a member take
+**The network model.** Members that can exchange frames, directly or through other members
+that bridge carriers (§S9), form a **group**. Inside a group every frame sent to all is
+eventually delivered to every member, possibly late, duplicated and out of order; between
+groups nothing is delivered. Groups split and merge at any time. The session rules are
+written for this model: they never need to reason about who can reach whom inside a group,
+because bridging makes reachability inside it complete.
+
+**What is and is not promised.** Under this model no protocol can both let a member take
 over in bounded time and guarantee that a holder whose frames are merely late keeps the
-role, so this document chooses the first (rule 1) and makes the cost visible: a displaced
-holder's state is never dropped silently (§S5 "Yielding state"). Agreement on the holder
-needs only that frames eventually travel between members, directly or through members that
-forward evidence (§S4). Agreement on the ordered lane additionally needs a carrier that
-reaches every member from the holder; the home carrier does, and a direct carrier between
-some members only does not. Relaying the ordered lane through members is not part of 0.6.
+role. This document chooses the first (rule 1) and makes the cost visible: a displaced
+holder's state is never dropped silently (§S5 "Yielding state"). Timeouts are measured on
+each member's own clock, which is assumed to run within 500 parts per million of real time
+while the process runs; a clock that stalls only delays that member's own timeouts.
 
 ## S1. Cells
 
@@ -54,7 +60,7 @@ core, as live rules are in 0.5 §20) together with its **policy**:
 | `retainMs` | 60,000 | Longest time a carrier keeps a retained frame (§S9). |
 | `tail` | 256 | Ordered messages the holder keeps for resume. |
 | `maxPayload` | 8,192 | Largest application payload, bytes. |
-| `fold` | `latest` | How ordered messages become state: `latest` (state is the last payload) or `append` (state is the last `tail` payloads, oldest dropped). |
+| `fold` | `latest` | How ordered messages become state: `latest` (state is the last payload) or `append` (state is the most recent payloads, at most `tail` of them and at most `maxPayload` bytes once encoded as a snapshot; oldest dropped first). A snapshot therefore always fits in a frame. |
 | `take` | `free` | `free`: any eligible member may take. Other values are reserved; a host that meets one MUST NOT take in that cell. |
 
 **Who may join.** A current member whose terms hold a `records` entry for the namespace
@@ -133,18 +139,14 @@ started, it accepts only `hello` frames from that key and takes from them only t
 delegation, `fresh` and `echo`. That echoing frame's `n` opens the window: frames with a
 lower `n` from that key are dropped.
 
-**Evidence without a window.** A holder frame forwarded as evidence (§S4) may come from a
-key whose window the receiver cannot open, because its origin is unreachable. From such a
-frame the receiver takes only the claim, under §S4 rules 1–4, and counts the holder as
-heard at the moment of receipt; it ignores `seq`, `snapshot` and `payload`. A replayed old
-frame can thus at most make a member that is behind accept a claim that was once real,
-after which §S6 applies.
+A member keeps windows for at most 4 session keys per member, dropping the oldest, and
+drops every window of a member it no longer accepts (§S2).
 
 The plaintext is `{"kind": …, …}`. Kinds and their fields:
 
 | Kind | Sender | Fields | Meaning |
 | --- | --- | --- | --- |
-| `hello` | any | `fresh`, `echo`, `seen` (`{term, rank, holder, via, seq}` or `null`), `heard` (`live`, `lapsed` or `unknown`), `lapsed` (bool) | Join, rejoin or ask to be brought up to date. Sent on every link-up. `seen.seq` is `null` when the sender holds no state for that claim. `heard` says whether the sender has itself received holder frames from `seen.holder` (§S4). `lapsed` is informational; receivers ignore it. |
+| `hello` | any | `fresh`, `echo`, `seen` (`{term, rank, holder, via, seq}` or `null`), `lapsed` (bool) | Join, rejoin or ask to be brought up to date. Sent on every link-up. `seen.seq` is `null` when the sender holds no state for that claim. `lapsed` is informational; receivers ignore it. |
 | `state` | holder | `claim`, `seq`, `snapshot` | Full state for one member (`to` set) or all. |
 | `beat` | holder | `claim`, `seq` | Liveness when the holder has nothing else to send. |
 | `msg` | holder | `claim`, `seq`, `origin`, `id`, `payload` | One ordered message. |
@@ -192,28 +194,11 @@ acting as holder at once: it sends no further `state`, `beat`, `msg`, `refuse`, 
 `decline` under its old claim, and reports the change to the application.
 
 **Correcting lesser claims.** Any member that receives a holder frame or `take` under a
-claim less than its accepted claim answers the sender:
-
-- a holder, with `state`;
-- a member that released that greater claim, with its `bye` again;
-- any other member, with **evidence** when it has it: the most recent holder frame it
-  accepted directly from the greater claim's holder within `holderTimeoutMs`, forwarded
-  unchanged. A frame that itself arrived as forwarded evidence is never forwarded again
-  and never counts toward this: its age is the age of the direct hearing
-  (a frame is signed by its origin, so anyone may forward it). The sender then accepts the
-  greater claim under rule 2 or 3 as if the holder had sent it directly, and yields;
-- otherwise with `hello`, whose `heard` is `lapsed` if the member's own link has worked for
-  `holderTimeoutMs` and it accepted no holder frame from that holder in that time, and
-  `unknown` if its link has not worked that long.
-
-The same answer is given to a `hello` whose `seen` is `null` or names a lesser claim, and a
-member remembers the claim each peer last named so that it forwards new evidence to peers
-that are behind without waiting for them to speak. A member that is silent and behind
-therefore still learns the holder.
-
-Whether a holder is alive is therefore judged only by a member that has listened for it,
-never by one that could not have heard it. Each member keeps the last holder frame it
-accepted for this purpose.
+claim less than its accepted claim answers the sender: a holder with `state`; a member
+that released that greater claim with its `bye` again; any other member with `hello`. The
+same answer is given to a `hello` whose `seen` is `null` or names a lesser claim. A claim
+whose holder has gone quiet therefore still reaches everyone in the group, who then apply
+"Renewing" (§S5).
 
 ## S5. Passing and taking
 
@@ -242,23 +227,6 @@ the term of its accepted claim (0 if none) when one of these holds:
 - there is no holder;
 - the holder is lapsed to it (§S6);
 - it sent `ask` and has accepted no holder frame from the holder for `askTimeoutMs` since.
-  A frame received as forwarded evidence does not count here.
-
-A writer that took, or wanted to take, and then yields to forwarded evidence keeps wanting
-the role, because it cannot tell whether that holder is reachable:
-
-- If it then hears the holder directly, a want that existed only because it had taken is
-  dropped (the returning member yields, §S6); a want its application asked for continues
-  as an ordinary `ask`.
-- Otherwise it stays silent until that holder is lapsed to it (§S6, counted from when the
-  evidence arrived), sends its lapse `hello`, waits `askTimeoutMs`, and only then takes, at
-  a term above the evidence.
-- A member that accepted a holder frame of that claim directly within `holderTimeoutMs`
-  answers a `hello` reporting that holder `lapsed` with the frame as evidence, and a holder
-  answers it with `state`; either clears the lapse and cancels the take.
-
-So members that want the role cannot displace each other in a loop, whether or not they
-can hear each other.
 
 It becomes holder at once, with the state it last held for the cell (application-defined
 projection included, §S7) or a state the application supplies with the take, `seq` 0, and
@@ -270,7 +238,9 @@ that after a restart it does not act as that claim's holder.
 
 **Yielding state.** A member that yields to a `take` (not to a `pass` it sent) sends
 `yielded`, with the claim it held, its last `seq` and its state, to the holder it now
-accepts. That holder reports it to the application and answers `ack`. Until it receives an
+accepts. A `yielded` is accepted only from the member named as holder in the claim it
+carries, and an `ack` only from the member the receiver accepts as holder. That holder
+reports the `yielded` to the application and answers `ack`. Until it receives an
 `ack` naming that claim, the displaced member resends `yielded` to whichever member it
 currently accepts as holder, when it hears a frame from that holder, at most once per
 `askTimeoutMs`. It changes no claim and no ordered state: it exists so that what the
@@ -284,19 +254,18 @@ before the pass arrived) is still reported to that member's application, once.
 **Renewing.** A holder raises its own claim to the greater term + 1, rank 0, and sends
 `state`, when it learns of a claim not less than its own that nobody is holding:
 
-- from a `hello` whose `seen` names another member and whose `heard` is `lapsed`;
+- from a `hello.seen` naming another member from which it has accepted no holder frame or
+  `take` for `holderTimeoutMs`, counted only once its own link has worked that long (inside
+  a group a live holder would have been heard; a member that has just joined a group has
+  not listened long enough to judge, and treats every member as holding until it has);
 - from a `hello.seen` or a `pass` naming itself under a greater claim;
 - from a `bye` (a released claim has no holder);
 - from a `hello` sent by the named holder itself (a `hello` cannot say whether its sender
   still holds; a sender that does hold then yields to the resulting `state`).
 
-A `hello` whose `heard` is `unknown` causes no renewal: the holder keeps its claim until
-evidence or a `lapsed` report arrives. A holder acts on a `lapsed` report only once its own
-link has worked for `holderTimeoutMs`, so a member that has just returned does not displace
-a live holder because a witness missed some beats. A writer that becomes holder orders its
-own unanswered submits. A holder never renews because it has not itself
-heard another holder. Terms never go backwards for any pair of members that have exchanged
-frames. A member whose term has reached 2^53−1 does not take or renew.
+A writer that becomes holder orders its own unanswered submits. Terms never go backwards
+for any pair of members that have exchanged frames. A member whose term has reached 2^53−1
+does not take or renew.
 
 **Declining.** A holder MAY answer `ask` with `decline`. An asker that receives `decline`
 MUST NOT take on the timeout rule for that ask.
@@ -375,6 +344,16 @@ application learns of the session from the carrier without waiting for the holde
 **Direct carriers** (device to device) are defined by their own documents and MUST carry
 frames unchanged.
 
+**Bridging.** A member with more than one carrier, or a carrier that reaches only some
+members, forwards every frame it accepts for the first time, unchanged, on each of its
+other carriers and to each of its other direct peers; it never forwards a frame back to
+where it came from, and never forwards a frame it has already accepted (the §S3 window is
+the memory of that). A frame addressed with `to` is forwarded the same way and ignored by
+members it does not name. Frames are signed by their origin, so a bridged frame is verified
+exactly as a direct one, and the freshness exchange of §S3 works across bridges because
+hellos are bridged too. Bridging is what makes a group fully reachable; with only the home
+carrier it has nothing to do.
+
 ## S10. What an application gets
 
 The core exposes, per cell: join and leave; the holder and whether it is this member; the
@@ -394,15 +373,11 @@ reorder frames and partition members for any time:
 - **G3.** After a `pass` is sent, the passing member sends no other holder frame under the
   old claim, and a member that becomes holder by that `pass` starts with exactly its
   snapshot.
-- **G4.** While a holder is live, any two members joined by a chain of members, each of
-  which eventually exchanges frames with the next, eventually hold the same accepted claim.
-  If the holder's frames also eventually reach both, they hold the same ordered state for
-  that claim. With no live holder, members may hold different dead claims until the next
-  take or renewal.
+- **G4.** While a holder is live, members of one group eventually hold the same accepted
+  claim and, for that claim, the same ordered state. With no live holder, members may hold
+  different dead claims until the next take or renewal.
 - **G5.** A writer with no holder reachable becomes holder within `askTimeoutMs` of asking,
-  or `holderTimeoutMs` of the holder's last frame, whichever its trigger was. If another
-  member forwards evidence of the unreachable holder, the bound is `holderTimeoutMs` +
-  `askTimeoutMs` from the last such evidence.
+  or `holderTimeoutMs` of the holder's last frame, whichever its trigger was.
 - **G6.** Once a frame carrying a claim, sent by that claim's holder, reaches a member, that
   member does not act as holder under any lesser claim.
 - **G7.** No frame is ever a record, and a carrier never holds a readable payload.
