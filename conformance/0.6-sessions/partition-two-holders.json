@@ -1,5 +1,5 @@
 {
-  "description": "a is cut off; b sees a lapsed and takes; when a's link heals its hello reaches b, which answers with state; a yields to the greater claim and sends `yielded` with what it held, which b reports (§S4, §S5 yielding state, §S6, G6, G11).",
+  "description": "a is cut off; b sees a lapsed and takes; when a's link heals its hello reaches b, which answers with state; a yields to the greater claim and sends `yielded` with what it held, which b reports and acknowledges with `ack` (§S4, §S5 yielding state, §S6, G6, G11).",
   "final": [
     {
       "digest": "16e54c500308ac4b6575b092a341c8b4fbbf9eeb9317724c8617e3238878bdb1",
@@ -41,7 +41,9 @@
     "askResend": true,
     "byeResend": true,
     "evidence": true,
+    "evidenceKeepsWant": true,
     "evidencePush": true,
+    "evidenceRefresh": true,
     "livenessHolderFrames": true,
     "persistRelease": true,
     "rank1FromHolder": true,
@@ -51,7 +53,7 @@
     "seenUnsynced": true,
     "stateReports": true,
     "submitRetry": true,
-    "yieldedRetry": true
+    "yieldedAck": true
   },
   "format": "colophon/session-vectors/6",
   "members": [
@@ -725,6 +727,21 @@
             "snapshot": "czA="
           },
           "output": "event"
+        },
+        {
+          "frame": {
+            "body": {
+              "kind": "ack",
+              "yielded": {
+                "holder": "a",
+                "rank": 0,
+                "term": 1
+              }
+            },
+            "from": "b",
+            "to": "a"
+          },
+          "output": "send"
         }
       ]
     },
@@ -772,6 +789,27 @@
           "output": "send"
         }
       ]
+    },
+    {
+      "at": 10010,
+      "input": {
+        "frame": {
+          "body": {
+            "kind": "ack",
+            "yielded": {
+              "holder": "a",
+              "rank": 0,
+              "term": 1
+            }
+          },
+          "from": "b",
+          "to": "a"
+        },
+        "input": "frame",
+        "writer": true
+      },
+      "member": "a",
+      "outputs": []
     },
     {
       "at": 10010,

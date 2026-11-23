@@ -33,12 +33,11 @@ use std::hash::{Hash, Hasher};
 use v06_session_support::*;
 
 const IDS: [&str; 3] = ["a", "b", "c"];
+thread_local! {
+    /// Deliveries within one lossless flush before it is called a livelock.
+    static GUARD: usize = env_u64("COLOPHON_EXPLORE_GUARD", 10_000) as usize;
+}
 static VERBOSE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-/// Completions in which a displaced state was never reported because the taker was itself
-/// displaced (finding R2f; counted, reported, not failed).
-static R2F: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-/// States from which revision 4's G5 fails by finding R1d (counted, reported, not failed).
-static G5_EVIDENCE_DISPLACED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 /// One explorer tick in ms: the §S8 gap-hello limit (1 s) is one tick.
 const TICK: u64 = 1_000;
 /// The longest policy duration (`policy()`): every comparison is `age >= d` or `age < d`
@@ -136,7 +135,11 @@ struct World {
     m: Vec<Session>,
     up: Vec<bool>,
     reach: Vec<Vec<bool>>,
-    net: Vec<(usize, Frame)>,
+    /// In flight: recipient, frame, and the forwarder when it is forwarded evidence.
+    net: Vec<(usize, Frame, Option<usize>)>,
+    /// `heard_direct[i][j]`: member i has received a frame directly from j since it
+    /// (re)started, so it has a freshness window for j's key (§S3 evidence without a window).
+    heard_direct: Vec<Vec<bool>>,
     cmds: u8,
     dups: u8,
     links: u8,
@@ -154,6 +157,8 @@ struct World {
     rotate: usize,
     /// Members that emitted `BecameHolder` (G5 bookkeeping).
     became: Vec<bool>,
+    /// Forwarded evidence frames delivered to each member (G5 bound).
+    evidence_seen: Vec<u64>,
 }
 
 fn idx(id: &str) -> usize {
@@ -183,6 +188,7 @@ impl World {
             up: vec![true; b.members],
             reach: reach_for(b.topo, b.members),
             net: Vec::new(),
+            heard_direct: vec![vec![false; b.members]; b.members],
             cmds: b.cmds,
             dups: b.dups,
             links: b.links,
@@ -198,6 +204,7 @@ impl World {
             persists: 0,
             rotate: 0,
             became: vec![false; b.members],
+            evidence_seen: vec![0; b.members],
         };
         for i in 0..b.members {
             w.input(i, Input::App { command: Command::Join { state: None } }, b, None).unwrap();
@@ -254,6 +261,7 @@ impl World {
             }
             self.up.hash(&mut h);
             self.net.hash(&mut h);
+            self.heard_direct.hash(&mut h);
             (self.cmds, self.dups, self.links, self.restarts, self.crashes).hash(&mut h);
             self.asks.hash(&mut h);
             self.persisted.hash(&mut h);
@@ -264,11 +272,11 @@ impl World {
         (u128::from(one(0)) << 64) | u128::from(one(1))
     }
 
-    fn route(&mut self, src: usize, dst: usize, frame: Frame, b: &Bounds) {
+    fn route(&mut self, src: usize, dst: usize, frame: Frame, b: &Bounds, via: Option<usize>) {
         if !self.up[src] || !self.reach[src][dst] {
             return;
         }
-        let item = (dst, frame);
+        let item = (dst, frame, via);
         let fits = !self.net.contains(&item) && self.net.len() < b.cap;
         if self.lossless || fits {
             self.net.push(item);
@@ -318,10 +326,10 @@ impl World {
                         None => (0..self.m.len()).filter(|j| *j != i).collect(),
                     };
                     for d in dsts {
-                        self.route(i, d, frame.clone(), b);
+                        self.route(i, d, frame.clone(), b, None);
                     }
                 }
-                Output::Forward { to, frame } => self.route(i, idx(to), frame.clone(), b),
+                Output::Forward { to, frame } => self.route(i, idx(to), frame.clone(), b, Some(i)),
                 Output::Persist { claim, released } => {
                     self.persists += 1;
                     self.persisted[i] = Some(Persisted {
@@ -354,6 +362,7 @@ impl World {
 
     fn restart(&mut self, i: usize, b: &Bounds) -> Result<(), String> {
         self.m[i] = Session::with_fixes(IDS[i], true, policy(), self.persisted[i].clone(), self.fixes);
+        self.heard_direct[i] = vec![false; self.m.len()];
         self.ghost.check_restart(&self.m[i])?;
         // A member that restarts lost what it held: it cannot report it (G11 is about
         // members that keep running).
@@ -374,23 +383,41 @@ impl World {
         Ok(())
     }
 
-    fn deliver_input(frame: Frame) -> Input {
+    /// The input for delivering `frame` to `d`; forwarded evidence is windowed only if `d`
+    /// has heard the origin directly since it started.
+    fn deliver_input(&mut self, d: usize, frame: Frame, via: Option<usize>) -> Input {
+        let origin = idx(&frame.from);
+        let forwarded = via.map(|v| Forwarded {
+            via: IDS[v].to_owned(),
+            windowed: self.heard_direct[d][origin],
+        });
+        if via.is_none() {
+            self.heard_direct[d][origin] = true;
+        } else {
+            self.evidence_seen[d] += 1;
+        }
         Input::Frame {
             frame,
             writer: true,
             key: None,
             n: None,
+            forwarded,
         }
     }
 
     /// Deliver everything (lossless mode) in the given fair order.
     fn flush(&mut self, b: &Bounds, s: Schedule) -> Result<(), String> {
         let mut guard = 0;
+        let mut last: VecDeque<String> = VecDeque::new();
         while !self.net.is_empty() {
             guard += 1;
-            if guard > 10_000 {
-                return Err("livelock: frames never quiesce".into());
+            if guard > GUARD.with(|g| *g) {
+                return Err(format!(
+                    "livelock: frames never quiesce; last deliveries: {}",
+                    last.iter().cloned().collect::<Vec<_>>().join(" | ")
+                ));
             }
+
             let k = match s {
                 Schedule::Fifo => 0,
                 Schedule::Lifo => self.net.len() - 1,
@@ -399,9 +426,13 @@ impl World {
                     self.rotate % self.net.len()
                 }
             };
-            let (d, f) = self.net.remove(k);
+            let (d, f, v) = self.net.remove(k);
+            if guard + 20 > GUARD.with(|g| *g) {
+                last.push_back(format!("{}->{}{} {}", f.from, IDS[d], v.map_or(String::new(), |v| format!(" via {}", IDS[v])), show_body(&f.body)));
+            }
             if self.up[d] {
-                self.input(d, Self::deliver_input(f), b, None)?;
+                let input = self.deliver_input(d, f, v);
+                self.input(d, input, b, None)?;
             }
         }
         Ok(())
@@ -417,7 +448,7 @@ impl World {
 
     fn actions(&self) -> Vec<Action> {
         let mut v = Vec::new();
-        for (k, (d, _)) in self.net.iter().enumerate() {
+        for (k, (d, _, _)) in self.net.iter().enumerate() {
             if self.up[*d] {
                 v.push(Action::Deliver(k));
                 if self.dups > 0 {
@@ -489,13 +520,13 @@ impl World {
     fn prepare(&mut self, a: &Action) -> Option<(usize, Input)> {
         Some(match a {
             Action::Deliver(k) => {
-                let (d, f) = self.net.remove(*k);
-                (d, Self::deliver_input(f))
+                let (d, f, v) = self.net.remove(*k);
+                (d, self.deliver_input(d, f, v))
             }
             Action::Dup(k) => {
                 self.dups -= 1;
-                let (d, f) = self.net[*k].clone();
-                (d, Self::deliver_input(f))
+                let (d, f, v) = self.net[*k].clone();
+                (d, self.deliver_input(d, f, v))
             }
             Action::Link(i, up) => {
                 if self.links > 0 {
@@ -634,21 +665,20 @@ impl World {
         }
         check_converged_topo(&w.m, &w.reach).map_err(|e| format!("{e} {tag}"))?;
         if w.fixes.state_reports {
+            // G11 (revision 5), strictly: a displaced member that kept running and can
+            // exchange frames with the component's holder has had its state reported.
             let comp = w.component();
-            for (taker, displaced, claim) in &w.ghost.owed {
-                let (t, d) = (idx(taker), idx(displaced));
-                if w.m[t].joined() && w.m[d].joined() && w.reach[d][t] && comp[d] == comp[t] {
-                    if w.fixes.yielded_retry && !w.m[t].is_holder() {
-                        // Finding R2f: the taker was itself displaced and no longer speaks to
-                        // the displaced member; without an acknowledgement the report can be
-                        // lost. Counted and reported, not failed.
-                        R2F.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        continue;
+            for (_, displaced, claim) in &w.ghost.owed {
+                let d = idx(displaced);
+                let holder = (0..w.m.len()).find(|&h| comp[h] == comp[d] && w.m[h].sends_as_holder());
+                if let Some(h) = holder {
+                    if w.m[d].joined() && w.reach[d][h] && w.reach[h][d] {
+                        return Err(format!(
+                            "G11: {displaced}'s state under {} never reported to a holder ({} holds) {tag}",
+                            show_claim(claim),
+                            IDS[h]
+                        ));
                     }
-                    return Err(format!(
-                        "G11: {displaced}'s state under {} never reported to {taker} {tag}",
-                        show_claim(claim)
-                    ));
                 }
             }
         }
@@ -677,7 +707,7 @@ impl World {
             w.reach[h][j] = false;
             w.reach[j][h] = false;
         }
-        w.net.retain(|(d, f)| *d != h && f.from != IDS[h]);
+        w.net.retain(|(d, f, v)| *d != h && (f.from != IDS[h] || v.is_some_and(|v| v != h)));
         for i in 0..w.m.len() {
             if i != h && !w.up[i] {
                 w.up[i] = true;
@@ -696,42 +726,23 @@ impl World {
         }
         w.became = vec![false; w.m.len()];
         w.input(wi, Input::App { command: Command::Ask }, b, None)?;
-        // askTimeoutMs plus a tick; but evidence of the cut-off holder, still younger than
-        // holderTimeoutMs at another member, can displace the asker's take (finding R1d), so
-        // the bound is holderTimeoutMs + askTimeoutMs when that happens.
+        // G5 (revision 5): askTimeoutMs plus a tick; with forwarded evidence of the cut-off
+        // holder, holderTimeoutMs + askTimeoutMs from the last such evidence (plus ticks).
         let p = policy();
         let quick = p.ask_timeout_ms / TICK + 1;
-        let deadline = (p.holder_timeout_ms + p.ask_timeout_ms) / TICK + 2;
-        let mut displaced = false;
-        for t in 0..deadline {
+        let slow = (p.holder_timeout_ms + p.ask_timeout_ms) / TICK + 2;
+        let mut deadline = quick;
+        let mut t = 0;
+        while t < deadline {
+            let before = w.evidence_seen.clone();
             w.flush(b, Schedule::Fifo)?;
-            if t == quick && !w.m[wi].sends_as_holder() {
-                displaced = true;
-            }
-            if t >= quick && !displaced {
-                break;
+            if w.evidence_seen[wi] > before[wi] {
+                deadline = deadline.max(t + slow).min(quick + 3 * slow);
             }
             w.tick(b)?;
+            t += 1;
         }
         w.flush(b, Schedule::Fifo)?;
-        if displaced && !w.m[wi].sends_as_holder() {
-            // Finding R1d: the asker took within askTimeoutMs, then yielded to evidence of the
-            // cut-off holder forwarded by a member that heard it less than holderTimeoutMs
-            // ago, and nothing makes it take again. Revision 4's G5 does not hold here.
-            let took = w.became[wi] && w.m[wi].accepted().is_some_and(|c| c.holder == IDS[h]);
-            if took {
-                if std::env::var("COLOPHON_EXPLORE_SHOW_R1D").is_ok() && G5_EVIDENCE_DISPLACED.load(std::sync::atomic::Ordering::Relaxed) == 0 {
-                    let mut v = self.clone();
-                    VERBOSE.store(true, std::sync::atomic::Ordering::Relaxed);
-                    println!("--- first R1d case, G5 completion replayed ---");
-                    v.became = vec![false; v.m.len()];
-                    let _ = v.complete_g5_inner(b);
-                    VERBOSE.store(false, std::sync::atomic::Ordering::Relaxed);
-                }
-                G5_EVIDENCE_DISPLACED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                return Ok(());
-            }
-        }
         if !w.m[wi].sends_as_holder() {
             return Err(format!(
                 "G5: {} asked with holder {} cut off and after {deadline} ticks is not holder (sees {:?})",
@@ -857,7 +868,7 @@ fn print_trace(b: Bounds, fixes: Fixes, path: &[Action]) -> String {
     for a in path {
         let label = match a {
             Action::Deliver(k) | Action::Dup(k) | Action::Drop(k) => {
-                let (d, f) = &w.net[*k];
+                let (d, f, _) = &w.net[*k];
                 format!("{a:?} [{}->{} {}]", f.from, IDS[*d], show_body(&f.body))
             }
             _ => format!("{a:?}"),
@@ -926,11 +937,6 @@ fn run(b: Bounds, fixes: Fixes) -> Report {
     let t = std::time::Instant::now();
     let r = explore(b, fixes);
     println!(
-        "so far: G5 displaced by evidence (finding R1d) {}, unreported displaced states (finding R2f) {}",
-        G5_EVIDENCE_DISPLACED.load(std::sync::atomic::Ordering::Relaxed),
-        R2F.load(std::sync::atomic::Ordering::Relaxed)
-    );
-    println!(
         "explore members={} topo={:?} start={:?} kinds={:?} crashes={}: {} states, {} transitions, {:?}, truncated={}",
         b.members,
         b.topo,
@@ -979,7 +985,9 @@ fn fixes_under_test() -> Fixes {
             "R2c" => f.persist_release = false,
             "R5" => f.submit_retry = false,
             "R1c" => f.evidence_push = false,
-            "R2d" => f.yielded_retry = false,
+            "R2d" => f.yielded_ack = false,
+            "R1d" => f.evidence_keeps_want = false,
+            "R1f" => f.evidence_refresh = false,
             _ => {}
         }
     }
@@ -1049,24 +1057,37 @@ fn chain_handoff_bounds() -> Bounds {
     b
 }
 
+/// Finding R1f: revision 5 as written livelocks on the chain. a and c both took because
+/// they wanted the role; each yields to evidence of the other relayed by b, keeps wanting,
+/// and takes again once the other is lapsed to it, forever (G10).
+#[test]
+fn chain_two_holders_rev5_livelocks() {
+    let r = chain_two_holders(Fixes::REV5);
+    let v = r.violation.expect("revision 5 should livelock on the chain");
+    assert!(v.0.starts_with("G10"), "{}", v.0);
+}
+
 /// The chain with ask, take and pass.
 #[test]
 fn chain_handoff() {
     check_bounds(chain_handoff_bounds());
 }
 
-/// Revision 4 as written fails where the reference machine goes beyond it: without
-/// evidence for silent members (R1c) a member behind a non-holder on the chain never learns
-/// the holder (G4); with a single `yielded` resend (R2d) two losses lose a displaced
-/// holder's state (G11).
+/// Revision 4 as written fails where revision 5 changed it: without evidence for silent
+/// members (R1c) a member behind a non-holder on the chain never learns the holder (G4);
+/// without the `ack` (R2d/R2f) two losses lose a displaced holder's state (G11); without
+/// R1d an asker displaced by forwarded evidence of a cut-off holder never takes (G5).
 #[test]
-fn rev4_text_counterexamples() {
+fn rev4_counterexamples() {
     let r = run(chain_handoff_bounds(), Fixes { evidence_push: false, ..Fixes::ALL });
     let v = r.violation.expect("R1c off should break G4 on the chain");
     assert!(v.0.starts_with("G4"), "{}", v.0);
-    let r = run(bounds(2, "atpu", (3, 1, 2, 3), 7), Fixes { yielded_retry: false, ..Fixes::ALL });
+    let r = run(bounds(2, "atpu", (3, 1, 2, 3), 7), Fixes { yielded_ack: false, ..Fixes::ALL });
     let v = r.violation.expect("R2d off should break G11");
     assert!(v.0.starts_with("G11"), "{}", v.0);
+    let r = run(bounds(3, "atp", (2, 0, 1, 3), 7), Fixes { evidence_keeps_want: false, ..Fixes::ALL });
+    let v = r.violation.expect("R1d off should break G5");
+    assert!(v.0.starts_with("G5"), "{}", v.0);
 }
 
 /// H4/G12: every single-member step cut after each prefix of its outputs, then a restart.
@@ -1120,7 +1141,7 @@ struct Router {
     ids: Vec<&'static str>,
     m: Vec<Session>,
     reach: Vec<Vec<bool>>,
-    net: Vec<(usize, Frame)>,
+    net: Vec<(usize, Frame, Option<usize>)>,
     events: Vec<(usize, Event)>,
     persisted: Vec<Option<Persisted>>,
     fixes: Fixes,
@@ -1155,14 +1176,14 @@ impl Router {
                     };
                     for d in dsts {
                         if self.reach[i][d] {
-                            self.net.push((d, frame.clone()));
+                            self.net.push((d, frame.clone(), None));
                         }
                     }
                 }
                 Output::Forward { to, frame } => {
                     let d = self.i(&to);
                     if self.reach[i][d] {
-                        self.net.push((d, frame));
+                        self.net.push((d, frame, Some(i)));
                     }
                 }
                 Output::Persist { claim, released } => self.persisted[i] = Some(Persisted { claim, released }),
@@ -1181,12 +1202,15 @@ impl Router {
         while !self.net.is_empty() {
             guard += 1;
             assert!(guard < 10_000, "frames never quiesce");
-            let (d, f) = self.net.remove(0);
+            let (d, f, v) = self.net.remove(0);
             if hold(self.ids[d], &f) {
-                held.push((d, f));
+                held.push((d, f, v));
                 continue;
             }
-            self.step(d, Input::Frame { frame: f, writer: true, key: None, n: None }, now);
+            // Scripted evidence is delivered with a window (the stale-evidence test builds its
+            // own windowless input).
+            let forwarded = v.map(|v| Forwarded { via: self.ids[v].to_owned(), windowed: true });
+            self.step(d, Input::Frame { frame: f, writer: true, key: None, n: None, forwarded }, now);
         }
         self.net = held;
     }
@@ -1370,7 +1394,7 @@ fn two_passes_to_one(fixes: Fixes, lose_a_pass_to_x: bool, loss_seed: Option<u64
     let mut rng = loss_seed.unwrap_or(0).wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
     let mut lose = |r: &mut Router, k: u64| {
         if lose_a_pass_to_x && k == 0 {
-            r.net.retain(|(d, f)| !(*d == 2 && f.from == "a" && matches!(f.body, Body::Pass { .. })));
+            r.net.retain(|(d, f, _)| !(*d == 2 && f.from == "a" && matches!(f.body, Body::Pass { .. })));
         }
         if loss_seed.is_some() && k < 12 {
             r.net.retain(|_| {

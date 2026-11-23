@@ -1,8 +1,8 @@
 {
-  "description": "the chain a↔b↔c with a↮c: a holds 1.0.a, c holds 1.0.c and b follows c; a's beat reaches b, which forwards c's last beat to a unchanged as evidence; a accepts 1.0.c and yields (§S4 correcting lesser claims, R1).",
+  "description": "the chain a↔b↔c with a↮c: a holds 1.0.a, c holds 1.0.c and b follows c; b forwards c's frames to a unchanged as evidence; a has never heard c, so it has no window for c's key and takes only the claim (its state stays A): a accepts 1.0.c and yields (§S4 correcting lesser claims, §S3 evidence without a window).",
   "final": [
     {
-      "digest": "1c8094a4ccf19fe180d4543e7303fae2c502e444f0fdb18f804c40605aa260b0",
+      "digest": "055305a8fe1c81dbd25e84aea21755a7609aad194f1741a0ef268d64a9990a07",
       "member": "a",
       "view": {
         "accepted": {
@@ -14,8 +14,8 @@
         "holder": "c",
         "holding": false,
         "seq": 0,
-        "state": "Qw==",
-        "synced": true
+        "state": "QQ==",
+        "synced": false
       }
     },
     {
@@ -58,7 +58,9 @@
     "askResend": true,
     "byeResend": true,
     "evidence": true,
+    "evidenceKeepsWant": true,
     "evidencePush": true,
+    "evidenceRefresh": true,
     "livenessHolderFrames": true,
     "persistRelease": true,
     "rank1FromHolder": true,
@@ -68,7 +70,7 @@
     "seenUnsynced": true,
     "stateReports": true,
     "submitRetry": true,
-    "yieldedRetry": true
+    "yieldedAck": true
   },
   "format": "colophon/session-vectors/6",
   "members": [
@@ -673,6 +675,10 @@
     {
       "at": 20,
       "input": {
+        "forwarded": {
+          "via": "b",
+          "windowed": false
+        },
         "frame": {
           "body": {
             "claim": {
@@ -691,26 +697,7 @@
         "writer": true
       },
       "member": "c",
-      "outputs": [
-        {
-          "frame": {
-            "body": {
-              "claim": {
-                "holder": "c",
-                "rank": 0,
-                "term": 1
-              },
-              "kind": "state",
-              "seq": 0,
-              "snapshot": "Qw=="
-            },
-            "from": "c",
-            "retain": true,
-            "to": "a"
-          },
-          "output": "send"
-        }
-      ]
+      "outputs": []
     },
     {
       "at": 20,
@@ -760,6 +747,10 @@
     {
       "at": 20,
       "input": {
+        "forwarded": {
+          "via": "b",
+          "windowed": false
+        },
         "frame": {
           "body": {
             "claim": {
@@ -831,7 +822,7 @@
             "body": {
               "echo": [],
               "fresh": "AAAAAAAAAAAAAAAAAAAAAA",
-              "heard": "live",
+              "heard": "unknown",
               "kind": "hello",
               "lapsed": false,
               "seen": {
@@ -845,37 +836,6 @@
             "to": "c"
           },
           "output": "send"
-        },
-        {
-          "event": {
-            "claim": {
-              "holder": "c",
-              "rank": 0,
-              "term": 1
-            },
-            "event": "snapshot",
-            "seq": 0,
-            "snapshot": "Qw=="
-          },
-          "output": "event"
-        },
-        {
-          "frame": {
-            "body": {
-              "claim": {
-                "holder": "c",
-                "rank": 0,
-                "term": 1
-              },
-              "kind": "state",
-              "seq": 0,
-              "snapshot": "Qw=="
-            },
-            "from": "c",
-            "retain": true
-          },
-          "output": "forward",
-          "to": "b"
         }
       ]
     },
@@ -949,29 +909,10 @@
     {
       "at": 20,
       "input": {
-        "frame": {
-          "body": {
-            "claim": {
-              "holder": "c",
-              "rank": 0,
-              "term": 1
-            },
-            "kind": "state",
-            "seq": 0,
-            "snapshot": "Qw=="
-          },
-          "from": "c",
-          "retain": true
+        "forwarded": {
+          "via": "b",
+          "windowed": false
         },
-        "input": "frame",
-        "writer": true
-      },
-      "member": "b",
-      "outputs": []
-    },
-    {
-      "at": 20,
-      "input": {
         "frame": {
           "body": {
             "claim": {
@@ -1045,25 +986,7 @@
         "input": "tick"
       },
       "member": "a",
-      "outputs": [
-        {
-          "frame": {
-            "body": {
-              "claim": {
-                "holder": "a",
-                "rank": 0,
-                "term": 1
-              },
-              "kind": "yielded",
-              "seq": 0,
-              "snapshot": "QQ=="
-            },
-            "from": "a",
-            "to": "c"
-          },
-          "output": "send"
-        }
-      ]
+      "outputs": []
     }
   ]
 }

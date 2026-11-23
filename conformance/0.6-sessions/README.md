@@ -1,7 +1,7 @@
 # 0.6 session vectors
 
 Transcripts of the reference session machine (`colophon_core::v06::session`, spec
-`spec/colophon-0.6-sessions.md` revision 4, §S3–§S8), for replay by the Swift, Kotlin and JS bindings.
+`spec/colophon-0.6-sessions.md` revision 5, §S3–§S8), for replay by the Swift, Kotlin and JS bindings.
 They are generated and checked by `crates/colophon-core/tests/v06_session_vectors.rs`
 (`COLOPHON_REGEN_VECTORS=1` rewrites them). The draft is unfrozen: these files change with it.
 
@@ -35,7 +35,9 @@ machine with a new one built from what the member persisted (the last `persist` 
 
 - `at` is that member's own monotonic clock in ms; members' clocks are unrelated.
 - `input` is tagged by `input`: `frame` (`frame`, `writer`, and, in keyed scenarios, the
-  sender's `key` and the frame's `n` for the §S3 freshness gate), `tick`, `linkUp`, `linkDown`,
+  sender's `key` and the frame's `n` for the §S3 freshness gate, and `forwarded {via,
+  windowed}` when another member forwarded it as evidence; `windowed: false` means the
+  receiver has no window for the origin's key and uses only the claim), `tick`, `linkUp`, `linkDown`,
   `app` (`command`, tagged by `command`: `join {state|null}`, `leave`, `ask`, `pass {to, snapshot}`,
   `decline {to}`, `take {state|null}`, `release`, `publish {id, payload}`,
   `submit {id, payload}`, `presence {payload}`, `ping {to}`).
@@ -43,7 +45,7 @@ machine with a new one built from what the member persisted (the last `persist` 
   the spec's field names. Claims are `{term, rank, holder, via}` (`via` only at rank 1).
   `hello` is `{fresh, echo, seen, heard, lapsed}`: `seen` is `{term, rank, holder, via,
   seq}` where `seq` may be `null`, `heard` is `live`, `lapsed` or `unknown`. `yielded` is
-  `{claim, seq, snapshot}`. `bye` carries `leaving`.
+  `{claim, seq, snapshot}` and `ack` is `{yielded}`. `bye` carries `leaving`.
 - Outputs are tagged by `output`: `send {frame}`, `forward {to, frame}` (another member's
   frame, unchanged, as evidence), `persist {claim, released?}`, `event {event}`; events are
   tagged by `event` (`becameHolder`, `yielded`, `holderChanged`, `askReceived`, `declined`,

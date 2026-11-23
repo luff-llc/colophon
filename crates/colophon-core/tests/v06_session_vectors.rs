@@ -25,11 +25,11 @@ fn id(label: &str) -> Id {
     Id::from_label(label)
 }
 fn frame_in(frame: Frame) -> Input {
-    Input::Frame { frame, writer: true, key: None, n: None }
+    Input::Frame { frame, writer: true, key: None, n: None, forwarded: None }
 }
 
 /// Recipient, frame, and the sender key and `n` when keyed.
-type InFlight = (String, Frame, Option<(String, u64)>);
+type InFlight = (String, Frame, Option<(String, u64)>, Option<String>);
 
 /// A scripted scenario. Sends go to a pending list; `deliver` routes them in order.
 struct Script {
@@ -46,6 +46,8 @@ struct Script {
     /// Keyed: each member has a session key `k-<id>`, an `n` counter and a `fresh` seed.
     keyed: bool,
     n: BTreeMap<String, u64>,
+    /// (recipient, origin) pairs that have exchanged a direct frame.
+    direct: std::collections::BTreeSet<(String, String)>,
 }
 
 impl Script {
@@ -67,6 +69,7 @@ impl Script {
             cut: Vec::new(),
             keyed: false,
             n: BTreeMap::new(),
+            direct: std::collections::BTreeSet::new(),
         }
     }
     fn keyed(mut self) -> Self {
@@ -82,7 +85,8 @@ impl Script {
     }
     fn route(&mut self, from: &str, to: String, frame: Frame, key: Option<(String, u64)>) {
         if !self.cut.iter().any(|(x, y)| x == from && *y == to) {
-            self.pending.push((to, frame, key));
+            let via = (frame.from != from).then(|| from.to_owned());
+            self.pending.push((to, frame, key, via));
         }
     }
     fn ids(&self) -> Vec<String> {
@@ -126,7 +130,7 @@ impl Script {
         while !self.pending.is_empty() {
             guard += 1;
             assert!(guard < 1000, "{}: frames never quiesce", self.name);
-            let (to, f, key) = self.pending.remove(0);
+            let (to, f, key, via) = self.pending.remove(0);
             if drop(&to, &f) {
                 continue;
             }
@@ -134,7 +138,16 @@ impl Script {
                 Some((k, n)) => (Some(k), Some(n)),
                 None => (None, None),
             };
-            self.step(&to, at, Input::Frame { frame: f, writer: true, key, n });
+            // Forwarded evidence is windowed only if the recipient has heard its origin
+            // directly (§S3 evidence without a window).
+            let forwarded = via.map(|v| Forwarded {
+                via: v,
+                windowed: self.direct.contains(&(to.clone(), f.from.clone())),
+            });
+            if forwarded.is_none() {
+                self.direct.insert((to.clone(), f.from.clone()));
+            }
+            self.step(&to, at, Input::Frame { frame: f, writer: true, key, n, forwarded });
         }
     }
     fn deliver(&mut self, at: u64) {
@@ -281,7 +294,7 @@ fn scenarios() -> Vec<Script> {
     assert!(s.session("c").synced());
     v.push(s);
 
-    let mut s = started("partition-two-holders", "a is cut off; b sees a lapsed and takes; when a's link heals its hello reaches b, which answers with state; a yields to the greater claim and sends `yielded` with what it held, which b reports (§S4, §S5 yielding state, §S6, G6, G11).", p(), &["a", "b"]);
+    let mut s = started("partition-two-holders", "a is cut off; b sees a lapsed and takes; when a's link heals its hello reaches b, which answers with state; a yields to the greater claim and sends `yielded` with what it held, which b reports and acknowledges with `ack` (§S4, §S5 yielding state, §S6, G6, G11).", p(), &["a", "b"]);
     s.step("a", 1_000, Input::LinkDown);
     s.lose_all();
     s.cmd("b", 1_000, Command::Take { state: None });
@@ -291,6 +304,7 @@ fn scenarios() -> Vec<Script> {
     s.deliver(10_010);
     assert!(s.session("b").is_holder() && !s.session("a").is_holder());
     assert!(s.steps.iter().any(|st| st["outputs"].to_string().contains("\"displaced\"")));
+    assert!(s.steps.iter().any(|st| st["outputs"].to_string().contains("\"kind\":\"ack\"")));
     v.push(s);
 
     let mut s = started("out-of-contact-return", "a has no link for 20 s; on link-up it sends hello lapsed:true, sends no holder frame for askTimeoutMs, then retakes at term + 1 (§S6).", p(), &["a", "b"]);
@@ -367,8 +381,56 @@ fn scenarios() -> Vec<Script> {
     assert_eq!((o.rtt, o.offset, o.error), (81, -4, 41));
     v.push(s);
 
+    // Revision 5: stale evidence and the kept want.
+    let mut s = Script::new("stale-evidence", "b has no claim yet; a replayed old state of a claim 3.0.x that once existed arrives as evidence from a key b has no window for: b accepts the claim only (no state, no seq), then x is lapsed to b after holderTimeoutMs and b takes at 4.0.b (§S3 evidence without a window).", p(), &["a", "b"]);
+    s.cmd("b", 100, Command::Join { state: Some(b("MINE")) });
+    s.lose_all();
+    let stale = Frame { from: "x".into(), to: None, retain: true, body: Body::State { claim: Claim::new(3, 0, "x"), seq: 9, snapshot: b("OLD") } };
+    s.step("b", 200, Input::Frame { frame: stale, writer: true, key: None, n: None, forwarded: Some(Forwarded { via: "a".into(), windowed: false }) });
+    assert_eq!(s.session("b").accepted(), Some(&Claim::new(3, 0, "x")));
+    assert_eq!(s.session("b").state(), &b("MINE"));
+    s.cmd("b", 300, Command::Take { state: None });
+    s.tick("b", 15_100);
+    assert!(!s.session("b").is_holder());
+    s.tick("b", 15_200);
+    s.lose_all();
+    assert_eq!(s.session("b").accepted(), Some(&Claim::new(4, 0, "b")));
+    v.push(s);
+
+    let mut s = Script::new("want-kept-after-evidence", "z released and retook 2.0.z while x missed it; z is then cut off. x asks z, takes 2.0.x on the ask timeout; w, which heard z within holderTimeoutMs, forwards z's state as evidence; x yields but keeps wanting: it asks z again and takes only once z is lapsed to it, holderTimeoutMs after the evidence, and askTimeoutMs after its lapse hello brought no fresh evidence, at 3.0.x (§S5 R1d, R1f, G5).", p(), &["w", "x", "z"]);
+    s.join_all(0);
+    s.deliver(0);
+    s.cmd("z", 10, Command::Take { state: Some(b("Z")) });
+    s.deliver(20);
+    s.cmd("z", 30, Command::Release);
+    s.cmd("z", 40, Command::Ask);
+    s.deliver_if(50, |to, _| to == "x");
+    assert_eq!(s.session("w").accepted(), Some(&Claim::new(2, 0, "z")));
+    assert_eq!(s.session("x").accepted(), Some(&Claim::new(1, 0, "z")));
+    s.tick("z", 1_000);
+    s.deliver_if(1_010, |to, _| to == "x");
+    s.cut("z", "w");
+    s.cut("z", "x");
+    s.cmd("x", 2_000, Command::Ask);
+    s.deliver(2_010);
+    s.tick("x", 3_600);
+    s.deliver(3_610);
+    assert_eq!(s.session("x").accepted(), Some(&Claim::new(2, 0, "z")));
+    s.tick("x", 5_200);
+    assert!(!s.session("x").is_holder(), "no take on the ask timeout after evidence");
+    // Lapsed (holderTimeoutMs after the evidence): x says so to all and waits askTimeoutMs
+    // for fresh evidence (R1f); w's evidence of z is itself stale, so none comes.
+    s.tick("x", 18_700);
+    s.deliver(18_710);
+    assert!(!s.session("x").is_holder());
+    s.tick("x", 20_300);
+    s.deliver(20_310);
+    assert_eq!(s.session("x").accepted(), Some(&Claim::new(3, 0, "x")));
+    assert_eq!(s.session("w").accepted(), Some(&Claim::new(3, 0, "x")));
+    v.push(s);
+
     // Revision 4 behaviours.
-    let mut s = Script::new("evidence-forward", "the chain a↔b↔c with a↮c: a holds 1.0.a, c holds 1.0.c and b follows c; a's beat reaches b, which forwards c's last beat to a unchanged as evidence; a accepts 1.0.c and yields (§S4 correcting lesser claims, R1).", p(), &["a", "b", "c"]);
+    let mut s = Script::new("evidence-forward", "the chain a↔b↔c with a↮c: a holds 1.0.a, c holds 1.0.c and b follows c; b forwards c's frames to a unchanged as evidence; a has never heard c, so it has no window for c's key and takes only the claim (its state stays A): a accepts 1.0.c and yields (§S4 correcting lesser claims, §S3 evidence without a window).", p(), &["a", "b", "c"]);
     s.cut("a", "c");
     s.join_all(0);
     s.deliver(0);
@@ -381,6 +443,7 @@ fn scenarios() -> Vec<Script> {
     s.deliver(5_050);
     assert_eq!(s.session("a").accepted(), Some(&Claim::new(1, 0, "c")));
     assert!(!s.session("a").is_holder());
+    assert_eq!(s.session("a").state(), &b("A"));
     v.push(s);
 
     let mut s = started("heard-renew", "c, cut off from a, sees a lapsed and takes 2.0.c; b follows it, but the evidence b relays to a is lost, and c then falls silent. When a's beat reaches b while b has no fresh evidence: right after b restarts, b's hello says heard:unknown and a keeps its claim; once b's link has worked for holderTimeoutMs without hearing c, b says heard:lapsed and a renews over c to 3.0.a (§S4, §S5 renewing, R1).", p(), &["a", "b", "c"]);
@@ -429,7 +492,7 @@ fn scenarios() -> Vec<Script> {
     assert_eq!(s.session("b").accepted(), Some(&Claim::new(1, 0, "a")));
     // A replay of a's take with n = 1 (below the window's floor) changes nothing.
     let replay = Frame { from: "a".into(), to: None, retain: false, body: Body::Take { claim: Claim::new(1, 0, "a") } };
-    let outs = s.step("b", 30, Input::Frame { frame: replay, writer: true, key: Some("k-a".into()), n: Some(1) });
+    let outs = s.step("b", 30, Input::Frame { frame: replay, writer: true, key: Some("k-a".into()), n: Some(1), forwarded: None });
     assert!(outs.is_empty());
     v.push(s);
 

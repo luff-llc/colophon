@@ -58,7 +58,9 @@
     "askResend": true,
     "byeResend": true,
     "evidence": true,
+    "evidenceKeepsWant": true,
     "evidencePush": true,
+    "evidenceRefresh": true,
     "livenessHolderFrames": true,
     "persistRelease": true,
     "rank1FromHolder": true,
@@ -68,7 +70,7 @@
     "seenUnsynced": true,
     "stateReports": true,
     "submitRetry": true,
-    "yieldedRetry": true
+    "yieldedAck": true
   },
   "format": "colophon/session-vectors/6",
   "members": [
@@ -693,6 +695,10 @@
     {
       "at": 20,
       "input": {
+        "forwarded": {
+          "via": "b",
+          "windowed": true
+        },
         "frame": {
           "body": {
             "claim": {
@@ -716,6 +722,10 @@
     {
       "at": 20,
       "input": {
+        "forwarded": {
+          "via": "c",
+          "windowed": true
+        },
         "frame": {
           "body": {
             "claim": {
@@ -906,7 +916,26 @@
         "writer": true
       },
       "member": "a",
-      "outputs": []
+      "outputs": [
+        {
+          "frame": {
+            "body": {
+              "claim": {
+                "holder": "a",
+                "rank": 0,
+                "term": 1
+              },
+              "kind": "state",
+              "seq": 0,
+              "snapshot": "czA="
+            },
+            "from": "a",
+            "retain": true,
+            "to": "b"
+          },
+          "output": "send"
+        }
+      ]
     },
     {
       "at": 20010,
@@ -1146,6 +1175,49 @@
               "rank": 0,
               "term": 1
             },
+            "kind": "state",
+            "seq": 0,
+            "snapshot": "czA="
+          },
+          "from": "a",
+          "retain": true,
+          "to": "b"
+        },
+        "input": "frame",
+        "writer": true
+      },
+      "member": "b",
+      "outputs": [
+        {
+          "frame": {
+            "body": {
+              "claim": {
+                "holder": "b",
+                "rank": 0,
+                "term": 2
+              },
+              "kind": "state",
+              "seq": 0,
+              "snapshot": "czA="
+            },
+            "from": "b",
+            "retain": true,
+            "to": "a"
+          },
+          "output": "send"
+        }
+      ]
+    },
+    {
+      "at": 20010,
+      "input": {
+        "frame": {
+          "body": {
+            "claim": {
+              "holder": "a",
+              "rank": 0,
+              "term": 1
+            },
             "kind": "yielded",
             "seq": 0,
             "snapshot": "czA="
@@ -1171,6 +1243,21 @@
             "snapshot": "czA="
           },
           "output": "event"
+        },
+        {
+          "frame": {
+            "body": {
+              "kind": "ack",
+              "yielded": {
+                "holder": "a",
+                "rank": 0,
+                "term": 1
+              }
+            },
+            "from": "b",
+            "to": "a"
+          },
+          "output": "send"
         }
       ]
     },
@@ -1263,6 +1350,51 @@
           "output": "send"
         }
       ]
+    },
+    {
+      "at": 20010,
+      "input": {
+        "frame": {
+          "body": {
+            "claim": {
+              "holder": "b",
+              "rank": 0,
+              "term": 2
+            },
+            "kind": "state",
+            "seq": 0,
+            "snapshot": "czA="
+          },
+          "from": "b",
+          "retain": true,
+          "to": "a"
+        },
+        "input": "frame",
+        "writer": true
+      },
+      "member": "a",
+      "outputs": []
+    },
+    {
+      "at": 20010,
+      "input": {
+        "frame": {
+          "body": {
+            "kind": "ack",
+            "yielded": {
+              "holder": "a",
+              "rank": 0,
+              "term": 1
+            }
+          },
+          "from": "b",
+          "to": "a"
+        },
+        "input": "frame",
+        "writer": true
+      },
+      "member": "a",
+      "outputs": []
     },
     {
       "at": 20010,

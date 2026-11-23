@@ -147,6 +147,8 @@ struct Sim {
     stats: Stats,
     record: bool,
     take_failure: Option<String>,
+    /// The `n` each frame content was last sent with (forwarded frames keep it).
+    last_n: std::collections::HashMap<Frame, u64>,
     pass_rate: u64,
     fixes: Fixes,
     /// Settling: the application stops re-anchoring so the end state can be compared.
@@ -167,6 +169,8 @@ struct Stats {
     forwarded: u64,
     /// Displaced-state and late-pass reports (G11).
     reports: u64,
+    /// Forwarded frames delivered.
+    forwarded_delivered: u64,
 }
 
 const RATE: i64 = 1250;
@@ -208,6 +212,7 @@ impl Sim {
             stats: Stats::default(),
             record: false,
             take_failure: None,
+            last_n: std::collections::HashMap::new(),
             pass_rate: 700,
             fixes: Fixes::ALL,
             quiet: false,
@@ -287,6 +292,7 @@ impl Sim {
         }
         self.n[i] += 1;
         let n = self.n[i];
+        self.last_n.insert(frame.clone(), n);
         let dsts: Vec<usize> = match &frame.to {
             Some(t) => self.m.iter().position(|m| m.id == *t).into_iter().collect(),
             None => (0..self.m.len()).filter(|j| *j != i).collect(),
@@ -298,7 +304,9 @@ impl Sim {
             return;
         }
         let dsts: Vec<usize> = self.m.iter().position(|m| m.id == to).into_iter().collect();
-        self.carry(i, 0, frame, dsts);
+        // A forwarded frame keeps its origin's `n`.
+        let n = self.last_n.get(&frame).copied().unwrap_or(0);
+        self.carry(i, n, frame, dsts);
     }
     fn carry(&mut self, i: usize, n: u64, frame: Frame, dsts: Vec<usize>) {
         for j in dsts {
@@ -322,7 +330,19 @@ impl Sim {
         if !self.m[to].up || !self.m[src].up {
             return Ok(());
         }
-        if self.n_filter && n > 0 {
+        let forwarded = src != from;
+        let mut windowed = true;
+        if forwarded {
+            // §S3 evidence without a window: the receiver's 128-wide window for the origin's
+            // key decides. A copy it already accepted is dropped; without a window (never
+            // heard the origin since starting) or below it, only the claim is used.
+            let (high, seen) = self.m[to].high.entry(from).or_default();
+            if seen.contains(&n) {
+                return Ok(());
+            }
+            windowed = *high > 0 && n + 128 >= *high && n > 0;
+            self.stats.forwarded_delivered += 1;
+        } else if self.n_filter {
             let (high, seen) = self.m[to].high.entry(from).or_default();
             if seen.contains(&n) || n + 128 < *high {
                 return Ok(());
@@ -340,7 +360,11 @@ impl Sim {
                 q.pop_front();
             }
         }
-        self.input(to, Input::Frame { frame, writer: true, key: None, n: None })
+        let forwarded = forwarded.then(|| Forwarded {
+            via: self.m[src].id.clone(),
+            windowed,
+        });
+        self.input(to, Input::Frame { frame, writer: true, key: None, n: None, forwarded })
     }
 
     // ---- the application (§S12) ----
@@ -474,8 +498,6 @@ impl Sim {
 // Driving.
 
 const TICK_MS: u64 = 100;
-/// Displaced states never reported despite resends (finding R2f), across all runs.
-static R2F: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 #[derive(Clone, Debug)]
 enum Act {
@@ -525,6 +547,9 @@ impl Sim {
                 self.m[i].playing = None;
                 self.m[i].high.clear();
                 self.m[i].pongs.clear();
+                // A member that restarts lost what it held (G11 excludes crashes).
+                let me = self.m[i].id.clone();
+                self.ghost.owed.retain(|(_, d, _)| *d != me);
                 if !self.m[i].up {
                     self.input(i, Input::LinkDown)?;
                 }
@@ -645,13 +670,8 @@ impl Sim {
         if self.fixes.state_reports {
             for (taker, displaced, claim) in &self.ghost.owed {
                 let joined = |id: &str| self.m.iter().any(|m| m.id == id && m.s.joined());
-                if joined(taker) && joined(displaced) {
-                    if self.fixes.yielded_retry {
-                        // Finding R2f: bounded resends without an acknowledgement cannot
-                        // survive every partition; counted and reported, not failed.
-                        R2F.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        continue;
-                    }
+                let _ = taker;
+                if joined(displaced) && self.m.iter().any(|m| m.s.sends_as_holder()) {
                     return Err(format!(
                         "G11: {displaced}'s state under {} never reported to {taker}",
                         show_claim(claim)
@@ -753,6 +773,7 @@ fn random_seeds_hold_the_guarantees() {
                 total.early_applied += s.early_applied;
                 total.forwarded += s.forwarded;
                 total.reports += s.reports;
+                total.forwarded_delivered += s.forwarded_delivered;
                 total.max_take_error = total.max_take_error.max(s.max_take_error);
                 total.max_take_bound = total.max_take_bound.max(s.max_take_bound);
                 n += 1;
@@ -763,8 +784,7 @@ fn random_seeds_hold_the_guarantees() {
         }
     }
     println!(
-        "sim: {n} seeds passed; {total:?}; unreported displaced states (finding R2f): {}",
-        R2F.load(std::sync::atomic::Ordering::Relaxed)
+        "sim: {n} seeds passed; {total:?}"
     );
     // With the revision 2 window, reordered bursts are delivered and early hold applies them.
     assert!(n < 50 || total.early_applied > 0, "early hold never applied a message");
@@ -888,7 +908,7 @@ fn carrier_independence() {
 fn fix_ablation() {
     let all = Fixes::ALL;
     let group = Fixes { bye_resend: false, answer_lesser: false, renew_wider: false, liveness_holder_frames: false, ..all };
-    let cases: [(&str, Fixes); 20] = [
+    let cases: [(&str, Fixes); 22] = [
         ("no fix removed", all),
         ("F10 renew_needs_contact", Fixes { renew_needs_contact: false, ..all }),
         ("F5+F6+F7+F8 together", group),
@@ -907,7 +927,9 @@ fn fix_ablation() {
         ("R2c persist_release", Fixes { persist_release: false, ..all }),
         ("R5 submit_retry", Fixes { submit_retry: false, ..all }),
         ("R1c evidence_push", Fixes { evidence_push: false, ..all }),
-        ("R2d yielded_retry", Fixes { yielded_retry: false, ..all }),
+        ("R2d/R2f yielded_ack", Fixes { yielded_ack: false, ..all }),
+        ("R1d evidence_keeps_want", Fixes { evidence_keeps_want: false, ..all }),
+        ("revision 5 as written (REV5)", Fixes::REV5),
         ("R1e renew_guard", Fixes { renew_guard: false, ..all }),
     ];
 

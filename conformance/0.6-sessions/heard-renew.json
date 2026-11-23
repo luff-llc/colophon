@@ -58,7 +58,9 @@
     "askResend": true,
     "byeResend": true,
     "evidence": true,
+    "evidenceKeepsWant": true,
     "evidencePush": true,
+    "evidenceRefresh": true,
     "livenessHolderFrames": true,
     "persistRelease": true,
     "rank1FromHolder": true,
@@ -68,7 +70,7 @@
     "seenUnsynced": true,
     "stateReports": true,
     "submitRetry": true,
-    "yieldedRetry": true
+    "yieldedAck": true
   },
   "format": "colophon/session-vectors/6",
   "members": [
@@ -693,6 +695,10 @@
     {
       "at": 20,
       "input": {
+        "forwarded": {
+          "via": "b",
+          "windowed": true
+        },
         "frame": {
           "body": {
             "claim": {
@@ -716,6 +722,10 @@
     {
       "at": 20,
       "input": {
+        "forwarded": {
+          "via": "c",
+          "windowed": true
+        },
         "frame": {
           "body": {
             "claim": {

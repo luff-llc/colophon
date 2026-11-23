@@ -113,7 +113,8 @@ pub fn check_step_input(
                     }
                 }
                 Event::Displaced { from, claim, .. } => {
-                    ghost.owed.remove(&(me.to_owned(), from.clone(), claim.clone()));
+                    // Revision 5: any holder that reports it discharges it.
+                    ghost.owed.retain(|(_, d, c)| !(d == from && c == claim));
                 }
                 Event::BecameHolder { .. } => {
                     // A displaced member that holds again kept its own state.
@@ -383,6 +384,7 @@ pub fn show_body(b: &Body) -> String {
         Body::Yielded { claim, snapshot, .. } => {
             format!("yielded {} {:?}", show_claim(claim), s(snapshot))
         }
+        Body::Ack { yielded } => format!("ack {}", show_claim(yielded)),
         other => other.kind().to_owned(),
     }
 }
