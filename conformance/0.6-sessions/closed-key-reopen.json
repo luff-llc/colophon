@@ -1,0 +1,748 @@
+{
+  "description": "keyed frames, b alone, five session keys of a (k1–k5): each opens a window by echoing a fresh b issued; the fifth closes k1. A replay of k1's echoing hello (its echoed fresh still inside the 60 s memory) and of a take under k1 do nothing. k1 then answers a new challenge and its take is accepted (§S3 freshness, revision 17). a's own machine is idle: its frames are written by hand.",
+  "final": [
+    {
+      "digest": "5d68fb8fadb3ae764b1e46fcb0ae89baa9ea206ab5725e9df5fc330db69eb4c0",
+      "member": "a",
+      "view": {
+        "accepted": null,
+        "gated": false,
+        "holder": null,
+        "holding": false,
+        "seq": 0,
+        "state": "",
+        "synced": false
+      }
+    },
+    {
+      "digest": "79bdd3ef4cdbce83cc64e0ad793df092508f928565a6481e77d9d309449fb16d",
+      "member": "b",
+      "view": {
+        "accepted": {
+          "holder": "a",
+          "rank": 0,
+          "term": 1
+        },
+        "gated": false,
+        "holder": "a",
+        "holding": false,
+        "seq": 0,
+        "state": "",
+        "synced": false
+      }
+    }
+  ],
+  "fixes": {
+    "answerLesser": true,
+    "appendBound": true,
+    "askResend": true,
+    "byeResend": true,
+    "evidence": false,
+    "evidenceKeepsWant": false,
+    "evidencePush": false,
+    "evidenceRefresh": false,
+    "freshnessProbe": true,
+    "helloCorrection": true,
+    "livenessHolderFrames": true,
+    "passAck": true,
+    "persistRelease": true,
+    "rank1FromHolder": true,
+    "renewGuard": true,
+    "renewNeedsContact": true,
+    "renewWider": true,
+    "reopenChallenge": true,
+    "seenUnsynced": true,
+    "senderChecks": true,
+    "stateReports": true,
+    "submitRetry": true,
+    "windowCap": true,
+    "writerClaims": true,
+    "yieldedAck": true
+  },
+  "format": "colophon/session-vectors/6",
+  "members": [
+    {
+      "canWrite": true,
+      "freshSeed": "e00961cc04e55c4533144d93fda113d9",
+      "id": "a",
+      "persisted": null
+    },
+    {
+      "canWrite": true,
+      "freshSeed": "04f5d0e8d9ed2af7d1bb4641b2e4bd62",
+      "id": "b",
+      "persisted": null
+    }
+  ],
+  "name": "closed-key-reopen",
+  "policy": {
+    "askTimeoutMs": 1500,
+    "beatMs": 5000,
+    "fold": "latest",
+    "holderTimeoutMs": 15000,
+    "maxPayload": 8192,
+    "presenceTimeoutMs": 15000,
+    "retainMs": 60000,
+    "tail": 256,
+    "take": "free"
+  },
+  "steps": [
+    {
+      "at": 0,
+      "input": {
+        "input": "entitled",
+        "writers": [
+          "a",
+          "b"
+        ]
+      },
+      "member": "a",
+      "outputs": []
+    },
+    {
+      "at": 0,
+      "input": {
+        "command": {
+          "command": "join",
+          "state": null
+        },
+        "input": "app"
+      },
+      "member": "a",
+      "outputs": [
+        {
+          "frame": {
+            "body": {
+              "echo": [],
+              "fresh": "3iYwu-vxUSNjsUs1onEEHQ",
+              "kind": "hello",
+              "lapsed": false,
+              "seen": null
+            },
+            "from": "a"
+          },
+          "output": "send"
+        }
+      ]
+    },
+    {
+      "at": 0,
+      "input": {
+        "input": "entitled",
+        "writers": [
+          "a",
+          "b"
+        ]
+      },
+      "member": "b",
+      "outputs": []
+    },
+    {
+      "at": 0,
+      "input": {
+        "command": {
+          "command": "join",
+          "state": null
+        },
+        "input": "app"
+      },
+      "member": "b",
+      "outputs": [
+        {
+          "frame": {
+            "body": {
+              "echo": [],
+              "fresh": "yvv8YHYqxK3F14fS_5oLOQ",
+              "kind": "hello",
+              "lapsed": false,
+              "seen": null
+            },
+            "from": "b"
+          },
+          "output": "send"
+        }
+      ]
+    },
+    {
+      "at": 2000,
+      "input": {
+        "frame": {
+          "body": {
+            "echo": [],
+            "fresh": "9V_xb2b0M2Ama5Xbb4_sAQ",
+            "kind": "hello",
+            "lapsed": false,
+            "seen": null
+          },
+          "from": "a"
+        },
+        "input": "frame",
+        "key": "k1",
+        "n": 1,
+        "writer": true
+      },
+      "member": "b",
+      "outputs": [
+        {
+          "frame": {
+            "body": {
+              "echo": [
+                "9V_xb2b0M2Ama5Xbb4_sAQ"
+              ],
+              "fresh": "Xgm07g9q9uILg5FzBHjLqw",
+              "kind": "hello",
+              "lapsed": false,
+              "seen": null
+            },
+            "from": "b",
+            "to": "a"
+          },
+          "output": "send"
+        }
+      ]
+    },
+    {
+      "at": 2001,
+      "input": {
+        "frame": {
+          "body": {
+            "echo": [
+              "Xgm07g9q9uILg5FzBHjLqw"
+            ],
+            "fresh": "3zK6bI6pixdlPFq54Inl6Q",
+            "kind": "hello",
+            "lapsed": false,
+            "seen": null
+          },
+          "from": "a"
+        },
+        "input": "frame",
+        "key": "k1",
+        "n": 2,
+        "writer": true
+      },
+      "member": "b",
+      "outputs": [
+        {
+          "frame": {
+            "body": {
+              "echo": [
+                "3zK6bI6pixdlPFq54Inl6Q"
+              ],
+              "fresh": "bOP71a0cAPH4gM1x4zdVsA",
+              "kind": "hello",
+              "lapsed": false,
+              "seen": null
+            },
+            "from": "b",
+            "to": "a"
+          },
+          "output": "send"
+        }
+      ]
+    },
+    {
+      "at": 4000,
+      "input": {
+        "frame": {
+          "body": {
+            "echo": [],
+            "fresh": "LDpCSddwcAWGSdvYItyveQ",
+            "kind": "hello",
+            "lapsed": false,
+            "seen": null
+          },
+          "from": "a"
+        },
+        "input": "frame",
+        "key": "k2",
+        "n": 1,
+        "writer": true
+      },
+      "member": "b",
+      "outputs": [
+        {
+          "frame": {
+            "body": {
+              "echo": [
+                "LDpCSddwcAWGSdvYItyveQ"
+              ],
+              "fresh": "5btSaoab7BElhy8cUxtYJw",
+              "kind": "hello",
+              "lapsed": false,
+              "seen": null
+            },
+            "from": "b",
+            "to": "a"
+          },
+          "output": "send"
+        }
+      ]
+    },
+    {
+      "at": 4001,
+      "input": {
+        "frame": {
+          "body": {
+            "echo": [
+              "5btSaoab7BElhy8cUxtYJw"
+            ],
+            "fresh": "q3r9s-I9pN892Ow6pcKGrw",
+            "kind": "hello",
+            "lapsed": false,
+            "seen": null
+          },
+          "from": "a"
+        },
+        "input": "frame",
+        "key": "k2",
+        "n": 2,
+        "writer": true
+      },
+      "member": "b",
+      "outputs": [
+        {
+          "frame": {
+            "body": {
+              "echo": [
+                "q3r9s-I9pN892Ow6pcKGrw"
+              ],
+              "fresh": "gRXaNJnI8Q6VV02BRrdrHw",
+              "kind": "hello",
+              "lapsed": false,
+              "seen": null
+            },
+            "from": "b",
+            "to": "a"
+          },
+          "output": "send"
+        }
+      ]
+    },
+    {
+      "at": 6000,
+      "input": {
+        "frame": {
+          "body": {
+            "echo": [],
+            "fresh": "9G3SilSZ2O_vC4-47h7BxQ",
+            "kind": "hello",
+            "lapsed": false,
+            "seen": null
+          },
+          "from": "a"
+        },
+        "input": "frame",
+        "key": "k3",
+        "n": 1,
+        "writer": true
+      },
+      "member": "b",
+      "outputs": [
+        {
+          "frame": {
+            "body": {
+              "echo": [
+                "9G3SilSZ2O_vC4-47h7BxQ"
+              ],
+              "fresh": "gfX6ulOHAwuCPMTTuD_LSg",
+              "kind": "hello",
+              "lapsed": false,
+              "seen": null
+            },
+            "from": "b",
+            "to": "a"
+          },
+          "output": "send"
+        }
+      ]
+    },
+    {
+      "at": 6001,
+      "input": {
+        "frame": {
+          "body": {
+            "echo": [
+              "gfX6ulOHAwuCPMTTuD_LSg"
+            ],
+            "fresh": "_PP9M8ST6qzh6B0cSQqf5Q",
+            "kind": "hello",
+            "lapsed": false,
+            "seen": null
+          },
+          "from": "a"
+        },
+        "input": "frame",
+        "key": "k3",
+        "n": 2,
+        "writer": true
+      },
+      "member": "b",
+      "outputs": [
+        {
+          "frame": {
+            "body": {
+              "echo": [
+                "_PP9M8ST6qzh6B0cSQqf5Q"
+              ],
+              "fresh": "9h3l54NtcaDwIupwV_jPeA",
+              "kind": "hello",
+              "lapsed": false,
+              "seen": null
+            },
+            "from": "b",
+            "to": "a"
+          },
+          "output": "send"
+        }
+      ]
+    },
+    {
+      "at": 8000,
+      "input": {
+        "frame": {
+          "body": {
+            "echo": [],
+            "fresh": "RTnktIiQecKgCv6uC_wUOQ",
+            "kind": "hello",
+            "lapsed": false,
+            "seen": null
+          },
+          "from": "a"
+        },
+        "input": "frame",
+        "key": "k4",
+        "n": 1,
+        "writer": true
+      },
+      "member": "b",
+      "outputs": [
+        {
+          "frame": {
+            "body": {
+              "echo": [
+                "RTnktIiQecKgCv6uC_wUOQ"
+              ],
+              "fresh": "EHAnrbBdeBgObrusl2-nRw",
+              "kind": "hello",
+              "lapsed": false,
+              "seen": null
+            },
+            "from": "b",
+            "to": "a"
+          },
+          "output": "send"
+        }
+      ]
+    },
+    {
+      "at": 8001,
+      "input": {
+        "frame": {
+          "body": {
+            "echo": [
+              "EHAnrbBdeBgObrusl2-nRw"
+            ],
+            "fresh": "QIwyd2brAvKh8X_sEy9rmw",
+            "kind": "hello",
+            "lapsed": false,
+            "seen": null
+          },
+          "from": "a"
+        },
+        "input": "frame",
+        "key": "k4",
+        "n": 2,
+        "writer": true
+      },
+      "member": "b",
+      "outputs": [
+        {
+          "frame": {
+            "body": {
+              "echo": [
+                "QIwyd2brAvKh8X_sEy9rmw"
+              ],
+              "fresh": "A_rw5GQiBJ0i7SRHtLj8JA",
+              "kind": "hello",
+              "lapsed": false,
+              "seen": null
+            },
+            "from": "b",
+            "to": "a"
+          },
+          "output": "send"
+        }
+      ]
+    },
+    {
+      "at": 10000,
+      "input": {
+        "frame": {
+          "body": {
+            "echo": [],
+            "fresh": "ZiIOcVkbLZM8DpNcE46_1g",
+            "kind": "hello",
+            "lapsed": false,
+            "seen": null
+          },
+          "from": "a"
+        },
+        "input": "frame",
+        "key": "k5",
+        "n": 1,
+        "writer": true
+      },
+      "member": "b",
+      "outputs": [
+        {
+          "frame": {
+            "body": {
+              "echo": [
+                "ZiIOcVkbLZM8DpNcE46_1g"
+              ],
+              "fresh": "-nrorhvpIFZxVBDH9sh6mA",
+              "kind": "hello",
+              "lapsed": false,
+              "seen": null
+            },
+            "from": "b",
+            "to": "a"
+          },
+          "output": "send"
+        }
+      ]
+    },
+    {
+      "at": 10001,
+      "input": {
+        "frame": {
+          "body": {
+            "echo": [
+              "-nrorhvpIFZxVBDH9sh6mA"
+            ],
+            "fresh": "2C62VxQq3-u9i1FcA8LvQg",
+            "kind": "hello",
+            "lapsed": false,
+            "seen": null
+          },
+          "from": "a"
+        },
+        "input": "frame",
+        "key": "k5",
+        "n": 2,
+        "writer": true
+      },
+      "member": "b",
+      "outputs": [
+        {
+          "frame": {
+            "body": {
+              "echo": [
+                "2C62VxQq3-u9i1FcA8LvQg"
+              ],
+              "fresh": "cb5S6pMSuIuDcUOYFG2UWQ",
+              "kind": "hello",
+              "lapsed": false,
+              "seen": null
+            },
+            "from": "b",
+            "to": "a"
+          },
+          "output": "send"
+        }
+      ]
+    },
+    {
+      "at": 11000,
+      "input": {
+        "frame": {
+          "body": {
+            "echo": [
+              "Xgm07g9q9uILg5FzBHjLqw"
+            ],
+            "fresh": "3zK6bI6pixdlPFq54Inl6Q",
+            "kind": "hello",
+            "lapsed": false,
+            "seen": null
+          },
+          "from": "a"
+        },
+        "input": "frame",
+        "key": "k1",
+        "n": 2,
+        "writer": true
+      },
+      "member": "b",
+      "outputs": []
+    },
+    {
+      "at": 11001,
+      "input": {
+        "frame": {
+          "body": {
+            "claim": {
+              "holder": "a",
+              "rank": 0,
+              "term": 1
+            },
+            "kind": "take"
+          },
+          "from": "a"
+        },
+        "input": "frame",
+        "key": "k1",
+        "n": 3,
+        "writer": true
+      },
+      "member": "b",
+      "outputs": []
+    },
+    {
+      "at": 14000,
+      "input": {
+        "frame": {
+          "body": {
+            "echo": [],
+            "fresh": "vosssQAMWx_jFMXFB6mv_Q",
+            "kind": "hello",
+            "lapsed": false,
+            "seen": null
+          },
+          "from": "a"
+        },
+        "input": "frame",
+        "key": "k1",
+        "n": 4,
+        "writer": true
+      },
+      "member": "b",
+      "outputs": [
+        {
+          "frame": {
+            "body": {
+              "echo": [
+                "vosssQAMWx_jFMXFB6mv_Q"
+              ],
+              "fresh": "E-AB3mgcRzyKIi0qFTYTTw",
+              "kind": "hello",
+              "lapsed": false,
+              "seen": null
+            },
+            "from": "b",
+            "to": "a"
+          },
+          "output": "send"
+        }
+      ]
+    },
+    {
+      "at": 14001,
+      "input": {
+        "frame": {
+          "body": {
+            "echo": [
+              "E-AB3mgcRzyKIi0qFTYTTw"
+            ],
+            "fresh": "eclHcdxuTnoGOXhtoCA87g",
+            "kind": "hello",
+            "lapsed": false,
+            "seen": null
+          },
+          "from": "a"
+        },
+        "input": "frame",
+        "key": "k1",
+        "n": 5,
+        "writer": true
+      },
+      "member": "b",
+      "outputs": [
+        {
+          "frame": {
+            "body": {
+              "echo": [
+                "eclHcdxuTnoGOXhtoCA87g"
+              ],
+              "fresh": "iDm5sx8agm6uwwfMnlrmLQ",
+              "kind": "hello",
+              "lapsed": false,
+              "seen": null
+            },
+            "from": "b",
+            "to": "a"
+          },
+          "output": "send"
+        }
+      ]
+    },
+    {
+      "at": 14002,
+      "input": {
+        "frame": {
+          "body": {
+            "claim": {
+              "holder": "a",
+              "rank": 0,
+              "term": 1
+            },
+            "kind": "take"
+          },
+          "from": "a"
+        },
+        "input": "frame",
+        "key": "k1",
+        "n": 6,
+        "writer": true
+      },
+      "member": "b",
+      "outputs": [
+        {
+          "claim": {
+            "holder": "a",
+            "rank": 0,
+            "term": 1
+          },
+          "output": "persist"
+        },
+        {
+          "event": {
+            "claim": {
+              "holder": "a",
+              "rank": 0,
+              "term": 1
+            },
+            "event": "holderChanged"
+          },
+          "output": "event"
+        },
+        {
+          "frame": {
+            "body": {
+              "echo": [
+                "3zK6bI6pixdlPFq54Inl6Q",
+                "q3r9s-I9pN892Ow6pcKGrw",
+                "_PP9M8ST6qzh6B0cSQqf5Q",
+                "QIwyd2brAvKh8X_sEy9rmw",
+                "2C62VxQq3-u9i1FcA8LvQg",
+                "eclHcdxuTnoGOXhtoCA87g"
+              ],
+              "fresh": "q1QjpATDdOqGgJpPN3qwlg",
+              "kind": "hello",
+              "lapsed": false,
+              "seen": {
+                "holder": "a",
+                "rank": 0,
+                "seq": null,
+                "term": 1
+              }
+            },
+            "from": "b",
+            "to": "a"
+          },
+          "output": "send"
+        }
+      ]
+    }
+  ]
+}

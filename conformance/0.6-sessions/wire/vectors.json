@@ -1,0 +1,774 @@
+{
+  "account": "c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5",
+  "cell": "now-playing",
+  "clockMs": 1795341600000,
+  "delegation": {
+    "body": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"expires\":\"2026-11-23T10:00:00Z\",\"key\":\"BAIX5hfwtkQ5KCePlpmeaaI6TywVK99tbN9m5bgCgtTtGUp968uXcS0t2jyoWqh2Wlb0X8dYWZZS8ol8ZTBuV5Q=\",\"member\":\"256b1be32745d1d1c9d49121cc87bc45\",\"namespace\":\"listening.podcasts\",\"notBefore\":\"2026-11-22T10:00:00Z\",\"protocol\":\"colophon/session-key/6\",\"session\":0}",
+    "envelope": "{\"body\":\"eyJhY2NvdW50IjoiYzE0Mzg0MWNkZWNiNzc0ZmE2NzQ5N2ExODQ4MWQ4ZDBhZDc2ZWRjOGUzMjQ5MGNmN2QzMzc3YWQ1OWFkYTVkNSIsImV4cGlyZXMiOiIyMDI2LTExLTIzVDEwOjAwOjAwWiIsImtleSI6IkJBSVg1aGZ3dGtRNUtDZVBscG1lYWFJNlR5d1ZLOTl0Yk45bTViZ0NndFR0R1VwOTY4dVhjUzB0Mmp5b1dxaDJXbGIwWDhkWVdaWlM4b2w4WlRCdVY1UT0iLCJtZW1iZXIiOiIyNTZiMWJlMzI3NDVkMWQxYzlkNDkxMjFjYzg3YmM0NSIsIm5hbWVzcGFjZSI6Imxpc3RlbmluZy5wb2RjYXN0cyIsIm5vdEJlZm9yZSI6IjIwMjYtMTEtMjJUMTA6MDA6MDBaIiwicHJvdG9jb2wiOiJjb2xvcGhvbi9zZXNzaW9uLWtleS82Iiwic2Vzc2lvbiI6MH0=\",\"signature\":\"rAq+iGteT/D46PBIAJqEzYhfFpRZTmmTR3wjN5YIRCBQl2X62xoH8hE3ujYberi8U4PNxR3VzeA9JAfPtYCwFg==\"}",
+    "signature": "rAq+iGteT/D46PBIAJqEzYhfFpRZTmmTR3wjN5YIRCBQl2X62xoH8hE3ujYberi8U4PNxR3VzeA9JAfPtYCwFg=="
+  },
+  "epochs": [
+    {
+      "epoch": 1,
+      "key": "4242424242424242424242424242424242424242424242424242424242424242"
+    }
+  ],
+  "format": "colophon/session-wire-vectors/6",
+  "frames": [
+    {
+      "aad": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":1,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\"}",
+      "ciphertext": "q7Ds+cNasQj8IQqn8Tsd549j/rdqi4KJmyP7Gcxa7XAcFv4NsoNEwEfkkraccPJJ9HkwFQcEnw2JeenjA/LqIVZDhD/7fH1UVuchhZQ4Jx3zq9TmjEq/YvTukt87lgPh6j2CqgeeV7o05//ROKI0F4v7GczS4qEJhslTL0RT/Wr4LLc3pAoRpZ/cAmZ0g4efZ4OSV9JFDdx00+/Wc+oGJr1KIPdyxMmfim7HnKBK+x/mVEPacmrg3AXzHJlCdkopJA==",
+      "frame": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"q7Ds+cNasQj8IQqn8Tsd549j/rdqi4KJmyP7Gcxa7XAcFv4NsoNEwEfkkraccPJJ9HkwFQcEnw2JeenjA/LqIVZDhD/7fH1UVuchhZQ4Jx3zq9TmjEq/YvTukt87lgPh6j2CqgeeV7o05//ROKI0F4v7GczS4qEJhslTL0RT/Wr4LLc3pAoRpZ/cAmZ0g4efZ4OSV9JFDdx00+/Wc+oGJr1KIPdyxMmfim7HnKBK+x/mVEPacmrg3AXzHJlCdkopJA==\",\"delegation\":{\"body\":\"eyJhY2NvdW50IjoiYzE0Mzg0MWNkZWNiNzc0ZmE2NzQ5N2ExODQ4MWQ4ZDBhZDc2ZWRjOGUzMjQ5MGNmN2QzMzc3YWQ1OWFkYTVkNSIsImV4cGlyZXMiOiIyMDI2LTExLTIzVDEwOjAwOjAwWiIsImtleSI6IkJBSVg1aGZ3dGtRNUtDZVBscG1lYWFJNlR5d1ZLOTl0Yk45bTViZ0NndFR0R1VwOTY4dVhjUzB0Mmp5b1dxaDJXbGIwWDhkWVdaWlM4b2w4WlRCdVY1UT0iLCJtZW1iZXIiOiIyNTZiMWJlMzI3NDVkMWQxYzlkNDkxMjFjYzg3YmM0NSIsIm5hbWVzcGFjZSI6Imxpc3RlbmluZy5wb2RjYXN0cyIsIm5vdEJlZm9yZSI6IjIwMjYtMTEtMjJUMTA6MDA6MDBaIiwicHJvdG9jb2wiOiJjb2xvcGhvbi9zZXNzaW9uLWtleS82Iiwic2Vzc2lvbiI6MH0=\",\"signature\":\"rAq+iGteT/D46PBIAJqEzYhfFpRZTmmTR3wjN5YIRCBQl2X62xoH8hE3ujYberi8U4PNxR3VzeA9JAfPtYCwFg==\"},\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":1,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"signature\":\"WOrpvS7N0Qf2RprlJEH62Gomg28RuoZzGh7QEgvptZpWATmU2/hrmsbW+Nre20w7s9Vdpbg4A3IIhnLqwlB2aA==\"}",
+      "n": 1,
+      "name": "hello",
+      "nonce": "000000000000000000000001",
+      "plaintext": "{\"echo\":[\"bWl1gPcaOMgpLQdZpZZW7w\"],\"fresh\":\"mO16APhVo1iK6CFZvg6OXA\",\"kind\":\"hello\",\"lapsed\":false,\"seen\":{\"holder\":\"256b1be32745d1d1c9d49121cc87bc45\",\"rank\":0,\"seq\":7,\"term\":3}}",
+      "retain": false,
+      "signature": "WOrpvS7N0Qf2RprlJEH62Gomg28RuoZzGh7QEgvptZpWATmU2/hrmsbW+Nre20w7s9Vdpbg4A3IIhnLqwlB2aA==",
+      "signedBody": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"q7Ds+cNasQj8IQqn8Tsd549j/rdqi4KJmyP7Gcxa7XAcFv4NsoNEwEfkkraccPJJ9HkwFQcEnw2JeenjA/LqIVZDhD/7fH1UVuchhZQ4Jx3zq9TmjEq/YvTukt87lgPh6j2CqgeeV7o05//ROKI0F4v7GczS4qEJhslTL0RT/Wr4LLc3pAoRpZ/cAmZ0g4efZ4OSV9JFDdx00+/Wc+oGJr1KIPdyxMmfim7HnKBK+x/mVEPacmrg3AXzHJlCdkopJA==\",\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":1,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\"}",
+      "to": null,
+      "writer": true
+    },
+    {
+      "aad": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":2,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"to\":\"fe00ab0f341901f863a49160cf554588\"}",
+      "ciphertext": "QdEJgxn3seMtw64AwydDFmFYkM5FeIyCOwBpxKZD+VPpF1cmORxZrIyi1HI90BKP2+0Ei7CVd+368RZcxqnjVPc2Jo0HnXMIn39o1AKCT0QjDNSrEQwOZYPZUvEurqk3IH8PuS/9FNL5tfInBEfh2NfzB6jAWt2ZUiNXsmYEkeEomsdqJluVZQ9X3D1iC8TQ596mQP7BkPND+cW2plNDBrrHzEzaGFnAu1PvRiAP50ob0Hno6nAoUkIOdPiuf1LzAg5CFqT8SUzzaH78MPmxisaPMwg=",
+      "frame": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"QdEJgxn3seMtw64AwydDFmFYkM5FeIyCOwBpxKZD+VPpF1cmORxZrIyi1HI90BKP2+0Ei7CVd+368RZcxqnjVPc2Jo0HnXMIn39o1AKCT0QjDNSrEQwOZYPZUvEurqk3IH8PuS/9FNL5tfInBEfh2NfzB6jAWt2ZUiNXsmYEkeEomsdqJluVZQ9X3D1iC8TQ596mQP7BkPND+cW2plNDBrrHzEzaGFnAu1PvRiAP50ob0Hno6nAoUkIOdPiuf1LzAg5CFqT8SUzzaH78MPmxisaPMwg=\",\"delegation\":{\"body\":\"eyJhY2NvdW50IjoiYzE0Mzg0MWNkZWNiNzc0ZmE2NzQ5N2ExODQ4MWQ4ZDBhZDc2ZWRjOGUzMjQ5MGNmN2QzMzc3YWQ1OWFkYTVkNSIsImV4cGlyZXMiOiIyMDI2LTExLTIzVDEwOjAwOjAwWiIsImtleSI6IkJBSVg1aGZ3dGtRNUtDZVBscG1lYWFJNlR5d1ZLOTl0Yk45bTViZ0NndFR0R1VwOTY4dVhjUzB0Mmp5b1dxaDJXbGIwWDhkWVdaWlM4b2w4WlRCdVY1UT0iLCJtZW1iZXIiOiIyNTZiMWJlMzI3NDVkMWQxYzlkNDkxMjFjYzg3YmM0NSIsIm5hbWVzcGFjZSI6Imxpc3RlbmluZy5wb2RjYXN0cyIsIm5vdEJlZm9yZSI6IjIwMjYtMTEtMjJUMTA6MDA6MDBaIiwicHJvdG9jb2wiOiJjb2xvcGhvbi9zZXNzaW9uLWtleS82Iiwic2Vzc2lvbiI6MH0=\",\"signature\":\"rAq+iGteT/D46PBIAJqEzYhfFpRZTmmTR3wjN5YIRCBQl2X62xoH8hE3ujYberi8U4PNxR3VzeA9JAfPtYCwFg==\"},\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":2,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"signature\":\"QIXasVyiI5DXp1sIMlRq27qzwdTjQLK/OIfrWlJH7ChAt7nBgodShVMfMMrxGrgQgcBpl8CjjmbBQcZv0YpOyA==\",\"to\":\"fe00ab0f341901f863a49160cf554588\"}",
+      "n": 2,
+      "name": "hello-unsynced",
+      "nonce": "000000000000000000000002",
+      "plaintext": "{\"echo\":[],\"fresh\":\"-mQUckHBJ6EzBK1KSsdVHw\",\"kind\":\"hello\",\"lapsed\":true,\"seen\":{\"holder\":\"fe00ab0f341901f863a49160cf554588\",\"rank\":1,\"seq\":null,\"term\":4,\"via\":\"256b1be32745d1d1c9d49121cc87bc45\"}}",
+      "retain": false,
+      "signature": "QIXasVyiI5DXp1sIMlRq27qzwdTjQLK/OIfrWlJH7ChAt7nBgodShVMfMMrxGrgQgcBpl8CjjmbBQcZv0YpOyA==",
+      "signedBody": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"QdEJgxn3seMtw64AwydDFmFYkM5FeIyCOwBpxKZD+VPpF1cmORxZrIyi1HI90BKP2+0Ei7CVd+368RZcxqnjVPc2Jo0HnXMIn39o1AKCT0QjDNSrEQwOZYPZUvEurqk3IH8PuS/9FNL5tfInBEfh2NfzB6jAWt2ZUiNXsmYEkeEomsdqJluVZQ9X3D1iC8TQ596mQP7BkPND+cW2plNDBrrHzEzaGFnAu1PvRiAP50ob0Hno6nAoUkIOdPiuf1LzAg5CFqT8SUzzaH78MPmxisaPMwg=\",\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":2,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"to\":\"fe00ab0f341901f863a49160cf554588\"}",
+      "to": "fe00ab0f341901f863a49160cf554588",
+      "writer": true
+    },
+    {
+      "aad": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":3,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"retain\":true}",
+      "ciphertext": "KglkW/u4yoWmFxdP7dTauxzRVm3NPaXxC2+6+sAWlHjk4ihoWHx02Ij+7ZGt0VbR1ihGVxT3nGuneRQ0A9bq26rIMphmGN9gWNDg4sYyuMECpoqntUNJ1wiDrdnB73S3hvN7PNG2tAaYTE4H1Vzt9aH70G8to+Xd9bCuy6YpLYp70woPWGHfhQ5iOEGouyDSyUYi+Gq32vfSCQj55AdHl3q8eRvbC79b4ZYNcN5lVVFFRzdb+HySOOAiCOScDYbw/XpWS4A7mt0FVBazkddDcrzhTloC6Q2EC5StSV27neGEfXYCWe2iev+Q2lQogqLmrrTXlTjzemxPT3huxrV2UE2TJB+tTb4Ul2U=",
+      "frame": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"KglkW/u4yoWmFxdP7dTauxzRVm3NPaXxC2+6+sAWlHjk4ihoWHx02Ij+7ZGt0VbR1ihGVxT3nGuneRQ0A9bq26rIMphmGN9gWNDg4sYyuMECpoqntUNJ1wiDrdnB73S3hvN7PNG2tAaYTE4H1Vzt9aH70G8to+Xd9bCuy6YpLYp70woPWGHfhQ5iOEGouyDSyUYi+Gq32vfSCQj55AdHl3q8eRvbC79b4ZYNcN5lVVFFRzdb+HySOOAiCOScDYbw/XpWS4A7mt0FVBazkddDcrzhTloC6Q2EC5StSV27neGEfXYCWe2iev+Q2lQogqLmrrTXlTjzemxPT3huxrV2UE2TJB+tTb4Ul2U=\",\"delegation\":{\"body\":\"eyJhY2NvdW50IjoiYzE0Mzg0MWNkZWNiNzc0ZmE2NzQ5N2ExODQ4MWQ4ZDBhZDc2ZWRjOGUzMjQ5MGNmN2QzMzc3YWQ1OWFkYTVkNSIsImV4cGlyZXMiOiIyMDI2LTExLTIzVDEwOjAwOjAwWiIsImtleSI6IkJBSVg1aGZ3dGtRNUtDZVBscG1lYWFJNlR5d1ZLOTl0Yk45bTViZ0NndFR0R1VwOTY4dVhjUzB0Mmp5b1dxaDJXbGIwWDhkWVdaWlM4b2w4WlRCdVY1UT0iLCJtZW1iZXIiOiIyNTZiMWJlMzI3NDVkMWQxYzlkNDkxMjFjYzg3YmM0NSIsIm5hbWVzcGFjZSI6Imxpc3RlbmluZy5wb2RjYXN0cyIsIm5vdEJlZm9yZSI6IjIwMjYtMTEtMjJUMTA6MDA6MDBaIiwicHJvdG9jb2wiOiJjb2xvcGhvbi9zZXNzaW9uLWtleS82Iiwic2Vzc2lvbiI6MH0=\",\"signature\":\"rAq+iGteT/D46PBIAJqEzYhfFpRZTmmTR3wjN5YIRCBQl2X62xoH8hE3ujYberi8U4PNxR3VzeA9JAfPtYCwFg==\"},\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":3,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"retain\":true,\"signature\":\"4a2qCADauX2p6FNMgL86b2Ps2zNJs0y8qSKCo8D5disIIScq3v9aqOqyMwS+HIGmWx4iJLoETGCcISNCt79bQQ==\"}",
+      "n": 3,
+      "name": "state",
+      "nonce": "000000000000000000000003",
+      "plaintext": "{\"claim\":{\"holder\":\"256b1be32745d1d1c9d49121cc87bc45\",\"rank\":0,\"term\":3},\"kind\":\"state\",\"seq\":7,\"snapshot\":\"eyJhdCI6OTg3NjU0MzIsImVwaXNvZGUiOiJlcC0xIiwicGxheWluZyI6dHJ1ZSwicG9zaXRpb25NcyI6MTIzNDU2NywicmF0ZVBlcm1pbGxlIjoxMjUwLCJzaG93Ijoic2hvdy0xIn0=\"}",
+      "retain": true,
+      "signature": "4a2qCADauX2p6FNMgL86b2Ps2zNJs0y8qSKCo8D5disIIScq3v9aqOqyMwS+HIGmWx4iJLoETGCcISNCt79bQQ==",
+      "signedBody": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"KglkW/u4yoWmFxdP7dTauxzRVm3NPaXxC2+6+sAWlHjk4ihoWHx02Ij+7ZGt0VbR1ihGVxT3nGuneRQ0A9bq26rIMphmGN9gWNDg4sYyuMECpoqntUNJ1wiDrdnB73S3hvN7PNG2tAaYTE4H1Vzt9aH70G8to+Xd9bCuy6YpLYp70woPWGHfhQ5iOEGouyDSyUYi+Gq32vfSCQj55AdHl3q8eRvbC79b4ZYNcN5lVVFFRzdb+HySOOAiCOScDYbw/XpWS4A7mt0FVBazkddDcrzhTloC6Q2EC5StSV27neGEfXYCWe2iev+Q2lQogqLmrrTXlTjzemxPT3huxrV2UE2TJB+tTb4Ul2U=\",\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":3,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"retain\":true}",
+      "to": null,
+      "writer": true
+    },
+    {
+      "aad": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":4,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"retain\":true}",
+      "ciphertext": "40ftK0aPGJ8695eH3Q6ocpFWhGEgxwvGrscFWeio4iK7mrx7Ec5IzRHQpbzuXcJCfnHCZG10aJde8+QCbPKHahIFNBhjfUyXW/Otii6bUGIyPlrsEWsu5Nf0e2VMtlpRWoEnnYRT2bzkQHUzMH78",
+      "frame": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"40ftK0aPGJ8695eH3Q6ocpFWhGEgxwvGrscFWeio4iK7mrx7Ec5IzRHQpbzuXcJCfnHCZG10aJde8+QCbPKHahIFNBhjfUyXW/Otii6bUGIyPlrsEWsu5Nf0e2VMtlpRWoEnnYRT2bzkQHUzMH78\",\"delegation\":{\"body\":\"eyJhY2NvdW50IjoiYzE0Mzg0MWNkZWNiNzc0ZmE2NzQ5N2ExODQ4MWQ4ZDBhZDc2ZWRjOGUzMjQ5MGNmN2QzMzc3YWQ1OWFkYTVkNSIsImV4cGlyZXMiOiIyMDI2LTExLTIzVDEwOjAwOjAwWiIsImtleSI6IkJBSVg1aGZ3dGtRNUtDZVBscG1lYWFJNlR5d1ZLOTl0Yk45bTViZ0NndFR0R1VwOTY4dVhjUzB0Mmp5b1dxaDJXbGIwWDhkWVdaWlM4b2w4WlRCdVY1UT0iLCJtZW1iZXIiOiIyNTZiMWJlMzI3NDVkMWQxYzlkNDkxMjFjYzg3YmM0NSIsIm5hbWVzcGFjZSI6Imxpc3RlbmluZy5wb2RjYXN0cyIsIm5vdEJlZm9yZSI6IjIwMjYtMTEtMjJUMTA6MDA6MDBaIiwicHJvdG9jb2wiOiJjb2xvcGhvbi9zZXNzaW9uLWtleS82Iiwic2Vzc2lvbiI6MH0=\",\"signature\":\"rAq+iGteT/D46PBIAJqEzYhfFpRZTmmTR3wjN5YIRCBQl2X62xoH8hE3ujYberi8U4PNxR3VzeA9JAfPtYCwFg==\"},\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":4,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"retain\":true,\"signature\":\"+aSI23KDU2Cu5h0iEy7TRQZkVsnkv8ExORVKvNYYJl8bdV0CzuuBmhGNVCM3okoiREQs6j4On5W5aQ4e2l9Qew==\"}",
+      "n": 4,
+      "name": "beat",
+      "nonce": "000000000000000000000004",
+      "plaintext": "{\"claim\":{\"holder\":\"256b1be32745d1d1c9d49121cc87bc45\",\"rank\":0,\"term\":3},\"kind\":\"beat\",\"seq\":7}",
+      "retain": true,
+      "signature": "+aSI23KDU2Cu5h0iEy7TRQZkVsnkv8ExORVKvNYYJl8bdV0CzuuBmhGNVCM3okoiREQs6j4On5W5aQ4e2l9Qew==",
+      "signedBody": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"40ftK0aPGJ8695eH3Q6ocpFWhGEgxwvGrscFWeio4iK7mrx7Ec5IzRHQpbzuXcJCfnHCZG10aJde8+QCbPKHahIFNBhjfUyXW/Otii6bUGIyPlrsEWsu5Nf0e2VMtlpRWoEnnYRT2bzkQHUzMH78\",\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":4,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"retain\":true}",
+      "to": null,
+      "writer": true
+    },
+    {
+      "aad": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":5,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\"}",
+      "ciphertext": "c+9jLZdQD9iZqFHP5wT50bAUWzWGjTu8a+15NaIZW9LwGEAJrLl9NTDkP/0sIluMy915xRbI9QkXql99FlBefmWDYrVZeDjhFnznNs033mjKn8eom0dSrB+ZH7RXS3AI+FWL90OQulhOfGW/CBmyXHsAdqbcWpBIZ/SkytKgaY7ztCd7gjxnuawHZWgdhAtl7cl+jed5Zaas7zU0S255NJBcsRvU3lGWvkcluf+2Ysd962BcfCkoXvK+3LorDN76SDmNdvAQ/JlF2HSMSyzq0B/a0n2jxgcE8YTWqvBECQvGoRTrCMwCrZGXbNUgjMeecVHFtaRQyVqC/ENlhbHhFQqxRQIwGreJ/Dg+t+ubgNPTA96hgJheXHaMEjg/rFp3wplSrZBhAcShYGsHIv8FcPsyXY3YQpm8olu+tTXR5fciVV1y+24R+9bwJuGJQU8AOg==",
+      "frame": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"c+9jLZdQD9iZqFHP5wT50bAUWzWGjTu8a+15NaIZW9LwGEAJrLl9NTDkP/0sIluMy915xRbI9QkXql99FlBefmWDYrVZeDjhFnznNs033mjKn8eom0dSrB+ZH7RXS3AI+FWL90OQulhOfGW/CBmyXHsAdqbcWpBIZ/SkytKgaY7ztCd7gjxnuawHZWgdhAtl7cl+jed5Zaas7zU0S255NJBcsRvU3lGWvkcluf+2Ysd962BcfCkoXvK+3LorDN76SDmNdvAQ/JlF2HSMSyzq0B/a0n2jxgcE8YTWqvBECQvGoRTrCMwCrZGXbNUgjMeecVHFtaRQyVqC/ENlhbHhFQqxRQIwGreJ/Dg+t+ubgNPTA96hgJheXHaMEjg/rFp3wplSrZBhAcShYGsHIv8FcPsyXY3YQpm8olu+tTXR5fciVV1y+24R+9bwJuGJQU8AOg==\",\"delegation\":{\"body\":\"eyJhY2NvdW50IjoiYzE0Mzg0MWNkZWNiNzc0ZmE2NzQ5N2ExODQ4MWQ4ZDBhZDc2ZWRjOGUzMjQ5MGNmN2QzMzc3YWQ1OWFkYTVkNSIsImV4cGlyZXMiOiIyMDI2LTExLTIzVDEwOjAwOjAwWiIsImtleSI6IkJBSVg1aGZ3dGtRNUtDZVBscG1lYWFJNlR5d1ZLOTl0Yk45bTViZ0NndFR0R1VwOTY4dVhjUzB0Mmp5b1dxaDJXbGIwWDhkWVdaWlM4b2w4WlRCdVY1UT0iLCJtZW1iZXIiOiIyNTZiMWJlMzI3NDVkMWQxYzlkNDkxMjFjYzg3YmM0NSIsIm5hbWVzcGFjZSI6Imxpc3RlbmluZy5wb2RjYXN0cyIsIm5vdEJlZm9yZSI6IjIwMjYtMTEtMjJUMTA6MDA6MDBaIiwicHJvdG9jb2wiOiJjb2xvcGhvbi9zZXNzaW9uLWtleS82Iiwic2Vzc2lvbiI6MH0=\",\"signature\":\"rAq+iGteT/D46PBIAJqEzYhfFpRZTmmTR3wjN5YIRCBQl2X62xoH8hE3ujYberi8U4PNxR3VzeA9JAfPtYCwFg==\"},\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":5,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"signature\":\"do2/2XOkKrhhzvSPfH4J+7PRjX39pY6/xqOBoEwoFlJQKigehgI5C5MNZ/U5NBBXAmfeQvMBT/r8oOHLIFCr3w==\"}",
+      "n": 5,
+      "name": "msg",
+      "nonce": "000000000000000000000005",
+      "plaintext": "{\"claim\":{\"holder\":\"256b1be32745d1d1c9d49121cc87bc45\",\"rank\":0,\"term\":3},\"id\":\"Gd_NJKYNYb6X6UC91TYZ4A\",\"kind\":\"msg\",\"origin\":\"fe00ab0f341901f863a49160cf554588\",\"payload\":\"eyJhdCI6OTg3NjU0MzIsImVwaXNvZGUiOiJlcC0xIiwicGxheWluZyI6dHJ1ZSwicG9zaXRpb25NcyI6MTIzNDU2NywicmF0ZVBlcm1pbGxlIjoxMjUwLCJzaG93Ijoic2hvdy0xIn0=\",\"seq\":8}",
+      "retain": false,
+      "signature": "do2/2XOkKrhhzvSPfH4J+7PRjX39pY6/xqOBoEwoFlJQKigehgI5C5MNZ/U5NBBXAmfeQvMBT/r8oOHLIFCr3w==",
+      "signedBody": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"c+9jLZdQD9iZqFHP5wT50bAUWzWGjTu8a+15NaIZW9LwGEAJrLl9NTDkP/0sIluMy915xRbI9QkXql99FlBefmWDYrVZeDjhFnznNs033mjKn8eom0dSrB+ZH7RXS3AI+FWL90OQulhOfGW/CBmyXHsAdqbcWpBIZ/SkytKgaY7ztCd7gjxnuawHZWgdhAtl7cl+jed5Zaas7zU0S255NJBcsRvU3lGWvkcluf+2Ysd962BcfCkoXvK+3LorDN76SDmNdvAQ/JlF2HSMSyzq0B/a0n2jxgcE8YTWqvBECQvGoRTrCMwCrZGXbNUgjMeecVHFtaRQyVqC/ENlhbHhFQqxRQIwGreJ/Dg+t+ubgNPTA96hgJheXHaMEjg/rFp3wplSrZBhAcShYGsHIv8FcPsyXY3YQpm8olu+tTXR5fciVV1y+24R+9bwJuGJQU8AOg==\",\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":5,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\"}",
+      "to": null,
+      "writer": true
+    },
+    {
+      "aad": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":6,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\"}",
+      "ciphertext": "ZcMU/B5PwVpLlXaw3b+QoPEKI/Xc3ONwxFMczBfzqAifk2cvf9sQfxWCfJY02lJsOfdN6TL0e8WWg2tFiz3pNKhLZkT505s7McjiHXFO06JOunH+",
+      "frame": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"ZcMU/B5PwVpLlXaw3b+QoPEKI/Xc3ONwxFMczBfzqAifk2cvf9sQfxWCfJY02lJsOfdN6TL0e8WWg2tFiz3pNKhLZkT505s7McjiHXFO06JOunH+\",\"delegation\":{\"body\":\"eyJhY2NvdW50IjoiYzE0Mzg0MWNkZWNiNzc0ZmE2NzQ5N2ExODQ4MWQ4ZDBhZDc2ZWRjOGUzMjQ5MGNmN2QzMzc3YWQ1OWFkYTVkNSIsImV4cGlyZXMiOiIyMDI2LTExLTIzVDEwOjAwOjAwWiIsImtleSI6IkJBSVg1aGZ3dGtRNUtDZVBscG1lYWFJNlR5d1ZLOTl0Yk45bTViZ0NndFR0R1VwOTY4dVhjUzB0Mmp5b1dxaDJXbGIwWDhkWVdaWlM4b2w4WlRCdVY1UT0iLCJtZW1iZXIiOiIyNTZiMWJlMzI3NDVkMWQxYzlkNDkxMjFjYzg3YmM0NSIsIm5hbWVzcGFjZSI6Imxpc3RlbmluZy5wb2RjYXN0cyIsIm5vdEJlZm9yZSI6IjIwMjYtMTEtMjJUMTA6MDA6MDBaIiwicHJvdG9jb2wiOiJjb2xvcGhvbi9zZXNzaW9uLWtleS82Iiwic2Vzc2lvbiI6MH0=\",\"signature\":\"rAq+iGteT/D46PBIAJqEzYhfFpRZTmmTR3wjN5YIRCBQl2X62xoH8hE3ujYberi8U4PNxR3VzeA9JAfPtYCwFg==\"},\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":6,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"signature\":\"VMg84mWXlfmJHRg9oO9nyBc6PjKtATN5yGIwztkyRmYBP4OsaCwMCQCHohAjvX9j7QEK5bCra/W03jnIaBIu1A==\"}",
+      "n": 6,
+      "name": "submit",
+      "nonce": "000000000000000000000006",
+      "plaintext": "{\"id\":\"Gd_NJKYNYb6X6UC91TYZ4A\",\"kind\":\"submit\",\"payload\":\"AAEC/v8=\"}",
+      "retain": false,
+      "signature": "VMg84mWXlfmJHRg9oO9nyBc6PjKtATN5yGIwztkyRmYBP4OsaCwMCQCHohAjvX9j7QEK5bCra/W03jnIaBIu1A==",
+      "signedBody": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"ZcMU/B5PwVpLlXaw3b+QoPEKI/Xc3ONwxFMczBfzqAifk2cvf9sQfxWCfJY02lJsOfdN6TL0e8WWg2tFiz3pNKhLZkT505s7McjiHXFO06JOunH+\",\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":6,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\"}",
+      "to": null,
+      "writer": true
+    },
+    {
+      "aad": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":7,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"to\":\"fe00ab0f341901f863a49160cf554588\"}",
+      "ciphertext": "wY365OYBbVjV/mGOUv7d6hi8W5BZoJNXhVxLBtY+aREIMwZAorSbCULGM/EdeDGu0Jgsp4QRKJWYseu2EN/+dCjeTSti+rsNg87A3sSH8A==",
+      "frame": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"wY365OYBbVjV/mGOUv7d6hi8W5BZoJNXhVxLBtY+aREIMwZAorSbCULGM/EdeDGu0Jgsp4QRKJWYseu2EN/+dCjeTSti+rsNg87A3sSH8A==\",\"delegation\":{\"body\":\"eyJhY2NvdW50IjoiYzE0Mzg0MWNkZWNiNzc0ZmE2NzQ5N2ExODQ4MWQ4ZDBhZDc2ZWRjOGUzMjQ5MGNmN2QzMzc3YWQ1OWFkYTVkNSIsImV4cGlyZXMiOiIyMDI2LTExLTIzVDEwOjAwOjAwWiIsImtleSI6IkJBSVg1aGZ3dGtRNUtDZVBscG1lYWFJNlR5d1ZLOTl0Yk45bTViZ0NndFR0R1VwOTY4dVhjUzB0Mmp5b1dxaDJXbGIwWDhkWVdaWlM4b2w4WlRCdVY1UT0iLCJtZW1iZXIiOiIyNTZiMWJlMzI3NDVkMWQxYzlkNDkxMjFjYzg3YmM0NSIsIm5hbWVzcGFjZSI6Imxpc3RlbmluZy5wb2RjYXN0cyIsIm5vdEJlZm9yZSI6IjIwMjYtMTEtMjJUMTA6MDA6MDBaIiwicHJvdG9jb2wiOiJjb2xvcGhvbi9zZXNzaW9uLWtleS82Iiwic2Vzc2lvbiI6MH0=\",\"signature\":\"rAq+iGteT/D46PBIAJqEzYhfFpRZTmmTR3wjN5YIRCBQl2X62xoH8hE3ujYberi8U4PNxR3VzeA9JAfPtYCwFg==\"},\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":7,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"signature\":\"4auqrh2d1SXSld6QimG5kgSOtf48HJDngNP398vEFHdD0SuXP25ZWxZDHVqTZ7AYIhkEJhHe94Ap2gC3p2/clg==\",\"to\":\"fe00ab0f341901f863a49160cf554588\"}",
+      "n": 7,
+      "name": "refuse",
+      "nonce": "000000000000000000000007",
+      "plaintext": "{\"id\":\"Gd_NJKYNYb6X6UC91TYZ4A\",\"kind\":\"refuse\",\"reason\":\"busy\"}",
+      "retain": false,
+      "signature": "4auqrh2d1SXSld6QimG5kgSOtf48HJDngNP398vEFHdD0SuXP25ZWxZDHVqTZ7AYIhkEJhHe94Ap2gC3p2/clg==",
+      "signedBody": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"wY365OYBbVjV/mGOUv7d6hi8W5BZoJNXhVxLBtY+aREIMwZAorSbCULGM/EdeDGu0Jgsp4QRKJWYseu2EN/+dCjeTSti+rsNg87A3sSH8A==\",\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":7,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"to\":\"fe00ab0f341901f863a49160cf554588\"}",
+      "to": "fe00ab0f341901f863a49160cf554588",
+      "writer": true
+    },
+    {
+      "aad": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":8,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\"}",
+      "ciphertext": "GQsLX6ehonHTbeCmvHS7XwZRaa/OIYjuVO/0CFKU1/hGcXognGu6f9I28wzKYzs1M4VaIqHw5abl4kCdKeWTc5jMB81i6Qpm2y4E+D1wRx6kEitLtG2bAV+0jxy3s1Tqv3EpqjG2Foo=",
+      "frame": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"GQsLX6ehonHTbeCmvHS7XwZRaa/OIYjuVO/0CFKU1/hGcXognGu6f9I28wzKYzs1M4VaIqHw5abl4kCdKeWTc5jMB81i6Qpm2y4E+D1wRx6kEitLtG2bAV+0jxy3s1Tqv3EpqjG2Foo=\",\"delegation\":{\"body\":\"eyJhY2NvdW50IjoiYzE0Mzg0MWNkZWNiNzc0ZmE2NzQ5N2ExODQ4MWQ4ZDBhZDc2ZWRjOGUzMjQ5MGNmN2QzMzc3YWQ1OWFkYTVkNSIsImV4cGlyZXMiOiIyMDI2LTExLTIzVDEwOjAwOjAwWiIsImtleSI6IkJBSVg1aGZ3dGtRNUtDZVBscG1lYWFJNlR5d1ZLOTl0Yk45bTViZ0NndFR0R1VwOTY4dVhjUzB0Mmp5b1dxaDJXbGIwWDhkWVdaWlM4b2w4WlRCdVY1UT0iLCJtZW1iZXIiOiIyNTZiMWJlMzI3NDVkMWQxYzlkNDkxMjFjYzg3YmM0NSIsIm5hbWVzcGFjZSI6Imxpc3RlbmluZy5wb2RjYXN0cyIsIm5vdEJlZm9yZSI6IjIwMjYtMTEtMjJUMTA6MDA6MDBaIiwicHJvdG9jb2wiOiJjb2xvcGhvbi9zZXNzaW9uLWtleS82Iiwic2Vzc2lvbiI6MH0=\",\"signature\":\"rAq+iGteT/D46PBIAJqEzYhfFpRZTmmTR3wjN5YIRCBQl2X62xoH8hE3ujYberi8U4PNxR3VzeA9JAfPtYCwFg==\"},\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":8,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"signature\":\"qgdrpK0QQaeopfYbbWLJx8nIhv3NyOlsEWV6W72EBeSUAgMbRrlQx53UJFui7VCqJuiWxWtBHJBgcfXUaPACIw==\"}",
+      "n": 8,
+      "name": "presence",
+      "nonce": "000000000000000000000008",
+      "plaintext": "{\"kind\":\"presence\",\"payload\":\"eyJsYWJlbCI6IktpdGNoZW4gaVBhZCIsInBsYXlpbmciOmZhbHNlfQ==\"}",
+      "retain": false,
+      "signature": "qgdrpK0QQaeopfYbbWLJx8nIhv3NyOlsEWV6W72EBeSUAgMbRrlQx53UJFui7VCqJuiWxWtBHJBgcfXUaPACIw==",
+      "signedBody": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"GQsLX6ehonHTbeCmvHS7XwZRaa/OIYjuVO/0CFKU1/hGcXognGu6f9I28wzKYzs1M4VaIqHw5abl4kCdKeWTc5jMB81i6Qpm2y4E+D1wRx6kEitLtG2bAV+0jxy3s1Tqv3EpqjG2Foo=\",\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":8,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\"}",
+      "to": null,
+      "writer": true
+    },
+    {
+      "aad": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":9,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\"}",
+      "ciphertext": "5roLWvbS9RuJYPjIdNUOTTAKALOjbDc42xqUwajTDiW1MacA68oKiVbc7YdM0m08m9DTH2ZnOYk0+8irj++5epKB7fBOgMuJEJWI1cdAMkxmOaTZYFAGRGXyWai8w2BHfimLqyMf",
+      "frame": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"5roLWvbS9RuJYPjIdNUOTTAKALOjbDc42xqUwajTDiW1MacA68oKiVbc7YdM0m08m9DTH2ZnOYk0+8irj++5epKB7fBOgMuJEJWI1cdAMkxmOaTZYFAGRGXyWai8w2BHfimLqyMf\",\"delegation\":{\"body\":\"eyJhY2NvdW50IjoiYzE0Mzg0MWNkZWNiNzc0ZmE2NzQ5N2ExODQ4MWQ4ZDBhZDc2ZWRjOGUzMjQ5MGNmN2QzMzc3YWQ1OWFkYTVkNSIsImV4cGlyZXMiOiIyMDI2LTExLTIzVDEwOjAwOjAwWiIsImtleSI6IkJBSVg1aGZ3dGtRNUtDZVBscG1lYWFJNlR5d1ZLOTl0Yk45bTViZ0NndFR0R1VwOTY4dVhjUzB0Mmp5b1dxaDJXbGIwWDhkWVdaWlM4b2w4WlRCdVY1UT0iLCJtZW1iZXIiOiIyNTZiMWJlMzI3NDVkMWQxYzlkNDkxMjFjYzg3YmM0NSIsIm5hbWVzcGFjZSI6Imxpc3RlbmluZy5wb2RjYXN0cyIsIm5vdEJlZm9yZSI6IjIwMjYtMTEtMjJUMTA6MDA6MDBaIiwicHJvdG9jb2wiOiJjb2xvcGhvbi9zZXNzaW9uLWtleS82Iiwic2Vzc2lvbiI6MH0=\",\"signature\":\"rAq+iGteT/D46PBIAJqEzYhfFpRZTmmTR3wjN5YIRCBQl2X62xoH8hE3ujYberi8U4PNxR3VzeA9JAfPtYCwFg==\"},\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":9,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"signature\":\"WVCsZ2+0S6DVlU7MAZ8A/lZYuuk1c4we9znHTdCZZqaATgh1ljiZmFvYbKF1ZfsCXC5KLqmIn+YLhgJnt2dgEw==\"}",
+      "n": 9,
+      "name": "ask",
+      "nonce": "000000000000000000000009",
+      "plaintext": "{\"claim\":{\"holder\":\"256b1be32745d1d1c9d49121cc87bc45\",\"rank\":0,\"term\":3},\"kind\":\"ask\"}",
+      "retain": false,
+      "signature": "WVCsZ2+0S6DVlU7MAZ8A/lZYuuk1c4we9znHTdCZZqaATgh1ljiZmFvYbKF1ZfsCXC5KLqmIn+YLhgJnt2dgEw==",
+      "signedBody": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"5roLWvbS9RuJYPjIdNUOTTAKALOjbDc42xqUwajTDiW1MacA68oKiVbc7YdM0m08m9DTH2ZnOYk0+8irj++5epKB7fBOgMuJEJWI1cdAMkxmOaTZYFAGRGXyWai8w2BHfimLqyMf\",\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":9,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\"}",
+      "to": null,
+      "writer": true
+    },
+    {
+      "aad": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":10,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\"}",
+      "ciphertext": "L6233cmGgyBY6gQYVKBJyceWgUTvyM0w8w3hh6BiomHCThEDfyvoU7JrUkwnS0jYnvzbF9qjW8T4QBQVhloL4aSGdzAVRmhQZxwpvUFqc7BfJREvKIu+OgtwpSTnYS/NA1LIJ2KNFAOXIbSRg1ePe/2u5XSqWL5/ocNDEbDE1eBFdjQLHWHkVYU0ZbmII9to+uddJJRdQAd9K5Lziq/3P6w3EAxWR8pBN3evRdyBstOBAMg7YphTbePuHgaueRQLgVbBNyFrNka8Ubm7YSzA6BkisS2eE2OlO6DGMskE70t5OKIZOhf2llpnH+zuYxSv1vO8PQczDS9cA5MqdhKKT1FX0cy1iYSqCP9zXS7/GAOJAYin5mXh194R7Aj6DRY7QcNY8kBo+YyntLIKmEddR7i4l2eO/MaKG7VCxQSt3ZsAIBjU2lyFZKJY/tlu9C6Plj7sCWc28yuzafobjWdHJaHo8u98JeKKlVik0Xmab9ppeK0rD4mNxOo=",
+      "frame": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"L6233cmGgyBY6gQYVKBJyceWgUTvyM0w8w3hh6BiomHCThEDfyvoU7JrUkwnS0jYnvzbF9qjW8T4QBQVhloL4aSGdzAVRmhQZxwpvUFqc7BfJREvKIu+OgtwpSTnYS/NA1LIJ2KNFAOXIbSRg1ePe/2u5XSqWL5/ocNDEbDE1eBFdjQLHWHkVYU0ZbmII9to+uddJJRdQAd9K5Lziq/3P6w3EAxWR8pBN3evRdyBstOBAMg7YphTbePuHgaueRQLgVbBNyFrNka8Ubm7YSzA6BkisS2eE2OlO6DGMskE70t5OKIZOhf2llpnH+zuYxSv1vO8PQczDS9cA5MqdhKKT1FX0cy1iYSqCP9zXS7/GAOJAYin5mXh194R7Aj6DRY7QcNY8kBo+YyntLIKmEddR7i4l2eO/MaKG7VCxQSt3ZsAIBjU2lyFZKJY/tlu9C6Plj7sCWc28yuzafobjWdHJaHo8u98JeKKlVik0Xmab9ppeK0rD4mNxOo=\",\"delegation\":{\"body\":\"eyJhY2NvdW50IjoiYzE0Mzg0MWNkZWNiNzc0ZmE2NzQ5N2ExODQ4MWQ4ZDBhZDc2ZWRjOGUzMjQ5MGNmN2QzMzc3YWQ1OWFkYTVkNSIsImV4cGlyZXMiOiIyMDI2LTExLTIzVDEwOjAwOjAwWiIsImtleSI6IkJBSVg1aGZ3dGtRNUtDZVBscG1lYWFJNlR5d1ZLOTl0Yk45bTViZ0NndFR0R1VwOTY4dVhjUzB0Mmp5b1dxaDJXbGIwWDhkWVdaWlM4b2w4WlRCdVY1UT0iLCJtZW1iZXIiOiIyNTZiMWJlMzI3NDVkMWQxYzlkNDkxMjFjYzg3YmM0NSIsIm5hbWVzcGFjZSI6Imxpc3RlbmluZy5wb2RjYXN0cyIsIm5vdEJlZm9yZSI6IjIwMjYtMTEtMjJUMTA6MDA6MDBaIiwicHJvdG9jb2wiOiJjb2xvcGhvbi9zZXNzaW9uLWtleS82Iiwic2Vzc2lvbiI6MH0=\",\"signature\":\"rAq+iGteT/D46PBIAJqEzYhfFpRZTmmTR3wjN5YIRCBQl2X62xoH8hE3ujYberi8U4PNxR3VzeA9JAfPtYCwFg==\"},\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":10,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"signature\":\"X/kTw/AF/QOHMqfMxwNr0RghPP1zqRY9UKSqV++BdsGGyY4mERbMDNwy6OgBOoqiyTF6P3nUO0lg1EJqi1uPCg==\"}",
+      "n": 10,
+      "name": "pass",
+      "nonce": "00000000000000000000000a",
+      "plaintext": "{\"claim\":{\"holder\":\"256b1be32745d1d1c9d49121cc87bc45\",\"rank\":0,\"term\":3},\"kind\":\"pass\",\"next\":{\"holder\":\"fe00ab0f341901f863a49160cf554588\",\"rank\":1,\"term\":4,\"via\":\"256b1be32745d1d1c9d49121cc87bc45\"},\"seq\":9,\"snapshot\":\"eyJhdCI6OTg3NjU0MzIsImVwaXNvZGUiOiJlcC0xIiwicGxheWluZyI6dHJ1ZSwicG9zaXRpb25NcyI6MTIzNDU2NywicmF0ZVBlcm1pbGxlIjoxMjUwLCJzaG93Ijoic2hvdy0xIn0=\"}",
+      "retain": false,
+      "signature": "X/kTw/AF/QOHMqfMxwNr0RghPP1zqRY9UKSqV++BdsGGyY4mERbMDNwy6OgBOoqiyTF6P3nUO0lg1EJqi1uPCg==",
+      "signedBody": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"L6233cmGgyBY6gQYVKBJyceWgUTvyM0w8w3hh6BiomHCThEDfyvoU7JrUkwnS0jYnvzbF9qjW8T4QBQVhloL4aSGdzAVRmhQZxwpvUFqc7BfJREvKIu+OgtwpSTnYS/NA1LIJ2KNFAOXIbSRg1ePe/2u5XSqWL5/ocNDEbDE1eBFdjQLHWHkVYU0ZbmII9to+uddJJRdQAd9K5Lziq/3P6w3EAxWR8pBN3evRdyBstOBAMg7YphTbePuHgaueRQLgVbBNyFrNka8Ubm7YSzA6BkisS2eE2OlO6DGMskE70t5OKIZOhf2llpnH+zuYxSv1vO8PQczDS9cA5MqdhKKT1FX0cy1iYSqCP9zXS7/GAOJAYin5mXh194R7Aj6DRY7QcNY8kBo+YyntLIKmEddR7i4l2eO/MaKG7VCxQSt3ZsAIBjU2lyFZKJY/tlu9C6Plj7sCWc28yuzafobjWdHJaHo8u98JeKKlVik0Xmab9ppeK0rD4mNxOo=\",\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":10,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\"}",
+      "to": null,
+      "writer": true
+    },
+    {
+      "aad": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":11,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"to\":\"fe00ab0f341901f863a49160cf554588\"}",
+      "ciphertext": "IuIlqEve0dfAs7Zcu07CH1wBwyM4zzMhURdwqEdNoJilhJZEd1ZSkocB1zZUYWiA8U82cFoNDM98VoVuPKuJNiKSuK8SagxK0nE9vgzGUhenPs5uFdZoImF9y6k4lKP2Yub7COtTLLjl8g==",
+      "frame": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"IuIlqEve0dfAs7Zcu07CH1wBwyM4zzMhURdwqEdNoJilhJZEd1ZSkocB1zZUYWiA8U82cFoNDM98VoVuPKuJNiKSuK8SagxK0nE9vgzGUhenPs5uFdZoImF9y6k4lKP2Yub7COtTLLjl8g==\",\"delegation\":{\"body\":\"eyJhY2NvdW50IjoiYzE0Mzg0MWNkZWNiNzc0ZmE2NzQ5N2ExODQ4MWQ4ZDBhZDc2ZWRjOGUzMjQ5MGNmN2QzMzc3YWQ1OWFkYTVkNSIsImV4cGlyZXMiOiIyMDI2LTExLTIzVDEwOjAwOjAwWiIsImtleSI6IkJBSVg1aGZ3dGtRNUtDZVBscG1lYWFJNlR5d1ZLOTl0Yk45bTViZ0NndFR0R1VwOTY4dVhjUzB0Mmp5b1dxaDJXbGIwWDhkWVdaWlM4b2w4WlRCdVY1UT0iLCJtZW1iZXIiOiIyNTZiMWJlMzI3NDVkMWQxYzlkNDkxMjFjYzg3YmM0NSIsIm5hbWVzcGFjZSI6Imxpc3RlbmluZy5wb2RjYXN0cyIsIm5vdEJlZm9yZSI6IjIwMjYtMTEtMjJUMTA6MDA6MDBaIiwicHJvdG9jb2wiOiJjb2xvcGhvbi9zZXNzaW9uLWtleS82Iiwic2Vzc2lvbiI6MH0=\",\"signature\":\"rAq+iGteT/D46PBIAJqEzYhfFpRZTmmTR3wjN5YIRCBQl2X62xoH8hE3ujYberi8U4PNxR3VzeA9JAfPtYCwFg==\"},\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":11,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"signature\":\"KXnl2fv99Mi3Pz3mIDRITlJcxttY76qOF+LG6qHbWQ6FOxGxPRliKdgSXkoS6VDAkWG0ViLTrki5SxyToujcDA==\",\"to\":\"fe00ab0f341901f863a49160cf554588\"}",
+      "n": 11,
+      "name": "decline",
+      "nonce": "00000000000000000000000b",
+      "plaintext": "{\"claim\":{\"holder\":\"256b1be32745d1d1c9d49121cc87bc45\",\"rank\":0,\"term\":3},\"kind\":\"decline\"}",
+      "retain": false,
+      "signature": "KXnl2fv99Mi3Pz3mIDRITlJcxttY76qOF+LG6qHbWQ6FOxGxPRliKdgSXkoS6VDAkWG0ViLTrki5SxyToujcDA==",
+      "signedBody": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"IuIlqEve0dfAs7Zcu07CH1wBwyM4zzMhURdwqEdNoJilhJZEd1ZSkocB1zZUYWiA8U82cFoNDM98VoVuPKuJNiKSuK8SagxK0nE9vgzGUhenPs5uFdZoImF9y6k4lKP2Yub7COtTLLjl8g==\",\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":11,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"to\":\"fe00ab0f341901f863a49160cf554588\"}",
+      "to": "fe00ab0f341901f863a49160cf554588",
+      "writer": true
+    },
+    {
+      "aad": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":12,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\"}",
+      "ciphertext": "2UeXgkv4kshvuOxKdrtYneLptdaO9V5dD2fmsmrrsYDQjNZfXLVFzldIyizXZlKQBjskB6B9DK9F0t0jnmVHzd8KMs9Eprou2XLWTbawXYmDSMK1Za5+dFP4j6kQWo03M9xHuLMo8g==",
+      "frame": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"2UeXgkv4kshvuOxKdrtYneLptdaO9V5dD2fmsmrrsYDQjNZfXLVFzldIyizXZlKQBjskB6B9DK9F0t0jnmVHzd8KMs9Eprou2XLWTbawXYmDSMK1Za5+dFP4j6kQWo03M9xHuLMo8g==\",\"delegation\":{\"body\":\"eyJhY2NvdW50IjoiYzE0Mzg0MWNkZWNiNzc0ZmE2NzQ5N2ExODQ4MWQ4ZDBhZDc2ZWRjOGUzMjQ5MGNmN2QzMzc3YWQ1OWFkYTVkNSIsImV4cGlyZXMiOiIyMDI2LTExLTIzVDEwOjAwOjAwWiIsImtleSI6IkJBSVg1aGZ3dGtRNUtDZVBscG1lYWFJNlR5d1ZLOTl0Yk45bTViZ0NndFR0R1VwOTY4dVhjUzB0Mmp5b1dxaDJXbGIwWDhkWVdaWlM4b2w4WlRCdVY1UT0iLCJtZW1iZXIiOiIyNTZiMWJlMzI3NDVkMWQxYzlkNDkxMjFjYzg3YmM0NSIsIm5hbWVzcGFjZSI6Imxpc3RlbmluZy5wb2RjYXN0cyIsIm5vdEJlZm9yZSI6IjIwMjYtMTEtMjJUMTA6MDA6MDBaIiwicHJvdG9jb2wiOiJjb2xvcGhvbi9zZXNzaW9uLWtleS82Iiwic2Vzc2lvbiI6MH0=\",\"signature\":\"rAq+iGteT/D46PBIAJqEzYhfFpRZTmmTR3wjN5YIRCBQl2X62xoH8hE3ujYberi8U4PNxR3VzeA9JAfPtYCwFg==\"},\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":12,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"signature\":\"izTeodep6DaGcEfGwMStCMVmti01o9sVNB03u8dDsfE1L9IGZ86qD7dJEVLwrkKjZv3b8GZjS9hT9/sUrAE/MQ==\"}",
+      "n": 12,
+      "name": "take",
+      "nonce": "00000000000000000000000c",
+      "plaintext": "{\"claim\":{\"holder\":\"256b1be32745d1d1c9d49121cc87bc45\",\"rank\":0,\"term\":5},\"kind\":\"take\"}",
+      "retain": false,
+      "signature": "izTeodep6DaGcEfGwMStCMVmti01o9sVNB03u8dDsfE1L9IGZ86qD7dJEVLwrkKjZv3b8GZjS9hT9/sUrAE/MQ==",
+      "signedBody": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"2UeXgkv4kshvuOxKdrtYneLptdaO9V5dD2fmsmrrsYDQjNZfXLVFzldIyizXZlKQBjskB6B9DK9F0t0jnmVHzd8KMs9Eprou2XLWTbawXYmDSMK1Za5+dFP4j6kQWo03M9xHuLMo8g==\",\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":12,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\"}",
+      "to": null,
+      "writer": true
+    },
+    {
+      "aad": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":13,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"to\":\"fe00ab0f341901f863a49160cf554588\"}",
+      "ciphertext": "76mjn/uhxb44vLdsHsb0j+HWJmEVeM1T/UhYXUAhkWch6V+vbTHGQQ==",
+      "frame": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"76mjn/uhxb44vLdsHsb0j+HWJmEVeM1T/UhYXUAhkWch6V+vbTHGQQ==\",\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":13,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"signature\":\"vwrtifvkzGFIJLsTL+TO3M09Y78hPqE3hLKnb2Kk5nG1ERCGN3ByBzvQLBFKibopG1dfBocQKRpzLpa9/2OqzQ==\",\"to\":\"fe00ab0f341901f863a49160cf554588\"}",
+      "n": 13,
+      "name": "ping",
+      "nonce": "00000000000000000000000d",
+      "plaintext": "{\"kind\":\"ping\",\"t\":1000}",
+      "retain": false,
+      "signature": "vwrtifvkzGFIJLsTL+TO3M09Y78hPqE3hLKnb2Kk5nG1ERCGN3ByBzvQLBFKibopG1dfBocQKRpzLpa9/2OqzQ==",
+      "signedBody": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"76mjn/uhxb44vLdsHsb0j+HWJmEVeM1T/UhYXUAhkWch6V+vbTHGQQ==\",\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":13,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"to\":\"fe00ab0f341901f863a49160cf554588\"}",
+      "to": "fe00ab0f341901f863a49160cf554588",
+      "writer": true
+    },
+    {
+      "aad": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":14,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"to\":\"fe00ab0f341901f863a49160cf554588\"}",
+      "ciphertext": "YVnZbIxRvIKV1+TEmlt2D79qiNh0zZQo0RP4xS3JQS52+5YnRUtDKv6GnDbqpKc56uycAPqWtduz5MNJ4Q==",
+      "frame": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"YVnZbIxRvIKV1+TEmlt2D79qiNh0zZQo0RP4xS3JQS52+5YnRUtDKv6GnDbqpKc56uycAPqWtduz5MNJ4Q==\",\"delegation\":{\"body\":\"eyJhY2NvdW50IjoiYzE0Mzg0MWNkZWNiNzc0ZmE2NzQ5N2ExODQ4MWQ4ZDBhZDc2ZWRjOGUzMjQ5MGNmN2QzMzc3YWQ1OWFkYTVkNSIsImV4cGlyZXMiOiIyMDI2LTExLTIzVDEwOjAwOjAwWiIsImtleSI6IkJBSVg1aGZ3dGtRNUtDZVBscG1lYWFJNlR5d1ZLOTl0Yk45bTViZ0NndFR0R1VwOTY4dVhjUzB0Mmp5b1dxaDJXbGIwWDhkWVdaWlM4b2w4WlRCdVY1UT0iLCJtZW1iZXIiOiIyNTZiMWJlMzI3NDVkMWQxYzlkNDkxMjFjYzg3YmM0NSIsIm5hbWVzcGFjZSI6Imxpc3RlbmluZy5wb2RjYXN0cyIsIm5vdEJlZm9yZSI6IjIwMjYtMTEtMjJUMTA6MDA6MDBaIiwicHJvdG9jb2wiOiJjb2xvcGhvbi9zZXNzaW9uLWtleS82Iiwic2Vzc2lvbiI6MH0=\",\"signature\":\"rAq+iGteT/D46PBIAJqEzYhfFpRZTmmTR3wjN5YIRCBQl2X62xoH8hE3ujYberi8U4PNxR3VzeA9JAfPtYCwFg==\"},\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":14,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"signature\":\"iJ9z9+KR+2TkMlnig329YILt2BAMc++I7wOlqrojzAUGg+jk0udrMoC0HhBME4ft2QGc/R4ou+A3qMCtgVrayQ==\",\"to\":\"fe00ab0f341901f863a49160cf554588\"}",
+      "n": 14,
+      "name": "pong",
+      "nonce": "00000000000000000000000e",
+      "plaintext": "{\"echo\":1000,\"hold\":3,\"kind\":\"pong\",\"t\":2040}",
+      "retain": false,
+      "signature": "iJ9z9+KR+2TkMlnig329YILt2BAMc++I7wOlqrojzAUGg+jk0udrMoC0HhBME4ft2QGc/R4ou+A3qMCtgVrayQ==",
+      "signedBody": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"YVnZbIxRvIKV1+TEmlt2D79qiNh0zZQo0RP4xS3JQS52+5YnRUtDKv6GnDbqpKc56uycAPqWtduz5MNJ4Q==\",\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":14,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"to\":\"fe00ab0f341901f863a49160cf554588\"}",
+      "to": "fe00ab0f341901f863a49160cf554588",
+      "writer": true
+    },
+    {
+      "aad": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":15,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"to\":\"fe00ab0f341901f863a49160cf554588\"}",
+      "ciphertext": "TpbPgDmE1EmBzon6rb9SpZGgmHjniBaI1aXyFKhowN3KjlapDsI8XDBIqHHXiuJU/6n50zkbLp7RDOoCtvy37DjNdc2AUi5DS5MB8HATSKugqOt0PYZWNEOadiiaic5CBoH//gky5J1IoglRdrAkPrqWHHjZGtSSKj9cYtgjtVg=",
+      "frame": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"TpbPgDmE1EmBzon6rb9SpZGgmHjniBaI1aXyFKhowN3KjlapDsI8XDBIqHHXiuJU/6n50zkbLp7RDOoCtvy37DjNdc2AUi5DS5MB8HATSKugqOt0PYZWNEOadiiaic5CBoH//gky5J1IoglRdrAkPrqWHHjZGtSSKj9cYtgjtVg=\",\"delegation\":{\"body\":\"eyJhY2NvdW50IjoiYzE0Mzg0MWNkZWNiNzc0ZmE2NzQ5N2ExODQ4MWQ4ZDBhZDc2ZWRjOGUzMjQ5MGNmN2QzMzc3YWQ1OWFkYTVkNSIsImV4cGlyZXMiOiIyMDI2LTExLTIzVDEwOjAwOjAwWiIsImtleSI6IkJBSVg1aGZ3dGtRNUtDZVBscG1lYWFJNlR5d1ZLOTl0Yk45bTViZ0NndFR0R1VwOTY4dVhjUzB0Mmp5b1dxaDJXbGIwWDhkWVdaWlM4b2w4WlRCdVY1UT0iLCJtZW1iZXIiOiIyNTZiMWJlMzI3NDVkMWQxYzlkNDkxMjFjYzg3YmM0NSIsIm5hbWVzcGFjZSI6Imxpc3RlbmluZy5wb2RjYXN0cyIsIm5vdEJlZm9yZSI6IjIwMjYtMTEtMjJUMTA6MDA6MDBaIiwicHJvdG9jb2wiOiJjb2xvcGhvbi9zZXNzaW9uLWtleS82Iiwic2Vzc2lvbiI6MH0=\",\"signature\":\"rAq+iGteT/D46PBIAJqEzYhfFpRZTmmTR3wjN5YIRCBQl2X62xoH8hE3ujYberi8U4PNxR3VzeA9JAfPtYCwFg==\"},\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":15,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"signature\":\"Fi+hhaBwzGfrgf75xnCxcKJnco2/yhRY6/dpU6Oyl2dx8FYz0bQIF6BaIhf21gQ5UmSK881gRto1yxCR5VIwBQ==\",\"to\":\"fe00ab0f341901f863a49160cf554588\"}",
+      "n": 15,
+      "name": "yielded",
+      "nonce": "00000000000000000000000f",
+      "plaintext": "{\"claim\":{\"holder\":\"256b1be32745d1d1c9d49121cc87bc45\",\"rank\":0,\"term\":3},\"kind\":\"yielded\",\"seq\":9,\"snapshot\":\"\"}",
+      "retain": false,
+      "signature": "Fi+hhaBwzGfrgf75xnCxcKJnco2/yhRY6/dpU6Oyl2dx8FYz0bQIF6BaIhf21gQ5UmSK881gRto1yxCR5VIwBQ==",
+      "signedBody": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"TpbPgDmE1EmBzon6rb9SpZGgmHjniBaI1aXyFKhowN3KjlapDsI8XDBIqHHXiuJU/6n50zkbLp7RDOoCtvy37DjNdc2AUi5DS5MB8HATSKugqOt0PYZWNEOadiiaic5CBoH//gky5J1IoglRdrAkPrqWHHjZGtSSKj9cYtgjtVg=\",\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":15,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"to\":\"fe00ab0f341901f863a49160cf554588\"}",
+      "to": "fe00ab0f341901f863a49160cf554588",
+      "writer": true
+    },
+    {
+      "aad": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":16,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"to\":\"fe00ab0f341901f863a49160cf554588\"}",
+      "ciphertext": "VWE/CgpfwLvKcUWVh3uEqXtbOc9YJlxk8SLn/kR+oVq3bgSdRFuuZD/XK9gci+V4LJDbfJN5V8Rh78iF6MqxeDMEkEPDKGMHWtNt63RFADgK1/Mr5L4lKipkyWE19k06QquQA3O7H+eo3ZLojExfdVnYUZmpSJUL4o4ca2aprY3VSOi3gqdCChNKdl8H4B4U",
+      "frame": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"VWE/CgpfwLvKcUWVh3uEqXtbOc9YJlxk8SLn/kR+oVq3bgSdRFuuZD/XK9gci+V4LJDbfJN5V8Rh78iF6MqxeDMEkEPDKGMHWtNt63RFADgK1/Mr5L4lKipkyWE19k06QquQA3O7H+eo3ZLojExfdVnYUZmpSJUL4o4ca2aprY3VSOi3gqdCChNKdl8H4B4U\",\"delegation\":{\"body\":\"eyJhY2NvdW50IjoiYzE0Mzg0MWNkZWNiNzc0ZmE2NzQ5N2ExODQ4MWQ4ZDBhZDc2ZWRjOGUzMjQ5MGNmN2QzMzc3YWQ1OWFkYTVkNSIsImV4cGlyZXMiOiIyMDI2LTExLTIzVDEwOjAwOjAwWiIsImtleSI6IkJBSVg1aGZ3dGtRNUtDZVBscG1lYWFJNlR5d1ZLOTl0Yk45bTViZ0NndFR0R1VwOTY4dVhjUzB0Mmp5b1dxaDJXbGIwWDhkWVdaWlM4b2w4WlRCdVY1UT0iLCJtZW1iZXIiOiIyNTZiMWJlMzI3NDVkMWQxYzlkNDkxMjFjYzg3YmM0NSIsIm5hbWVzcGFjZSI6Imxpc3RlbmluZy5wb2RjYXN0cyIsIm5vdEJlZm9yZSI6IjIwMjYtMTEtMjJUMTA6MDA6MDBaIiwicHJvdG9jb2wiOiJjb2xvcGhvbi9zZXNzaW9uLWtleS82Iiwic2Vzc2lvbiI6MH0=\",\"signature\":\"rAq+iGteT/D46PBIAJqEzYhfFpRZTmmTR3wjN5YIRCBQl2X62xoH8hE3ujYberi8U4PNxR3VzeA9JAfPtYCwFg==\"},\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":16,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"signature\":\"TLVqRHvRefHwLWPPrJ1frv2uICeS2AR/7ISfI/1WCzStD0crpRhYYDxGmrBmzXQfUe4/7GAfVbEpgvu5+7XrEg==\",\"to\":\"fe00ab0f341901f863a49160cf554588\"}",
+      "n": 16,
+      "name": "ack",
+      "nonce": "000000000000000000000010",
+      "plaintext": "{\"kind\":\"ack\",\"passed\":{\"holder\":\"fe00ab0f341901f863a49160cf554588\",\"rank\":1,\"term\":4,\"via\":\"256b1be32745d1d1c9d49121cc87bc45\"}}",
+      "retain": false,
+      "signature": "TLVqRHvRefHwLWPPrJ1frv2uICeS2AR/7ISfI/1WCzStD0crpRhYYDxGmrBmzXQfUe4/7GAfVbEpgvu5+7XrEg==",
+      "signedBody": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"VWE/CgpfwLvKcUWVh3uEqXtbOc9YJlxk8SLn/kR+oVq3bgSdRFuuZD/XK9gci+V4LJDbfJN5V8Rh78iF6MqxeDMEkEPDKGMHWtNt63RFADgK1/Mr5L4lKipkyWE19k06QquQA3O7H+eo3ZLojExfdVnYUZmpSJUL4o4ca2aprY3VSOi3gqdCChNKdl8H4B4U\",\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":16,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"to\":\"fe00ab0f341901f863a49160cf554588\"}",
+      "to": "fe00ab0f341901f863a49160cf554588",
+      "writer": true
+    },
+    {
+      "aad": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":17,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\"}",
+      "ciphertext": "jhabsBX6gKyf+Z0CYzjuV8sgnRB3VvdztnalobYyuk8zFhmK1oRlKsuc8JabKMtg7CFNy1whUe0G9wN9bwCtEDXfI27a/VWfCkr+iSqoJSY7y3lUuvNp+rV02fISIogI6z58QqlEEwhqwFCQxnRD+mG0r0hKjw==",
+      "frame": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"jhabsBX6gKyf+Z0CYzjuV8sgnRB3VvdztnalobYyuk8zFhmK1oRlKsuc8JabKMtg7CFNy1whUe0G9wN9bwCtEDXfI27a/VWfCkr+iSqoJSY7y3lUuvNp+rV02fISIogI6z58QqlEEwhqwFCQxnRD+mG0r0hKjw==\",\"delegation\":{\"body\":\"eyJhY2NvdW50IjoiYzE0Mzg0MWNkZWNiNzc0ZmE2NzQ5N2ExODQ4MWQ4ZDBhZDc2ZWRjOGUzMjQ5MGNmN2QzMzc3YWQ1OWFkYTVkNSIsImV4cGlyZXMiOiIyMDI2LTExLTIzVDEwOjAwOjAwWiIsImtleSI6IkJBSVg1aGZ3dGtRNUtDZVBscG1lYWFJNlR5d1ZLOTl0Yk45bTViZ0NndFR0R1VwOTY4dVhjUzB0Mmp5b1dxaDJXbGIwWDhkWVdaWlM4b2w4WlRCdVY1UT0iLCJtZW1iZXIiOiIyNTZiMWJlMzI3NDVkMWQxYzlkNDkxMjFjYzg3YmM0NSIsIm5hbWVzcGFjZSI6Imxpc3RlbmluZy5wb2RjYXN0cyIsIm5vdEJlZm9yZSI6IjIwMjYtMTEtMjJUMTA6MDA6MDBaIiwicHJvdG9jb2wiOiJjb2xvcGhvbi9zZXNzaW9uLWtleS82Iiwic2Vzc2lvbiI6MH0=\",\"signature\":\"rAq+iGteT/D46PBIAJqEzYhfFpRZTmmTR3wjN5YIRCBQl2X62xoH8hE3ujYberi8U4PNxR3VzeA9JAfPtYCwFg==\"},\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":17,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"signature\":\"h1WX1+bfC6UVaGnP0L0G32Co/IZJktND7z8CyEQG27u/hFosmScQ11gBDsf9AePUpiwJqqTJt+EblExrjM9juw==\"}",
+      "n": 17,
+      "name": "bye-release",
+      "nonce": "000000000000000000000011",
+      "plaintext": "{\"claim\":{\"holder\":\"256b1be32745d1d1c9d49121cc87bc45\",\"rank\":0,\"term\":3},\"kind\":\"bye\",\"leaving\":false}",
+      "retain": false,
+      "signature": "h1WX1+bfC6UVaGnP0L0G32Co/IZJktND7z8CyEQG27u/hFosmScQ11gBDsf9AePUpiwJqqTJt+EblExrjM9juw==",
+      "signedBody": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"jhabsBX6gKyf+Z0CYzjuV8sgnRB3VvdztnalobYyuk8zFhmK1oRlKsuc8JabKMtg7CFNy1whUe0G9wN9bwCtEDXfI27a/VWfCkr+iSqoJSY7y3lUuvNp+rV02fISIogI6z58QqlEEwhqwFCQxnRD+mG0r0hKjw==\",\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":17,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\"}",
+      "to": null,
+      "writer": true
+    },
+    {
+      "aad": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":18,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\"}",
+      "ciphertext": "dguTJRx0MnZmJya2iWm/lNP5DzpP9kED0vMHvQwKAxKH5T2qTryWfVZvsxDz",
+      "frame": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"dguTJRx0MnZmJya2iWm/lNP5DzpP9kED0vMHvQwKAxKH5T2qTryWfVZvsxDz\",\"delegation\":{\"body\":\"eyJhY2NvdW50IjoiYzE0Mzg0MWNkZWNiNzc0ZmE2NzQ5N2ExODQ4MWQ4ZDBhZDc2ZWRjOGUzMjQ5MGNmN2QzMzc3YWQ1OWFkYTVkNSIsImV4cGlyZXMiOiIyMDI2LTExLTIzVDEwOjAwOjAwWiIsImtleSI6IkJBSVg1aGZ3dGtRNUtDZVBscG1lYWFJNlR5d1ZLOTl0Yk45bTViZ0NndFR0R1VwOTY4dVhjUzB0Mmp5b1dxaDJXbGIwWDhkWVdaWlM4b2w4WlRCdVY1UT0iLCJtZW1iZXIiOiIyNTZiMWJlMzI3NDVkMWQxYzlkNDkxMjFjYzg3YmM0NSIsIm5hbWVzcGFjZSI6Imxpc3RlbmluZy5wb2RjYXN0cyIsIm5vdEJlZm9yZSI6IjIwMjYtMTEtMjJUMTA6MDA6MDBaIiwicHJvdG9jb2wiOiJjb2xvcGhvbi9zZXNzaW9uLWtleS82Iiwic2Vzc2lvbiI6MH0=\",\"signature\":\"rAq+iGteT/D46PBIAJqEzYhfFpRZTmmTR3wjN5YIRCBQl2X62xoH8hE3ujYberi8U4PNxR3VzeA9JAfPtYCwFg==\"},\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":18,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"signature\":\"8xZr5qWFceuRckBz+oBx0+C3dMGUWhvS3atvKPPg/yWjFXAjuHWqXBe4qm+xkQmHEwsxHVjPHl/AYzkQ+I4Tjw==\"}",
+      "n": 18,
+      "name": "bye-leave",
+      "nonce": "000000000000000000000012",
+      "plaintext": "{\"kind\":\"bye\",\"leaving\":true}",
+      "retain": false,
+      "signature": "8xZr5qWFceuRckBz+oBx0+C3dMGUWhvS3atvKPPg/yWjFXAjuHWqXBe4qm+xkQmHEwsxHVjPHl/AYzkQ+I4Tjw==",
+      "signedBody": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"dguTJRx0MnZmJya2iWm/lNP5DzpP9kED0vMHvQwKAxKH5T2qTryWfVZvsxDz\",\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":18,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\"}",
+      "to": null,
+      "writer": true
+    },
+    {
+      "aad": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"epoch\":1,\"from\":\"e6f39369127579d20d5eacd45990055f\",\"key\":\"77b093d60f7b5c18d6e9a9033b67385a\",\"n\":1,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\"}",
+      "ciphertext": "KumFdxy84W294rUKaPNv551dYs3pr676XLJZmdMm2Mb3vsTBZ6Cf6NA/k2L4na9x9Xm1qSmylHe0HPI5li0hqSQNGi1813ratBsPF7zp+7U9vfK9vIFhGAll2maFLMng152MDZbRuQ==",
+      "frame": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"KumFdxy84W294rUKaPNv551dYs3pr676XLJZmdMm2Mb3vsTBZ6Cf6NA/k2L4na9x9Xm1qSmylHe0HPI5li0hqSQNGi1813ratBsPF7zp+7U9vfK9vIFhGAll2maFLMng152MDZbRuQ==\",\"delegation\":{\"body\":\"eyJhY2NvdW50IjoiYzE0Mzg0MWNkZWNiNzc0ZmE2NzQ5N2ExODQ4MWQ4ZDBhZDc2ZWRjOGUzMjQ5MGNmN2QzMzc3YWQ1OWFkYTVkNSIsImV4cGlyZXMiOiIyMDI2LTExLTIyVDExOjAwOjAwWiIsImtleSI6IkJLUjNDRWdCU3ZKRGhLU0VSeE9BaVBNd3ZpUG1vbFFKVTV4VVVudW1xbXpnRVNmalhUMHY5dGlzNGxBd1NyT29vNkFrL0FkVzZaek9IVWwvVDdsTFEwOD0iLCJtZW1iZXIiOiJlNmYzOTM2OTEyNzU3OWQyMGQ1ZWFjZDQ1OTkwMDU1ZiIsIm5hbWVzcGFjZSI6Imxpc3RlbmluZy5wb2RjYXN0cyIsIm5vdEJlZm9yZSI6IjIwMjYtMTEtMjJUMTA6MDA6MDBaIiwicHJvdG9jb2wiOiJjb2xvcGhvbi9zZXNzaW9uLWtleS82Iiwic2Vzc2lvbiI6MH0=\",\"signature\":\"aWUXMMy6sdoClIH9O/n5C3L0xsoIhEs7s4Cr/nB+iR70rUHHNo/im7+9ApZDx+OQv/wqKxGkxEOubk+c0+gTww==\"},\"epoch\":1,\"from\":\"e6f39369127579d20d5eacd45990055f\",\"key\":\"77b093d60f7b5c18d6e9a9033b67385a\",\"n\":1,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"signature\":\"xMzJ5iiR8GrmtbPGjv+vp3mzE0EK2sgiPrrDHMt1IcXcf09cHnjG/rCTKHmxhhxmwTAcUJjZ6S0GJLoBcj8gjQ==\"}",
+      "n": 1,
+      "name": "take-from-reader",
+      "nonce": "000000000000000000000001",
+      "plaintext": "{\"claim\":{\"holder\":\"e6f39369127579d20d5eacd45990055f\",\"rank\":0,\"term\":6},\"kind\":\"take\"}",
+      "retain": false,
+      "signature": "xMzJ5iiR8GrmtbPGjv+vp3mzE0EK2sgiPrrDHMt1IcXcf09cHnjG/rCTKHmxhhxmwTAcUJjZ6S0GJLoBcj8gjQ==",
+      "signedBody": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"KumFdxy84W294rUKaPNv551dYs3pr676XLJZmdMm2Mb3vsTBZ6Cf6NA/k2L4na9x9Xm1qSmylHe0HPI5li0hqSQNGi1813ratBsPF7zp+7U9vfK9vIFhGAll2maFLMng152MDZbRuQ==\",\"epoch\":1,\"from\":\"e6f39369127579d20d5eacd45990055f\",\"key\":\"77b093d60f7b5c18d6e9a9033b67385a\",\"n\":1,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\"}",
+      "to": null,
+      "writer": false
+    }
+  ],
+  "maxPayload": 8192,
+  "members": [
+    {
+      "access": "write",
+      "id": "256b1be32745d1d1c9d49121cc87bc45",
+      "name": "a",
+      "privateKey": "0101010101010101010101010101010101010101010101010101010101010101",
+      "session": 0,
+      "signing": "BG/wO5SSQc4drdQ1GeaWDgqFtBppoFwygQOqK84VlMoWPE91OlW/AdxT9sCwx+7ni0DG/30lqW4igrmJzvccFEo="
+    },
+    {
+      "access": "write",
+      "id": "fe00ab0f341901f863a49160cf554588",
+      "name": "b",
+      "privateKey": "0202020202020202020202020202020202020202020202020202020202020202",
+      "session": 0,
+      "signing": "BFUPRxAD89+Xw99QaseX9nIfsaH7e49vg9IkSYplyI4kE2CT1wEuUJpzcVy9CwCjzA/0tcAbP/oZarH7MnA2uOY="
+    },
+    {
+      "access": "write",
+      "id": "d02c9e7062d4d70c142007e115a13cf4",
+      "name": "c",
+      "privateKey": "0303030303030303030303030303030303030303030303030303030303030303",
+      "session": 0,
+      "signing": "BFkat3HrvP1tnLkJTRBlKK3Rpp1EwsH2J/CJ7Fi5xhrfn05qvw0EXAxpOjxorXyXynK+ZN70om/s0mPdmKkngPA="
+    },
+    {
+      "access": "read",
+      "id": "e6f39369127579d20d5eacd45990055f",
+      "name": "r",
+      "privateKey": "0404040404040404040404040404040404040404040404040404040404040404",
+      "session": 0,
+      "signing": "BHMQPsMLPM9X2q4I6TU0rvFEo1lAz2u7oSoM98vV1lpk2CyMmenTxF+SRbqbJ5gsmuqOwduUsZxEeVlCwOsiqjI="
+    }
+  ],
+  "namespace": "listening.podcasts",
+  "negative": [
+    {
+      "accept": [
+        "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"q7Ds+cNasQj8IQqn8Tsd549j/rdqi4KJmyP7Gcxa7XAcFv4NsoNEwEfkkraccPJJ9HkwFQcEnw2JeenjA/LqIVZDhD/7fH1UVuchhZQ4Jx3zq9TmjEq/YvTukt87lgPh6j2CqgeeV7o05//ROKI0F4v7GczS4qEJhslTL0RT/Wr4LLc3pAoRpZ/cAmZ0g4efZ4OSV9JFDdx00+/Wc+oGJr1KIPdyxMmfim7HnKBK+x/mVEPacmrg3AXzHJlCdkopJA==\",\"delegation\":{\"body\":\"eyJhY2NvdW50IjoiYzE0Mzg0MWNkZWNiNzc0ZmE2NzQ5N2ExODQ4MWQ4ZDBhZDc2ZWRjOGUzMjQ5MGNmN2QzMzc3YWQ1OWFkYTVkNSIsImV4cGlyZXMiOiIyMDI2LTExLTIzVDEwOjAwOjAwWiIsImtleSI6IkJBSVg1aGZ3dGtRNUtDZVBscG1lYWFJNlR5d1ZLOTl0Yk45bTViZ0NndFR0R1VwOTY4dVhjUzB0Mmp5b1dxaDJXbGIwWDhkWVdaWlM4b2w4WlRCdVY1UT0iLCJtZW1iZXIiOiIyNTZiMWJlMzI3NDVkMWQxYzlkNDkxMjFjYzg3YmM0NSIsIm5hbWVzcGFjZSI6Imxpc3RlbmluZy5wb2RjYXN0cyIsIm5vdEJlZm9yZSI6IjIwMjYtMTEtMjJUMTA6MDA6MDBaIiwicHJvdG9jb2wiOiJjb2xvcGhvbi9zZXNzaW9uLWtleS82Iiwic2Vzc2lvbiI6MH0=\",\"signature\":\"rAq+iGteT/D46PBIAJqEzYhfFpRZTmmTR3wjN5YIRCBQl2X62xoH8hE3ujYberi8U4PNxR3VzeA9JAfPtYCwFg==\"},\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":1,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"signature\":\"WOrpvS7N0Qf2RprlJEH62Gomg28RuoZzGh7QEgvptZpWATmU2/hrmsbW+Nre20w7s9Vdpbg4A3IIhnLqwlB2aA==\"}"
+      ],
+      "drop": "replay",
+      "frame": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"q7Ds+cNasQj8IQqn8Tsd549j/rdqi4KJmyP7Gcxa7XAcFv4NsoNEwEfkkraccPJJ9HkwFQcEnw2JeenjA/LqIVZDhD/7fH1UVuchhZQ4Jx3zq9TmjEq/YvTukt87lgPh6j2CqgeeV7o05//ROKI0F4v7GczS4qEJhslTL0RT/Wr4LLc3pAoRpZ/cAmZ0g4efZ4OSV9JFDdx00+/Wc+oGJr1KIPdyxMmfim7HnKBK+x/mVEPacmrg3AXzHJlCdkopJA==\",\"delegation\":{\"body\":\"eyJhY2NvdW50IjoiYzE0Mzg0MWNkZWNiNzc0ZmE2NzQ5N2ExODQ4MWQ4ZDBhZDc2ZWRjOGUzMjQ5MGNmN2QzMzc3YWQ1OWFkYTVkNSIsImV4cGlyZXMiOiIyMDI2LTExLTIzVDEwOjAwOjAwWiIsImtleSI6IkJBSVg1aGZ3dGtRNUtDZVBscG1lYWFJNlR5d1ZLOTl0Yk45bTViZ0NndFR0R1VwOTY4dVhjUzB0Mmp5b1dxaDJXbGIwWDhkWVdaWlM4b2w4WlRCdVY1UT0iLCJtZW1iZXIiOiIyNTZiMWJlMzI3NDVkMWQxYzlkNDkxMjFjYzg3YmM0NSIsIm5hbWVzcGFjZSI6Imxpc3RlbmluZy5wb2RjYXN0cyIsIm5vdEJlZm9yZSI6IjIwMjYtMTEtMjJUMTA6MDA6MDBaIiwicHJvdG9jb2wiOiJjb2xvcGhvbi9zZXNzaW9uLWtleS82Iiwic2Vzc2lvbiI6MH0=\",\"signature\":\"rAq+iGteT/D46PBIAJqEzYhfFpRZTmmTR3wjN5YIRCBQl2X62xoH8hE3ujYberi8U4PNxR3VzeA9JAfPtYCwFg==\"},\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":1,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"signature\":\"WOrpvS7N0Qf2RprlJEH62Gomg28RuoZzGh7QEgvptZpWATmU2/hrmsbW+Nre20w7s9Vdpbg4A3IIhnLqwlB2aA==\"}",
+      "name": "replay"
+    },
+    {
+      "accept": [],
+      "drop": "signature",
+      "frame": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"40ftKkaPGJ8695eH3Q6ocpFWhGEgxwvGrscFWeio4iK7mrx7Ec5IzRHQpbzuXcJCfnHCZG10aJde8+QCbPKHahIFNBhjfUyXW/Otii6bUGIyPlrsEWsu5Nf0e2VMtlpRWoEnnYRT2bzkQHUzMH78\",\"delegation\":{\"body\":\"eyJhY2NvdW50IjoiYzE0Mzg0MWNkZWNiNzc0ZmE2NzQ5N2ExODQ4MWQ4ZDBhZDc2ZWRjOGUzMjQ5MGNmN2QzMzc3YWQ1OWFkYTVkNSIsImV4cGlyZXMiOiIyMDI2LTExLTIzVDEwOjAwOjAwWiIsImtleSI6IkJBSVg1aGZ3dGtRNUtDZVBscG1lYWFJNlR5d1ZLOTl0Yk45bTViZ0NndFR0R1VwOTY4dVhjUzB0Mmp5b1dxaDJXbGIwWDhkWVdaWlM4b2w4WlRCdVY1UT0iLCJtZW1iZXIiOiIyNTZiMWJlMzI3NDVkMWQxYzlkNDkxMjFjYzg3YmM0NSIsIm5hbWVzcGFjZSI6Imxpc3RlbmluZy5wb2RjYXN0cyIsIm5vdEJlZm9yZSI6IjIwMjYtMTEtMjJUMTA6MDA6MDBaIiwicHJvdG9jb2wiOiJjb2xvcGhvbi9zZXNzaW9uLWtleS82Iiwic2Vzc2lvbiI6MH0=\",\"signature\":\"rAq+iGteT/D46PBIAJqEzYhfFpRZTmmTR3wjN5YIRCBQl2X62xoH8hE3ujYberi8U4PNxR3VzeA9JAfPtYCwFg==\"},\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":4,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"retain\":true,\"signature\":\"+aSI23KDU2Cu5h0iEy7TRQZkVsnkv8ExORVKvNYYJl8bdV0CzuuBmhGNVCM3okoiREQs6j4On5W5aQ4e2l9Qew==\"}",
+      "name": "ciphertext-bit"
+    },
+    {
+      "accept": [],
+      "drop": "signature",
+      "frame": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"40ftK0aPGJ8695eH3Q6ocpFWhGEgxwvGrscFWeio4iK7mrx7Ec5IzRHQpbzuXcJCfnHCZG10aJde8+QCbPKHahIFNBhjfUyXW/Otii6bUGIyPlrsEWsu5Nf0e2VMtlpRWoEnnYRT2bzkQHUzMH78\",\"delegation\":{\"body\":\"eyJhY2NvdW50IjoiYzE0Mzg0MWNkZWNiNzc0ZmE2NzQ5N2ExODQ4MWQ4ZDBhZDc2ZWRjOGUzMjQ5MGNmN2QzMzc3YWQ1OWFkYTVkNSIsImV4cGlyZXMiOiIyMDI2LTExLTIzVDEwOjAwOjAwWiIsImtleSI6IkJBSVg1aGZ3dGtRNUtDZVBscG1lYWFJNlR5d1ZLOTl0Yk45bTViZ0NndFR0R1VwOTY4dVhjUzB0Mmp5b1dxaDJXbGIwWDhkWVdaWlM4b2w4WlRCdVY1UT0iLCJtZW1iZXIiOiIyNTZiMWJlMzI3NDVkMWQxYzlkNDkxMjFjYzg3YmM0NSIsIm5hbWVzcGFjZSI6Imxpc3RlbmluZy5wb2RjYXN0cyIsIm5vdEJlZm9yZSI6IjIwMjYtMTEtMjJUMTA6MDA6MDBaIiwicHJvdG9jb2wiOiJjb2xvcGhvbi9zZXNzaW9uLWtleS82Iiwic2Vzc2lvbiI6MH0=\",\"signature\":\"rAq+iGteT/D46PBIAJqEzYhfFpRZTmmTR3wjN5YIRCBQl2X62xoH8hE3ujYberi8U4PNxR3VzeA9JAfPtYCwFg==\"},\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":4,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"retain\":true,\"signature\":\"+aSI23KDU2Cu5x0iEy7TRQZkVsnkv8ExORVKvNYYJl8bdV0CzuuBmhGNVCM3okoiREQs6j4On5W5aQ4e2l9Qew==\"}",
+      "name": "signature-bit"
+    },
+    {
+      "accept": [],
+      "drop": "signature",
+      "frame": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"40ftK0aPGJ8695eH3Q6ocpFWhGEgxwvGrscFWeio4iK7mrx7Ec5IzRHQpbzuXcJCfnHCZG10aJde8+QCbPKHahIFNBhjfUyXW/Otii6bUGIyPlrsEWsu5Nf0e2VMtlpRWoEnnYRT2bzkQHUzMH78\",\"delegation\":{\"body\":\"eyJhY2NvdW50IjoiYzE0Mzg0MWNkZWNiNzc0ZmE2NzQ5N2ExODQ4MWQ4ZDBhZDc2ZWRjOGUzMjQ5MGNmN2QzMzc3YWQ1OWFkYTVkNSIsImV4cGlyZXMiOiIyMDI2LTExLTIzVDEwOjAwOjAwWiIsImtleSI6IkJBSVg1aGZ3dGtRNUtDZVBscG1lYWFJNlR5d1ZLOTl0Yk45bTViZ0NndFR0R1VwOTY4dVhjUzB0Mmp5b1dxaDJXbGIwWDhkWVdaWlM4b2w4WlRCdVY1UT0iLCJtZW1iZXIiOiIyNTZiMWJlMzI3NDVkMWQxYzlkNDkxMjFjYzg3YmM0NSIsIm5hbWVzcGFjZSI6Imxpc3RlbmluZy5wb2RjYXN0cyIsIm5vdEJlZm9yZSI6IjIwMjYtMTEtMjJUMTA6MDA6MDBaIiwicHJvdG9jb2wiOiJjb2xvcGhvbi9zZXNzaW9uLWtleS82Iiwic2Vzc2lvbiI6MH0=\",\"signature\":\"rAq+iGteT/D46PBIAJqEzYhfFpRZTmmTR3wjN5YIRCBQl2X62xoH8hE3ujYberi8U4PNxR3VzeA9JAfPtYCwFg==\"},\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":99,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"retain\":true,\"signature\":\"+aSI23KDU2Cu5h0iEy7TRQZkVsnkv8ExORVKvNYYJl8bdV0CzuuBmhGNVCM3okoiREQs6j4On5W5aQ4e2l9Qew==\"}",
+      "name": "n-changed"
+    },
+    {
+      "accept": [],
+      "drop": "signature",
+      "frame": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"40ftK0aPGJ8695eH3Q6ocpFWhGEgxwvGrscFWeio4iK7mrx7Ec5IzRHQpbzuXcJCfnHCZG10aJde8+QCbPKHahIFNBhjfUyXW/Otii6bUGIyPlrsEWsu5Nf0e2VMtlpRWoEnnYRT2bzkQHUzMH78\",\"delegation\":{\"body\":\"eyJhY2NvdW50IjoiYzE0Mzg0MWNkZWNiNzc0ZmE2NzQ5N2ExODQ4MWQ4ZDBhZDc2ZWRjOGUzMjQ5MGNmN2QzMzc3YWQ1OWFkYTVkNSIsImV4cGlyZXMiOiIyMDI2LTExLTIzVDEwOjAwOjAwWiIsImtleSI6IkJBSVg1aGZ3dGtRNUtDZVBscG1lYWFJNlR5d1ZLOTl0Yk45bTViZ0NndFR0R1VwOTY4dVhjUzB0Mmp5b1dxaDJXbGIwWDhkWVdaWlM4b2w4WlRCdVY1UT0iLCJtZW1iZXIiOiIyNTZiMWJlMzI3NDVkMWQxYzlkNDkxMjFjYzg3YmM0NSIsIm5hbWVzcGFjZSI6Imxpc3RlbmluZy5wb2RjYXN0cyIsIm5vdEJlZm9yZSI6IjIwMjYtMTEtMjJUMTA6MDA6MDBaIiwicHJvdG9jb2wiOiJjb2xvcGhvbi9zZXNzaW9uLWtleS82Iiwic2Vzc2lvbiI6MH0=\",\"signature\":\"rAq+iGteT/D46PBIAJqEzYhfFpRZTmmTR3wjN5YIRCBQl2X62xoH8hE3ujYberi8U4PNxR3VzeA9JAfPtYCwFg==\"},\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":4,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"retain\":true,\"signature\":\"+aSI23KDU2Cu5h0iEy7TRQZkVsnkv8ExORVKvNYYJl8bdV0CzuuBmhGNVCM3okoiREQs6j4On5W5aQ4e2l9Qew==\",\"to\":\"d02c9e7062d4d70c142007e115a13cf4\"}",
+      "name": "to-added"
+    },
+    {
+      "accept": [],
+      "drop": "signature",
+      "frame": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"40ftK0aPGJ8695eH3Q6ocpFWhGEgxwvGrscFWeio4iK7mrx7Ec5IzRHQpbzuXcJCfnHCZG10aJde8+QCbPKHahIFNBhjfUyXW/Otii6bUGIyPlrsEWsu5Nf0e2VMtlpRWoEnnYRT2bzkQHUzMH78\",\"delegation\":{\"body\":\"eyJhY2NvdW50IjoiYzE0Mzg0MWNkZWNiNzc0ZmE2NzQ5N2ExODQ4MWQ4ZDBhZDc2ZWRjOGUzMjQ5MGNmN2QzMzc3YWQ1OWFkYTVkNSIsImV4cGlyZXMiOiIyMDI2LTExLTIzVDEwOjAwOjAwWiIsImtleSI6IkJBSVg1aGZ3dGtRNUtDZVBscG1lYWFJNlR5d1ZLOTl0Yk45bTViZ0NndFR0R1VwOTY4dVhjUzB0Mmp5b1dxaDJXbGIwWDhkWVdaWlM4b2w4WlRCdVY1UT0iLCJtZW1iZXIiOiIyNTZiMWJlMzI3NDVkMWQxYzlkNDkxMjFjYzg3YmM0NSIsIm5hbWVzcGFjZSI6Imxpc3RlbmluZy5wb2RjYXN0cyIsIm5vdEJlZm9yZSI6IjIwMjYtMTEtMjJUMTA6MDA6MDBaIiwicHJvdG9jb2wiOiJjb2xvcGhvbi9zZXNzaW9uLWtleS82Iiwic2Vzc2lvbiI6MH0=\",\"signature\":\"rAq+iGteT/D46PBIAJqEzYhfFpRZTmmTR3wjN5YIRCBQl2X62xoH8hE3ujYberi8U4PNxR3VzeA9JAfPtYCwFg==\"},\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":4,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"signature\":\"+aSI23KDU2Cu5h0iEy7TRQZkVsnkv8ExORVKvNYYJl8bdV0CzuuBmhGNVCM3okoiREQs6j4On5W5aQ4e2l9Qew==\"}",
+      "name": "retain-removed"
+    },
+    {
+      "accept": [],
+      "drop": "delegation",
+      "frame": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"40ftK0aPGJ8695eH3Q6ocpFWhGEgxwvGrscFWeio4iK7mrx7Ec5IzRHQpbzuXcJCfnHCZG10aJde8+QCbPKHahIFNBhjfUyXW/Otii6bUGIyPlrsEWsu5Nf0e2VMtlpRWoEnnYRT2bzkQHUzMH78\",\"delegation\":{\"body\":\"eyJhY2NvdW50IjoiYzE0Mzg0MWNlZWNiNzc0ZmE2NzQ5N2ExODQ4MWQ4ZDBhZDc2ZWRjOGUzMjQ5MGNmN2QzMzc3YWQ1OWFkYTVkNSIsImV4cGlyZXMiOiIyMDI2LTExLTIzVDEwOjAwOjAwWiIsImtleSI6IkJBSVg1aGZ3dGtRNUtDZVBscG1lYWFJNlR5d1ZLOTl0Yk45bTViZ0NndFR0R1VwOTY4dVhjUzB0Mmp5b1dxaDJXbGIwWDhkWVdaWlM4b2w4WlRCdVY1UT0iLCJtZW1iZXIiOiIyNTZiMWJlMzI3NDVkMWQxYzlkNDkxMjFjYzg3YmM0NSIsIm5hbWVzcGFjZSI6Imxpc3RlbmluZy5wb2RjYXN0cyIsIm5vdEJlZm9yZSI6IjIwMjYtMTEtMjJUMTA6MDA6MDBaIiwicHJvdG9jb2wiOiJjb2xvcGhvbi9zZXNzaW9uLWtleS82Iiwic2Vzc2lvbiI6MH0=\",\"signature\":\"rAq+iGteT/D46PBIAJqEzYhfFpRZTmmTR3wjN5YIRCBQl2X62xoH8hE3ujYberi8U4PNxR3VzeA9JAfPtYCwFg==\"},\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":4,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"retain\":true,\"signature\":\"+aSI23KDU2Cu5h0iEy7TRQZkVsnkv8ExORVKvNYYJl8bdV0CzuuBmhGNVCM3okoiREQs6j4On5W5aQ4e2l9Qew==\"}",
+      "name": "delegation-body-bit"
+    },
+    {
+      "accept": [],
+      "drop": "noKey",
+      "frame": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"40ftK0aPGJ8695eH3Q6ocpFWhGEgxwvGrscFWeio4iK7mrx7Ec5IzRHQpbzuXcJCfnHCZG10aJde8+QCbPKHahIFNBhjfUyXW/Otii6bUGIyPlrsEWsu5Nf0e2VMtlpRWoEnnYRT2bzkQHUzMH78\",\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":4,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"retain\":true,\"signature\":\"+aSI23KDU2Cu5h0iEy7TRQZkVsnkv8ExORVKvNYYJl8bdV0CzuuBmhGNVCM3okoiREQs6j4On5W5aQ4e2l9Qew==\"}",
+      "name": "delegation-stripped"
+    },
+    {
+      "accept": [],
+      "drop": "malformed",
+      "frame": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"40ftK0aPGJ8695eH3Q6ocpFWhGEgxwvGrscFWeio4iK7mrx7Ec5IzRHQpbzuXcJCfnHCZG10aJde8+QCbPKHahIFNBhjfUyXW/Otii6bUGIyPlrsEWsu5Nf0e2VMtlpRWoEnnYRT2bzkQHUzMH78\",\"delegation\":{\"body\":\"eyJhY2NvdW50IjoiYzE0Mzg0MWNkZWNiNzc0ZmE2NzQ5N2ExODQ4MWQ4ZDBhZDc2ZWRjOGUzMjQ5MGNmN2QzMzc3YWQ1OWFkYTVkNSIsImV4cGlyZXMiOiIyMDI2LTExLTIzVDEwOjAwOjAwWiIsImtleSI6IkJBSVg1aGZ3dGtRNUtDZVBscG1lYWFJNlR5d1ZLOTl0Yk45bTViZ0NndFR0R1VwOTY4dVhjUzB0Mmp5b1dxaDJXbGIwWDhkWVdaWlM4b2w4WlRCdVY1UT0iLCJtZW1iZXIiOiIyNTZiMWJlMzI3NDVkMWQxYzlkNDkxMjFjYzg3YmM0NSIsIm5hbWVzcGFjZSI6Imxpc3RlbmluZy5wb2RjYXN0cyIsIm5vdEJlZm9yZSI6IjIwMjYtMTEtMjJUMTA6MDA6MDBaIiwicHJvdG9jb2wiOiJjb2xvcGhvbi9zZXNzaW9uLWtleS82Iiwic2Vzc2lvbiI6MH0=\",\"signature\":\"rAq+iGteT/D46PBIAJqEzYhfFpRZTmmTR3wjN5YIRCBQl2X62xoH8hE3ujYberi8U4PNxR3VzeA9JAfPtYCwFg==\"},\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"hint\":\"x\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":4,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"retain\":true,\"signature\":\"+aSI23KDU2Cu5h0iEy7TRQZkVsnkv8ExORVKvNYYJl8bdV0CzuuBmhGNVCM3okoiREQs6j4On5W5aQ4e2l9Qew==\"}",
+      "name": "unknown-field"
+    },
+    {
+      "accept": [],
+      "drop": "malformed",
+      "frame": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\", \"cell\":\"now-playing\",\"ciphertext\":\"40ftK0aPGJ8695eH3Q6ocpFWhGEgxwvGrscFWeio4iK7mrx7Ec5IzRHQpbzuXcJCfnHCZG10aJde8+QCbPKHahIFNBhjfUyXW/Otii6bUGIyPlrsEWsu5Nf0e2VMtlpRWoEnnYRT2bzkQHUzMH78\",\"delegation\":{\"body\":\"eyJhY2NvdW50IjoiYzE0Mzg0MWNkZWNiNzc0ZmE2NzQ5N2ExODQ4MWQ4ZDBhZDc2ZWRjOGUzMjQ5MGNmN2QzMzc3YWQ1OWFkYTVkNSIsImV4cGlyZXMiOiIyMDI2LTExLTIzVDEwOjAwOjAwWiIsImtleSI6IkJBSVg1aGZ3dGtRNUtDZVBscG1lYWFJNlR5d1ZLOTl0Yk45bTViZ0NndFR0R1VwOTY4dVhjUzB0Mmp5b1dxaDJXbGIwWDhkWVdaWlM4b2w4WlRCdVY1UT0iLCJtZW1iZXIiOiIyNTZiMWJlMzI3NDVkMWQxYzlkNDkxMjFjYzg3YmM0NSIsIm5hbWVzcGFjZSI6Imxpc3RlbmluZy5wb2RjYXN0cyIsIm5vdEJlZm9yZSI6IjIwMjYtMTEtMjJUMTA6MDA6MDBaIiwicHJvdG9jb2wiOiJjb2xvcGhvbi9zZXNzaW9uLWtleS82Iiwic2Vzc2lvbiI6MH0=\",\"signature\":\"rAq+iGteT/D46PBIAJqEzYhfFpRZTmmTR3wjN5YIRCBQl2X62xoH8hE3ujYberi8U4PNxR3VzeA9JAfPtYCwFg==\"},\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":4,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"retain\":true,\"signature\":\"+aSI23KDU2Cu5h0iEy7TRQZkVsnkv8ExORVKvNYYJl8bdV0CzuuBmhGNVCM3okoiREQs6j4On5W5aQ4e2l9Qew==\"}",
+      "name": "not-canonical"
+    },
+    {
+      "accept": [],
+      "drop": "malformed",
+      "frame": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"40ftK0aPGJ8695eH3Q6ocpFWhGEgxwvGrscFWeio4iK7mrx7Ec5IzRHQpbzuXcJCfnHCZG10aJde8+QCbPKHahIFNBhjfUyXW/Otii6bUGIyPlrsEWsu5Nf0e2VMtlpRWoEnnYRT2bzkQHUzMH78\",\"delegation\":{\"body\":\"eyJhY2NvdW50IjoiYzE0Mzg0MWNkZWNiNzc0ZmE2NzQ5N2ExODQ4MWQ4ZDBhZDc2ZWRjOGUzMjQ5MGNmN2QzMzc3YWQ1OWFkYTVkNSIsImV4cGlyZXMiOiIyMDI2LTExLTIzVDEwOjAwOjAwWiIsImtleSI6IkJBSVg1aGZ3dGtRNUtDZVBscG1lYWFJNlR5d1ZLOTl0Yk45bTViZ0NndFR0R1VwOTY4dVhjUzB0Mmp5b1dxaDJXbGIwWDhkWVdaWlM4b2w4WlRCdVY1UT0iLCJtZW1iZXIiOiIyNTZiMWJlMzI3NDVkMWQxYzlkNDkxMjFjYzg3YmM0NSIsIm5hbWVzcGFjZSI6Imxpc3RlbmluZy5wb2RjYXN0cyIsIm5vdEJlZm9yZSI6IjIwMjYtMTEtMjJUMTA6MDA6MDBaIiwicHJvdG9jb2wiOiJjb2xvcGhvbi9zZXNzaW9uLWtleS82Iiwic2Vzc2lvbiI6MH0=\",\"signature\":\"rAq+iGteT/D46PBIAJqEzYhfFpRZTmmTR3wjN5YIRCBQl2X62xoH8hE3ujYberi8U4PNxR3VzeA9JAfPtYCwFg==\"},\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":4,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"retain\":false,\"signature\":\"+aSI23KDU2Cu5h0iEy7TRQZkVsnkv8ExORVKvNYYJl8bdV0CzuuBmhGNVCM3okoiREQs6j4On5W5aQ4e2l9Qew==\"}",
+      "name": "retain-false"
+    },
+    {
+      "accept": [],
+      "drop": "oversize",
+      "frame": "{                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               }",
+      "name": "oversize"
+    },
+    {
+      "accept": [],
+      "drop": "cell",
+      "frame": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"up-next\",\"ciphertext\":\"40ftK0aPGJ8695eH3Q6ocpFWhGEgxwvGrscFWeio4iK7mrx7Ec5IzRHQpbzuXcJCfnHCZG10aJde8+QCbPKHahIFNBhjfUyXW/Otii6bUGIyPlrsEWsu5Nf0e2VMtlpRWoEnnYRT2bzkQHUzMH78\",\"delegation\":{\"body\":\"eyJhY2NvdW50IjoiYzE0Mzg0MWNkZWNiNzc0ZmE2NzQ5N2ExODQ4MWQ4ZDBhZDc2ZWRjOGUzMjQ5MGNmN2QzMzc3YWQ1OWFkYTVkNSIsImV4cGlyZXMiOiIyMDI2LTExLTIzVDEwOjAwOjAwWiIsImtleSI6IkJBSVg1aGZ3dGtRNUtDZVBscG1lYWFJNlR5d1ZLOTl0Yk45bTViZ0NndFR0R1VwOTY4dVhjUzB0Mmp5b1dxaDJXbGIwWDhkWVdaWlM4b2w4WlRCdVY1UT0iLCJtZW1iZXIiOiIyNTZiMWJlMzI3NDVkMWQxYzlkNDkxMjFjYzg3YmM0NSIsIm5hbWVzcGFjZSI6Imxpc3RlbmluZy5wb2RjYXN0cyIsIm5vdEJlZm9yZSI6IjIwMjYtMTEtMjJUMTA6MDA6MDBaIiwicHJvdG9jb2wiOiJjb2xvcGhvbi9zZXNzaW9uLWtleS82Iiwic2Vzc2lvbiI6MH0=\",\"signature\":\"rAq+iGteT/D46PBIAJqEzYhfFpRZTmmTR3wjN5YIRCBQl2X62xoH8hE3ujYberi8U4PNxR3VzeA9JAfPtYCwFg==\"},\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":4,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"retain\":true,\"signature\":\"+aSI23KDU2Cu5h0iEy7TRQZkVsnkv8ExORVKvNYYJl8bdV0CzuuBmhGNVCM3okoiREQs6j4On5W5aQ4e2l9Qew==\"}",
+      "name": "other-cell"
+    },
+    {
+      "accept": [],
+      "drop": "account",
+      "frame": "{\"account\":\"0000000000000000000000000000000000000000000000000000000000000001\",\"cell\":\"now-playing\",\"ciphertext\":\"40ftK0aPGJ8695eH3Q6ocpFWhGEgxwvGrscFWeio4iK7mrx7Ec5IzRHQpbzuXcJCfnHCZG10aJde8+QCbPKHahIFNBhjfUyXW/Otii6bUGIyPlrsEWsu5Nf0e2VMtlpRWoEnnYRT2bzkQHUzMH78\",\"delegation\":{\"body\":\"eyJhY2NvdW50IjoiYzE0Mzg0MWNkZWNiNzc0ZmE2NzQ5N2ExODQ4MWQ4ZDBhZDc2ZWRjOGUzMjQ5MGNmN2QzMzc3YWQ1OWFkYTVkNSIsImV4cGlyZXMiOiIyMDI2LTExLTIzVDEwOjAwOjAwWiIsImtleSI6IkJBSVg1aGZ3dGtRNUtDZVBscG1lYWFJNlR5d1ZLOTl0Yk45bTViZ0NndFR0R1VwOTY4dVhjUzB0Mmp5b1dxaDJXbGIwWDhkWVdaWlM4b2w4WlRCdVY1UT0iLCJtZW1iZXIiOiIyNTZiMWJlMzI3NDVkMWQxYzlkNDkxMjFjYzg3YmM0NSIsIm5hbWVzcGFjZSI6Imxpc3RlbmluZy5wb2RjYXN0cyIsIm5vdEJlZm9yZSI6IjIwMjYtMTEtMjJUMTA6MDA6MDBaIiwicHJvdG9jb2wiOiJjb2xvcGhvbi9zZXNzaW9uLWtleS82Iiwic2Vzc2lvbiI6MH0=\",\"signature\":\"rAq+iGteT/D46PBIAJqEzYhfFpRZTmmTR3wjN5YIRCBQl2X62xoH8hE3ujYberi8U4PNxR3VzeA9JAfPtYCwFg==\"},\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":4,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"retain\":true,\"signature\":\"+aSI23KDU2Cu5h0iEy7TRQZkVsnkv8ExORVKvNYYJl8bdV0CzuuBmhGNVCM3okoiREQs6j4On5W5aQ4e2l9Qew==\"}",
+      "name": "other-account"
+    },
+    {
+      "accept": [
+        "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"q7Ds+cNasQj8IQqn8Tsd549j/rdqi4KJmyP7Gcxa7XAcFv4NsoNEwEfkkraccPJJ9HkwFQcEnw2JeenjA/LqIVZDhD/7fH1UVuchhZQ4Jx3zq9TmjEq/YvTukt87lgPh6j2CqgeeV7o05//ROKI0F4v7GczS4qEJhslTL0RT/Wr4LLc3pAoRpZ/cAmZ0g4efZ4OSV9JFDdx00+/Wc+oGJr1KIPdyxMmfim7HnKBK+x/mVEPacmrg3AXzHJlCdkopJA==\",\"delegation\":{\"body\":\"eyJhY2NvdW50IjoiYzE0Mzg0MWNkZWNiNzc0ZmE2NzQ5N2ExODQ4MWQ4ZDBhZDc2ZWRjOGUzMjQ5MGNmN2QzMzc3YWQ1OWFkYTVkNSIsImV4cGlyZXMiOiIyMDI2LTExLTIzVDEwOjAwOjAwWiIsImtleSI6IkJBSVg1aGZ3dGtRNUtDZVBscG1lYWFJNlR5d1ZLOTl0Yk45bTViZ0NndFR0R1VwOTY4dVhjUzB0Mmp5b1dxaDJXbGIwWDhkWVdaWlM4b2w4WlRCdVY1UT0iLCJtZW1iZXIiOiIyNTZiMWJlMzI3NDVkMWQxYzlkNDkxMjFjYzg3YmM0NSIsIm5hbWVzcGFjZSI6Imxpc3RlbmluZy5wb2RjYXN0cyIsIm5vdEJlZm9yZSI6IjIwMjYtMTEtMjJUMTA6MDA6MDBaIiwicHJvdG9jb2wiOiJjb2xvcGhvbi9zZXNzaW9uLWtleS82Iiwic2Vzc2lvbiI6MH0=\",\"signature\":\"rAq+iGteT/D46PBIAJqEzYhfFpRZTmmTR3wjN5YIRCBQl2X62xoH8hE3ujYberi8U4PNxR3VzeA9JAfPtYCwFg==\"},\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":1,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"signature\":\"WOrpvS7N0Qf2RprlJEH62Gomg28RuoZzGh7QEgvptZpWATmU2/hrmsbW+Nre20w7s9Vdpbg4A3IIhnLqwlB2aA==\"}"
+      ],
+      "clockMs": 1795428060001,
+      "drop": "keyWindow",
+      "frame": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"40ftK0aPGJ8695eH3Q6ocpFWhGEgxwvGrscFWeio4iK7mrx7Ec5IzRHQpbzuXcJCfnHCZG10aJde8+QCbPKHahIFNBhjfUyXW/Otii6bUGIyPlrsEWsu5Nf0e2VMtlpRWoEnnYRT2bzkQHUzMH78\",\"delegation\":{\"body\":\"eyJhY2NvdW50IjoiYzE0Mzg0MWNkZWNiNzc0ZmE2NzQ5N2ExODQ4MWQ4ZDBhZDc2ZWRjOGUzMjQ5MGNmN2QzMzc3YWQ1OWFkYTVkNSIsImV4cGlyZXMiOiIyMDI2LTExLTIzVDEwOjAwOjAwWiIsImtleSI6IkJBSVg1aGZ3dGtRNUtDZVBscG1lYWFJNlR5d1ZLOTl0Yk45bTViZ0NndFR0R1VwOTY4dVhjUzB0Mmp5b1dxaDJXbGIwWDhkWVdaWlM4b2w4WlRCdVY1UT0iLCJtZW1iZXIiOiIyNTZiMWJlMzI3NDVkMWQxYzlkNDkxMjFjYzg3YmM0NSIsIm5hbWVzcGFjZSI6Imxpc3RlbmluZy5wb2RjYXN0cyIsIm5vdEJlZm9yZSI6IjIwMjYtMTEtMjJUMTA6MDA6MDBaIiwicHJvdG9jb2wiOiJjb2xvcGhvbi9zZXNzaW9uLWtleS82Iiwic2Vzc2lvbiI6MH0=\",\"signature\":\"rAq+iGteT/D46PBIAJqEzYhfFpRZTmmTR3wjN5YIRCBQl2X62xoH8hE3ujYberi8U4PNxR3VzeA9JAfPtYCwFg==\"},\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":4,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"retain\":true,\"signature\":\"+aSI23KDU2Cu5h0iEy7TRQZkVsnkv8ExORVKvNYYJl8bdV0CzuuBmhGNVCM3okoiREQs6j4On5W5aQ4e2l9Qew==\"}",
+      "name": "clock-past-window"
+    },
+    {
+      "accept": [
+        "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"q7Ds+cNasQj8IQqn8Tsd549j/rdqi4KJmyP7Gcxa7XAcFv4NsoNEwEfkkraccPJJ9HkwFQcEnw2JeenjA/LqIVZDhD/7fH1UVuchhZQ4Jx3zq9TmjEq/YvTukt87lgPh6j2CqgeeV7o05//ROKI0F4v7GczS4qEJhslTL0RT/Wr4LLc3pAoRpZ/cAmZ0g4efZ4OSV9JFDdx00+/Wc+oGJr1KIPdyxMmfim7HnKBK+x/mVEPacmrg3AXzHJlCdkopJA==\",\"delegation\":{\"body\":\"eyJhY2NvdW50IjoiYzE0Mzg0MWNkZWNiNzc0ZmE2NzQ5N2ExODQ4MWQ4ZDBhZDc2ZWRjOGUzMjQ5MGNmN2QzMzc3YWQ1OWFkYTVkNSIsImV4cGlyZXMiOiIyMDI2LTExLTIzVDEwOjAwOjAwWiIsImtleSI6IkJBSVg1aGZ3dGtRNUtDZVBscG1lYWFJNlR5d1ZLOTl0Yk45bTViZ0NndFR0R1VwOTY4dVhjUzB0Mmp5b1dxaDJXbGIwWDhkWVdaWlM4b2w4WlRCdVY1UT0iLCJtZW1iZXIiOiIyNTZiMWJlMzI3NDVkMWQxYzlkNDkxMjFjYzg3YmM0NSIsIm5hbWVzcGFjZSI6Imxpc3RlbmluZy5wb2RjYXN0cyIsIm5vdEJlZm9yZSI6IjIwMjYtMTEtMjJUMTA6MDA6MDBaIiwicHJvdG9jb2wiOiJjb2xvcGhvbi9zZXNzaW9uLWtleS82Iiwic2Vzc2lvbiI6MH0=\",\"signature\":\"rAq+iGteT/D46PBIAJqEzYhfFpRZTmmTR3wjN5YIRCBQl2X62xoH8hE3ujYberi8U4PNxR3VzeA9JAfPtYCwFg==\"},\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":1,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"signature\":\"WOrpvS7N0Qf2RprlJEH62Gomg28RuoZzGh7QEgvptZpWATmU2/hrmsbW+Nre20w7s9Vdpbg4A3IIhnLqwlB2aA==\"}"
+      ],
+      "clockMs": 1795341539999,
+      "drop": "keyWindow",
+      "frame": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"40ftK0aPGJ8695eH3Q6ocpFWhGEgxwvGrscFWeio4iK7mrx7Ec5IzRHQpbzuXcJCfnHCZG10aJde8+QCbPKHahIFNBhjfUyXW/Otii6bUGIyPlrsEWsu5Nf0e2VMtlpRWoEnnYRT2bzkQHUzMH78\",\"delegation\":{\"body\":\"eyJhY2NvdW50IjoiYzE0Mzg0MWNkZWNiNzc0ZmE2NzQ5N2ExODQ4MWQ4ZDBhZDc2ZWRjOGUzMjQ5MGNmN2QzMzc3YWQ1OWFkYTVkNSIsImV4cGlyZXMiOiIyMDI2LTExLTIzVDEwOjAwOjAwWiIsImtleSI6IkJBSVg1aGZ3dGtRNUtDZVBscG1lYWFJNlR5d1ZLOTl0Yk45bTViZ0NndFR0R1VwOTY4dVhjUzB0Mmp5b1dxaDJXbGIwWDhkWVdaWlM4b2w4WlRCdVY1UT0iLCJtZW1iZXIiOiIyNTZiMWJlMzI3NDVkMWQxYzlkNDkxMjFjYzg3YmM0NSIsIm5hbWVzcGFjZSI6Imxpc3RlbmluZy5wb2RjYXN0cyIsIm5vdEJlZm9yZSI6IjIwMjYtMTEtMjJUMTA6MDA6MDBaIiwicHJvdG9jb2wiOiJjb2xvcGhvbi9zZXNzaW9uLWtleS82Iiwic2Vzc2lvbiI6MH0=\",\"signature\":\"rAq+iGteT/D46PBIAJqEzYhfFpRZTmmTR3wjN5YIRCBQl2X62xoH8hE3ujYberi8U4PNxR3VzeA9JAfPtYCwFg==\"},\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":4,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"retain\":true,\"signature\":\"+aSI23KDU2Cu5h0iEy7TRQZkVsnkv8ExORVKvNYYJl8bdV0CzuuBmhGNVCM3okoiREQs6j4On5W5aQ4e2l9Qew==\"}",
+      "name": "clock-before-window"
+    },
+    {
+      "accept": [],
+      "drop": "range",
+      "frame": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"GQsLX6ehonHTbeCmvHS7XwZRaa/OIYjuVO/0CFKU1/hGcXognGu6f9I28wzKYzs1M4VaIqHw5abl4kCdKeWTc5jMB81i6Qpm2y4E+D1wRx6kEitLtG2bAV+0jxy3s1Tqv3EpqjG2Foo=\",\"delegation\":{\"body\":\"eyJhY2NvdW50IjoiYzE0Mzg0MWNkZWNiNzc0ZmE2NzQ5N2ExODQ4MWQ4ZDBhZDc2ZWRjOGUzMjQ5MGNmN2QzMzc3YWQ1OWFkYTVkNSIsImV4cGlyZXMiOiIyMDI2LTExLTIzVDEwOjAwOjAwWiIsImtleSI6IkJBSVg1aGZ3dGtRNUtDZVBscG1lYWFJNlR5d1ZLOTl0Yk45bTViZ0NndFR0R1VwOTY4dVhjUzB0Mmp5b1dxaDJXbGIwWDhkWVdaWlM4b2w4WlRCdVY1UT0iLCJtZW1iZXIiOiIyNTZiMWJlMzI3NDVkMWQxYzlkNDkxMjFjYzg3YmM0NSIsIm5hbWVzcGFjZSI6Imxpc3RlbmluZy5wb2RjYXN0cyIsIm5vdEJlZm9yZSI6IjIwMjYtMTEtMjJUMTA6MDA6MDBaIiwicHJvdG9jb2wiOiJjb2xvcGhvbi9zZXNzaW9uLWtleS82Iiwic2Vzc2lvbiI6MH0=\",\"signature\":\"rAq+iGteT/D46PBIAJqEzYhfFpRZTmmTR3wjN5YIRCBQl2X62xoH8hE3ujYberi8U4PNxR3VzeA9JAfPtYCwFg==\"},\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":8,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"signature\":\"qgdrpK0QQaeopfYbbWLJx8nIhv3NyOlsEWV6W72EBeSUAgMbRrlQx53UJFui7VCqJuiWxWtBHJBgcfXUaPACIw==\"}",
+      "maxPayload": 8,
+      "name": "payload-over-max"
+    },
+    {
+      "accept": [],
+      "drop": "plaintext",
+      "frame": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"W7I+DtxzUzfVvjdiyBdoqLgeHRI3h4jJmk1mIWJ9w/XvSZtY5cXF4xPXbuF98w==\",\"delegation\":{\"body\":\"eyJhY2NvdW50IjoiYzE0Mzg0MWNkZWNiNzc0ZmE2NzQ5N2ExODQ4MWQ4ZDBhZDc2ZWRjOGUzMjQ5MGNmN2QzMzc3YWQ1OWFkYTVkNSIsImV4cGlyZXMiOiIyMDI2LTExLTIzVDEwOjAwOjAwWiIsImtleSI6IkJBSVg1aGZ3dGtRNUtDZVBscG1lYWFJNlR5d1ZLOTl0Yk45bTViZ0NndFR0R1VwOTY4dVhjUzB0Mmp5b1dxaDJXbGIwWDhkWVdaWlM4b2w4WlRCdVY1UT0iLCJtZW1iZXIiOiIyNTZiMWJlMzI3NDVkMWQxYzlkNDkxMjFjYzg3YmM0NSIsIm5hbWVzcGFjZSI6Imxpc3RlbmluZy5wb2RjYXN0cyIsIm5vdEJlZm9yZSI6IjIwMjYtMTEtMjJUMTA6MDA6MDBaIiwicHJvdG9jb2wiOiJjb2xvcGhvbi9zZXNzaW9uLWtleS82Iiwic2Vzc2lvbiI6MH0=\",\"signature\":\"rAq+iGteT/D46PBIAJqEzYhfFpRZTmmTR3wjN5YIRCBQl2X62xoH8hE3ujYberi8U4PNxR3VzeA9JAfPtYCwFg==\"},\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":19,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"signature\":\"ymM2YVMloszt7SNQW0hW3kZ0jTF0SjBj+Kch30cobKzGnfyOKMqnfk1qGgVSondLXPIwkE2WuwDy9+kZb0qnXw==\"}",
+      "name": "plaintext-unknown-field"
+    },
+    {
+      "accept": [],
+      "drop": "unknownKind",
+      "frame": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"TkKRiNiuXs53o2L55xB4jwOBmTeDJjZ2QXCo1b9fBw==\",\"delegation\":{\"body\":\"eyJhY2NvdW50IjoiYzE0Mzg0MWNkZWNiNzc0ZmE2NzQ5N2ExODQ4MWQ4ZDBhZDc2ZWRjOGUzMjQ5MGNmN2QzMzc3YWQ1OWFkYTVkNSIsImV4cGlyZXMiOiIyMDI2LTExLTIzVDEwOjAwOjAwWiIsImtleSI6IkJBSVg1aGZ3dGtRNUtDZVBscG1lYWFJNlR5d1ZLOTl0Yk45bTViZ0NndFR0R1VwOTY4dVhjUzB0Mmp5b1dxaDJXbGIwWDhkWVdaWlM4b2w4WlRCdVY1UT0iLCJtZW1iZXIiOiIyNTZiMWJlMzI3NDVkMWQxYzlkNDkxMjFjYzg3YmM0NSIsIm5hbWVzcGFjZSI6Imxpc3RlbmluZy5wb2RjYXN0cyIsIm5vdEJlZm9yZSI6IjIwMjYtMTEtMjJUMTA6MDA6MDBaIiwicHJvdG9jb2wiOiJjb2xvcGhvbi9zZXNzaW9uLWtleS82Iiwic2Vzc2lvbiI6MH0=\",\"signature\":\"rAq+iGteT/D46PBIAJqEzYhfFpRZTmmTR3wjN5YIRCBQl2X62xoH8hE3ujYberi8U4PNxR3VzeA9JAfPtYCwFg==\"},\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":20,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"signature\":\"nONLfJu6huiNKTv1pq8pLmnyCD6BkciqlaFN2fNRacFDx4j6+QE3MhgRSIARvd4tKqCav0sbCuIBQpoAt75tdw==\"}",
+      "name": "plaintext-unknown-kind"
+    },
+    {
+      "accept": [],
+      "drop": "range",
+      "frame": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"ZkRRSFNsH+RYwpx/q7i9gFZuC+YMSE5J64kxwh4a6/H1Gr5hW3Y3WomkeJ1oODQ9auNsag==\",\"delegation\":{\"body\":\"eyJhY2NvdW50IjoiYzE0Mzg0MWNkZWNiNzc0ZmE2NzQ5N2ExODQ4MWQ4ZDBhZDc2ZWRjOGUzMjQ5MGNmN2QzMzc3YWQ1OWFkYTVkNSIsImV4cGlyZXMiOiIyMDI2LTExLTIzVDEwOjAwOjAwWiIsImtleSI6IkJBSVg1aGZ3dGtRNUtDZVBscG1lYWFJNlR5d1ZLOTl0Yk45bTViZ0NndFR0R1VwOTY4dVhjUzB0Mmp5b1dxaDJXbGIwWDhkWVdaWlM4b2w4WlRCdVY1UT0iLCJtZW1iZXIiOiIyNTZiMWJlMzI3NDVkMWQxYzlkNDkxMjFjYzg3YmM0NSIsIm5hbWVzcGFjZSI6Imxpc3RlbmluZy5wb2RjYXN0cyIsIm5vdEJlZm9yZSI6IjIwMjYtMTEtMjJUMTA6MDA6MDBaIiwicHJvdG9jb2wiOiJjb2xvcGhvbi9zZXNzaW9uLWtleS82Iiwic2Vzc2lvbiI6MH0=\",\"signature\":\"rAq+iGteT/D46PBIAJqEzYhfFpRZTmmTR3wjN5YIRCBQl2X62xoH8hE3ujYberi8U4PNxR3VzeA9JAfPtYCwFg==\"},\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":21,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"signature\":\"tAVTBaIbXy4+fpcomogiu1ZThhU5C/cGFoHtX9+OM/fq593NLR/xa9+xf/3BHC75C5LQ/AIyI9zqoAQ9laRZOQ==\"}",
+      "name": "plaintext-integer-over-2^53-1"
+    },
+    {
+      "accept": [],
+      "drop": "plaintext",
+      "frame": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"Hu3ZrZ+KlZ8d5EMfmr1QICwxkQI+fdn00+pd1fILlEAlg+5sXeDRE1m3iPV9LgADgTc0b/BbLAW0/A==\",\"delegation\":{\"body\":\"eyJhY2NvdW50IjoiYzE0Mzg0MWNkZWNiNzc0ZmE2NzQ5N2ExODQ4MWQ4ZDBhZDc2ZWRjOGUzMjQ5MGNmN2QzMzc3YWQ1OWFkYTVkNSIsImV4cGlyZXMiOiIyMDI2LTExLTIzVDEwOjAwOjAwWiIsImtleSI6IkJBSVg1aGZ3dGtRNUtDZVBscG1lYWFJNlR5d1ZLOTl0Yk45bTViZ0NndFR0R1VwOTY4dVhjUzB0Mmp5b1dxaDJXbGIwWDhkWVdaWlM4b2w4WlRCdVY1UT0iLCJtZW1iZXIiOiIyNTZiMWJlMzI3NDVkMWQxYzlkNDkxMjFjYzg3YmM0NSIsIm5hbWVzcGFjZSI6Imxpc3RlbmluZy5wb2RjYXN0cyIsIm5vdEJlZm9yZSI6IjIwMjYtMTEtMjJUMTA6MDA6MDBaIiwicHJvdG9jb2wiOiJjb2xvcGhvbi9zZXNzaW9uLWtleS82Iiwic2Vzc2lvbiI6MH0=\",\"signature\":\"rAq+iGteT/D46PBIAJqEzYhfFpRZTmmTR3wjN5YIRCBQl2X62xoH8hE3ujYberi8U4PNxR3VzeA9JAfPtYCwFg==\"},\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":22,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"signature\":\"MHA5mDC57Y/Bc77dO5tVK024hOfvuaOyGH+FAdef3kFrLER4lfWd5hYVYzmobgtlTJ6ykS2LlWdGwjXkXZMv/A==\"}",
+      "name": "plaintext-bye-claim-null"
+    },
+    {
+      "accept": [],
+      "drop": "plaintext",
+      "frame": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"e8cgz5znKFqVc1zCUFesGeRomxbsSn3GMBnSEO/URkL67q3Ihfe41aGHtsw8dtxpFRBMhex6iLxjdBzMZXm6dTPLe0PE3XwgPKozDkX/GTL9FM6UD/r2aV640gW6fZpQWmoWAVh8kqXzN9QlkHxyv8vFfzLi\",\"delegation\":{\"body\":\"eyJhY2NvdW50IjoiYzE0Mzg0MWNkZWNiNzc0ZmE2NzQ5N2ExODQ4MWQ4ZDBhZDc2ZWRjOGUzMjQ5MGNmN2QzMzc3YWQ1OWFkYTVkNSIsImV4cGlyZXMiOiIyMDI2LTExLTIzVDEwOjAwOjAwWiIsImtleSI6IkJBSVg1aGZ3dGtRNUtDZVBscG1lYWFJNlR5d1ZLOTl0Yk45bTViZ0NndFR0R1VwOTY4dVhjUzB0Mmp5b1dxaDJXbGIwWDhkWVdaWlM4b2w4WlRCdVY1UT0iLCJtZW1iZXIiOiIyNTZiMWJlMzI3NDVkMWQxYzlkNDkxMjFjYzg3YmM0NSIsIm5hbWVzcGFjZSI6Imxpc3RlbmluZy5wb2RjYXN0cyIsIm5vdEJlZm9yZSI6IjIwMjYtMTEtMjJUMTA6MDA6MDBaIiwicHJvdG9jb2wiOiJjb2xvcGhvbi9zZXNzaW9uLWtleS82Iiwic2Vzc2lvbiI6MH0=\",\"signature\":\"rAq+iGteT/D46PBIAJqEzYhfFpRZTmmTR3wjN5YIRCBQl2X62xoH8hE3ujYberi8U4PNxR3VzeA9JAfPtYCwFg==\"},\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":23,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"signature\":\"1xvIWdhZzJapTPMyxFbgwhkYPAXco0scBKL4h9kws9rKfhqe9fcQfk8gOcI3d3rxu+2N678TSNgxk/xWnjTzyw==\"}",
+      "name": "plaintext-hello-heard"
+    },
+    {
+      "accept": [],
+      "drop": "open",
+      "frame": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"Jwqa6RRcJj2c/EibLtIVML1Qtb29mtni7karrwDexCb6FvkRUw==\",\"delegation\":{\"body\":\"eyJhY2NvdW50IjoiYzE0Mzg0MWNkZWNiNzc0ZmE2NzQ5N2ExODQ4MWQ4ZDBhZDc2ZWRjOGUzMjQ5MGNmN2QzMzc3YWQ1OWFkYTVkNSIsImV4cGlyZXMiOiIyMDI2LTExLTIzVDEwOjAwOjAwWiIsImtleSI6IkJBSVg1aGZ3dGtRNUtDZVBscG1lYWFJNlR5d1ZLOTl0Yk45bTViZ0NndFR0R1VwOTY4dVhjUzB0Mmp5b1dxaDJXbGIwWDhkWVdaWlM4b2w4WlRCdVY1UT0iLCJtZW1iZXIiOiIyNTZiMWJlMzI3NDVkMWQxYzlkNDkxMjFjYzg3YmM0NSIsIm5hbWVzcGFjZSI6Imxpc3RlbmluZy5wb2RjYXN0cyIsIm5vdEJlZm9yZSI6IjIwMjYtMTEtMjJUMTA6MDA6MDBaIiwicHJvdG9jb2wiOiJjb2xvcGhvbi9zZXNzaW9uLWtleS82Iiwic2Vzc2lvbiI6MH0=\",\"signature\":\"rAq+iGteT/D46PBIAJqEzYhfFpRZTmmTR3wjN5YIRCBQl2X62xoH8hE3ujYberi8U4PNxR3VzeA9JAfPtYCwFg==\"},\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":24,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"signature\":\"yAlXdp4I4zPUbRcZMz1hqRqPe3Mdnwps6CUgopnEDEjcKaj45Q/8xbZiVYDLe3I/U0MGM6/Jgstn6xvktfEA8w==\"}",
+      "name": "wrong-epoch-key"
+    },
+    {
+      "accept": [],
+      "drop": "noEpoch",
+      "frame": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"7SKKUKV6s4myoN/M1UkPPrGsn6Iv4bAkVAHSmue1LPOEnEWnmg==\",\"delegation\":{\"body\":\"eyJhY2NvdW50IjoiYzE0Mzg0MWNkZWNiNzc0ZmE2NzQ5N2ExODQ4MWQ4ZDBhZDc2ZWRjOGUzMjQ5MGNmN2QzMzc3YWQ1OWFkYTVkNSIsImV4cGlyZXMiOiIyMDI2LTExLTIzVDEwOjAwOjAwWiIsImtleSI6IkJBSVg1aGZ3dGtRNUtDZVBscG1lYWFJNlR5d1ZLOTl0Yk45bTViZ0NndFR0R1VwOTY4dVhjUzB0Mmp5b1dxaDJXbGIwWDhkWVdaWlM4b2w4WlRCdVY1UT0iLCJtZW1iZXIiOiIyNTZiMWJlMzI3NDVkMWQxYzlkNDkxMjFjYzg3YmM0NSIsIm5hbWVzcGFjZSI6Imxpc3RlbmluZy5wb2RjYXN0cyIsIm5vdEJlZm9yZSI6IjIwMjYtMTEtMjJUMTA6MDA6MDBaIiwicHJvdG9jb2wiOiJjb2xvcGhvbi9zZXNzaW9uLWtleS82Iiwic2Vzc2lvbiI6MH0=\",\"signature\":\"rAq+iGteT/D46PBIAJqEzYhfFpRZTmmTR3wjN5YIRCBQl2X62xoH8hE3ujYberi8U4PNxR3VzeA9JAfPtYCwFg==\"},\"epoch\":2,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":25,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"signature\":\"Zv/1yxpJSMEElaq/R+ZOtr6KYZjsw6anPtWsOI3xGZV9LQhlVrIrMNkm6cb3kc+NJoKe6Pb+N0mHo3izLli3dw==\"}",
+      "name": "missing-epoch"
+    },
+    {
+      "accept": [
+        "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"wxRFFgOxWdILesVsyAG1bk+ExiJI967cFk7KGLQjmxnduaU05SKa\",\"delegation\":{\"body\":\"eyJhY2NvdW50IjoiYzE0Mzg0MWNkZWNiNzc0ZmE2NzQ5N2ExODQ4MWQ4ZDBhZDc2ZWRjOGUzMjQ5MGNmN2QzMzc3YWQ1OWFkYTVkNSIsImV4cGlyZXMiOiIyMDI2LTExLTIzVDEwOjAwOjAwWiIsImtleSI6IkJBSVg1aGZ3dGtRNUtDZVBscG1lYWFJNlR5d1ZLOTl0Yk45bTViZ0NndFR0R1VwOTY4dVhjUzB0Mmp5b1dxaDJXbGIwWDhkWVdaWlM4b2w4WlRCdVY1UT0iLCJtZW1iZXIiOiIyNTZiMWJlMzI3NDVkMWQxYzlkNDkxMjFjYzg3YmM0NSIsIm5hbWVzcGFjZSI6Imxpc3RlbmluZy5wb2RjYXN0cyIsIm5vdEJlZm9yZSI6IjIwMjYtMTEtMjJUMTA6MDA6MDBaIiwicHJvdG9jb2wiOiJjb2xvcGhvbi9zZXNzaW9uLWtleS82Iiwic2Vzc2lvbiI6MH0=\",\"signature\":\"rAq+iGteT/D46PBIAJqEzYhfFpRZTmmTR3wjN5YIRCBQl2X62xoH8hE3ujYberi8U4PNxR3VzeA9JAfPtYCwFg==\"},\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":225,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"signature\":\"KJvWCE7gLFapP31YQPIlYI5eDyMtzVOHuM/JCYSo4uHvRQhy+9JIUaesUwW2NU8yK2Z+N3WMe0xm2dZp2yNi9w==\"}"
+      ],
+      "drop": "tooOld",
+      "frame": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"zNSOGUyu1Y4UURBj9kj9rMsszxNLNx0lBsS+16gznjsTAH93l2A=\",\"delegation\":{\"body\":\"eyJhY2NvdW50IjoiYzE0Mzg0MWNkZWNiNzc0ZmE2NzQ5N2ExODQ4MWQ4ZDBhZDc2ZWRjOGUzMjQ5MGNmN2QzMzc3YWQ1OWFkYTVkNSIsImV4cGlyZXMiOiIyMDI2LTExLTIzVDEwOjAwOjAwWiIsImtleSI6IkJBSVg1aGZ3dGtRNUtDZVBscG1lYWFJNlR5d1ZLOTl0Yk45bTViZ0NndFR0R1VwOTY4dVhjUzB0Mmp5b1dxaDJXbGIwWDhkWVdaWlM4b2w4WlRCdVY1UT0iLCJtZW1iZXIiOiIyNTZiMWJlMzI3NDVkMWQxYzlkNDkxMjFjYzg3YmM0NSIsIm5hbWVzcGFjZSI6Imxpc3RlbmluZy5wb2RjYXN0cyIsIm5vdEJlZm9yZSI6IjIwMjYtMTEtMjJUMTA6MDA6MDBaIiwicHJvdG9jb2wiOiJjb2xvcGhvbi9zZXNzaW9uLWtleS82Iiwic2Vzc2lvbiI6MH0=\",\"signature\":\"rAq+iGteT/D46PBIAJqEzYhfFpRZTmmTR3wjN5YIRCBQl2X62xoH8hE3ujYberi8U4PNxR3VzeA9JAfPtYCwFg==\"},\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":96,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"signature\":\"3w/8TTAapOeRUKvnao4jOpgSOD8F1+Gre1EapftUESNAoWIFhCXvutAGllWYZ35GBtTdok13kSTyBX3jl8Fysw==\"}",
+      "name": "more-than-128-below"
+    },
+    {
+      "accept": [
+        "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"wxRFFgOxWdILesVsyAG1bk+ExiJI967cFk7KGLQjmxnduaU05SKa\",\"delegation\":{\"body\":\"eyJhY2NvdW50IjoiYzE0Mzg0MWNkZWNiNzc0ZmE2NzQ5N2ExODQ4MWQ4ZDBhZDc2ZWRjOGUzMjQ5MGNmN2QzMzc3YWQ1OWFkYTVkNSIsImV4cGlyZXMiOiIyMDI2LTExLTIzVDEwOjAwOjAwWiIsImtleSI6IkJBSVg1aGZ3dGtRNUtDZVBscG1lYWFJNlR5d1ZLOTl0Yk45bTViZ0NndFR0R1VwOTY4dVhjUzB0Mmp5b1dxaDJXbGIwWDhkWVdaWlM4b2w4WlRCdVY1UT0iLCJtZW1iZXIiOiIyNTZiMWJlMzI3NDVkMWQxYzlkNDkxMjFjYzg3YmM0NSIsIm5hbWVzcGFjZSI6Imxpc3RlbmluZy5wb2RjYXN0cyIsIm5vdEJlZm9yZSI6IjIwMjYtMTEtMjJUMTA6MDA6MDBaIiwicHJvdG9jb2wiOiJjb2xvcGhvbi9zZXNzaW9uLWtleS82Iiwic2Vzc2lvbiI6MH0=\",\"signature\":\"rAq+iGteT/D46PBIAJqEzYhfFpRZTmmTR3wjN5YIRCBQl2X62xoH8hE3ujYberi8U4PNxR3VzeA9JAfPtYCwFg==\"},\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":225,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"signature\":\"KJvWCE7gLFapP31YQPIlYI5eDyMtzVOHuM/JCYSo4uHvRQhy+9JIUaesUwW2NU8yK2Z+N3WMe0xm2dZp2yNi9w==\"}"
+      ],
+      "drop": null,
+      "frame": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"2iu+y+NuBtjhb2qGz+9mTHoimWAnZdfTPIAFVQXQefe0vJ7zZlY=\",\"delegation\":{\"body\":\"eyJhY2NvdW50IjoiYzE0Mzg0MWNkZWNiNzc0ZmE2NzQ5N2ExODQ4MWQ4ZDBhZDc2ZWRjOGUzMjQ5MGNmN2QzMzc3YWQ1OWFkYTVkNSIsImV4cGlyZXMiOiIyMDI2LTExLTIzVDEwOjAwOjAwWiIsImtleSI6IkJBSVg1aGZ3dGtRNUtDZVBscG1lYWFJNlR5d1ZLOTl0Yk45bTViZ0NndFR0R1VwOTY4dVhjUzB0Mmp5b1dxaDJXbGIwWDhkWVdaWlM4b2w4WlRCdVY1UT0iLCJtZW1iZXIiOiIyNTZiMWJlMzI3NDVkMWQxYzlkNDkxMjFjYzg3YmM0NSIsIm5hbWVzcGFjZSI6Imxpc3RlbmluZy5wb2RjYXN0cyIsIm5vdEJlZm9yZSI6IjIwMjYtMTEtMjJUMTA6MDA6MDBaIiwicHJvdG9jb2wiOiJjb2xvcGhvbi9zZXNzaW9uLWtleS82Iiwic2Vzc2lvbiI6MH0=\",\"signature\":\"rAq+iGteT/D46PBIAJqEzYhfFpRZTmmTR3wjN5YIRCBQl2X62xoH8hE3ujYberi8U4PNxR3VzeA9JAfPtYCwFg==\"},\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"2bad0fd610d99eae443e932a26142bca\",\"n\":97,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"signature\":\"vmuYOMuKYqblnZGHk4Dh481JYeRNLcLS6p6juSGld6XGwMyJeOsCBLlcD2hgVwEYZCwjrPIw23gfpNZADUN/mw==\"}",
+      "name": "exactly-128-below"
+    }
+  ],
+  "receiver": "fe00ab0f341901f863a49160cf554588",
+  "scenarios": [
+    {
+      "name": "probe-only-entitled",
+      "steps": [
+        {
+          "expect": {
+            "drop": "noKey",
+            "helloTo": "256b1be32745d1d1c9d49121cc87bc45"
+          },
+          "open": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"BZfCMr3XCoe2nTKTQIYGDhI54P/X4jewkFfSfAwVYsdQmDRghQ==\",\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"039edeffbd0ddc63c86a766f04bc0586\",\"n\":1,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"signature\":\"eW5ENR01+Zug4LxRQBvcQi0TqLWi8JVeYv+UyIAjUE/DSTXuq9WgnCU6rJCfxFXA7bie1/bc4jZDB3UXw6NnAw==\"}"
+        },
+        {
+          "expect": {
+            "drop": "noKey",
+            "helloTo": null
+          },
+          "open": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"BZfCMr3XCoe2nTKTQIYGDhI54P/X4jewkFfSfAwVYsdQmDRghQ==\",\"epoch\":1,\"from\":\"df0ce0dc165decf4382706f81bf7d748\",\"key\":\"039edeffbd0ddc63c86a766f04bc0586\",\"n\":1,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"signature\":\"eW5ENR01+Zug4LxRQBvcQi0TqLWi8JVeYv+UyIAjUE/DSTXuq9WgnCU6rJCfxFXA7bie1/bc4jZDB3UXw6NnAw==\"}"
+        },
+        {
+          "expect": {
+            "drop": "noKey",
+            "helloTo": null
+          },
+          "open": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"BZfCMr3XCoe2nTKTQIYGDhI54P/X4jewkFfSfAwVYsdQmDRghQ==\",\"epoch\":1,\"from\":\"16ae88b8403de2b42369857421e7ad43\",\"key\":\"039edeffbd0ddc63c86a766f04bc0586\",\"n\":1,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"signature\":\"eW5ENR01+Zug4LxRQBvcQi0TqLWi8JVeYv+UyIAjUE/DSTXuq9WgnCU6rJCfxFXA7bie1/bc4jZDB3UXw6NnAw==\"}"
+        },
+        {
+          "expect": {
+            "drop": "noKey",
+            "helloTo": "e6f39369127579d20d5eacd45990055f"
+          },
+          "open": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"BZfCMr3XCoe2nTKTQIYGDhI54P/X4jewkFfSfAwVYsdQmDRghQ==\",\"epoch\":1,\"from\":\"e6f39369127579d20d5eacd45990055f\",\"key\":\"039edeffbd0ddc63c86a766f04bc0586\",\"n\":1,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"signature\":\"eW5ENR01+Zug4LxRQBvcQi0TqLWi8JVeYv+UyIAjUE/DSTXuq9WgnCU6rJCfxFXA7bie1/bc4jZDB3UXw6NnAw==\"}"
+        }
+      ]
+    },
+    {
+      "name": "reader-claims",
+      "steps": [
+        {
+          "expect": {
+            "drop": null,
+            "writer": false
+          },
+          "open": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"tKxIqv8BjOgslMJT7t391Grt0wdeLyIVuwtW5GbxvBkiM1C8+qTruR7TiNpBhxVxhjoxRLc95JkTgDbeU/2Ljuzu2tMlTy77XG7bY4C92rkR9kWOlWjXZRtsxg6FKG0OgoaIeXGvYlFvKp4XqLcdAT7kirQoJ1o+faUJ3lhm0uXioA0taHwBpEsbk7iW7dIrDMUWPvFxHjQk+KiYzwMUmsuVcUTXVfZeCz+6UNBH5DxAPeCkmrTEIQ==\",\"delegation\":{\"body\":\"eyJhY2NvdW50IjoiYzE0Mzg0MWNkZWNiNzc0ZmE2NzQ5N2ExODQ4MWQ4ZDBhZDc2ZWRjOGUzMjQ5MGNmN2QzMzc3YWQ1OWFkYTVkNSIsImV4cGlyZXMiOiIyMDI2LTExLTIzVDEwOjAwOjAwWiIsImtleSI6IkJHYVNOMVJtSzRyNFpidnlxSjNCN2E5N0dXUjFSUDFiSHRUeFRpK0liWXJmaDNSL3lYNlpvMGV1NzVaakdPd2FKT2NoMTg3M054d2d4UXJmVTFqWUF3bz0iLCJtZW1iZXIiOiJlNmYzOTM2OTEyNzU3OWQyMGQ1ZWFjZDQ1OTkwMDU1ZiIsIm5hbWVzcGFjZSI6Imxpc3RlbmluZy5wb2RjYXN0cyIsIm5vdEJlZm9yZSI6IjIwMjYtMTEtMjJUMTA6MDA6MDBaIiwicHJvdG9jb2wiOiJjb2xvcGhvbi9zZXNzaW9uLWtleS82Iiwic2Vzc2lvbiI6MH0=\",\"signature\":\"tSID5bSPo/UeDonNAJBpzs++NG8HMY2bg9BxUf9sIapa77rWgJYl/LNMKeoomq0mf2WQ4xkHD7jh86pBiyi8iw==\"},\"epoch\":1,\"from\":\"e6f39369127579d20d5eacd45990055f\",\"key\":\"9e9f38acdc2faf4ee74f2a8ca4085ade\",\"n\":1,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"signature\":\"9VOO0feWq6cuiwaiLpxhd1pce/sIcwFtUQfW7i3rt/cYS6XBFENqQTyr74hnT0mswrdYRzWTILkpsIDtmpWF2g==\"}"
+        },
+        {
+          "expect": {
+            "drop": null,
+            "writer": false
+          },
+          "open": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"pKhjEw8Gg0QGkw/BeKt4Jyd5+kdJOpCM8J40td2QGicWq1yX/37Q6OZPp6/sFTnLFhvIO0rSscE3fJGPCYHgOCbVIPSjxNnExcqAzhHGfZEZ0B1Q/2mtOBfka2ekswtHxTH5tEgERhwtA5npo1q4M50RRD2TLpWEMA1SDcKy7K9mmwg6nw==\",\"delegation\":{\"body\":\"eyJhY2NvdW50IjoiYzE0Mzg0MWNkZWNiNzc0ZmE2NzQ5N2ExODQ4MWQ4ZDBhZDc2ZWRjOGUzMjQ5MGNmN2QzMzc3YWQ1OWFkYTVkNSIsImV4cGlyZXMiOiIyMDI2LTExLTIzVDEwOjAwOjAwWiIsImtleSI6IkJHYVNOMVJtSzRyNFpidnlxSjNCN2E5N0dXUjFSUDFiSHRUeFRpK0liWXJmaDNSL3lYNlpvMGV1NzVaakdPd2FKT2NoMTg3M054d2d4UXJmVTFqWUF3bz0iLCJtZW1iZXIiOiJlNmYzOTM2OTEyNzU3OWQyMGQ1ZWFjZDQ1OTkwMDU1ZiIsIm5hbWVzcGFjZSI6Imxpc3RlbmluZy5wb2RjYXN0cyIsIm5vdEJlZm9yZSI6IjIwMjYtMTEtMjJUMTA6MDA6MDBaIiwicHJvdG9jb2wiOiJjb2xvcGhvbi9zZXNzaW9uLWtleS82Iiwic2Vzc2lvbiI6MH0=\",\"signature\":\"tSID5bSPo/UeDonNAJBpzs++NG8HMY2bg9BxUf9sIapa77rWgJYl/LNMKeoomq0mf2WQ4xkHD7jh86pBiyi8iw==\"},\"epoch\":1,\"from\":\"e6f39369127579d20d5eacd45990055f\",\"key\":\"9e9f38acdc2faf4ee74f2a8ca4085ade\",\"n\":2,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"signature\":\"ll6RokT+IjHw+mbiMmljj8fkg8K4dwmIbE2NnnbOOMGBgqqekWTKC3+dZM9IvdeLP3O5mkn+fZSV0enGTcseNQ==\"}"
+        },
+        {
+          "expect": {
+            "drop": null,
+            "writer": false
+          },
+          "open": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"4D99jNFMKSWju1fY3J45hzj5XIL6xNS3GVGNNe3GwPaDH092kCXKO7I0xXnqK+zdK3Z4C6THHaBHj1OFsiCFnETj+Sr/tyvvMqaj8vsP2S1lRzH+0Eup97Lf/qg5PU9WWKfEFuL/g2sOSNKIhRVyu3uGkVJE7ux8LyLQXMuHCJJnY8NcCWnshIqhLUMAy9EKSc6r\",\"delegation\":{\"body\":\"eyJhY2NvdW50IjoiYzE0Mzg0MWNkZWNiNzc0ZmE2NzQ5N2ExODQ4MWQ4ZDBhZDc2ZWRjOGUzMjQ5MGNmN2QzMzc3YWQ1OWFkYTVkNSIsImV4cGlyZXMiOiIyMDI2LTExLTIzVDEwOjAwOjAwWiIsImtleSI6IkJHYVNOMVJtSzRyNFpidnlxSjNCN2E5N0dXUjFSUDFiSHRUeFRpK0liWXJmaDNSL3lYNlpvMGV1NzVaakdPd2FKT2NoMTg3M054d2d4UXJmVTFqWUF3bz0iLCJtZW1iZXIiOiJlNmYzOTM2OTEyNzU3OWQyMGQ1ZWFjZDQ1OTkwMDU1ZiIsIm5hbWVzcGFjZSI6Imxpc3RlbmluZy5wb2RjYXN0cyIsIm5vdEJlZm9yZSI6IjIwMjYtMTEtMjJUMTA6MDA6MDBaIiwicHJvdG9jb2wiOiJjb2xvcGhvbi9zZXNzaW9uLWtleS82Iiwic2Vzc2lvbiI6MH0=\",\"signature\":\"tSID5bSPo/UeDonNAJBpzs++NG8HMY2bg9BxUf9sIapa77rWgJYl/LNMKeoomq0mf2WQ4xkHD7jh86pBiyi8iw==\"},\"epoch\":1,\"from\":\"e6f39369127579d20d5eacd45990055f\",\"key\":\"9e9f38acdc2faf4ee74f2a8ca4085ade\",\"n\":3,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"signature\":\"VewBeWW4K1eUpEUqp8gp2mcigZ7GWi8/ooij87F2aOou7rfwolT/jfrlDlxzFA4eXJNDpaJFmgan366HfIMdJQ==\"}"
+        },
+        {
+          "expect": {
+            "drop": null,
+            "writer": false
+          },
+          "open": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"HnJY7nGN5CnDBhG4tBOD1QNoVUaCz03aIqye2MzMhd139QNpHJqCdgAHaPOvZUueByDEEUVjlll0cW7qE9T9d3XDUPX8CIEQsUNh5U+TBj9RCkmuug1zYpWjsiamPi2Fm8a3IeZf8Hy0I12HIT3oqwKmimLrGQ==\",\"delegation\":{\"body\":\"eyJhY2NvdW50IjoiYzE0Mzg0MWNkZWNiNzc0ZmE2NzQ5N2ExODQ4MWQ4ZDBhZDc2ZWRjOGUzMjQ5MGNmN2QzMzc3YWQ1OWFkYTVkNSIsImV4cGlyZXMiOiIyMDI2LTExLTIzVDEwOjAwOjAwWiIsImtleSI6IkJHYVNOMVJtSzRyNFpidnlxSjNCN2E5N0dXUjFSUDFiSHRUeFRpK0liWXJmaDNSL3lYNlpvMGV1NzVaakdPd2FKT2NoMTg3M054d2d4UXJmVTFqWUF3bz0iLCJtZW1iZXIiOiJlNmYzOTM2OTEyNzU3OWQyMGQ1ZWFjZDQ1OTkwMDU1ZiIsIm5hbWVzcGFjZSI6Imxpc3RlbmluZy5wb2RjYXN0cyIsIm5vdEJlZm9yZSI6IjIwMjYtMTEtMjJUMTA6MDA6MDBaIiwicHJvdG9jb2wiOiJjb2xvcGhvbi9zZXNzaW9uLWtleS82Iiwic2Vzc2lvbiI6MH0=\",\"signature\":\"tSID5bSPo/UeDonNAJBpzs++NG8HMY2bg9BxUf9sIapa77rWgJYl/LNMKeoomq0mf2WQ4xkHD7jh86pBiyi8iw==\"},\"epoch\":1,\"from\":\"e6f39369127579d20d5eacd45990055f\",\"key\":\"9e9f38acdc2faf4ee74f2a8ca4085ade\",\"n\":4,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"signature\":\"EDVQhortYfA9bGrc+Ql4wH6UJRahIKchX4IaatNa296VK6rhcLgItKVs6CX9yjhfO7N8AfHk04EAfvLBWFJ7iw==\"}"
+        }
+      ]
+    },
+    {
+      "name": "entitlement-change",
+      "steps": [
+        {
+          "expect": {
+            "drop": null,
+            "writer": true
+          },
+          "open": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"zP0vVJ0tLtUHcnYmPZKftHvNxHbMokCh7qUBLIEWZE/olKwK+Q==\",\"delegation\":{\"body\":\"eyJhY2NvdW50IjoiYzE0Mzg0MWNkZWNiNzc0ZmE2NzQ5N2ExODQ4MWQ4ZDBhZDc2ZWRjOGUzMjQ5MGNmN2QzMzc3YWQ1OWFkYTVkNSIsImV4cGlyZXMiOiIyMDI2LTExLTIzVDEwOjAwOjAwWiIsImtleSI6IkJEclRoaHFWWWhPU1VXdTFrKzhGV0Q3UzVZWnZYTFltQ2pBWEkzL1ltNUN2MEpZY2ZqY0hXbWVSbzV4aDlXS1ZzQ3R0SmxaN1lWNWdxa0h1SEk2RE9JMD0iLCJtZW1iZXIiOiIyNTZiMWJlMzI3NDVkMWQxYzlkNDkxMjFjYzg3YmM0NSIsIm5hbWVzcGFjZSI6Imxpc3RlbmluZy5wb2RjYXN0cyIsIm5vdEJlZm9yZSI6IjIwMjYtMTEtMjJUMTA6MDA6MDBaIiwicHJvdG9jb2wiOiJjb2xvcGhvbi9zZXNzaW9uLWtleS82Iiwic2Vzc2lvbiI6MH0=\",\"signature\":\"+fwTdE6DNrDxxQnMVph+y8k6hvzSdsd3FJXssWp7HmAjuGedd/o+7xAO8M7VY4WgYwduWUFe0gMZ1PhwyoLDJg==\"},\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"8964233423574cbc50a15c713208ecb8\",\"n\":1,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"signature\":\"RD+W0ZaASTtQFTN3vzoed922wwsAiVvCpwhl91TX9fdQswVyJ1/BRHwTYKOGOU9iMbsLVUk1xQ/KB8k4e6EH9A==\"}"
+        },
+        {
+          "expect": {
+            "closedKeys": [],
+            "forgottenMembers": []
+          },
+          "setView": "aRead"
+        },
+        {
+          "expect": {
+            "drop": null,
+            "writer": false
+          },
+          "open": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"OLUuV02CbYmWsbCkGh4sghuHpqxd/Wa1Cdu/4hr9EQ5ySp09mw==\",\"delegation\":{\"body\":\"eyJhY2NvdW50IjoiYzE0Mzg0MWNkZWNiNzc0ZmE2NzQ5N2ExODQ4MWQ4ZDBhZDc2ZWRjOGUzMjQ5MGNmN2QzMzc3YWQ1OWFkYTVkNSIsImV4cGlyZXMiOiIyMDI2LTExLTIzVDEwOjAwOjAwWiIsImtleSI6IkJEclRoaHFWWWhPU1VXdTFrKzhGV0Q3UzVZWnZYTFltQ2pBWEkzL1ltNUN2MEpZY2ZqY0hXbWVSbzV4aDlXS1ZzQ3R0SmxaN1lWNWdxa0h1SEk2RE9JMD0iLCJtZW1iZXIiOiIyNTZiMWJlMzI3NDVkMWQxYzlkNDkxMjFjYzg3YmM0NSIsIm5hbWVzcGFjZSI6Imxpc3RlbmluZy5wb2RjYXN0cyIsIm5vdEJlZm9yZSI6IjIwMjYtMTEtMjJUMTA6MDA6MDBaIiwicHJvdG9jb2wiOiJjb2xvcGhvbi9zZXNzaW9uLWtleS82Iiwic2Vzc2lvbiI6MH0=\",\"signature\":\"+fwTdE6DNrDxxQnMVph+y8k6hvzSdsd3FJXssWp7HmAjuGedd/o+7xAO8M7VY4WgYwduWUFe0gMZ1PhwyoLDJg==\"},\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"8964233423574cbc50a15c713208ecb8\",\"n\":2,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"signature\":\"dwDHkS3BNTQ0Yqi6gZeomRmmXZvtpjiaQxrCXo4qEzLJEx2O7ISzcU49eT+8N4rYaMTY49btDXdmpHnqEx9EzA==\"}"
+        },
+        {
+          "expect": {
+            "closedKeys": [
+              [
+                "256b1be32745d1d1c9d49121cc87bc45",
+                "8964233423574cbc50a15c713208ecb8"
+              ]
+            ],
+            "forgottenMembers": []
+          },
+          "setView": "aSession1"
+        },
+        {
+          "expect": {
+            "drop": "delegation"
+          },
+          "open": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"6DoruDTQ9cZhXty+2Y7nu7KO7Ac3kw108stsVKx0zRsN51Oq8w==\",\"delegation\":{\"body\":\"eyJhY2NvdW50IjoiYzE0Mzg0MWNkZWNiNzc0ZmE2NzQ5N2ExODQ4MWQ4ZDBhZDc2ZWRjOGUzMjQ5MGNmN2QzMzc3YWQ1OWFkYTVkNSIsImV4cGlyZXMiOiIyMDI2LTExLTIzVDEwOjAwOjAwWiIsImtleSI6IkJEclRoaHFWWWhPU1VXdTFrKzhGV0Q3UzVZWnZYTFltQ2pBWEkzL1ltNUN2MEpZY2ZqY0hXbWVSbzV4aDlXS1ZzQ3R0SmxaN1lWNWdxa0h1SEk2RE9JMD0iLCJtZW1iZXIiOiIyNTZiMWJlMzI3NDVkMWQxYzlkNDkxMjFjYzg3YmM0NSIsIm5hbWVzcGFjZSI6Imxpc3RlbmluZy5wb2RjYXN0cyIsIm5vdEJlZm9yZSI6IjIwMjYtMTEtMjJUMTA6MDA6MDBaIiwicHJvdG9jb2wiOiJjb2xvcGhvbi9zZXNzaW9uLWtleS82Iiwic2Vzc2lvbiI6MH0=\",\"signature\":\"+fwTdE6DNrDxxQnMVph+y8k6hvzSdsd3FJXssWp7HmAjuGedd/o+7xAO8M7VY4WgYwduWUFe0gMZ1PhwyoLDJg==\"},\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"8964233423574cbc50a15c713208ecb8\",\"n\":3,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"signature\":\"+/9ROoG81hPhsqHnkHOxZExkUqMWI5hwbyDh/a73UjAPVpMiICK1T9pCpcBUo637xWLl2AbZSa5IwJNRNbCeDw==\"}"
+        },
+        {
+          "expect": {
+            "drop": null,
+            "writer": true
+          },
+          "open": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"5WjReAYRou/IxDtiYii1YdFCNkOqs67vFocUF86S5KNbb9D9KQ==\",\"delegation\":{\"body\":\"eyJhY2NvdW50IjoiYzE0Mzg0MWNkZWNiNzc0ZmE2NzQ5N2ExODQ4MWQ4ZDBhZDc2ZWRjOGUzMjQ5MGNmN2QzMzc3YWQ1OWFkYTVkNSIsImV4cGlyZXMiOiIyMDI2LTExLTIzVDEwOjAwOjAwWiIsImtleSI6IkJEclRoaHFWWWhPU1VXdTFrKzhGV0Q3UzVZWnZYTFltQ2pBWEkzL1ltNUN2MEpZY2ZqY0hXbWVSbzV4aDlXS1ZzQ3R0SmxaN1lWNWdxa0h1SEk2RE9JMD0iLCJtZW1iZXIiOiIyNTZiMWJlMzI3NDVkMWQxYzlkNDkxMjFjYzg3YmM0NSIsIm5hbWVzcGFjZSI6Imxpc3RlbmluZy5wb2RjYXN0cyIsIm5vdEJlZm9yZSI6IjIwMjYtMTEtMjJUMTA6MDA6MDBaIiwicHJvdG9jb2wiOiJjb2xvcGhvbi9zZXNzaW9uLWtleS82Iiwic2Vzc2lvbiI6MX0=\",\"signature\":\"hI2BITN1skFylPVMN1Ccax3uhGiMl0Ge7sBq+gik/sQmacdI8+GIkrO+doWQ48avKr24r2sshClm56Bpn3sdzw==\"},\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"8964233423574cbc50a15c713208ecb8\",\"n\":4,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"signature\":\"DBj9n9qLKyEhhVP1ZECx/ExuLGtqfST1+VF8yWPT9jjdpj2uHPCoaERWsLFZzv82hWmjk0kDO8vGKsSZFyekJQ==\"}"
+        },
+        {
+          "expect": {
+            "closedKeys": [],
+            "forgottenMembers": [
+              "256b1be32745d1d1c9d49121cc87bc45"
+            ]
+          },
+          "setView": "withoutA"
+        },
+        {
+          "expect": {
+            "drop": "delegation"
+          },
+          "open": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"5WjReAYRou/IxDtiYii1YdFCNkOqs67vFocUF86S5KNbb9D9KQ==\",\"delegation\":{\"body\":\"eyJhY2NvdW50IjoiYzE0Mzg0MWNkZWNiNzc0ZmE2NzQ5N2ExODQ4MWQ4ZDBhZDc2ZWRjOGUzMjQ5MGNmN2QzMzc3YWQ1OWFkYTVkNSIsImV4cGlyZXMiOiIyMDI2LTExLTIzVDEwOjAwOjAwWiIsImtleSI6IkJEclRoaHFWWWhPU1VXdTFrKzhGV0Q3UzVZWnZYTFltQ2pBWEkzL1ltNUN2MEpZY2ZqY0hXbWVSbzV4aDlXS1ZzQ3R0SmxaN1lWNWdxa0h1SEk2RE9JMD0iLCJtZW1iZXIiOiIyNTZiMWJlMzI3NDVkMWQxYzlkNDkxMjFjYzg3YmM0NSIsIm5hbWVzcGFjZSI6Imxpc3RlbmluZy5wb2RjYXN0cyIsIm5vdEJlZm9yZSI6IjIwMjYtMTEtMjJUMTA6MDA6MDBaIiwicHJvdG9jb2wiOiJjb2xvcGhvbi9zZXNzaW9uLWtleS82Iiwic2Vzc2lvbiI6MX0=\",\"signature\":\"hI2BITN1skFylPVMN1Ccax3uhGiMl0Ge7sBq+gik/sQmacdI8+GIkrO+doWQ48avKr24r2sshClm56Bpn3sdzw==\"},\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"8964233423574cbc50a15c713208ecb8\",\"n\":4,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"signature\":\"DBj9n9qLKyEhhVP1ZECx/ExuLGtqfST1+VF8yWPT9jjdpj2uHPCoaERWsLFZzv82hWmjk0kDO8vGKsSZFyekJQ==\"}"
+        }
+      ]
+    },
+    {
+      "name": "delegation-renewal",
+      "steps": [
+        {
+          "expect": {
+            "drop": null
+          },
+          "open": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"oFW6h+sdvzc53DhsSONfiDGFErKmyjFjhHOXQpvw2nhCOepypQ==\",\"delegation\":{\"body\":\"eyJhY2NvdW50IjoiYzE0Mzg0MWNkZWNiNzc0ZmE2NzQ5N2ExODQ4MWQ4ZDBhZDc2ZWRjOGUzMjQ5MGNmN2QzMzc3YWQ1OWFkYTVkNSIsImV4cGlyZXMiOiIyMDI2LTExLTIzVDEwOjAwOjAwWiIsImtleSI6IkJCVXM5UktnQTlrK0szOStMblRsMkJwV245elljY1lVM2tudWRBNVhWSmdsaWVmYnVyaWxMWUxwRVBkSUFnMmE2TWZSNytGQ1h1RWc4VFF2QmNodFpQOD0iLCJtZW1iZXIiOiIyNTZiMWJlMzI3NDVkMWQxYzlkNDkxMjFjYzg3YmM0NSIsIm5hbWVzcGFjZSI6Imxpc3RlbmluZy5wb2RjYXN0cyIsIm5vdEJlZm9yZSI6IjIwMjYtMTEtMjJUMTA6MDA6MDBaIiwicHJvdG9jb2wiOiJjb2xvcGhvbi9zZXNzaW9uLWtleS82Iiwic2Vzc2lvbiI6MH0=\",\"signature\":\"/6Jk+j91uriUCzmXD/xja7GZykJvlNM3yEtQHt32UfFDkL0TMx1iCCEMrUXTPX3uewrnUEi6bHufRS/Z4/wLfg==\"},\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"89eae44a26a6e19f38e1062875270f8a\",\"n\":1,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"signature\":\"eT5gZrOt+0o4OnoDX0GDQgQfSMp/qF1o0CHdluus2zaTZ996TBOV9w1Fg7OjbcJPCrTOjDrk52NNJ68Xlmw8pg==\"}"
+        },
+        {
+          "clockMs": 1795341601000,
+          "expect": {
+            "drop": null
+          },
+          "open": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"8edzVMheZL2VsrRTVHGf583rRJ/e2TYUGQwb/gd1nv8IreDLLA==\",\"delegation\":{\"body\":\"eyJhY2NvdW50IjoiYzE0Mzg0MWNkZWNiNzc0ZmE2NzQ5N2ExODQ4MWQ4ZDBhZDc2ZWRjOGUzMjQ5MGNmN2QzMzc3YWQ1OWFkYTVkNSIsImV4cGlyZXMiOiIyMDI2LTExLTIzVDEwOjAwOjAxWiIsImtleSI6IkJCVXM5UktnQTlrK0szOStMblRsMkJwV245elljY1lVM2tudWRBNVhWSmdsaWVmYnVyaWxMWUxwRVBkSUFnMmE2TWZSNytGQ1h1RWc4VFF2QmNodFpQOD0iLCJtZW1iZXIiOiIyNTZiMWJlMzI3NDVkMWQxYzlkNDkxMjFjYzg3YmM0NSIsIm5hbWVzcGFjZSI6Imxpc3RlbmluZy5wb2RjYXN0cyIsIm5vdEJlZm9yZSI6IjIwMjYtMTEtMjJUMTA6MDA6MDFaIiwicHJvdG9jb2wiOiJjb2xvcGhvbi9zZXNzaW9uLWtleS82Iiwic2Vzc2lvbiI6MH0=\",\"signature\":\"NJcmr9NhElp2hJrWR286lf0ffwUv5kuEKXO4Gbr7R2Y3uHug7bkBvgQb/trGE015S0udxSPuXNwUCDliS08j1w==\"},\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"89eae44a26a6e19f38e1062875270f8a\",\"n\":2,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"signature\":\"vUGQ3Ag+3ySgeEeaHf1wJSKkb+VOpguf0E8CI2NhoYmOb8J3q2eHlkymMRuB7NdM3y4l7r6MfPZHj3IQ387Z5w==\"}"
+        },
+        {
+          "clockMs": 1795341601000,
+          "expect": {
+            "drop": "replay"
+          },
+          "open": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"oFW6h+sdvzc53DhsSONfiDGFErKmyjFjhHOXQpvw2nhCOepypQ==\",\"delegation\":{\"body\":\"eyJhY2NvdW50IjoiYzE0Mzg0MWNkZWNiNzc0ZmE2NzQ5N2ExODQ4MWQ4ZDBhZDc2ZWRjOGUzMjQ5MGNmN2QzMzc3YWQ1OWFkYTVkNSIsImV4cGlyZXMiOiIyMDI2LTExLTIzVDEwOjAwOjAxWiIsImtleSI6IkJCVXM5UktnQTlrK0szOStMblRsMkJwV245elljY1lVM2tudWRBNVhWSmdsaWVmYnVyaWxMWUxwRVBkSUFnMmE2TWZSNytGQ1h1RWc4VFF2QmNodFpQOD0iLCJtZW1iZXIiOiIyNTZiMWJlMzI3NDVkMWQxYzlkNDkxMjFjYzg3YmM0NSIsIm5hbWVzcGFjZSI6Imxpc3RlbmluZy5wb2RjYXN0cyIsIm5vdEJlZm9yZSI6IjIwMjYtMTEtMjJUMTA6MDA6MDFaIiwicHJvdG9jb2wiOiJjb2xvcGhvbi9zZXNzaW9uLWtleS82Iiwic2Vzc2lvbiI6MH0=\",\"signature\":\"NJcmr9NhElp2hJrWR286lf0ffwUv5kuEKXO4Gbr7R2Y3uHug7bkBvgQb/trGE015S0udxSPuXNwUCDliS08j1w==\"},\"epoch\":1,\"from\":\"256b1be32745d1d1c9d49121cc87bc45\",\"key\":\"89eae44a26a6e19f38e1062875270f8a\",\"n\":1,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"signature\":\"eT5gZrOt+0o4OnoDX0GDQgQfSMp/qF1o0CHdluus2zaTZ996TBOV9w1Fg7OjbcJPCrTOjDrk52NNJ68Xlmw8pg==\"}"
+        }
+      ]
+    },
+    {
+      "name": "pass-ack",
+      "receiver": "256b1be32745d1d1c9d49121cc87bc45",
+      "steps": [
+        {
+          "expect": {
+            "drop": null,
+            "writer": true
+          },
+          "open": "{\"account\":\"c143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\",\"cell\":\"now-playing\",\"ciphertext\":\"JwHCYLKtVkdEd459OD7ZReI/fC9M7yAfKtggcyo0omemti98jzgcpmhK3arUBezjHU+8xIZO2HIEbf0igDB0EVB9Dgx0ccF++UPZJxFbbaS02mfermWWhQM4UrCcFhFFEKtwT1r7RDoSnXObseCqD5Uhhm+u4cUDTirSzcm1j/GjCoYzxnGub9qAf70v8pz4\",\"delegation\":{\"body\":\"eyJhY2NvdW50IjoiYzE0Mzg0MWNkZWNiNzc0ZmE2NzQ5N2ExODQ4MWQ4ZDBhZDc2ZWRjOGUzMjQ5MGNmN2QzMzc3YWQ1OWFkYTVkNSIsImV4cGlyZXMiOiIyMDI2LTExLTIzVDEwOjAwOjAwWiIsImtleSI6IkJGczJpUTJzdlh5YWxydDBvZTRvczlMWFczTGdtaUR2SmMrT2I5aXA4RFVORGhTKzJOUm9LalRZTlRpOS8xdVc2SnBtWnV3TnRYUmRBdm9TRUFjdDkxbz0iLCJtZW1iZXIiOiJmZTAwYWIwZjM0MTkwMWY4NjNhNDkxNjBjZjU1NDU4OCIsIm5hbWVzcGFjZSI6Imxpc3RlbmluZy5wb2RjYXN0cyIsIm5vdEJlZm9yZSI6IjIwMjYtMTEtMjJUMTA6MDA6MDBaIiwicHJvdG9jb2wiOiJjb2xvcGhvbi9zZXNzaW9uLWtleS82Iiwic2Vzc2lvbiI6MH0=\",\"signature\":\"82ycrqLLTyiu40KQDWLIxBPRylMnd2XWsFRS02rdnOB+GD4v15MVbCw4+fkFumPueMi7PLCNcaF2l6/ilQIHCA==\"},\"epoch\":1,\"from\":\"fe00ab0f341901f863a49160cf554588\",\"key\":\"da35a142ef073d5a8b155a5bec3a7cdf\",\"n\":1,\"namespace\":\"listening.podcasts\",\"protocol\":\"colophon/session/6\",\"signature\":\"6xt4fnNJhFFAOP46JMYP9JQFVBRl/7VqOlUqXAyLPUX0nuhYshHo9waxANrg8hrX2QaBI7tapg/052LQvJbQSA==\",\"to\":\"256b1be32745d1d1c9d49121cc87bc45\"}"
+        }
+      ]
+    }
+  ],
+  "sessionKey": {
+    "frameKey": "1c0fa406ebef7b6780888680f41ed7ef8b073ea08b6336678d2a9b793d7a7ef8",
+    "id": "2bad0fd610d99eae443e932a26142bca",
+    "info": "colophon/session-frame/6\nc143841cdecb774fa67497a18481d8d0ad76edc8e32490cf7d3377ad59ada5d5\nlistening.podcasts\nnow-playing\n2bad0fd610d99eae443e932a26142bca",
+    "member": "256b1be32745d1d1c9d49121cc87bc45",
+    "privateKey": "1111111111111111111111111111111111111111111111111111111111111111",
+    "signing": "BAIX5hfwtkQ5KCePlpmeaaI6TywVK99tbN9m5bgCgtTtGUp968uXcS0t2jyoWqh2Wlb0X8dYWZZS8ol8ZTBuV5Q="
+  },
+  "spec": "colophon-0.6-sessions revision 17, §S2 and §S3",
+  "views": {
+    "aRead": [
+      {
+        "access": "read",
+        "id": "256b1be32745d1d1c9d49121cc87bc45",
+        "session": 0,
+        "signing": "BG/wO5SSQc4drdQ1GeaWDgqFtBppoFwygQOqK84VlMoWPE91OlW/AdxT9sCwx+7ni0DG/30lqW4igrmJzvccFEo="
+      },
+      {
+        "access": "write",
+        "id": "fe00ab0f341901f863a49160cf554588",
+        "session": 0,
+        "signing": "BFUPRxAD89+Xw99QaseX9nIfsaH7e49vg9IkSYplyI4kE2CT1wEuUJpzcVy9CwCjzA/0tcAbP/oZarH7MnA2uOY="
+      },
+      {
+        "access": "write",
+        "id": "d02c9e7062d4d70c142007e115a13cf4",
+        "session": 0,
+        "signing": "BFkat3HrvP1tnLkJTRBlKK3Rpp1EwsH2J/CJ7Fi5xhrfn05qvw0EXAxpOjxorXyXynK+ZN70om/s0mPdmKkngPA="
+      },
+      {
+        "access": "read",
+        "id": "e6f39369127579d20d5eacd45990055f",
+        "session": 0,
+        "signing": "BHMQPsMLPM9X2q4I6TU0rvFEo1lAz2u7oSoM98vV1lpk2CyMmenTxF+SRbqbJ5gsmuqOwduUsZxEeVlCwOsiqjI="
+      }
+    ],
+    "aSession1": [
+      {
+        "access": "write",
+        "id": "256b1be32745d1d1c9d49121cc87bc45",
+        "session": 1,
+        "signing": "BG/wO5SSQc4drdQ1GeaWDgqFtBppoFwygQOqK84VlMoWPE91OlW/AdxT9sCwx+7ni0DG/30lqW4igrmJzvccFEo="
+      },
+      {
+        "access": "write",
+        "id": "fe00ab0f341901f863a49160cf554588",
+        "session": 0,
+        "signing": "BFUPRxAD89+Xw99QaseX9nIfsaH7e49vg9IkSYplyI4kE2CT1wEuUJpzcVy9CwCjzA/0tcAbP/oZarH7MnA2uOY="
+      },
+      {
+        "access": "write",
+        "id": "d02c9e7062d4d70c142007e115a13cf4",
+        "session": 0,
+        "signing": "BFkat3HrvP1tnLkJTRBlKK3Rpp1EwsH2J/CJ7Fi5xhrfn05qvw0EXAxpOjxorXyXynK+ZN70om/s0mPdmKkngPA="
+      },
+      {
+        "access": "read",
+        "id": "e6f39369127579d20d5eacd45990055f",
+        "session": 0,
+        "signing": "BHMQPsMLPM9X2q4I6TU0rvFEo1lAz2u7oSoM98vV1lpk2CyMmenTxF+SRbqbJ5gsmuqOwduUsZxEeVlCwOsiqjI="
+      }
+    ],
+    "default": [
+      {
+        "access": "write",
+        "id": "256b1be32745d1d1c9d49121cc87bc45",
+        "session": 0,
+        "signing": "BG/wO5SSQc4drdQ1GeaWDgqFtBppoFwygQOqK84VlMoWPE91OlW/AdxT9sCwx+7ni0DG/30lqW4igrmJzvccFEo="
+      },
+      {
+        "access": "write",
+        "id": "fe00ab0f341901f863a49160cf554588",
+        "session": 0,
+        "signing": "BFUPRxAD89+Xw99QaseX9nIfsaH7e49vg9IkSYplyI4kE2CT1wEuUJpzcVy9CwCjzA/0tcAbP/oZarH7MnA2uOY="
+      },
+      {
+        "access": "write",
+        "id": "d02c9e7062d4d70c142007e115a13cf4",
+        "session": 0,
+        "signing": "BFkat3HrvP1tnLkJTRBlKK3Rpp1EwsH2J/CJ7Fi5xhrfn05qvw0EXAxpOjxorXyXynK+ZN70om/s0mPdmKkngPA="
+      },
+      {
+        "access": "read",
+        "id": "e6f39369127579d20d5eacd45990055f",
+        "session": 0,
+        "signing": "BHMQPsMLPM9X2q4I6TU0rvFEo1lAz2u7oSoM98vV1lpk2CyMmenTxF+SRbqbJ5gsmuqOwduUsZxEeVlCwOsiqjI="
+      }
+    ],
+    "withoutA": [
+      {
+        "access": "write",
+        "id": "fe00ab0f341901f863a49160cf554588",
+        "session": 0,
+        "signing": "BFUPRxAD89+Xw99QaseX9nIfsaH7e49vg9IkSYplyI4kE2CT1wEuUJpzcVy9CwCjzA/0tcAbP/oZarH7MnA2uOY="
+      },
+      {
+        "access": "write",
+        "id": "d02c9e7062d4d70c142007e115a13cf4",
+        "session": 0,
+        "signing": "BFkat3HrvP1tnLkJTRBlKK3Rpp1EwsH2J/CJ7Fi5xhrfn05qvw0EXAxpOjxorXyXynK+ZN70om/s0mPdmKkngPA="
+      },
+      {
+        "access": "read",
+        "id": "e6f39369127579d20d5eacd45990055f",
+        "session": 0,
+        "signing": "BHMQPsMLPM9X2q4I6TU0rvFEo1lAz2u7oSoM98vV1lpk2CyMmenTxF+SRbqbJ5gsmuqOwduUsZxEeVlCwOsiqjI="
+      }
+    ]
+  }
+}
