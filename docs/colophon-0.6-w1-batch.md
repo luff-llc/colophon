@@ -20,6 +20,15 @@ The batch purpose is always `colophon.home.read`. A `colophon.history.read`
 call is refused, so recover-only and suspended controllers must use single GET
 to read members-only history.
 
+A batch MUST NOT reach further than single-record reads. Besides the conditions
+on the batch call's own `args`, the conditions of the member's terms and of
+every link in the call MUST hold, for every requested path, against the `args`
+a single `GET {base}/records/<path>` would carry
+(`{"method":"GET","path":"/records/<path>","body":"<SHA-256 of the empty string>"}`).
+If any path is out of scope the home refuses the entire batch with 403
+`refused:outOfScope` at §12.3 step 7, before reserving the call or reading
+storage.
+
 ## Whole-request failure
 
 An unappointed home MUST answer 404 before checking authorization or parsing the
@@ -31,8 +40,9 @@ replay-share limit returns 429 with `Retry-After`.
 
 A stopped home returns 503 with `{"result":"unavailable"}` for a well-formed
 batch carrying a call. A single GET may still serve public history at a stopped
-home. If a record the home would return fails its storage integrity check, the
-entire batch fails with 500. Whole-request errors carry no per-item results.
+home. If a record the home would return fails its storage integrity check, or is
+indexed but missing or unreadable, the entire batch fails with 500, naming no
+path. Whole-request errors carry no per-item results.
 After a 500, the batch call remains spent. Clients can use single-record GETs
 to fetch unaffected paths.
 

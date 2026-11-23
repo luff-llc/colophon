@@ -421,6 +421,22 @@ pub fn finish_home_call(
     Ok(env)
 }
 
+/// [`finish_home_call`] for `POST /records/batch` serving `paths`: judged as its signer by the
+/// home's batch rule ([`crate::v05::calls::check_home_batch_as_signer`]), which also holds every
+/// condition to each path as a single `GET` of it would carry it.
+pub fn finish_home_batch_call(
+    prepared: &PreparedCall,
+    sig: &SignatureResult,
+    view: &AccountView,
+    cfg: &CallConfig<'_>,
+    req: &crate::v05::calls::HomeRequest<'_>,
+    paths: &[String],
+) -> Result<Vec<u8>> {
+    let env = call_envelope(prepared, sig)?;
+    crate::v05::calls::check_home_batch_as_signer(&env, view, cfg, req, paths)?;
+    Ok(env)
+}
+
 // ---------------------------------------------------------------------------------------------
 // A history read by a member that holds no history yet (§12.2, §13.4, §14).
 

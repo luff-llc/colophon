@@ -15,7 +15,11 @@ mod support_relay;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use base64::Engine as _;
 use colophon_core::v05::account::{Change, Incoming, RevokeKeep};
-use colophon_core::v05::calls::home_call_args;
+use colophon_core::v05::account::HomeCall;
+use colophon_core::v05::calls::{
+    check_home_batch_as_signer, home_call_args, AccountView, CallConfig, HomeRequest,
+};
+use colophon_core::v05::history::{verify_history, Persisted};
 use colophon_core::v05::encoding::{canonical, digest};
 use colophon_core::v05::history::Objects;
 use colophon_core::v05::write::authority::TransitionRule;
@@ -385,6 +389,152 @@ fn a_batch_uses_one_bound_call_for_records_and_members_only_history() {
         assert_eq!(answer["status"], 404, "{answer}");
         assert!(answer.get("reserve").is_none());
     }
+}
+
+/// A batch reaches no further than single-record reads: conditions on a link or on the member's
+/// own terms are judged for every path as a single `GET` of it would carry them, and one path out
+/// of scope refuses the whole batch before anything is reserved or served.
+#[test]
+fn a_conditional_delegation_cannot_batch_paths_it_could_not_get_one_at_a_time() {
+    let mut f = create_with(&[NS], "members", 1);
+    let member = f.host.identity(41);
+    let narrowed = f.host.identity(42);
+    let delegate = f.host.identity(43);
+    let read = "colophon.home.read";
+    let mut delegating = terms_for(&[(NS, "read")]);
+    delegating["services"] = json!([{"audience": BASE_A, "purposes": [read]}]);
+    delegating["depth"] = json!(1);
+    admit(&mut f, &member, "Reader", "device", delegating.clone(), delegating);
+    // Member terms of its own: the batch route and live values only.
+    let scope = json!([{"any": [{"eq": ["args.path", BATCH]},
+                                {"prefix": ["args.path", "/records/state/"]}]}]);
+    let mut conditional = terms_for(&[(NS, "read")]);
+    conditional["conditions"] = scope.clone();
+    admit(&mut f, &narrowed, "Narrow reader", "device", conditional.clone(), conditional);
+    let keys = HomeKeys::new(0x77);
+    appoint_homes(&mut f, &[(&keys, BASE_A)]);
+    let mut home = Home::new(keys, f.account.id().as_str());
+    let entries: Vec<Value> = entries_json(&f).into_iter().map(|(_, e)| e).collect();
+    assert_eq!(home.authority(1, &entries, NOW)["appointed"], true);
+    let home_head = serde_json::to_vec(&home.head(NOW).unwrap()).unwrap();
+
+    let live = format!("state/{member}/{NS}/current.json");
+    let op = format!("ops/{member}/{NS}/000000000001-{}.json", "a".repeat(32));
+    let delegate_point = f.host.ids[&delegate].public().signing;
+    let link_body = canonical(&json!({
+        "protocol": "colophon/link/5", "account": f.account.id().as_str(), "from": member,
+        "to": {"signing": b(&delegate_point)}, "session": 0,
+        "terms": {"services": [{"audience": BASE_A, "purposes": [read]}], "depth": 0,
+                  "conditions": scope},
+        "notBefore": format_date(NOW - 1_000), "expires": format_date(NOW + 60_000),
+        "created": format_date(NOW - 1_000),
+    }))
+    .unwrap();
+    let link = canonical(&json!({"body": b(&link_body),
+                                 "signature": b(&f.host.ids[&member].sign(&link_body))}))
+    .unwrap();
+    let linked = |args: Value, n: u8| {
+        let (seq, at) = f.account.head();
+        let body = canonical(&json!({
+            "protocol": "colophon/call/5", "account": f.account.id().as_str(),
+            "asOf": {"seq": seq, "digest": at}, "signer": {"member": member},
+            "key": b(&delegate_point), "links": [b(&link)], "audience": BASE_A, "purpose": read,
+            "args": args, "requestId": URL_SAFE_NO_PAD.encode([n; 32]), "created": format_date(NOW),
+        }))
+        .unwrap();
+        json!(b(&canonical(&json!({"body": b(&body),
+                                   "signature": b(&f.host.ids[&delegate].sign(&body))}))
+        .unwrap()))
+    };
+    let own = |args: Value, n: u8| {
+        json!(b(&call_as(&f.host, &f.account, "member", &narrowed, BASE_A, read, args, NOW, [n; 32])))
+    };
+    let batch_args = |body: &str| home_call_args("POST", BATCH, &digest(body.as_bytes()));
+    let get = |path: &str, credential: Value| {
+        call(json!({"op": "access", "state": home.state, "now": NOW, "base": BASE_A,
+                    "method": "GET", "section": "records", "rest": path,
+                    "path": format!("/records/{path}"), "bodySha256": digest(b""),
+                    "call": credential}))
+    };
+    let get_args = |path: &str| home_call_args("GET", &format!("/records/{path}"), &digest(b""));
+
+    // One at a time: the live value is in scope, the operation is not.
+    for (who, n) in [(&linked as &dyn Fn(Value, u8) -> Value, 1u8), (&own, 2)] {
+        let ok = get(&live, who(get_args(&live), n));
+        assert_eq!(ok["allowed"], true, "{ok}");
+        let refused = get(&op, who(get_args(&op), n + 10));
+        assert_eq!(refused["result"], "refused:outOfScope", "{refused}");
+    }
+    // In scope: a batch of live values only is served.
+    let in_scope = json!({"paths": [&live]}).to_string();
+    for (who, n) in [(&linked as &dyn Fn(Value, u8) -> Value, 21u8), (&own, 22)] {
+        let ok = call(batch_request(&home, NOW, &in_scope, who(batch_args(&in_scope), n)));
+        assert_eq!(ok["allowed"], true, "{ok}");
+        assert_eq!(ok["records"], json!([{"path": live, "status": 200}]));
+    }
+    // One path out of scope refuses the whole batch: no per-item results, nothing reserved.
+    for body in [json!({"paths": [&live, &op]}), json!({"paths": [&op, &live]})] {
+        let body = body.to_string();
+        for (who, n) in [(&linked as &dyn Fn(Value, u8) -> Value, 31u8), (&own, 32)] {
+            let answer = call(batch_request(&home, NOW, &body, who(batch_args(&body), n)));
+            assert_eq!(answer["status"], 403, "{answer}");
+            assert_eq!(answer["result"], "refused:outOfScope");
+            assert!(answer.get("records").is_none());
+            assert!(answer.get("reserve").is_none());
+        }
+    }
+    // The signer's own preflight refuses exactly what the home refuses, by the same rule.
+    let mut objects = f.account.objects().clone();
+    objects.heads.push(home_head);
+    let verdict = verify_history(&objects, &Persisted::default(), NOW);
+    let view = AccountView::from_history_verifier(&verdict, &objects, NOW).unwrap();
+    let audiences = [BASE_A.to_string()];
+    let origins = Default::default();
+    let cfg = CallConfig {
+        now_ms: NOW,
+        audiences: &audiences,
+        call_origins: &origins,
+        controller_purposes: &[],
+        home_endpoints: &audiences,
+    };
+    let mixed = json!({"paths": [&live, &op]}).to_string();
+    for (body, paths) in [(&in_scope, vec![live.clone()]), (&mixed, vec![live.clone(), op.clone()])] {
+        for (who, n) in [(&linked as &dyn Fn(Value, u8) -> Value, 41u8), (&own, 42)] {
+            let credential = who(batch_args(body), n);
+            let envelope = STANDARD.decode(credential.as_str().unwrap()).unwrap();
+            let sha = digest(body.as_bytes());
+            let req = HomeRequest { method: "POST", path: BATCH, body_sha256: &sha, writes: &[] };
+            let signer = check_home_batch_as_signer(&envelope, &view, &cfg, &req, &paths)
+                .err()
+                .map(|e| e.code());
+            let home_said = call(batch_request(&home, NOW, body, credential));
+            let home_code = home_said["result"].as_str().map(str::to_string);
+            assert_eq!(signer, home_code, "{body}: home {home_said}");
+            assert_eq!(signer.is_none(), home_said["allowed"] == true);
+        }
+    }
+    // Through the account: a batch is begun with its body, judged path by path at finish.
+    let mut heads = Objects::default();
+    heads.heads.push(objects.heads.last().unwrap().clone());
+    f.account.merge(Incoming { objects: heads, ..Default::default() }, NOW).unwrap();
+    let controller = f.host.ids[&f.d].public().signing;
+    let generic = HomeCall {
+        audience: BASE_A.into(),
+        method: "POST".into(),
+        path: BATCH.into(),
+        body_sha256: digest(mixed.as_bytes()),
+        as_of: None,
+    };
+    assert!(f.account.begin_home_call(&controller, &generic, [50; 32]).is_err());
+    let action = f
+        .account
+        .begin_home_batch_call(&controller, &[], BASE_A, mixed.as_bytes(), None, [51; 32])
+        .unwrap();
+    let sigs = f.host.sign(action.steps());
+    let finished = f.account.finish(action, sigs).unwrap();
+    let built = json!(b(finished.artifact.as_ref().unwrap()));
+    let served = call(batch_request(&home, NOW, &mixed, built));
+    assert_eq!(served["allowed"], true, "{served}");
 }
 
 #[test]

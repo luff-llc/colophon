@@ -591,6 +591,8 @@ mod purpose_tests {
         assert!(HOME_PURPOSES.contains(&HOME_STREAM));
         assert_eq!(home_purposes("POST", "/stream/ticket"), &[HOME_STREAM]);
         assert_eq!(home_purposes("GET", "/stream"), &[HOME_READ]);
+        // The batch read keeps its own purpose; neither route shadows the other.
+        assert_eq!(home_purposes("POST", "/records/batch"), &[HOME_READ]);
         assert_eq!(home_purposes("POST", "/stream/ticket?x=1"), &[HOME_WRITE]);
         for (method, path) in [
             ("GET", "/changes"),
