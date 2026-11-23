@@ -83,7 +83,8 @@ pub struct SessionOuter {
     pub cell: String,
     /// The sending member.
     pub from: String,
-    /// The one recipient, when addressed.
+    /// The member the frame is addressed to, when present. Advice to receivers, not a route:
+    /// the carrier forwards the frame to every other subscribed, entitled member either way.
     pub to: Option<String>,
     /// Whether the carrier keeps it as the latest for `(namespace, cell, from)`.
     pub retain: bool,

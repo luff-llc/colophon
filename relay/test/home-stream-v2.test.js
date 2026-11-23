@@ -39,7 +39,7 @@ async function settle(...clients) {
   for (const c of clients) await c.settle();
 }
 
-testHome('frames reach every other subscribed, entitled member; `to` reaches one; no echo', async ({ open }) => {
+testHome('frames reach every other subscribed, entitled member, addressed or not; no echo', async ({ open }) => {
   const [a, b, d, c] = [await open('a'), await open('b'), await open('d'), await open('c')];
   for (const m of [a, b, d]) assert.equal((await subscribe(m)).type, 'subscribed');
   assert.equal((await subscribe(c)).code, 'notEntitled');
@@ -50,9 +50,11 @@ testHome('frames reach every other subscribed, entitled member; `to` reaches one
   assert.deepEqual((await b.next('session')).frame, f1);
   assert.deepEqual((await d.next('session')).frame, f1);
 
+  // `to` is advice to receivers, not a route (§S3): d, which it does not name, gets it too.
   const f2 = frame('a', { n: 2, to: 'b' });
   a.send({ type: 'session', frame: f2 });
   assert.deepEqual((await b.next('session')).frame, f2);
+  assert.deepEqual((await d.next('session')).frame, f2);
 
   // Another cell nobody subscribed to, then after d leaves the cell.
   a.send({ type: 'session', frame: frame('a', { n: 3, cell: 'queue' }) });
@@ -63,7 +65,7 @@ testHome('frames reach every other subscribed, entitled member; `to` reaches one
   assert.deepEqual((await b.next('session')).frame, f4);
   await settle(a, b, c, d);
   assert.deepEqual(a.all('session'), [], 'echoed to the sender');
-  assert.deepEqual(d.all('session').map((f) => f.frame), [f1]);
+  assert.deepEqual(d.all('session').map((f) => f.frame), [f1, f2]);
   assert.deepEqual(b.all('session').map((f) => f.frame), [f1, f2, f4]);
   assert.deepEqual(c.all('session'), []);
 
@@ -78,6 +80,92 @@ testHome('frames reach every other subscribed, entitled member; `to` reaches one
   b.send({ type: 'session', frame: back });
   assert.deepEqual((await a.next('session')).frame, back);
 }, { stream: { framesPerSecond: 1000, frameBurst: 1000 } });
+
+testHome('an addressed frame reaches every other subscriber but not the unentitled or unsubscribed', async ({ open }) => {
+  const [a, b, c, d] = [await open('a'), await open('b'), await open('c'), await open('d')];
+  for (const m of [a, b]) assert.equal((await subscribe(m)).type, 'subscribed');
+  assert.equal((await subscribe(c)).code, 'notEntitled');
+  // d is connected and entitled but not subscribed.
+  const toD = frame('a', { n: 1, to: 'd' });
+  a.send({ type: 'session', id: 'to-d', frame: toD });
+  assert.deepEqual((await b.next('session')).frame, toD, 'a subscriber the frame does not name');
+  await settle(a, b, c, d);
+  assert.deepEqual(a.all('session'), [], 'echoed to the sender');
+  assert.deepEqual(c.all('session'), [], 'not entitled to the namespace');
+  assert.deepEqual(d.all('session'), [], 'not subscribed, though named');
+}, { stream: { framesPerSecond: 1000, frameBurst: 1000 } });
+
+testHome('the sender hears the same whether or not `to` names a connected member', async ({ open }) => {
+  const [a, b] = [await open('a'), await open('b')];
+  await subscribe(b);
+  /** Everything a receives in answer to one addressed frame, without its sequence numbers. */
+  const answer = async (to, n) => {
+    const before = a.frames.length;
+    a.send({ type: 'session', id: `to-${to}`, frame: frame('a', { n, to }) });
+    await b.next('session', (f) => JSON.parse(Buffer.from(f.frame.body, 'base64')).n === n);
+    await settle(a);
+    return a.frames.slice(before).map(({ n: _n, t: _t, taken: _taken, ...rest }) => rest);
+  };
+  const connected = await answer('b', 1); // b is connected and subscribed
+  const absent = await answer('e', 2); // e has no connection
+  assert.deepEqual(connected, absent);
+  assert.deepEqual(connected.map((f) => f.type), ['pong'], 'no acknowledgement and no error');
+}, { stream: { framesPerSecond: 1000, frameBurst: 1000 } });
+
+testHome('session frames are capped for the whole account, whoever is listening', async ({ open, slot }) => {
+  const [a, b, d] = [await open('a'), await open('b'), await open('d')];
+  await subscribe(b);
+  // Two senders share a budget of three frames; neither is near its own connection's rate.
+  for (let n = 1; n <= 2; n++) a.send({ type: 'session', frame: frame('a', { n }) });
+  await settle(a);
+  for (let n = 1; n <= 3; n++) d.send({ type: 'session', frame: frame('d', { n, retain: true }) });
+  const warned = await d.next('error');
+  assert.deepEqual([warned.code, warned.dropped], ['rateLimited', 1]);
+  await settle(a, b, d);
+  assert.equal(b.all('session').length, 3, 'only the frames within the budget are forwarded');
+  const { stream } = (await slot()).home;
+  assert.deepEqual([stream.counters.forwarded, stream.counters.limited], [3, 2]);
+  assert.equal(a.all('error').length, 0);
+
+  // The same with nobody subscribed: the budget does not depend on who is connected.
+  b.send({ type: 'unsubscribe', namespace: 'notes', cell: CELL });
+  await b.next('unsubscribed');
+  a.send({ type: 'session', frame: frame('a', { n: 3 }) });
+  assert.equal((await a.next('error')).code, 'rateLimited');
+  assert.equal(stream.counters.limited, 3);
+}, { stream: { sessionFramesPerSecond: 1, sessionFrameBurst: 3, framesPerSecond: 1000, frameBurst: 1000 } });
+
+testHome('retained replay is not repeated for a duplicate subscribe and is capped for the account', async ({ open, slot }) => {
+  const [a, b, d] = [await open('a'), await open('b'), await open('d')];
+  a.send({ type: 'session', frame: frame('a', { n: 1, retain: true }) });
+  await settle(a);
+  assert.equal((await subscribe(b)).type, 'subscribed');
+  await b.next('session', (f) => f.retained);
+  // Subscribing again while subscribed replays nothing.
+  assert.equal((await subscribe(b)).type, 'subscribed');
+  await settle(b);
+  assert.equal(b.all('session').length, 1);
+  // Leaving and returning replays until the account's replay budget (two frames here) is spent,
+  // on whichever connection asks.
+  const again = async (m) => {
+    m.send({ type: 'unsubscribe', namespace: 'notes', cell: CELL });
+    await m.next('unsubscribed');
+    assert.equal((await subscribe(m)).type, 'subscribed');
+    await settle(m);
+  };
+  await again(b);
+  assert.equal(b.all('session').length, 2);
+  await again(b);
+  assert.equal((await subscribe(d)).type, 'subscribed');
+  await settle(b, d);
+  assert.deepEqual([b.all('session').length, d.all('session').length], [2, 0]);
+  const { stream } = (await slot()).home;
+  assert.equal(stream.counters.limited, 2);
+  // Live frames have their own budget and still flow.
+  const live = frame('a', { n: 2 });
+  a.send({ type: 'session', frame: live });
+  assert.deepEqual((await d.next('session')).frame, live);
+}, { stream: { sessionFramesPerSecond: 1, sessionFrameBurst: 2, framesPerSecond: 1000, frameBurst: 1000 } });
 
 testHome('spoofed senders and unentitled members cannot send', async ({ open }) => {
   const [a, b, c] = [await open('a'), await open('b'), await open('c')];
@@ -108,9 +196,13 @@ testHome('the latest retained frame per (cell, from) is given on subscribe, and 
   await settle(a, b);
   await subscribe(d);
   const given = await d.next('session');
-  assert.deepEqual(given, { type: 'session', n: given.n, retained: true, frame: latest });
+  assert.equal(given.retained, true);
   await settle(d);
-  assert.equal(d.all('session').length, 1, 'only the latest, and not a frame addressed to another');
+  // Retained frames are given whatever their `to` says: d is given b's frame to a as well.
+  const givenAll = d.all('session').map((f) => f.frame);
+  const expected = [latest, toB];
+  assert.equal(givenAll.length, 2, 'only the latest per sender');
+  assert.deepEqual(new Set(givenAll.map((f) => f.body)), new Set(expected.map((f) => f.body)));
   // A member is not given its own retained frame; the addressee is given b's.
   await subscribe(a);
   assert.deepEqual((await a.next('session')).frame, toB);
@@ -121,7 +213,7 @@ testHome('the latest retained frame per (cell, from) is given on subscribe, and 
   d.send({ type: 'unsubscribe', namespace: 'notes', cell: CELL });
   await subscribe(d);
   await settle(d);
-  assert.equal(d.all('session').length, 1);
+  assert.equal(d.all('session').length, 2);
 }, { stream: { retainMs: 300 } });
 
 async function endSessions(member, seq, previous, issued) {
@@ -181,7 +273,7 @@ testHome('a member that cannot keep up is cut off (4013) instead of buffered', a
   assert.equal(a.ws.readyState, a.ws.OPEN, 'the sender is unaffected');
   socket.destroy();
   await closed;
-}, { stream: { bufferedBytes: 65_536, framesPerSecond: 10_000, frameBurst: 10_000, bytesPerSecond: 1 << 30, byteBurst: 1 << 30 } });
+}, { stream: { bufferedBytes: 65_536, framesPerSecond: 10_000, frameBurst: 10_000, bytesPerSecond: 1 << 30, byteBurst: 1 << 30, sessionFramesPerSecond: 10_000, sessionFrameBurst: 10_000, sessionBytesPerSecond: 1 << 30, sessionByteBurst: 1 << 30 } });
 
 testHome('nothing of a session frame is written under the data directory', async ({ open, dir, restart }) => {
   const [a, b] = [await open('a'), await open('b')];

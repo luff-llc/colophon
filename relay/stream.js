@@ -24,6 +24,12 @@ export const STREAM_DEFAULTS = Object.freeze({
   frameBurst: 100,
   bytesPerSecond: 262_144,
   byteBurst: 524_288,
+  // Session frames the whole account may send, all connections together. Each one is copied to
+  // every other subscriber, so this is what bounds the home's outbound work for an account.
+  sessionFramesPerSecond: 100,
+  sessionFrameBurst: 200,
+  sessionBytesPerSecond: 524_288,
+  sessionByteBurst: 1_048_576,
   bufferedBytes: 1_048_576, // a connection whose unsent bytes exceed this is cut off (4013)
   resumeEntries: 1024, // most missed changes replayed on connect; more answers `resync`
   retainMs: 60_000, // retained-frame life (at most 60 s, §S9)
@@ -85,8 +91,18 @@ export class HomeStream {
     this.o.retainMs = Math.min(this.o.retainMs, 60_000);
     this.tickets = new Map(); // sha256(ticket) -> grant
     this.conns = new Set();
-    this.retained = new Map(); // namespace \0 cell \0 from -> { frame, to, from, namespace, cell, at }
-    this.counters = { forwarded: 0, dropped: 0, refused: 0, slow: 0, idle: 0 };
+    this.retained = new Map(); // namespace \0 cell \0 from -> { frame, from, namespace, cell, at }
+    this.counters = { forwarded: 0, dropped: 0, limited: 0, refused: 0, slow: 0, idle: 0 };
+    this.session = {
+      frames: new Bucket(this.o.sessionFramesPerSecond, this.o.sessionFrameBurst),
+      bytes: new Bucket(this.o.sessionBytesPerSecond, this.o.sessionByteBurst),
+    };
+    // Retained frames replayed to new subscribers, at the same rates. Kept apart from the budget
+    // for live frames so that subscribing over and over cannot starve them.
+    this.replay = {
+      frames: new Bucket(this.o.sessionFramesPerSecond, this.o.sessionFrameBurst),
+      bytes: new Bucket(this.o.sessionBytesPerSecond, this.o.sessionByteBurst),
+    };
     this.timers = null;
   }
 
@@ -198,6 +214,7 @@ export class HomeStream {
       limits: {
         frameBytes: 16_384, messageBytes: this.o.messageBytes, subscriptions: this.o.subscriptions,
         framesPerSecond: this.o.framesPerSecond, bytesPerSecond: this.o.bytesPerSecond,
+        sessionFramesPerSecond: this.o.sessionFramesPerSecond, sessionBytesPerSecond: this.o.sessionBytesPerSecond,
         retainMs: this.o.retainMs, pingMs: this.o.pingMs, idleMs: this.o.idleMs,
         resumeEntries: this.o.resumeEntries,
       },
@@ -302,22 +319,24 @@ export class HomeStream {
     this.send(conn, { type: 'error', code, ...(ref !== undefined ? { ref } : {}), ...extra });
   }
 
+  /** Count a frame dropped for a rate cap, and tell its sender at most once a second. */
+  limited(conn) {
+    conn.dropped += 1;
+    this.counters.dropped += 1;
+    const now = Date.now();
+    if (now - conn.warnedAt >= 1000) {
+      conn.warnedAt = now;
+      this.error(conn, 'rateLimited', undefined, { dropped: conn.dropped });
+    }
+  }
+
   receive(conn, data, isBinary) {
     conn.lastSeen = Date.now();
     if (!conn.live) return;
     const size = data.length ?? data.byteLength ?? 0;
     // Over the rate: dropped and counted, never queued. The sender hears of it at most once a
     // second, with its running total.
-    if (!conn.frames.take(1) || !conn.bytes.take(size)) {
-      conn.dropped += 1;
-      this.counters.dropped += 1;
-      const now = Date.now();
-      if (now - conn.warnedAt >= 1000) {
-        conn.warnedAt = now;
-        this.error(conn, 'rateLimited', undefined, { dropped: conn.dropped });
-      }
-      return;
-    }
+    if (!conn.frames.take(1) || !conn.bytes.take(size)) { this.limited(conn); return; }
     if (isBinary) { this.error(conn, 'binary'); return; }
     let msg;
     try { msg = JSON.parse(Buffer.from(data).toString('utf8')); } catch { msg = null; }
@@ -349,14 +368,21 @@ export class HomeStream {
     const r = this.home.wasm.call({ op: 'subscription', namespace, cell, entitled: conn.namespaces });
     if (!r.allowed) { this.error(conn, r.code, ref); return; }
     const key = `${namespace}\0${cell}`;
-    if (!conn.subs.has(key) && conn.subs.size >= this.o.subscriptions) { this.error(conn, 'tooMany', ref); return; }
+    const already = conn.subs.has(key);
+    if (!already && conn.subs.size >= this.o.subscriptions) { this.error(conn, 'tooMany', ref); return; }
     conn.subs.add(key);
     this.send(conn, { type: 'subscribed', namespace, cell, ...(ref !== undefined ? { ref } : {}) });
-    // The latest retained frame of every other member in the cell (§S9), still in its time.
+    // Subscribing again to a cell replays nothing: the connection has had those frames.
+    if (already) return;
+    // The latest retained frame of every other member in the cell (§S9), still in its time,
+    // whatever its `to` says: receivers ignore frames not addressed to them (§S3).
     const now = Date.now();
     for (const [k, r2] of this.retained) {
       if (now - r2.at > this.o.retainMs) { this.retained.delete(k); continue; }
-      if (r2.namespace === namespace && r2.cell === cell && r2.from !== conn.member && (!r2.to || r2.to === conn.member)) {
+      if (r2.namespace === namespace && r2.cell === cell && r2.from !== conn.member) {
+        // Replay is best effort and bounded for the account: over the budget the rest is left
+        // out, and the subscriber gets each member's state with that member's next frame.
+        if (!this.replay.frames.take(1) || !this.replay.bytes.take(r2.size)) { this.counters.limited += 1; return; }
         if (!this.send(conn, { type: 'session', retained: true, frame: r2.frame })) return;
       }
     }
@@ -374,17 +400,29 @@ export class HomeStream {
       this.error(conn, r.code, ref);
       return;
     }
+    // The account's budget for session frames, charged for every valid frame whoever is
+    // listening: the answer cannot depend on how many members are connected or subscribed. Over
+    // it the frame is dropped like one over the connection's own rate, and never retained.
+    if (!this.session.frames.take(1) || !this.session.bytes.take(encoded.length)) {
+      this.counters.limited += 1;
+      this.limited(conn);
+      return;
+    }
     const out = { type: 'session', frame };
     if (r.retain) {
       const key = `${r.namespace}\0${r.cell}\0${r.from}`;
       if (this.retained.has(key) || this.retained.size < this.o.retainedPerSlot) {
-        this.retained.set(key, { frame, to: r.to, from: r.from, namespace: r.namespace, cell: r.cell, at: Date.now() });
+        this.retained.set(key, { frame, size: encoded.length, from: r.from, namespace: r.namespace, cell: r.cell, at: Date.now() });
       }
     }
+    // `to` is advice to receivers, not a route (§S3, §S9): a member reachable only through
+    // another member must still get addressed frames, so every other subscribed, entitled member
+    // receives the frame. The sender hears nothing either way, so it cannot learn from the home
+    // whether the member `to` names is connected.
     const sub = `${r.namespace}\0${r.cell}`;
     this.counters.forwarded += 1;
     this.broadcast(out, (c) => c !== conn && c.member && c.member !== r.from && c.subs.has(sub)
-      && c.namespaces.includes(r.namespace) && (!r.to || c.member === r.to));
+      && c.namespaces.includes(r.namespace));
   }
 
   // -------------------------------------------------------------------------------------------
