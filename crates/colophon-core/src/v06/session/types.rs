@@ -514,8 +514,9 @@ impl Default for Policy {
 /// Departures from the draft text that the explorer showed necessary
 /// (`docs/colophon-0.6-sessions-findings.md`). [`Fixes::default`] is the reference reading;
 /// [`Fixes::LITERAL`] reproduces the revision 1 draft so the counterexamples stay
-/// reproducible, [`Fixes::REV3`], [`Fixes::REV4`] and [`Fixes::REV5`] those drafts.
-/// [`Fixes::ALL`] is revision 5 plus R1f; F12/F21 are settled by `Claim::via`.
+/// reproducible, [`Fixes::REV3`] to [`Fixes::REV7`] those drafts. [`Fixes::ALL`] is the
+/// current revision (10). The revision 4–6 evidence rules (`evidence*` switches) are reached
+/// only through the hidden `Input::LegacyEvidence`, for those regression presets.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Fixes {

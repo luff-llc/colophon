@@ -21,7 +21,7 @@ pub mod io;
 pub mod types;
 
 pub use clock::{sample, Sample, Samples};
-pub use io::{Command, Event, Forwarded, Input, Output, Via};
+pub use io::{Command, Event, Input, Output, Via};
 pub use types::{
     Body, Bytes, Claim, Fixes, Fold, Frame, Heard, Id, MemberId, Persisted, Policy, Seen,
     TakeRule, MAX_ECHO, MAX_INT, MAX_TERM,
@@ -95,6 +95,8 @@ pub const GAP_HELLO_MS: u64 = 1_000;
 pub const MAX_KEYS_PER_MEMBER: usize = 4;
 /// Own `fresh` values remembered (§S3 freshness).
 const OWN_FRESH: usize = 32;
+/// An echo is honoured only of a `fresh` sent within this long (§S3, revision 10).
+pub const FRESH_MEMORY_MS: u64 = 60_000;
 
 /// The protocol-visible state of a member, for digests and cross-implementation vectors.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
@@ -145,6 +147,8 @@ pub struct Session {
     took_wanting: bool,
     /// Transient during `handle`: the input is forwarded evidence.
     in_evidence: bool,
+    /// Transient during `handle`: the input's time, for `fresh` bookkeeping.
+    fresh_now: u64,
     /// The claim each member's last `hello` named (finding R1c): a member that names a lesser
     /// claim or none is sent evidence as soon as this member has it.
     peers_seen: BTreeMap<MemberId, Option<Claim>>,
@@ -172,7 +176,9 @@ pub struct Session {
     /// last `fresh` answered per member.
     fresh_seed: Option<[u8; 16]>,
     fresh_count: u64,
-    own_fresh: VecDeque<Id>,
+    own_fresh: VecDeque<(Id, u64)>,
+    /// The writers entitled at the accepted authority head, once the host said (§S5).
+    entitled: Option<BTreeSet<MemberId>>,
     windows: BTreeMap<(MemberId, String), u64>,
     /// When a freshness probe was last sent to each member (finding B5).
     probed: BTreeMap<MemberId, u64>,
@@ -222,6 +228,7 @@ impl Session {
             pending_yielded: None,
             took_wanting: false,
             in_evidence: false,
+            fresh_now: 0,
             peers_seen: BTreeMap::new(),
             reported: VecDeque::new(),
             submits: BTreeMap::new(),
@@ -242,6 +249,7 @@ impl Session {
             fresh_seed: None,
             fresh_count: 0,
             own_fresh: VecDeque::new(),
+            entitled: None,
             windows: BTreeMap::new(),
             window_order: BTreeMap::new(),
             probed: BTreeMap::new(),
@@ -260,6 +268,11 @@ impl Session {
     /// The number of freshness windows held for `member`.
     pub fn windows_for(&self, member: &str) -> usize {
         self.windows.keys().filter(|(m, _)| m == member).count()
+    }
+    /// Whether a frame from `member` under carrier `key` and number `n` would pass the §S3
+    /// window check now (an open window at or below `n`). For harnesses.
+    pub fn window_admits(&self, member: &str, key: &str, n: u64) -> bool {
+        self.windows.get(&(member.to_string(), key.to_string())).is_some_and(|floor| n >= *floor)
     }
 
     /// Seed the `fresh` values of this process's hellos (16 random bytes from the host, new
@@ -447,7 +460,10 @@ impl Session {
         self.clocks.hash(h);
         self.fresh_seed.hash(h);
         self.fresh_count.hash(h);
-        self.own_fresh.hash(h);
+        for (id, t) in &self.own_fresh {
+            (id, now.saturating_sub(*t).min(FRESH_MEMORY_MS + 1)).hash(h);
+        }
+        self.entitled.hash(h);
         self.windows.hash(h);
         self.window_order.hash(h);
         for (k, t) in &self.probed {
@@ -463,20 +479,35 @@ impl Session {
     /// Process one input at `now` (this member's monotonic ms).
     pub fn handle(&mut self, input: Input, now: u64) -> Vec<Output> {
         let mut out = Vec::new();
+        self.fresh_now = now;
         match input {
             Input::Frame {
                 frame,
                 writer,
                 key,
                 n,
-                forwarded,
+            } => self.on_frame(frame, writer, key, n, now, &mut out),
+            Input::Entitled { writers } => {
+                let set: BTreeSet<MemberId> = writers.into_iter().collect();
+                self.asks.retain(|a| set.contains(a));
+                self.entitled = Some(set);
+            }
+            Input::LegacyEvidence {
+                frame,
+                writer,
+                via: _,
+                windowed,
             } => {
-                self.in_evidence = forwarded.is_some();
-                match forwarded {
-                    Some(fw) if !fw.windowed => self.claim_only(frame, writer, now, &mut out),
-                    _ => self.on_frame(frame, writer, key, n, now, &mut out),
+                // Revisions 4–6 only: unreachable with any current preset.
+                if self.fixes.evidence {
+                    self.in_evidence = true;
+                    if windowed {
+                        self.on_frame(frame, writer, None, None, now, &mut out);
+                    } else {
+                        self.claim_only(frame, writer, now, &mut out);
+                    }
+                    self.in_evidence = false;
                 }
-                self.in_evidence = false;
             }
             Input::Tick => self.on_tick(now, &mut out),
             Input::LinkUp => self.on_link_up(now, &mut out),
@@ -564,11 +595,17 @@ impl Session {
         let mut b = [0u8; 16];
         b.copy_from_slice(&d.finalize()[..16]);
         let id = Id(b);
-        self.own_fresh.push_back(id);
+        self.own_fresh.push_back((id, self.fresh_now));
         while self.own_fresh.len() > OWN_FRESH {
             self.own_fresh.pop_front();
         }
         id
+    }
+    /// Whether `e` is one of this member's `fresh` values sent within the last 60 s.
+    fn honours(&self, e: &Id, now: u64) -> bool {
+        self.own_fresh
+            .iter()
+            .any(|(id, t)| id == e && now.saturating_sub(*t) <= FRESH_MEMORY_MS)
     }
     fn send_hello_echo(
         &mut self,
@@ -1035,7 +1072,7 @@ impl Session {
             Some(floor) if n < *floor => return false,
             Some(_) => {}
             None => {
-                if echo.iter().any(|e| self.own_fresh.contains(e)) {
+                if echo.iter().any(|e| self.honours(e, now)) {
                     self.windows.insert(wk.clone(), n);
                     if self.fixes.window_cap {
                         // Revision 7: at most 4 keys per member, the oldest dropped.
@@ -1055,7 +1092,7 @@ impl Session {
         // Answer a fresh we have not answered, unless the hello is itself an answer to us
         // through a window that was already open (finding R4a: otherwise the two members
         // answer each other's answers forever).
-        let answers_us = echo.iter().any(|e| self.own_fresh.contains(e));
+        let answers_us = echo.iter().any(|e| self.honours(e, now));
         if self.answered.get(&f.from) != Some(fresh) && (!answers_us || opened) {
             self.answered.insert(f.from.clone(), *fresh);
             let to = f.from.clone();
@@ -1942,6 +1979,12 @@ impl Session {
             Command::Pass { to, snapshot } => {
                 if !self.sends_as_holder() || to == self.me {
                     Self::reject(out, "pass", "not-holder");
+                    return;
+                }
+                // §S5 (revision 10): still entitled at the accepted authority head (checked
+                // first: losing the entitlement also drops the member's pending ask).
+                if self.entitled.as_ref().is_some_and(|e| !e.contains(&to)) {
+                    Self::reject(out, "pass", "not-entitled");
                     return;
                 }
                 // R7: only to a member whose ask is pending under this claim.

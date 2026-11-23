@@ -20,10 +20,26 @@ pub enum Input {
         /// The frame's `n`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         n: Option<u64>,
-        /// Set when another member forwarded this frame as evidence (§S4), as the carrier
-        /// reports it.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        forwarded: Option<Forwarded>,
+    },
+    /// The members entitled to write in the namespace at the accepted authority head (§S1,
+    /// §S5: a pass goes only to an entitled asker). Until the host gives it, no pass is
+    /// refused for entitlement.
+    Entitled {
+        /// Their member IDs.
+        writers: Vec<MemberId>,
+    },
+    /// Revisions 4–6 only (evidence forwarded by another member). Ignored unless the
+    /// machine runs one of those regression presets; not part of any current revision.
+    #[doc(hidden)]
+    LegacyEvidence {
+        /// The origin's frame.
+        frame: Frame,
+        /// Whether the origin may write.
+        writer: bool,
+        /// The member that forwarded it.
+        via: MemberId,
+        /// Whether the receiver had a window for the origin's key.
+        windowed: bool,
     },
     /// Time passed; the host calls this at least every few hundred ms.
     Tick,
@@ -36,17 +52,6 @@ pub enum Input {
         /// The command.
         command: Command,
     },
-}
-
-/// How a forwarded evidence frame arrived (§S3 "evidence without a window").
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Forwarded {
-    /// The member that forwarded it.
-    pub via: MemberId,
-    /// Whether the receiver has an open freshness window for the origin's key with the
-    /// frame's `n` inside it. Without one only the frame's claim is used.
-    pub windowed: bool,
 }
 
 /// Application commands (§S10).

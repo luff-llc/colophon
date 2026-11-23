@@ -1,9 +1,15 @@
 # 0.6 session vectors
 
 Transcripts of the reference session machine (`colophon_core::v06::session`, spec
-`spec/colophon-0.6-sessions.md` revision 7, §S3–§S9), for replay by the Swift, Kotlin and JS bindings.
+`spec/colophon-0.6-sessions.md` revision 10, §S3–§S9), for replay by the Swift, Kotlin and JS bindings.
 They are generated and checked by `crates/colophon-core/tests/v06_session_vectors.rs`
 (`COLOPHON_REGEN_VECTORS=1` rewrites them). The draft is unfrozen: these files change with it.
+
+0.6 conformance is the home carrier: every frame a member sends is carried to every other
+member of the cell, and `to` is advice. The scenario files are written that way: each sent
+frame is delivered to every other member, and a member that `to` does not name ignores it
+(its step has no outputs). Bridging (`bridge.json`) is specified but is not part of 0.6
+conformance.
 
 The machine runs with `Fixes::default()` (every fix in
 `docs/colophon-0.6-sessions-findings.md`); each file records the `fixes` it used.
@@ -35,19 +41,21 @@ machine with a new one built from what the member persisted (the last `persist` 
 
 - `at` is that member's own monotonic clock in ms; members' clocks are unrelated.
 - `input` is tagged by `input`: `frame` (`frame`, `writer`, and, in keyed scenarios, the
-  sender's `key` and the frame's `n` for the §S3 freshness gate; `forwarded {via,
-  windowed}` exists only for the revision 6 evidence rules and is absent here), `tick`, `linkUp`, `linkDown`,
+  sender's `key` and the frame's `n` for the §S3 freshness gate), `entitled {writers}` (the
+  writers entitled at the accepted authority head, from the host; a `pass` to any other
+  member is rejected with `not-entitled`), `tick`, `linkUp`, `linkDown`,
   `app` (`command`, tagged by `command`: `join {state|null}`, `leave`, `ask`, `pass {to, snapshot}`,
   `decline {to}`, `take {state|null}`, `release`, `publish {id, payload}`,
-  `submit {id, payload}`, `presence {payload}`, `ping {to}`).
+  `submit {id, payload}`, `presence {payload}`, `ping {to}`). A `legacyEvidence` input exists
+  only for the revision 6 regression presets and never appears here.
 - A frame is `{from, to?, retain?, body}`; `body` is the §S3 plaintext tagged by `kind` with
   the spec's field names. Claims are `{term, rank, holder, via}` (`via` only at rank 1).
   `hello` is `{fresh, echo, seen, heard, lapsed}`: `seen` is `{term, rank, holder, via,
   seq}` where `seq` may be `null`, `heard` is `live`, `lapsed` or `unknown`. `yielded` is
   `{claim, seq, snapshot}` and `ack` is `{yielded}`. `bye` carries `leaving`. `hello.heard`
-  appears only in revisions 4–6 and not in these files.
-- Outputs are tagged by `output`: `send {frame}`, `forward {to, frame}` (another member's
-  frame, unchanged, as evidence), `persist {claim, released?}`, `event {event}`; events are
+  appears only in revisions 4–6 and not in these files, nor does the revision 6 `forward`
+  output.
+- Outputs are tagged by `output`: `send {frame}`, `persist {claim, released?}`, `event {event}`; events are
   tagged by `event` (`becameHolder`, `yielded`, `holderChanged`, `askReceived`, `declined`,
   `message`, `snapshot`, `refused`, `presenceChanged`, `holderLapsed`, `offsetChanged`,
   `latePass`, `displaced`, `submitFailed`, `rejected`).
@@ -74,4 +82,7 @@ Each step is either a `send` by a member (its own frame, with the links it is tr
 or a `receive` on a link (the link back to the sender), with whether the frame is delivered
 to the session layer and the links it is forwarded on. A wire is `{key, n, frame}`; the
 window per key is 128 wide, so a frame already seen, or more than 128 below the highest `n`,
-is neither delivered nor forwarded.
+is neither delivered nor forwarded. A bridge keeps forwarding windows for at most 4 keys per
+origin member (the oldest dropped) and rate-limits forwarding per origin (default 50 frames/s
+and 262,144 bytes/s); the file has no clock, so the rate limit is not exercised there
+(`crates/colophon-core/tests/v06_bridge.rs` checks it).

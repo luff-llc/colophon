@@ -372,11 +372,12 @@ impl Sim {
                 q.pop_front();
             }
         }
-        let forwarded = forwarded.then(|| Forwarded {
-            via: self.m[src].id.clone(),
-            windowed,
-        });
-        self.input(to, Input::Frame { frame, writer: true, key: None, n: None, forwarded })
+        let input = if forwarded {
+            Input::LegacyEvidence { frame, writer: true, via: self.m[src].id.clone(), windowed }
+        } else {
+            Input::Frame { frame, writer: true, key: None, n: None }
+        };
+        self.input(to, input)
     }
 
     // ---- the application (§S12) ----

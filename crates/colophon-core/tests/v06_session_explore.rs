@@ -405,21 +405,21 @@ impl World {
     /// has heard the origin directly since it started.
     fn deliver_input(&mut self, d: usize, frame: Frame, via: Option<usize>) -> Input {
         let origin = idx(&frame.from);
-        let forwarded = via.map(|v| Forwarded {
-            via: IDS[v].to_owned(),
-            windowed: self.heard_direct[d][origin],
-        });
-        if via.is_none() {
-            self.heard_direct[d][origin] = true;
-        } else {
-            self.evidence_seen[d] += 1;
-        }
-        Input::Frame {
-            frame,
-            writer: true,
-            key: None,
-            n: None,
-            forwarded,
+        match via {
+            None => {
+                self.heard_direct[d][origin] = true;
+                Input::Frame { frame, writer: true, key: None, n: None }
+            }
+            Some(v) => {
+                // Revision 6 evidence (regression presets only).
+                self.evidence_seen[d] += 1;
+                Input::LegacyEvidence {
+                    frame,
+                    writer: true,
+                    via: IDS[v].to_owned(),
+                    windowed: self.heard_direct[d][origin],
+                }
+            }
         }
     }
 
@@ -1281,8 +1281,11 @@ impl Router {
             }
             // Scripted evidence is delivered with a window (the stale-evidence test builds its
             // own windowless input).
-            let forwarded = v.map(|v| Forwarded { via: self.ids[v].to_owned(), windowed: true });
-            self.step(d, Input::Frame { frame: f, writer: true, key: None, n: None, forwarded }, now);
+            let input = match v {
+                None => Input::Frame { frame: f, writer: true, key: None, n: None },
+                Some(v) => Input::LegacyEvidence { frame: f, writer: true, via: self.ids[v].to_owned(), windowed: true },
+            };
+            self.step(d, input, now);
         }
         self.net = held;
     }
@@ -1519,7 +1522,6 @@ fn frame_to(from: &str, to: &str, body: Body) -> Input {
         writer: true,
         key: None,
         n: None,
-        forwarded: None,
     }
 }
 
@@ -1619,7 +1621,6 @@ fn freshness_windows_are_bounded() {
                 writer: true,
                 key: Some(format!("kx{k}")),
                 n: Some(1),
-                forwarded: None,
             },
             10 + u64::from(k),
         );

@@ -8,11 +8,30 @@
 //! forwarded. Forwarding does not wait for this member's own freshness exchange with the
 //! origin: freshness (in `super::session`) governs only what this member acts on.
 //!
+//! 0.6 conformance covers only the home carrier; bridging is specified for later carriers
+//! (revision 10). A bridge keeps windows for at most 4 keys per origin member and limits
+//! what it forwards per origin member (by default 50 frames and 262,144 bytes per second).
+//!
 //! A frame lost beyond the first hop is not sent again under the same `n`; the session layer
 //! repairs loss with new frames. A frame addressed with `to` is bridged the same way; the
 //! session layer ignores it unless it names this member.
 use super::session::{Frame, MemberId};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+
+/// Keys with windows kept per origin member (§S9, revision 10); the oldest is dropped.
+pub const KEYS_PER_MEMBER: usize = 4;
+/// Default forwarding limit per origin member, frames per second (§S9).
+pub const FRAMES_PER_SECOND: u64 = 50;
+/// Default forwarding limit per origin member, bytes per second (§S9).
+pub const BYTES_PER_SECOND: u64 = 262_144;
+
+/// A token bucket per origin member (milli-tokens, refilled from the caller's clock).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+struct Bucket {
+    frames: u64,
+    bytes: u64,
+    at: u64,
+}
 
 /// A link of this member: one carrier, or one direct peer on a carrier.
 pub type LinkId = u32;
@@ -86,6 +105,14 @@ pub struct Bridge {
     windows: BTreeMap<String, Window>,
     /// Forwarding window per key (§S9, revision 8), separate from the delivery window.
     forwarded: BTreeMap<String, Window>,
+    /// Keys with windows per origin member, oldest first (at most [`KEYS_PER_MEMBER`]).
+    keys: BTreeMap<MemberId, VecDeque<String>>,
+    /// Forwarding budget per origin member.
+    buckets: BTreeMap<MemberId, Bucket>,
+    /// The forwarding limits: frames and bytes per second per origin member.
+    limits: (u64, u64),
+    /// Frames not forwarded because their origin exceeded the limit.
+    rate_dropped: u64,
     /// Whether to bridge at all (off: deliver only; for revision 6 comparisons).
     bridging: bool,
 }
@@ -98,6 +125,10 @@ impl Bridge {
             links: BTreeSet::new(),
             windows: BTreeMap::new(),
             forwarded: BTreeMap::new(),
+            keys: BTreeMap::new(),
+            buckets: BTreeMap::new(),
+            limits: (FRAMES_PER_SECOND, BYTES_PER_SECOND),
+            rate_dropped: 0,
             bridging: true,
         }
     }
@@ -125,6 +156,62 @@ impl Bridge {
     pub fn forget_key(&mut self, key: &str) {
         self.windows.remove(key);
         self.forwarded.remove(key);
+        for ks in self.keys.values_mut() {
+            ks.retain(|k| k != key);
+        }
+    }
+    /// Forget a member no longer accepted: its keys, windows and budget.
+    pub fn forget_member(&mut self, member: &str) {
+        if let Some(ks) = self.keys.remove(member) {
+            for k in ks {
+                self.windows.remove(&k);
+                self.forwarded.remove(&k);
+            }
+        }
+        self.buckets.remove(member);
+    }
+    /// Set the per-origin forwarding limits (frames and bytes per second).
+    pub fn set_limits(&mut self, frames_per_second: u64, bytes_per_second: u64) {
+        self.limits = (frames_per_second, bytes_per_second);
+    }
+    /// Frames not forwarded because of the rate limit.
+    pub fn rate_dropped(&self) -> u64 {
+        self.rate_dropped
+    }
+    /// Note a key of `origin`; keep at most [`KEYS_PER_MEMBER`] per member.
+    fn note_key(&mut self, origin: &str, key: &str) {
+        let ks = self.keys.entry(origin.to_owned()).or_default();
+        if ks.iter().any(|k| k == key) {
+            return;
+        }
+        ks.push_back(key.to_owned());
+        while ks.len() > KEYS_PER_MEMBER {
+            if let Some(old) = ks.pop_front() {
+                self.windows.remove(&old);
+                self.forwarded.remove(&old);
+            }
+        }
+    }
+    /// Take one frame of `size` bytes from `origin`'s budget at `now` (ms).
+    fn within_limit(&mut self, origin: &str, size: u64, now: u64) -> bool {
+        let (fps, bps) = self.limits;
+        let b = self.buckets.entry(origin.to_owned()).or_insert(Bucket {
+            frames: fps * 1000,
+            bytes: bps * 1000,
+            at: now,
+        });
+        let dt = now.saturating_sub(b.at);
+        b.at = now;
+        // A full bucket holds one second's worth.
+        b.frames = (b.frames + dt * fps).min(fps * 1000);
+        b.bytes = (b.bytes + dt * bps).min(bps * 1000);
+        if b.frames >= 1000 && b.bytes >= size * 1000 {
+            b.frames -= 1000;
+            b.bytes -= size * 1000;
+            true
+        } else {
+            false
+        }
     }
     /// The number of keys with a forwarding window.
     pub fn forwarding_keys(&self) -> usize {
@@ -133,6 +220,8 @@ impl Bridge {
     /// This member sends a frame of its own: transmit on every link. Its own window records
     /// it, so a copy that comes back is dropped.
     pub fn send(&mut self, wire: Wire) -> Vec<(LinkId, Wire)> {
+        let origin = wire.frame.from.clone();
+        self.note_key(&origin, &wire.key);
         self.windows.entry(wire.key.clone()).or_default().admit(wire.n);
         self.forwarded.entry(wire.key.clone()).or_default().admit(wire.n);
         self.links.iter().map(|l| (*l, wire.clone())).collect()
@@ -144,17 +233,38 @@ impl Bridge {
     }
     /// As [`Bridge::receive`], saying whether the frame verified.
     pub fn receive_checked(&mut self, link: LinkId, wire: Wire, verified: bool) -> Received {
+        self.receive_at(link, wire, verified, None)
+    }
+    /// As [`Bridge::receive_checked`], applying the per-origin forwarding limit at `now`
+    /// (ms; `None`: no limit).
+    pub fn receive_at(&mut self, link: LinkId, wire: Wire, verified: bool, now: Option<u64>) -> Received {
         if wire.frame.from == self.me || !verified {
             return Received::default();
         }
-        let forward = match self.forwarded.entry(wire.key.clone()).or_default().admit(wire.n) {
-            Seen::New if self.bridging => self
+        let origin = wire.frame.from.clone();
+        self.note_key(&origin, &wire.key);
+        let first = self.forwarded.entry(wire.key.clone()).or_default().admit(wire.n) == Seen::New;
+        let allowed = first
+            && self.bridging
+            && match now {
+                Some(t) => {
+                    let size = serde_json::to_vec(&wire.frame).map_or(0, |v| v.len() as u64);
+                    let ok = self.within_limit(&origin, size, t);
+                    if !ok {
+                        self.rate_dropped += 1;
+                    }
+                    ok
+                }
+                None => true,
+            };
+        let forward = match allowed {
+            true => self
                 .links
                 .iter()
                 .filter(|l| **l != link)
                 .map(|l| (*l, wire.clone()))
                 .collect(),
-            _ => Vec::new(),
+            false => Vec::new(),
         };
         let deliver = match self.windows.entry(wire.key.clone()).or_default().admit(wire.n) {
             Seen::New => Some(wire),

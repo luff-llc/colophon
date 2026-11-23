@@ -25,7 +25,7 @@ fn id(label: &str) -> Id {
     Id::from_label(label)
 }
 fn frame_in(frame: Frame) -> Input {
-    Input::Frame { frame, writer: true, key: None, n: None, forwarded: None }
+    Input::Frame { frame, writer: true, key: None, n: None }
 }
 
 /// Recipient, frame, and the sender key and `n` when keyed.
@@ -46,8 +46,6 @@ struct Script {
     /// Keyed: each member has a session key `k-<id>`, an `n` counter and a `fresh` seed.
     keyed: bool,
     n: BTreeMap<String, u64>,
-    /// (recipient, origin) pairs that have exchanged a direct frame.
-    direct: std::collections::BTreeSet<(String, String)>,
 }
 
 impl Script {
@@ -69,7 +67,6 @@ impl Script {
             cut: Vec::new(),
             keyed: false,
             n: BTreeMap::new(),
-            direct: std::collections::BTreeSet::new(),
         }
     }
     fn keyed(mut self) -> Self {
@@ -104,10 +101,9 @@ impl Script {
                         *n += 1;
                         (format!("k-{member}"), *n)
                     });
-                    let dsts: Vec<String> = match &frame.to {
-                        Some(t) => vec![t.clone()],
-                        None => self.ids().into_iter().filter(|i| i != member).collect(),
-                    };
+                    // §S9 (revision 10): every frame is carried to every member; `to` is
+                    // advice, and a member it does not name ignores the frame.
+                    let dsts: Vec<String> = self.ids().into_iter().filter(|i| i != member).collect();
                     for d in dsts {
                         self.route(member, d, frame.clone(), key.clone());
                     }
@@ -139,16 +135,8 @@ impl Script {
                 Some((k, n)) => (Some(k), Some(n)),
                 None => (None, None),
             };
-            // Forwarded evidence is windowed only if the recipient has heard its origin
-            // directly (§S3 evidence without a window).
-            let forwarded = via.map(|v| Forwarded {
-                via: v,
-                windowed: self.direct.contains(&(to.clone(), f.from.clone())),
-            });
-            if forwarded.is_none() {
-                self.direct.insert((to.clone(), f.from.clone()));
-            }
-            self.step(&to, at, Input::Frame { frame: f, writer: true, key, n, forwarded });
+            let _ = via;
+            self.step(&to, at, Input::Frame { frame: f, writer: true, key, n });
         }
     }
     fn deliver(&mut self, at: u64) {
@@ -230,6 +218,16 @@ fn scenarios() -> Vec<Script> {
     s.deliver(1_030);
     assert!(s.session("b").is_holder());
     assert_eq!(s.session("c").state(), &Bytes(stopped.to_vec()));
+    v.push(s);
+
+    let mut s = started("pass-not-entitled", "b asks; before a passes, the accepted authority head drops b's write entitlement (an `entitled` input); a's pass to b is rejected and a keeps the role (§S5, revision 10).", p(), &["a", "b"]);
+    s.cmd("b", 1_000, Command::Ask);
+    s.deliver(1_010);
+    s.step("a", 1_015, Input::Entitled { writers: vec!["a".into()] });
+    let outs = s.cmd("a", 1_020, Command::Pass { to: "b".into(), snapshot: b("s1") });
+    assert!(outs.iter().any(|o| matches!(o, Output::Event { event: Event::Rejected { reason, .. } } if reason == "not-entitled")));
+    s.deliver(1_030);
+    assert!(s.session("a").is_holder() && !s.session("b").is_holder());
     v.push(s);
 
     let mut s = started("ask-decline", "b asks; a declines; b does not take when askTimeoutMs passes (§S5).", p(), &["a", "b"]);
@@ -434,7 +432,7 @@ fn scenarios() -> Vec<Script> {
     assert_eq!(s.session("b").accepted(), Some(&Claim::new(1, 0, "a")));
     // A replay of a's take with n = 1 (below the window's floor) changes nothing.
     let replay = Frame { from: "a".into(), to: None, retain: false, body: Body::Take { claim: Claim::new(1, 0, "a") } };
-    let outs = s.step("b", 30, Input::Frame { frame: replay, writer: true, key: Some("k-a".into()), n: Some(1), forwarded: None });
+    let outs = s.step("b", 30, Input::Frame { frame: replay, writer: true, key: Some("k-a".into()), n: Some(1) });
     assert!(outs.is_empty());
     v.push(s);
 
