@@ -393,7 +393,7 @@ testHome('unknown, binary and malformed client frames are refused without closin
   assert.equal((await ws.next('error')).code, 'badFrame');
   ws.ws.send(Buffer.from([1, 2, 3]), { binary: true });
   assert.equal((await ws.next('error')).code, 'binary');
-  ws.send({ type: 'session', frame: { body: Buffer.from('{}').toString('base64'), signature: 'x' } });
+  ws.send({ type: 'session', frame: { protocol: 'colophon/session/6' } });
   assert.equal((await ws.next('error')).code, 'badFrame');
   await ws.settle();
   assert.equal(ws.ws.readyState, ws.ws.OPEN);
@@ -405,14 +405,13 @@ testHome('a controller stream takes pushes but neither subscribes to nor sends s
   const ws = await open('controller');
   ws.send({ type: 'subscribe', namespace: 'notes', cell: 'now-playing', id: 'c1' });
   assert.equal((await ws.next('error')).code, 'notEntitled');
-  ws.send({ type: 'session', id: 'c2', frame: { body: 'e30=', signature: 'x' } });
+  ws.send({ type: 'session', id: 'c2', frame: { protocol: 'colophon/session/6' } });
   assert.deepEqual([(await ws.next('error')).code, ws.all('subscribed').length], ['notEntitled', 0]);
 });
 
 testHome('an oversize session frame is refused; an oversize message closes 1009', async ({ open, slot }) => {
   const ws = await open('member');
-  const body = Buffer.from(JSON.stringify({ protocol: 'colophon/session/6', ciphertext: 'A'.repeat(17_000) })).toString('base64');
-  ws.send({ type: 'session', frame: { body: body.slice(0, 17_500), signature: 'x' } });
+  ws.send({ type: 'session', frame: { ciphertext: 'A'.repeat(17_000), protocol: 'colophon/session/6' } });
   assert.equal((await ws.next('error')).code, 'tooLarge');
   ws.send({ type: 'ping', pad: 'x'.repeat(21_000) });
   assert.equal((await ws.closed).code, 1009);

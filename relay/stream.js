@@ -199,7 +199,11 @@ export class HomeStream {
     clearTimeout(conn.timer);
     if (!this.conns.has(conn)) { ws.terminate(); return; }
     conn.ws = ws;
-    ws.on('message', (data, isBinary) => this.receive(conn, data, isBinary));
+    // A client message that makes the host code or the module fail answers `badFrame`; it never
+    // reaches the process as an uncaught exception.
+    ws.on('message', (data, isBinary) => {
+      try { this.receive(conn, data, isBinary); } catch { this.error(conn, 'badFrame'); }
+    });
     ws.on('pong', () => { conn.lastSeen = Date.now(); });
     ws.on('close', () => this.drop(conn));
     ws.on('error', () => ws.terminate());
@@ -338,8 +342,12 @@ export class HomeStream {
     // second, with its running total.
     if (!conn.frames.take(1) || !conn.bytes.take(size)) { this.limited(conn); return; }
     if (isBinary) { this.error(conn, 'binary'); return; }
+    const bytes = Buffer.from(data);
+    // Nesting is bounded before parsing, so no client structure can exhaust the stack in
+    // JSON.parse, JSON.stringify or a module call; whatever the message type.
+    if (nestingOver(bytes, MAX_MESSAGE_NESTING)) { this.error(conn, 'badFrame'); return; }
     let msg;
-    try { msg = JSON.parse(Buffer.from(data).toString('utf8')); } catch { msg = null; }
+    try { msg = JSON.parse(bytes.toString('utf8')); } catch { msg = null; }
     if (!msg || typeof msg !== 'object' || Array.isArray(msg) || typeof msg.type !== 'string') {
       this.error(conn, 'badFrame');
       return;
@@ -392,7 +400,17 @@ export class HomeStream {
     if (!conn.member) { conn.refused += 1; this.counters.refused += 1; this.error(conn, 'notEntitled', ref); return; }
     const { frame } = msg;
     if (!frame || typeof frame !== 'object' || Array.isArray(frame)) { this.error(conn, 'badFrame', ref); return; }
-    const encoded = JSON.stringify(frame);
+    // The frame is the session codec's: one canonical JSON object (sessions §S3). The module
+    // checks this serialisation and refuses it unless it is canonical. A codec frame holds only
+    // strings, `true`, integers up to 2^53 − 1 and objects of those (the delegation), which
+    // JSON.parse and JSON.stringify carry without loss and, for keys already in byte order and
+    // none of them integer-like, in the same order: so `encoded` is the sender's exact bytes.
+    // The object is never changed after this, and `send` serialises it with the same function,
+    // so every receiver, live or by retained replay, gets `encoded` byte for byte.
+    let encoded;
+    try { encoded = JSON.stringify(frame); } catch { this.error(conn, 'badFrame', ref); return; }
+    // Budgets and sizes are wire bytes (UTF-8), not UTF-16 code units.
+    const bytes = Buffer.byteLength(encoded, 'utf8');
     const r = this.home.wasm.call({ op: 'session_frame', frame: encoded, account: this.home.account, member: conn.member, entitled: conn.namespaces });
     if (!r.allowed) {
       conn.refused += 1;
@@ -403,7 +421,7 @@ export class HomeStream {
     // The account's budget for session frames, charged for every valid frame whoever is
     // listening: the answer cannot depend on how many members are connected or subscribed. Over
     // it the frame is dropped like one over the connection's own rate, and never retained.
-    if (!this.session.frames.take(1) || !this.session.bytes.take(encoded.length)) {
+    if (!this.session.frames.take(1) || !this.session.bytes.take(bytes)) {
       this.counters.limited += 1;
       this.limited(conn);
       return;
@@ -412,7 +430,7 @@ export class HomeStream {
     if (r.retain) {
       const key = `${r.namespace}\0${r.cell}\0${r.from}`;
       if (this.retained.has(key) || this.retained.size < this.o.retainedPerSlot) {
-        this.retained.set(key, { frame, size: encoded.length, from: r.from, namespace: r.namespace, cell: r.cell, at: Date.now() });
+        this.retained.set(key, { frame, size: bytes, from: r.from, namespace: r.namespace, cell: r.cell, at: Date.now() });
       }
     }
     // `to` is advice to receivers, not a route (§S3, §S9): a member reachable only through
@@ -547,6 +565,27 @@ export class HomeStream {
     this.retained.clear();
     this.stopTimers();
   }
+}
+
+/** Deepest nesting of objects and arrays a client message may have: a session frame nests at
+ * most 64 deep (sessions §S3), and the message adds one. */
+export const MAX_MESSAGE_NESTING = 65;
+
+/** Whether JSON text nests objects and arrays more than `max` deep. A single pass over the
+ * bytes that skips string contents; malformed text is left to the parser. */
+export function nestingOver(bytes, max) {
+  let depth = 0;
+  let inString = false;
+  for (let i = 0; i < bytes.length; i++) {
+    const b = bytes[i];
+    if (inString) {
+      if (b === 0x5c) i += 1; // backslash: skip the escaped byte
+      else if (b === 0x22) inString = false;
+    } else if (b === 0x22) inString = true;
+    else if (b === 0x7b || b === 0x5b) { if (++depth > max) return true; }
+    else if (b === 0x7d || b === 0x5d) depth -= 1;
+  }
+  return false;
 }
 
 function minExpiry(a, b) {

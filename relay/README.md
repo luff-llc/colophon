@@ -622,9 +622,17 @@ session frames between the account's connected members. The home never reads tho
 | `session` `{frame, id?}` | Forwarded to every other subscribed, entitled member, whether or not it carries `to`. Never echoed |
 | `ping` `{t?, id?}` | |
 
-A session frame is checked by the home module: at most 16,384 bytes, its outer fields well
-formed, `from` the connection's member, and that member holding a `records` entry for the
-namespace. Unknown or malformed client frames answer `error` without closing.
+A session frame is the session codec's frame (sessions §S3), carried as the JSON value of
+`frame`: one canonical JSON object with exactly the codec's fields (`protocol`, `account`,
+`namespace`, `cell`, `from`, `key`, `to`?, `n`, `epoch`, `retain`?, `ciphertext`, `signature`,
+`delegation`?). The home module checks it with the codec's own parser, without verifying or
+decrypting anything: at most 16,384 bytes, strict and canonical JSON with exactly those fields,
+every field in its grammar (key IDs, canonical base64 of the right lengths, a well-formed
+delegation envelope naming the sender's key), `from` the connection's member, and that member
+holding a `records` entry for the namespace. Anything else, including a `{"body","signature"}`
+envelope, answers `error badFrame`. Receivers get the checked frame, which for a conforming
+sender is its exact bytes (`docs/colophon-0.6-stream.md` §5.2). A client message nested more than
+65 deep, unknown or malformed client frames answer `error` without closing.
 The latest `retain: true` frame per (namespace, cell, sender) is kept **in memory only** for at
 most 60 s and given to members when they subscribe. Session frames are never written to disk.
 A frame's `to` is checked as a member ID but is advice to receivers, not a route: the home

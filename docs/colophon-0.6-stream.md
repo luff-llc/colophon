@@ -112,7 +112,7 @@ slow consumer) closes the connection rather than skip a number. So a client that
 | `head` | `home`, `seq`, `digest` | The home stored a new head of its own over authority entry `seq` with that digest. |
 | `notice` | `notice`, `object`, `kind`, `deadline` | The home queued a notice (§6). `notice` is its number. |
 | `route` | `id`, `change` (`put` or `delete`), and for `put`: `kind`, `reaches`, `by` | A notice route changed. Never carries an address. |
-| `session` | `frame`, and `retained: true` when given from the retained table | A session frame from another member, byte-for-byte the envelope the sender sent (§5). |
+| `session` | `frame`, and `retained: true` when given from the retained table | A session frame from another member, byte-for-byte the frame the sender sent (§5.2). |
 | `subscribed`, `unsubscribed` | `namespace`, `cell`, `ref`? | Acknowledges a subscription change. |
 | `pong` | `t`?, `ref`? | Answers `ping`. |
 | `error` | `code`, `ref`?, and `dropped` for `rateLimited` | A client frame was refused. The connection stays open. |
@@ -186,24 +186,59 @@ stream receives no `session` frames and cannot send or subscribe.
 
 ### 5.2 Forwarding
 
-A client sends `{"type":"session","frame":<envelope>}`. The envelope is the frame of sessions
-§S3 exactly as it will be delivered: `{"body":"<base64>","signature":"<base64>"}`, whose body is
-the frame's JSON. The home module (`session_frame`, from
-`colophon_core::v05::home_stream::check_session_frame`) checks, in order:
+A client sends `{"type":"session","frame":<frame>}`. The frame is the session codec's frame of
+sessions §S3 exactly as it will be delivered: one canonical JSON object with the fields
+`protocol`, `account`, `namespace`, `cell`, `from`, `key`, `to`?, `n`, `epoch`, `retain`?,
+`ciphertext`, `signature` and `delegation`? (`docs/colophon-0.6-sessions-wire.md` §3.1), carried
+as a JSON value, not as a string. The home module (`session_frame`, from
+`colophon_core::v05::home_stream::check_session_frame`) checks the frame as the home will
+forward it, in order:
 
-1. the encoded envelope is at most **16,384 bytes** (`tooLarge`);
-2. the envelope is strict JSON with exactly `body` and `signature`. The body is strict JSON
-   with `protocol` `colophon/session/6`, a namespace and a cell by their grammars, `from` and an
-   optional `to` as member IDs, and an optional `retain` that is only `true` (`badFrame`);
+1. the encoded frame is at most **16,384 bytes** (`tooLarge`);
+2. the frame passes the session codec's own parser, the one a receiver applies before anything
+   cryptographic (`WireFrame::parse`, and `Delegation::parse_carried` for a carried delegation;
+   wire doc §3.1) (`badFrame`):
+   - strict JSON (0.5 §2.3: no duplicate names, no lone surrogates, nesting at most 64), an
+     object, and byte-identical to its canonical encoding (0.5 §2.1);
+   - exactly the fields above, as a receiver refuses unknown and missing fields;
+   - `protocol` is `colophon/session/6`; `account` 64 lowercase hex; `namespace` and `cell` by
+     their grammars; `from`, `key` and an optional `to` key IDs; `n` and `epoch` integers from 1
+     to 2^53 − 1; an optional `retain` that is only `true`;
+   - `ciphertext` canonical base64 of at least the 16-byte tag; `signature` canonical base64 of
+     64 bytes;
+   - `delegation`, when present, a raw envelope of at most 2,048 bytes whose body is a
+     well-formed `colophon/session-key/6` body (sessions §S2) naming `from` and `key`;
 3. `account` is the home's account (`account`);
 4. `from` is the connection's authenticated member (`from`);
 5. the member is entitled to `namespace` (`notEntitled`).
 
-Everything else in the frame (`key`, `n`, `epoch`, `nonce`, `ciphertext`, the signature) is
-opaque. It is not decoded, judged or kept. The home then sends `{"type":"session","frame":…}`
-to every connection that is open, belongs to a member other than `from` (never back to the
-sender, nor to the sender's other connections), is entitled to the namespace, and is subscribed
-to `(namespace, cell)`, whether or not the frame carries `to`.
+The home applies the receiver's parser and nothing after it: it verifies no signature (the
+frame's or the delegation's), checks no delegation window or standing, decrypts nothing and
+tracks no `n`; a receiver does all of that (sessions §S3). So it forwards and retains only frames
+a receiver can parse, and keeps nothing of them beyond the forwarded frame (and a retained frame,
+§5.3). Any other shape, including a raw-signed `{"body","signature"}` envelope, is `badFrame`.
+
+Before parsing, the reference relay refuses with `badFrame` any client message, of any type,
+that nests objects and arrays more than 65 deep (a frame's 64 plus the message), so no client
+structure can exhaust the parser's or the serialiser's stack. A message that makes the host code
+or the module fail also answers `badFrame`. The session budgets (the fan-out caps below) and the retained
+frames' sizes count UTF-8 bytes of the checked frame; every field a frame can carry is ASCII by
+its grammar.
+
+**What a receiver gets.** A receiver's codec refuses non-canonical bytes. The home checks the
+frame in the form it will forward: the reference relay parses the client's message and
+serialises `frame` again, so a client's syntax (spacing, escapes, duplicate names, which the
+message parser collapses) is normalised before the check, and the result is refused unless it is
+canonical. What the home delivers, live or retained on subscribe, is that checked text exactly:
+the `frame` value of each `session` message. For a conforming sender this is byte-identical to
+what it sent, because a codec frame holds only ASCII strings, `true`, integers up to 2^53 − 1 and
+the delegation envelope of two strings, which parsing and serialising again reproduce. A receiver
+hands the `frame` value's text, or its canonical encoding (the same bytes), to its codec.
+
+The home then sends `{"type":"session","frame":…}` to every connection that is open, belongs to
+a member other than `from` (never back to the sender, nor to the sender's other connections), is
+entitled to the namespace, and is subscribed to `(namespace, cell)`, whether or not the frame
+carries `to`.
 
 `to` is advice to receivers, not a route (sessions §S3, §S9). A member reachable only through
 another member (a bridge) must still receive frames addressed to it, so the home does not narrow

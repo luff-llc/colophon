@@ -9,23 +9,26 @@ import { once } from 'node:events';
 import { readdir, readFile } from 'node:fs/promises';
 import net from 'node:net';
 import path from 'node:path';
+import { test } from 'node:test';
+import vectors from '../../conformance/0.6-sessions/wire/vectors.json' with { type: 'json' };
+import { HomeModule } from '../home.js';
 import fixture from './home-stream-v2.fixture.json' with { type: 'json' };
-import { Client, prefix, sha, signBody, stamp, testHome as testHomeOn, tryUpgrade } from './stream-support.js';
+import { canonical, Client, prefix, ready, sha, signBody, stamp, testHome as testHomeOn, tryUpgrade, wasm } from './stream-support.js';
 
 const testHome = (name, run, options) => testHomeOn(fixture, name, run, options);
 const CELL = 'now-playing';
 
-/** A session frame as a member's core would send it: a raw envelope over the frame body. The
- * home never opens `ciphertext` or checks the signature; these are placeholders. */
+/** A session frame as a member's codec sends it (sessions §S3): one canonical JSON object, its
+ * keys in byte order. The home never opens `ciphertext` or checks the signature; these are
+ * placeholders of the right type. */
 function frame(from, { namespace = 'notes', cell = CELL, to, retain, n = 1, marker = 'sealed', size = 0 } = {}) {
-  const body = {
+  return JSON.parse(canonical({
     protocol: 'colophon/session/6', account: fixture.account, namespace, cell, from: fixture[from].id,
-    key: 'session-key-1', ...(to ? { to: fixture[to].id } : {}), n, epoch: 1,
+    key: '2bad0fd610d99eae443e932a26142bca', ...(to ? { to: fixture[to].id } : {}), n, epoch: 1,
     ...(retain ? { retain: true } : {}),
-    nonce: randomBytes(12).toString('base64'),
-    ciphertext: Buffer.from(`${marker}${'.'.repeat(size)}`).toString('base64'),
-  };
-  return { body: Buffer.from(JSON.stringify(body)).toString('base64'), signature: randomBytes(64).toString('base64') };
+    ciphertext: Buffer.concat([Buffer.from(`${marker}${'.'.repeat(size)}`), randomBytes(16)]).toString('base64'),
+    signature: randomBytes(64).toString('base64'),
+  }));
 }
 
 async function subscribe(client, namespace = 'notes', cell = CELL) {
@@ -81,6 +84,120 @@ testHome('frames reach every other subscribed, entitled member, addressed or not
   assert.deepEqual((await a.next('session')).frame, back);
 }, { stream: { framesPerSecond: 1000, frameBurst: 1000 } });
 
+// ---------------------------------------------------------------------------------------------
+// The session codec's frames (conformance/0.6-sessions/wire): accepted as they are, and delivered
+// byte for byte, so a receiver's codec, which refuses non-canonical bytes, can open them.
+
+test('every wire-vector frame passes the home module as the relay forwards it', { skip: ready ? false : 'module not built' }, async () => {
+  const module = await HomeModule.load(wasm);
+  assert.ok(vectors.frames.length > 0);
+  for (const v of vectors.frames) {
+    // What `forward` checks and sends is the frame parsed with the message and re-serialised.
+    const encoded = JSON.stringify(JSON.parse(v.frame));
+    assert.equal(encoded, v.frame, `${v.name}: re-serialising keeps the codec's bytes`);
+    const { from } = JSON.parse(v.frame);
+    const r = module.call({ op: 'session_frame', frame: encoded, account: vectors.account, member: from, entitled: [vectors.namespace] });
+    assert.deepEqual(
+      [r.allowed, r.namespace, r.cell, r.from, r.to, r.retain],
+      [true, vectors.namespace, vectors.cell, from, v.to, v.retain],
+      v.name,
+    );
+  }
+  // The former envelope over the frame is refused.
+  const envelope = JSON.stringify({ body: Buffer.from(vectors.frames[0].frame).toString('base64'), signature: 'AAAA' });
+  const { from } = JSON.parse(vectors.frames[0].frame);
+  const r = module.call({ op: 'session_frame', frame: envelope, account: vectors.account, member: from, entitled: [vectors.namespace] });
+  assert.deepEqual([r.allowed, r.code], [false, 'badFrame']);
+});
+
+/** A wire-vector frame moved to the fixture's account, the `notes` namespace and sender `from`:
+ * a real codec frame's shape and bytes, with only routed values changed. Its delegation body is
+ * moved the same way, so it names `from` and still names the frame's session key. The home
+ * verifies no signature, and no receiver here opens the frame. */
+function codecFrame(index, from) {
+  const moved = { account: fixture.account, namespace: 'notes' };
+  const value = { ...JSON.parse(vectors.frames[index].frame), ...moved, from: fixture[from].id };
+  delete value.to;
+  if (value.delegation) {
+    const body = { ...JSON.parse(Buffer.from(value.delegation.body, 'base64')), ...moved, member: fixture[from].id };
+    value.delegation = { ...value.delegation, body: Buffer.from(canonical(body)).toString('base64') };
+  }
+  const text = canonical(value);
+  assert.equal(JSON.stringify(JSON.parse(text)), text);
+  return text;
+}
+
+testHome('a codec frame reaches receivers byte for byte, live and retained', async ({ open }) => {
+  const [a, b] = [await open('a'), await open('b')];
+  await subscribe(b);
+  const live = codecFrame(0, 'a');
+  a.send(`{"type":"session","id":"v0","frame":${live}}`);
+  const got = await b.next('session');
+  assert.equal(b.texts.find((t) => JSON.parse(t).n === got.n), `{"type":"session","n":${got.n},"frame":${live}}`);
+  // A retained frame (the vector with `retain: true`) is replayed with the same bytes.
+  const index = vectors.frames.findIndex((v) => v.retain);
+  assert.ok(index >= 0);
+  const kept = codecFrame(index, 'a');
+  assert.equal(JSON.parse(kept).retain, true);
+  a.send(`{"type":"session","frame":${kept}}`);
+  await b.next('session');
+  const d = await open('d');
+  await subscribe(d);
+  const given = await d.next('session');
+  assert.equal(given.retained, true);
+  assert.equal(d.texts.find((t) => JSON.parse(t).n === given.n), `{"type":"session","n":${given.n},"retained":true,"frame":${kept}}`);
+  // The same frame with an unknown field, or not canonical, is refused and not forwarded.
+  const unknown = JSON.parse(canonical({ ...JSON.parse(live), extra: 1 }));
+  a.send({ type: 'session', id: 'x1', frame: unknown });
+  assert.deepEqual([(await a.next('error')).code], ['badFrame']);
+  const { account, ...rest } = JSON.parse(live);
+  a.send({ type: 'session', id: 'x2', frame: { ...rest, account } });
+  assert.deepEqual([(await a.next('error')).code], ['badFrame']);
+  await settle(a, b);
+  assert.equal(b.all('session').length, 2);
+}, { stream: { framesPerSecond: 1000, frameBurst: 1000 } });
+
+testHome('deeply nested client messages are refused before parsing and the relay keeps serving', async ({ open, slot }) => {
+  const [a, b] = [await open('a'), await open('b')];
+  await subscribe(b);
+  const deep = (n) => '['.repeat(n) + ']'.repeat(n);
+  // A session frame whose delegation nests thousands deep, within the message size limit.
+  const live = JSON.parse(codecFrame(0, 'a'));
+  const text = canonical(live).replace(/"delegation":\{[^}]*\}/, `"delegation":{"body":${deep(8_000)}}`);
+  assert.ok(text.length < 20_480);
+  a.send(`{"type":"session","id":"deep","frame":${text}}`);
+  assert.equal((await a.next('error')).code, 'badFrame');
+  // Non-session messages too, whatever the type.
+  for (const type of ['subscribe', 'unsubscribe', 'ping', 'teleport']) {
+    a.send(`{"type":"${type}","namespace":${deep(8_000)},"cell":"now-playing","t":1}`);
+    assert.equal((await a.next('error')).code, 'badFrame', type);
+  }
+  // Brackets inside strings are not nesting.
+  a.send({ type: 'ping', t: 7, pad: '[{'.repeat(4_000) });
+  assert.equal((await a.next('pong', (f) => f.t === 7)).t, 7);
+  // The relay still serves: the connection and other members are unaffected.
+  a.send(`{"type":"session","frame":${codecFrame(0, 'a')}}`);
+  await b.next('session');
+  assert.equal(a.ws.readyState, a.ws.OPEN);
+  assert.ok((await slot()).home.stream.conns.size >= 2);
+}, { stream: { framesPerSecond: 1000, frameBurst: 1000, bytesPerSecond: 1 << 30, byteBurst: 1 << 30 } });
+
+testHome('session byte budgets count UTF-8 bytes; no multi-byte frame passes the codec grammar', async ({ open, slot }) => {
+  const [a, b] = [await open('a'), await open('b')];
+  await subscribe(b);
+  // Every field of a codec frame is ASCII by its grammar, so multi-byte text is refused.
+  const multi = { ...JSON.parse(codecFrame(0, 'a')), cell: 'now-plaÿing' };
+  a.send({ type: 'session', id: 'mb', frame: JSON.parse(canonical(multi)) });
+  assert.equal((await a.next('error')).code, 'badFrame');
+  // An accepted frame is charged and retained at its byte length.
+  const kept = codecFrame(vectors.frames.findIndex((v) => v.retain), 'a');
+  a.send(`{"type":"session","frame":${kept}}`);
+  await b.next('session');
+  const { stream } = (await slot()).home;
+  const [entry] = [...stream.retained.values()];
+  assert.equal(entry.size, Buffer.byteLength(kept));
+}, { stream: { framesPerSecond: 1000, frameBurst: 1000 } });
+
 testHome('an addressed frame reaches every other subscriber but not the unentitled or unsubscribed', async ({ open }) => {
   const [a, b, c, d] = [await open('a'), await open('b'), await open('c'), await open('d')];
   for (const m of [a, b]) assert.equal((await subscribe(m)).type, 'subscribed');
@@ -102,7 +219,7 @@ testHome('the sender hears the same whether or not `to` names a connected member
   const answer = async (to, n) => {
     const before = a.frames.length;
     a.send({ type: 'session', id: `to-${to}`, frame: frame('a', { n, to }) });
-    await b.next('session', (f) => JSON.parse(Buffer.from(f.frame.body, 'base64')).n === n);
+    await b.next('session', (f) => f.frame.n === n);
     await settle(a);
     return a.frames.slice(before).map(({ n: _n, t: _t, taken: _taken, ...rest }) => rest);
   };
@@ -174,9 +291,7 @@ testHome('spoofed senders and unentitled members cannot send', async ({ open }) 
   assert.deepEqual(await a.next('error'), { type: 'error', n: a.frames.at(-1).n, code: 'from', ref: 's1' });
   c.send({ type: 'session', id: 's2', frame: frame('c') });
   assert.equal((await c.next('error')).code, 'notEntitled');
-  const foreign = frame('a');
-  const body = JSON.parse(Buffer.from(foreign.body, 'base64'));
-  foreign.body = Buffer.from(JSON.stringify({ ...body, account: '0'.repeat(64) })).toString('base64');
+  const foreign = { ...frame('a'), account: '0'.repeat(64) };
   a.send({ type: 'session', id: 's4', frame: foreign });
   assert.equal((await a.next('error')).code, 'account');
   // c's own namespace is its to use.
@@ -202,7 +317,7 @@ testHome('the latest retained frame per (cell, from) is given on subscribe, and 
   const givenAll = d.all('session').map((f) => f.frame);
   const expected = [latest, toB];
   assert.equal(givenAll.length, 2, 'only the latest per sender');
-  assert.deepEqual(new Set(givenAll.map((f) => f.body)), new Set(expected.map((f) => f.body)));
+  assert.deepEqual(new Set(givenAll.map((f) => f.signature)), new Set(expected.map((f) => f.signature)));
   // A member is not given its own retained frame; the addressee is given b's.
   await subscribe(a);
   assert.deepEqual((await a.next('session')).frame, toB);
@@ -285,7 +400,7 @@ testHome('nothing of a session frame is written under the data directory', async
   await b.next('session');
   await settle(a, b);
   await restart(); // a shutdown keeps nothing either
-  const needles = [marker, Buffer.from(marker).toString('base64').slice(0, 12), ...sent.map((f) => f.body.slice(0, 40)), ...sent.map((f) => f.signature)];
+  const needles = [marker, Buffer.from(marker).toString('base64').slice(0, 12), ...sent.map((f) => f.ciphertext.slice(0, 40)), ...sent.map((f) => f.signature)];
   const walk = async (d) => {
     for (const e of await readdir(d, { withFileTypes: true })) {
       const p = path.join(d, e.name);
@@ -328,7 +443,7 @@ testHome('a full retained table forwards a frame without keeping it', async ({ o
   await subscribe(b, 'notes', 'first');
   await subscribe(b, 'notes', 'second');
   await settle(b);
-  const cells = b.all('session').map((f) => JSON.parse(Buffer.from(f.frame.body, 'base64')).cell);
+  const cells = b.all('session').map((f) => f.frame.cell);
   assert.deepEqual(cells, ['first']);
 }, { stream: { retainedPerSlot: 1 } });
 

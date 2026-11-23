@@ -790,9 +790,10 @@ fn str_list(req: &Value, k: &str) -> R<Vec<String>> {
         .collect()
 }
 
-/// A session frame sent on a stream (0.6 sessions §S3, §S9): `frame` is the envelope exactly as
-/// it would be forwarded, `member` the connection's authenticated member, `entitled` its
-/// namespaces from the last standing check. The outer fields to route by, or a refusal code.
+/// A session frame sent on a stream (0.6 sessions §S3, §S9): `frame` is the session codec's
+/// frame, one canonical JSON object, as the text that will be forwarded; `member` the
+/// connection's authenticated member, `entitled` its namespaces from the last standing check.
+/// The outer fields to route by, or a refusal code.
 fn session_frame(req: &Value) -> R<Value> {
     let frame = str_of(req, "frame")?;
     let entitled = str_list(req, "entitled")?;

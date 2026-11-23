@@ -151,9 +151,12 @@ export class Client {
   constructor(ws) {
     this.ws = ws;
     this.frames = [];
+    /** Every message as received, text exactly as sent by the home. */
+    this.texts = [];
     this.waiters = [];
     this.closed = new Promise((resolve) => ws.on('close', (code, reason) => resolve({ code, reason: String(reason) })));
     ws.on('message', (data) => {
+      this.texts.push(String(data));
       const frame = JSON.parse(String(data));
       this.frames.push(frame);
       this.waiters = this.waiters.filter((w) => !w(frame));

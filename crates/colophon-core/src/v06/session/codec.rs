@@ -370,10 +370,8 @@ impl Receiver {
             None => None,
             Some(env) if stored.is_some_and(|a| &a.delegation.envelope == env) => None,
             Some(env) => {
-                let d = Delegation::parse(env).map_err(DropReason::Delegation)?;
-                if d.body.member != o.from || d.key_id() != o.key {
-                    return Err(DropReason::Delegation("names another (from, key)".into()).into());
-                }
+                let d = Delegation::parse_carried(env, &o.from, &o.key)
+                    .map_err(DropReason::Delegation)?;
                 d.verify(view, &o.namespace, wall_ms)
                     .map_err(DropReason::Delegation)?;
                 Some(d)
