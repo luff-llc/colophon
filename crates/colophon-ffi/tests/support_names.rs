@@ -16,20 +16,25 @@ pub fn api_dir() -> PathBuf {
 pub fn list_file() -> PathBuf {
     api_dir().join("surface-names.txt")
 }
-/// The names only the `conformance` feature exports (`api/conformance.rs`).
-pub fn conformance_list_file() -> PathBuf {
-    api_dir().join("surface-names-conformance.txt")
-}
-/// Names that must never be in a release build: each bypasses a trust boundary (an invented
-/// account view, supplied epoch keys, the machine or the receiver without the endpoint).
-pub const CONFORMANCE_ONLY: [&str; 6] = [
+/// Names that must never be in a shipping crate: each bypasses a trust boundary (an invented
+/// account view, supplied epoch keys, the machine or the receiver without the endpoint). They
+/// live in the unpublished conformance crates; any name with `Conformance` in it is refused too.
+pub const CONFORMANCE_ONLY: [&str; 7] = [
     "SessionAccountView.supplied",
     "SessionEpochs.with_keys",
     "object:SessionEpochs",
     "object:SessionMachine",
     "object:SessionWireReceiver",
     "AccountEngine.session_epochs",
+    "fn:session_epochs",
 ];
+/// The conformance crates' shared source and its name list.
+pub fn conformance_source() -> PathBuf {
+    api_dir().join("../../../colophon-conformance/src/api.rs")
+}
+pub fn conformance_list_file() -> PathBuf {
+    api_dir().join("../../../colophon-conformance/surface-names.txt")
+}
 
 /// Whether the attribute lines before an item export it for `feature` (`native05`/`web05`).
 fn exported(window: &[String], feature: &str) -> bool {
@@ -199,15 +204,13 @@ fn scan_text(text: &str, feature: &str, out: &mut BTreeSet<String>) {
     }
 }
 
-/// The names a build exports; `conformance` includes `api/conformance.rs`, which only the
-/// `conformance` feature compiles.
-pub fn scan(feature: &str, glue: Option<&Path>, conformance: bool) -> BTreeSet<String> {
+/// The names a build exports.
+pub fn scan(feature: &str, glue: Option<&Path>) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     let mut files: Vec<PathBuf> = std::fs::read_dir(api_dir().join("api"))
         .unwrap()
         .map(|e| e.unwrap().path())
         .filter(|p| p.extension().is_some_and(|e| e == "rs"))
-        .filter(|p| conformance || !p.ends_with("conformance.rs"))
         .collect();
     files.sort();
     for f in files {
@@ -269,35 +272,84 @@ fn same(got: &BTreeSet<String>, want: &BTreeSet<String>, file: &str) {
     );
 }
 
-/// The release names equal `surface-names.txt`, the names only a conformance build adds equal
-/// `surface-names-conformance.txt`, and no conformance-only name is in a release build.
-pub fn check(feature: &str, glue: Option<&Path>) {
-    let release = scan(feature, glue, false);
-    let full = scan(feature, glue, true);
-    let extra: BTreeSet<String> = full.difference(&release).cloned().collect();
-    for n in CONFORMANCE_ONLY {
-        assert!(!release.contains(n), "{n} is in the release surface");
-        if !n.starts_with("AccountEngine.") {
-            assert!(extra.contains(n), "{n} is not in the conformance surface");
+/// The `[features]` keys a manifest declares and the names of its dependencies.
+fn manifest(path: &Path) -> (Vec<String>, Vec<String>) {
+    let text = std::fs::read_to_string(path).unwrap();
+    let (mut features, mut deps) = (Vec::new(), Vec::new());
+    let mut section = String::new();
+    for line in text.lines() {
+        let t = line.trim();
+        if t.starts_with('[') {
+            section = t.to_string();
+            continue;
+        }
+        let Some((key, _)) = t.split_once('=') else {
+            continue;
+        };
+        let key = key.trim().trim_matches('"').to_string();
+        if t.starts_with('#') || key.is_empty() {
+            continue;
+        }
+        if section == "[features]" {
+            features.push(key);
+        } else if section.contains("dependencies") {
+            deps.push(key);
         }
     }
+    (features, deps)
+}
+
+/// The shipping names equal `surface-names.txt` and hold no conformance name, and the shipping
+/// crate's manifest declares no `conformance` feature and depends on no conformance crate (a
+/// feature anywhere in the graph could otherwise switch a bypass on in a release artifact).
+pub fn check(feature: &str, glue: Option<&Path>) {
+    let release = scan(feature, glue);
+    for n in CONFORMANCE_ONLY {
+        assert!(!release.contains(n), "{n} is in the shipping surface");
+    }
+    assert!(
+        !release.iter().any(|n| n.contains("Conformance")),
+        "a conformance name is in the shipping surface"
+    );
+    let (features, deps) = manifest(&Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"));
+    assert!(
+        !features.iter().any(|f| f.contains("conformance")),
+        "a shipping crate declares a conformance feature: {features:?}"
+    );
+    assert!(
+        !deps.iter().any(|d| d.contains("conformance")),
+        "a shipping crate depends on a conformance crate: {deps:?}"
+    );
     if std::env::var("UPDATE_NAMES").is_ok() {
         write_list(
             &list_file(),
             "# The 0.5 export surface, one name per line. Both crates must produce exactly this list.\n# object:T an exported object; T.m a method or static; fn:f a free function;\n# callback:HostSource.m a host callback; error:AccountError.V an error variant.\n",
             &release,
         );
-        write_list(
-            &conformance_list_file(),
-            "# The names only the `conformance` feature adds to the surface (`api/conformance.rs`). No\n# shipped artifact enables it; none of these may appear in surface-names.txt.\n",
-            &extra,
-        );
         return;
     }
     same(&release, &read_list(&list_file()), "surface-names.txt");
+}
+
+/// The conformance crates' names equal their list, and none of them is a shipping name.
+pub fn check_conformance(feature: &str) {
+    let text = std::fs::read_to_string(conformance_source()).unwrap();
+    let mut got = BTreeSet::new();
+    scan_text(&text, feature, &mut got);
+    let shipping = read_list(&list_file());
+    let both: Vec<_> = got.intersection(&shipping).collect();
+    assert!(both.is_empty(), "names in both surfaces: {both:?}");
+    if std::env::var("UPDATE_NAMES").is_ok() {
+        write_list(
+            &conformance_list_file(),
+            "# The conformance surface (colophon-conformance, colophon-conformance-wasm), one name per\n# line. Not published; none of these may appear in the shipping surface-names.txt.\n",
+            &got,
+        );
+        return;
+    }
     same(
-        &extra,
+        &got,
         &read_list(&conformance_list_file()),
-        "surface-names-conformance.txt",
+        "colophon-conformance/surface-names.txt",
     );
 }

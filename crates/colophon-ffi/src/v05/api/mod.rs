@@ -12,8 +12,8 @@
 //! ECDH result read back, a prepared action's state, a verified state supplied by the host.
 //!
 //! The 0.6 home stream (`stream.rs`) and sessions (`sessions.rs`) are part of this surface. The
-//! conformance surface (`conformance.rs`, with its own name list) exists only with the
-//! `conformance` feature, which no shipped artifact enables.
+//! conformance surface lives in a separate, unpublished crate (`colophon-conformance`) that no
+//! shipped artifact depends on.
 #![allow(missing_docs, clippy::too_many_arguments)]
 
 #[cfg(all(feature = "native05", feature = "web05"))]
@@ -39,9 +39,6 @@ mod sessions;
 mod stream;
 mod successor;
 mod verify;
-/// The conformance surface: never in a shipped artifact (see the module).
-#[cfg(feature = "conformance")]
-mod conformance;
 
 pub use action::AccountAction;
 pub use create::{account_default_policy, AccountCreation};
@@ -54,8 +51,6 @@ pub use session::{
     AccountCopyWrite, SwiftCopyDestination, SwiftCopyPlan, SwiftCopyResult, SwiftSource,
     SwiftTranslator,
 };
-#[cfg(feature = "conformance")]
-pub use conformance::*;
 pub use sessions::{
     session_clock_sample, session_default_policy, session_validate_policy, SessionAccountView,
     SessionEndpoint,

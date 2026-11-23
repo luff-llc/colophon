@@ -15,10 +15,6 @@ web05 = []
 native05 = []
 # Install the zero-on-free global allocator the native crate also has.
 zero-on-free = []
-# The 0.6 session conformance surface (a machine and a receiver on their own, supplied views
-# and epoch keys) for replaying the vectors in a host. It bypasses trust boundaries an
-# application relies on, so it is off by default and no shipped artifact enables it.
-conformance = []
 
 [dependencies]
 colophon-core = { path = "../colophon-core", version = "=0.6.0-dev" }

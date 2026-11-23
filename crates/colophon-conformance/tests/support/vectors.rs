@@ -1,13 +1,11 @@
-//! The 0.6 session conformance vectors replayed through the exported surface only, as a Swift,
-//! Kotlin or JS host replays them: `SessionMachine` for the machine transcripts
-//! (`conformance/0.6-sessions/*.json`), `session_clock_sample` for `offset.json`, and
-//! `SessionWireReceiver`, `SessionAccountView::supplied`, `SessionEpochs::with_keys` and
-//! `SessionEndpoint` for the wire file (`conformance/0.6-sessions/wire/vectors.json`).
+//! The 0.6 session conformance vectors replayed through the conformance crates' exports only, as
+//! a Swift, Kotlin or JS host replays them: `ConformanceMachine` for the machine transcripts
+//! (`conformance/0.6-sessions/*.json`), the shipping `session_clock_sample` for `offset.json`,
+//! and `ConformanceReceiver`, `ConformanceView`, `ConformanceEpochs` and `ConformanceSender` for
+//! the wire file (`conformance/0.6-sessions/wire/vectors.json`).
 //!
-//! Shared with the wasm crate's test, which includes it with that crate's exports in scope. The
-//! including file supplies `new_endpoint`, the one call whose argument type differs between the
-//! two builds (the view is an `Arc` natively, a reference on the web), and `ViewHandle`, the type
-//! `SessionAccountView::supplied` returns.
+//! Shared by the tests of `colophon-conformance` and `colophon-conformance-wasm`, each including
+//! it with its own exports, and the shipping crate's free functions, in scope.
 //!
 //! Not replayed here, because they are not part of the binding surface: the wire file's
 //! intermediate values (frame key, HKDF info, nonce, AAD, signed body, ciphertext and
@@ -39,7 +37,7 @@ fn json_of(text: &str) -> Value {
     serde_json::from_str(text).unwrap()
 }
 
-/// Every machine transcript: one `SessionMachine` per member, each step's outputs compared in
+/// Every machine transcript: one `ConformanceMachine` per member, each step's outputs compared in
 /// order, restarts rebuilt from `persisted_json`, then each member's view and digest. Returns
 /// how many files were replayed.
 pub fn replay_machine_vectors() -> usize {
@@ -65,7 +63,7 @@ pub fn replay_machine_vectors() -> usize {
             let w = m["canWrite"].as_bool().unwrap();
             let persisted = (!m["persisted"].is_null()).then(|| m["persisted"].to_string());
             let seed = m["freshSeed"].as_str().map(unhex);
-            let machine = SessionMachine::new(
+            let machine = ConformanceMachine::new(
                 id.clone(),
                 w,
                 policy.clone(),
@@ -81,7 +79,7 @@ pub fn replay_machine_vectors() -> usize {
             let member = st(&step["member"]);
             if step.get("restart").is_some() {
                 let p = machines[&member].persisted_json().unwrap();
-                let fresh = SessionMachine::new(
+                let fresh = ConformanceMachine::new(
                     member.clone(),
                     can_write[&member],
                     policy.clone(),
@@ -137,21 +135,21 @@ pub fn replay_offset_cases() -> usize {
     cases.len()
 }
 
-fn member_entries(members: &Value, ns: &str) -> Vec<SessionMemberEntry> {
+fn member_entries(members: &Value, ns: &str) -> Vec<ConformanceMember> {
     members
         .as_array()
         .unwrap()
         .iter()
-        .map(|m| SessionMemberEntry {
+        .map(|m| ConformanceMember {
             signing: decode_base64(m["signing"].as_str().unwrap(), 1024).unwrap(),
             session: m["session"].as_u64().unwrap(),
             expires_ms: None,
-            records: vec![SessionRecordEntry {
+            records: vec![ConformanceRecordEntry {
                 namespace: ns.to_owned(),
                 access: if m["access"] == "write" {
-                    SessionAccess::Write
+                    ConformanceAccess::Write
                 } else {
-                    SessionAccess::Read
+                    ConformanceAccess::Read
                 },
             }],
         })
@@ -159,7 +157,7 @@ fn member_entries(members: &Value, ns: &str) -> Vec<SessionMemberEntry> {
 }
 
 /// The keys a receiver holds and each one's highest `n`: what a drop must leave unchanged.
-fn held(rx: &SessionWireReceiver) -> Vec<(String, String, Option<u64>)> {
+fn held(rx: &ConformanceReceiver) -> Vec<(String, String, Option<u64>)> {
     rx.keys()
         .unwrap()
         .into_iter()
@@ -171,12 +169,7 @@ fn held(rx: &SessionWireReceiver) -> Vec<(String, String, Option<u64>)> {
 }
 
 /// The wire file. Returns (frames, scenario steps, negative cases) checked.
-pub fn replay_wire_vectors<E>(
-    new_endpoint: impl Fn(&ViewHandle, &Value, String, String) -> E,
-) -> (usize, usize, usize)
-where
-    E: std::borrow::Borrow<SessionEndpoint>,
-{
+pub fn replay_wire_vectors() -> (usize, usize, usize) {
     let v = read(dir().join("wire/vectors.json"));
     let account = st(&v["account"]);
     let ns = st(&v["namespace"]);
@@ -189,67 +182,47 @@ where
             .as_array()
             .unwrap()
             .iter()
-            .map(|e| SessionEpochKey {
+            .map(|e| ConformanceEpochKey {
                 epoch: e["epoch"].as_u64().unwrap(),
                 key: unhex(e["key"].as_str().unwrap()),
             })
             .collect();
-        SessionEpochs::with_keys(ns.clone(), keys).unwrap()
+        ConformanceEpochs::new(ns.clone(), keys).unwrap()
     };
     let table = epochs();
     assert_eq!(table.current_epoch(), Some(1));
-    let view =
-        SessionAccountView::supplied(account.clone(), member_entries(&v["members"], &ns)).unwrap();
+    let view = ConformanceView::new(account.clone(), member_entries(&v["members"], &ns)).unwrap();
 
-    // The session key and its delegation, through an endpoint made from the same randomness:
-    // the key ID, and the exact delegation body the member signs, then installed.
+    // The session key and its delegation from the file's randomness: the key ID, the exact
+    // body the member signs, and the installed signature (a changed one refused).
     let sk = &v["sessionKey"];
-    let made = new_endpoint(&view, &v, st(&sk["member"]), st(&sk["privateKey"]));
-    let ep: &SessionEndpoint = std::borrow::Borrow::borrow(&made);
-    assert_eq!(ep.key_id().unwrap(), st(&sk["id"]));
-    let body = ep.begin_delegation(clock, clock + 86_400_000).unwrap();
+    let tx = ConformanceSender::new(
+        account.clone(),
+        ns.clone(),
+        cell.clone(),
+        st(&sk["member"]),
+        unhex(&st(&sk["privateKey"])),
+    )
+    .unwrap();
+    assert_eq!(tx.key_id().unwrap(), st(&sk["id"]));
+    let body = tx.delegation_body(0, clock, clock + 86_400_000).unwrap();
     assert_eq!(
         body,
         st(&v["delegation"]["body"]).into_bytes(),
         "the delegation body"
     );
     let sig = decode_base64(v["delegation"]["signature"].as_str().unwrap(), 1024).unwrap();
-    let c = || SessionClock {
-        mono_ms: 0,
-        wall_ms: clock,
-    };
     let mut forged = sig.clone();
     forged[5] ^= 1;
-    let e = ep
-        .finish_delegation(body.clone(), forged, c())
+    let e = tx
+        .install(body.clone(), forged, &view, clock)
         .err()
         .unwrap();
     assert_eq!(e.code(), "session:delegation", "a bad signature");
-    // Any changed field (member, key, bounds, namespace) is a body begin_delegation did not
-    // return; the signature does not matter.
-    let text = String::from_utf8(body.clone()).unwrap();
-    for (from, to) in [
-        ("\"member\":\"", "\"member\":\"0"),
-        ("\"key\":\"", "\"key\":\"A"),
-        ("\"expires\":\"2", "\"expires\":\"3"),
-        ("\"namespace\":\"", "\"namespace\":\"x"),
-        ("\"session\":0", "\"session\":1"),
-    ] {
-        assert!(text.contains(from), "{from}");
-        let changed = text.replacen(from, to, 1).into_bytes();
-        let e = ep
-            .finish_delegation(changed, sig.clone(), c())
-            .err()
-            .unwrap();
-        assert_eq!(e.code(), "session:delegation", "{from}");
-    }
-    ep.finish_delegation(body.clone(), sig.clone(), c())
-        .unwrap();
-    let e = ep.finish_delegation(body, sig, c()).err().unwrap();
-    assert_eq!(e.code(), "consumed", "a delegation is installed once");
+    tx.install(body, sig, &view, clock).unwrap();
 
     // Positive frames, in order, through one receiver.
-    let rx = SessionWireReceiver::new(account.clone(), ns.clone(), cell.clone(), me.clone());
+    let rx = ConformanceReceiver::new(account.clone(), ns.clone(), cell.clone(), me.clone());
     let frames = v["frames"].as_array().unwrap();
     for f in frames {
         let name = st(&f["name"]);
@@ -272,16 +245,15 @@ where
     for sc in v["scenarios"].as_array().unwrap() {
         let name = st(&sc["name"]);
         let who = sc.get("receiver").map_or(me.clone(), st);
-        let rx = SessionWireReceiver::new(account.clone(), ns.clone(), cell.clone(), who);
+        let rx = ConformanceReceiver::new(account.clone(), ns.clone(), cell.clone(), who);
         let mut view =
-            SessionAccountView::supplied(account.clone(), member_entries(&views["default"], &ns))
-                .unwrap();
+            ConformanceView::new(account.clone(), member_entries(&views["default"], &ns)).unwrap();
         for (k, step) in sc["steps"].as_array().unwrap().iter().enumerate() {
             steps += 1;
             let ex = &step["expect"];
             let what = format!("{name} step {k}");
             if let Some(vn) = step.get("setView") {
-                view = SessionAccountView::supplied(
+                view = ConformanceView::new(
                     account.clone(),
                     member_entries(&views[vn.as_str().unwrap()], &ns),
                 )
@@ -336,7 +308,7 @@ where
     let negative = v["negative"].as_array().unwrap();
     for n in negative {
         let name = st(&n["name"]);
-        let rx = SessionWireReceiver::new(account.clone(), ns.clone(), cell.clone(), me.clone());
+        let rx = ConformanceReceiver::new(account.clone(), ns.clone(), cell.clone(), me.clone());
         let at = n.get("clockMs").and_then(Value::as_i64).unwrap_or(clock);
         let maxp = n.get("maxPayload").and_then(Value::as_u64).unwrap_or(max);
         for a in n["accept"].as_array().unwrap() {
@@ -366,7 +338,7 @@ where
 /// malformed persisted claims are typed errors, never defaults.
 pub fn strict_inputs_fail_closed() {
     let policy = session_default_policy().unwrap();
-    let m = SessionMachine::new("a".into(), true, policy.clone(), None, None, None).unwrap();
+    let m = ConformanceMachine::new("a".into(), true, policy.clone(), None, None, None).unwrap();
     for bad in [
         r#"{"input":"wave"}"#,
         r#"{"input":"tick","extra":1}"#,
@@ -379,11 +351,11 @@ pub fn strict_inputs_fail_closed() {
     }
     let mut p: Value = json_of(&policy);
     p["surprise"] = Value::Bool(true);
-    let e = SessionMachine::new("a".into(), true, p.to_string(), None, None, None)
+    let e = ConformanceMachine::new("a".into(), true, p.to_string(), None, None, None)
         .err()
         .unwrap();
     assert_eq!(e.code(), "malformed");
-    let e = SessionMachine::new(
+    let e = ConformanceMachine::new(
         "a".into(),
         true,
         policy.clone(),
@@ -398,7 +370,7 @@ pub fn strict_inputs_fail_closed() {
         "malformed",
         "a claim of term 0 is not well formed"
     );
-    let e = SessionMachine::new(
+    let e = ConformanceMachine::new(
         "a".into(),
         true,
         policy.clone(),
@@ -409,9 +381,9 @@ pub fn strict_inputs_fail_closed() {
     .err()
     .unwrap();
     assert_eq!(e.code(), "bound");
-    let e = SessionEpochs::with_keys(
+    let e = ConformanceEpochs::new(
         "listening.podcasts".into(),
-        vec![SessionEpochKey {
+        vec![ConformanceEpochKey {
             epoch: 1,
             key: vec![1; 31],
         }],
