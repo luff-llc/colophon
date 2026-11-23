@@ -14,7 +14,7 @@
 //!
 //! Every failure is a silent drop that changes no state: a receiver computes everything first
 //! and commits the accepted key and the window update only when every check has passed.
-use super::keys::{Delegation, KeyError, SessionAccount, SessionKey};
+use super::keys::{Delegation, KeyError, SessionAccount, SessionKey, CLOCK_SLACK_MS};
 use super::types::{Body, Frame, MemberId};
 use super::wire::{decode_body, encode_body, DropReason, Outer, WireFrame, MAX_FRAME_BYTES};
 use crate::v05::signature::verify_raw;
@@ -32,8 +32,11 @@ use zeroize::{Zeroize, Zeroizing};
 pub const FRAME_KEY_INFO: &str = "colophon/session-frame/6";
 /// Width of the replay window (§S3).
 pub const WINDOW: u64 = 128;
-/// Session keys kept per member (§S3).
+/// Open windows kept per member (§S3).
 pub const KEYS_PER_MEMBER: usize = 4;
+/// Session keys per member a receiver holds a replay floor for (§S3, revision 15); while it
+/// holds this many it accepts no new key from that member.
+pub const FLOORS_PER_MEMBER: usize = 64;
 
 /// A cell: `(account, namespace, cell)` (§S1).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -116,8 +119,12 @@ pub fn frame_key_info(cell: &CellId, key_id: &str) -> Vec<u8> {
 /// the epoch key, no salt, [`frame_key_info`], 32 bytes.
 pub fn frame_key(epoch_key: &[u8; 32], cell: &CellId, key_id: &str) -> Zeroizing<[u8; 32]> {
     let mut out = Zeroizing::new([0u8; 32]);
+    let (mut prk, hkdf) = Hkdf::<Sha256>::extract(None, epoch_key);
     // 32 bytes is always a valid HKDF-SHA-256 output length.
-    let _ = Hkdf::<Sha256>::new(None, epoch_key).expand(&frame_key_info(cell, key_id), &mut *out);
+    let _ = hkdf.expand(&frame_key_info(cell, key_id), &mut *out);
+    // The PRK copy returned here is wiped; the copy inside `hkdf`'s HMAC state is not
+    // reachable for wiping and is dropped with it.
+    prk.as_mut_slice().zeroize();
     out
 }
 
@@ -205,12 +212,20 @@ impl ReplayWindow {
     }
 }
 
-/// An accepted session key of another member.
+/// What a receiver holds for one session key of another member (§S3, revision 15).
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct Accepted {
+struct Known {
     delegation: Delegation,
     window: ReplayWindow,
-    /// Acceptance order, for the 4-keys-per-member cap.
+    /// The highest `n` accepted when the key was last closed: a frame at or below it is
+    /// dropped even if the key is presented again.
+    floor: u64,
+    /// Whether the key's window is open (at most [`KEYS_PER_MEMBER`] per member).
+    open: bool,
+    /// The member's session number changed: every frame of this key is dropped until its
+    /// delegation expires (§S2 "every frame signed by them from then on").
+    retired: bool,
+    /// When the window was last opened, for "close the one accepted first".
     since: u64,
 }
 
@@ -227,10 +242,13 @@ pub struct Opened {
     pub n: u64,
     /// The epoch it was sealed under.
     pub epoch: u64,
+    /// A key of the same member whose window this acceptance closed (the fifth open key
+    /// closes the one opened first); the machine must close its freshness window too.
+    pub closed: Option<String>,
 }
 
 /// A dropped frame: why, and whether §S3 asks the receiver to send `hello` to the sender
-/// (no accepted session key for `(from, key)`).
+/// (no accepted session key for `(from, key)`, and `from` entitled to the namespace).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Dropped {
     /// Why.
@@ -247,13 +265,26 @@ impl From<DropReason> for Dropped {
     }
 }
 
-/// The receiving side of one member in one cell: accepted session keys of other members and
-/// their replay windows.
+/// What a new account view, or the passing of time, removed (§S2, §S3).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Forgotten {
+    /// Members no longer accepted at all: everything held for them was dropped, and the
+    /// machine forgets them.
+    pub members: Vec<MemberId>,
+    /// Keys closed or dropped while their member stays accepted (a new session number, or
+    /// an expired delegation): the machine closes their freshness windows.
+    pub keys: Vec<(MemberId, String)>,
+}
+
+/// The receiving side of one member in one cell: the lifecycle of other members' session
+/// keys (accepted, open, closed with a replay floor, retired) and their replay windows. This
+/// is the one owner of "which keys of a member are known, open or closed"; the machine's
+/// freshness windows follow it through [`Opened::closed`] and [`Forgotten`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Receiver {
     cell: CellId,
     me: MemberId,
-    keys: BTreeMap<(MemberId, String), Accepted>,
+    keys: BTreeMap<(MemberId, String), Known>,
     counter: u64,
 }
 impl Receiver {
@@ -266,13 +297,29 @@ impl Receiver {
             counter: 0,
         }
     }
-    /// The number of accepted session keys of `member`.
+    /// The number of session keys of `member` this receiver holds anything for (open, closed
+    /// or retired; at most [`FLOORS_PER_MEMBER`]).
     pub fn keys_for(&self, member: &str) -> usize {
         self.keys.keys().filter(|(m, _)| m == member).count()
     }
-    /// Whether `(member, key)` is an accepted session key.
+    /// The number of open windows of `member` (at most [`KEYS_PER_MEMBER`]).
+    pub fn open_for(&self, member: &str) -> usize {
+        self.keys
+            .iter()
+            .filter(|((m, _), k)| m == member && k.open)
+            .count()
+    }
+    /// Whether `(member, key)` is an open, accepted session key.
     pub fn knows(&self, member: &str, key: &str) -> bool {
-        self.keys.contains_key(&(member.to_owned(), key.to_owned()))
+        self.keys
+            .get(&(member.to_owned(), key.to_owned()))
+            .is_some_and(|k| k.open)
+    }
+    /// The replay floor of `(member, key)`: 0 while it was never closed.
+    pub fn floor(&self, member: &str, key: &str) -> Option<u64> {
+        self.keys
+            .get(&(member.to_owned(), key.to_owned()))
+            .map(|k| k.floor)
     }
     /// The replay window of `(member, key)`.
     pub fn window(&self, member: &str, key: &str) -> Option<ReplayWindow> {
@@ -281,26 +328,65 @@ impl Receiver {
             .map(|a| a.window)
     }
 
-    /// A newly accepted authority head (§S2): drop every key whose member is no longer
-    /// current, lost its `records` entry for the namespace, or has another session number.
-    /// Returns the members left with no key, for the state machine to forget.
-    pub fn set_account(&mut self, view: &SessionAccount, wall_ms: i64) -> Vec<MemberId> {
-        let before: Vec<MemberId> = self.keys.keys().map(|(m, _)| m.clone()).collect();
-        self.keys
-            .retain(|_, a| a.delegation.holds_in(view, wall_ms));
-        let mut gone: Vec<MemberId> = before
-            .into_iter()
-            .filter(|m| self.keys_for(m) == 0)
+    /// A newly accepted authority head (§S2). A member that is no longer current or lost its
+    /// `records` entry for the namespace is forgotten entirely. A member with another session
+    /// number keeps its keys only as retired tombstones until they expire, so a delegation
+    /// signed again for an old key cannot revive its frames.
+    pub fn set_account(&mut self, view: &SessionAccount, wall_ms: i64) -> Forgotten {
+        let ns = self.cell.namespace.clone();
+        let mut out = Forgotten::default();
+        let gone: Vec<(MemberId, String)> = self
+            .keys
+            .iter()
+            .filter(|((m, _), k)| {
+                k.delegation.body.account != view.account() || view.access(m, &ns, wall_ms).is_none()
+            })
+            .map(|(slot, _)| slot.clone())
             .collect();
-        gone.dedup();
-        gone
+        for slot in gone {
+            self.keys.remove(&slot);
+            if !out.members.contains(&slot.0) {
+                out.members.push(slot.0);
+            }
+        }
+        for ((m, key), k) in self.keys.iter_mut() {
+            let session = view.member(m).map(|x| x.session);
+            if !k.retired && session != Some(k.delegation.body.session) {
+                k.retired = true;
+                if k.open {
+                    k.open = false;
+                    k.floor = k.window.high();
+                }
+                out.keys.push((m.clone(), key.clone()));
+            }
+        }
+        out
     }
 
-    /// Run the §S3 receiver checks, in order: parse with closed field sets; check `account`,
-    /// `namespace` and `cell`; verify a carried delegation that names `(from, key)`; find an
-    /// accepted session key (its window re-checked at `wall_ms`), else drop and ask for a
-    /// `hello`; verify the frame signature; check `n` against the replay window; open the
-    /// ciphertext; decode the plaintext strictly. Only then is anything remembered.
+    /// Forget keys whose delegation expired more than 60 s ago (their frames can no longer
+    /// pass §S2, so their floors are no longer needed). Returns them, for the machine.
+    pub fn expire(&mut self, wall_ms: i64) -> Vec<(MemberId, String)> {
+        let old: Vec<(MemberId, String)> = self
+            .keys
+            .iter()
+            .filter(|(_, k)| {
+                wall_ms > k.delegation.body.expires_ms.saturating_add(CLOCK_SLACK_MS)
+            })
+            .map(|(slot, _)| slot.clone())
+            .collect();
+        for slot in &old {
+            self.keys.remove(slot);
+        }
+        old
+    }
+
+    /// Run the §S3 receiver checks, in order (revision 15): (1) parse with closed field sets;
+    /// (2) check `account`, `namespace` and `cell`; (3) verify a carried delegation, which must
+    /// name `(from, key)`; (4) find an accepted session key, its window re-checked at
+    /// `wall_ms`, else drop and ask for a `hello` when `from` is entitled; (5) verify the
+    /// frame signature; (6) check `n` against the key's floor and window; (7) open the
+    /// ciphertext and decode the plaintext strictly. Only then is anything remembered; the
+    /// machine applies (8), freshness.
     pub fn open(
         &mut self,
         bytes: &[u8],
@@ -325,6 +411,9 @@ impl Receiver {
         }
         let slot = (o.from.clone(), o.key.clone());
         let stored = self.keys.get(&slot);
+        if stored.is_some_and(|k| k.retired) {
+            return Err(DropReason::Retired.into());
+        }
         // A carried delegation must name (from, key) and verify; one byte-identical to the
         // accepted envelope for that pair is the same verified object.
         let fresh = match &w.delegation {
@@ -340,26 +429,28 @@ impl Receiver {
                 Some(d)
             }
         };
+        let entitled = view.access(&o.from, &o.namespace, wall_ms).is_some();
+        let probe = |reason| Dropped {
+            reason,
+            hello_to: entitled.then(|| o.from.clone()),
+        };
         let Some(delegation) = fresh.as_ref().or(stored.map(|a| &a.delegation)) else {
-            return Err(Dropped {
-                reason: DropReason::NoKey,
-                hello_to: Some(o.from.clone()),
-            });
+            return Err(probe(DropReason::NoKey));
         };
         if !delegation.holds_in(view, wall_ms) {
-            return Err(Dropped {
-                reason: DropReason::NoKey,
-                hello_to: Some(o.from.clone()),
-            });
+            return Err(probe(DropReason::NoKey));
         }
         if !delegation.body.in_window(wall_ms) {
-            return Err(Dropped {
-                reason: DropReason::KeyWindow,
-                hello_to: Some(o.from.clone()),
-            });
+            return Err(probe(DropReason::KeyWindow));
+        }
+        if stored.is_none() && self.keys_for(&o.from) >= FLOORS_PER_MEMBER {
+            return Err(DropReason::KeyLimit.into());
         }
         verify_raw(&delegation.body.key, &w.signed_body(), &w.signature)
             .map_err(|_| DropReason::Signature)?;
+        if stored.is_some_and(|k| o.n <= k.floor) {
+            return Err(DropReason::Floor.into());
+        }
         let mut window = stored.map(|a| a.window).unwrap_or_default();
         window.check(o.n)?;
         let epoch_key = epochs
@@ -369,17 +460,10 @@ impl Receiver {
         let plaintext = decrypt(&key, o.n, &o.aad(), &w.ciphertext).ok_or(DropReason::Open)?;
         let body = decode_body(&plaintext, max_payload)?;
 
-        // Every check passed: commit.
+        // Steps 1–7 passed: commit.
         window.admit(o.n);
         let writer = view.access(&o.from, &o.namespace, wall_ms) == Some(Access::Write);
-        match fresh {
-            Some(d) => self.accept(slot, d, window),
-            None => {
-                if let Some(a) = self.keys.get_mut(&slot) {
-                    a.window = window;
-                }
-            }
-        }
+        let closed = self.accept(slot, fresh, window);
         Ok(Opened {
             frame: Frame {
                 from: o.from.clone(),
@@ -391,40 +475,67 @@ impl Receiver {
             key: o.key.clone(),
             n: o.n,
             epoch: o.epoch,
+            closed,
         })
     }
 
-    fn accept(&mut self, slot: (MemberId, String), d: Delegation, window: ReplayWindow) {
-        if let Some(a) = self.keys.get_mut(&slot) {
-            // A renewed delegation for a known key keeps its window.
-            a.delegation = d;
-            a.window = window;
-            return;
-        }
-        // At most 4 keys per member: drop the oldest.
-        while self.keys_for(&slot.0) >= KEYS_PER_MEMBER {
-            let oldest = self
-                .keys
-                .iter()
-                .filter(|((m, _), _)| *m == slot.0)
-                .min_by_key(|(_, a)| a.since)
-                .map(|(k, _)| k.clone());
-            match oldest {
-                Some(k) => {
-                    self.keys.remove(&k);
+    /// Record an accepted frame's key: a new or renewed delegation, the window, and (for a new
+    /// or reopened key) an open window, closing the member's first-opened key beyond four.
+    fn accept(
+        &mut self,
+        slot: (MemberId, String),
+        fresh: Option<Delegation>,
+        window: ReplayWindow,
+    ) -> Option<String> {
+        let reopened = match self.keys.get_mut(&slot) {
+            Some(k) => {
+                if let Some(d) = fresh {
+                    // A renewed delegation for a known key keeps its window and floor.
+                    k.delegation = d;
                 }
-                None => break,
+                k.window = window;
+                let was_open = k.open;
+                k.open = true;
+                !was_open
             }
+            None => {
+                let d = fresh?;
+                self.keys.insert(
+                    slot.clone(),
+                    Known {
+                        delegation: d,
+                        window,
+                        floor: 0,
+                        open: true,
+                        retired: false,
+                        since: 0,
+                    },
+                );
+                true
+            }
+        };
+        if !reopened {
+            return None;
         }
         self.counter += 1;
-        self.keys.insert(
-            slot,
-            Accepted {
-                delegation: d,
-                window,
-                since: self.counter,
-            },
-        );
+        let counter = self.counter;
+        if let Some(k) = self.keys.get_mut(&slot) {
+            k.since = counter;
+        }
+        if self.open_for(&slot.0) <= KEYS_PER_MEMBER {
+            return None;
+        }
+        // At most 4 open windows per member: close the one opened first. Its floor stays.
+        let first = self
+            .keys
+            .iter()
+            .filter(|((m, _), k)| *m == slot.0 && k.open)
+            .min_by_key(|(_, k)| k.since)
+            .map(|(s, _)| s.clone())?;
+        let k = self.keys.get_mut(&first)?;
+        k.open = false;
+        k.floor = k.window.high();
+        Some(first.1)
     }
 }
 
@@ -443,6 +554,12 @@ pub enum SealError {
     Key(KeyError),
     /// The encoded frame would exceed 16,384 bytes.
     Oversize,
+    /// This member no longer holds a `records` entry for the namespace.
+    NotEntitled,
+    /// This member may only read, and only a writer sends this kind.
+    NotWriter,
+    /// This member's session number changed: the key is retired, start a new session.
+    Retired,
     /// The plaintext could not be encoded.
     Encode(String),
 }
@@ -461,6 +578,10 @@ pub struct Sender {
     me: MemberId,
     key: SessionKey,
     delegation: Option<Delegation>,
+    /// The session number the key was first delegated under; a key is never delegated
+    /// under another (receivers retire it).
+    session: Option<u64>,
+    retired: bool,
 }
 impl Sender {
     /// A sender for `me` in `cell` with a fresh session key.
@@ -470,7 +591,22 @@ impl Sender {
             me: me.to_owned(),
             key,
             delegation: None,
+            session: None,
+            retired: false,
         }
+    }
+    /// The member's current session number at the accepted head. A change from the number
+    /// the key was delegated under retires the key: its delegation is dropped and no new one
+    /// can be made for it.
+    pub fn observe_session(&mut self, session: Option<u64>) {
+        if self.session.is_some() && session != self.session {
+            self.retired = true;
+            self.delegation = None;
+        }
+    }
+    /// Whether the key is retired.
+    pub fn retired(&self) -> bool {
+        self.retired
     }
     /// The session key.
     pub fn key(&self) -> &SessionKey {
@@ -487,6 +623,9 @@ impl Sender {
         not_before_ms: i64,
         expires_ms: i64,
     ) -> Result<Vec<u8>, KeyError> {
+        if self.retired || self.session.is_some_and(|s| s != session) {
+            return Err(KeyError::Retired);
+        }
         self.key.delegation_body(
             &self.cell.account,
             &self.me,
@@ -508,7 +647,11 @@ impl Sender {
         if d.body.member != self.me || d.key_id() != self.key.id() {
             return Err("the delegation names another member or key".into());
         }
+        if self.retired || self.session.is_some_and(|s| s != d.body.session) {
+            return Err("the key is retired".into());
+        }
         d.verify(view, &self.cell.namespace, wall_ms)?;
+        self.session = Some(d.body.session);
         self.delegation = Some(d);
         Ok(())
     }
@@ -547,6 +690,9 @@ impl Sender {
         epochs: &dyn EpochKeys,
         wall_ms: i64,
     ) -> Result<Vec<u8>, SealError> {
+        if self.retired {
+            return Err(SealError::Retired);
+        }
         let delegation = self.delegation.as_ref().ok_or(SealError::NoDelegation)?;
         if !delegation.body.in_window(wall_ms) {
             return Err(SealError::DelegationWindow);

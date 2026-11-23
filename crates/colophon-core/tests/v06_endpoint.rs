@@ -320,10 +320,24 @@ fn a_new_session_number_mid_session_drops_the_old_key() {
         .with_member(&w.b.point, 0, None, &[(NS, Access::Write)]);
     let s = net.eps[1].set_account(bumped, clock(net.now), &epochs());
     net.post(1, s);
-    assert_eq!(net.eps[1].receiver().keys_for(&w.a.id), 0);
+    // The key is retired (a tombstone until it expires), and its window closed.
+    assert_eq!(net.eps[1].receiver().keys_for(&w.a.id), 1);
+    assert!(!net.eps[1].receiver().knows(&w.a.id, net.eps[0].key_id()));
+    assert_eq!(net.eps[1].machine().windows_for(&w.a.id), 0);
     let before = net.drops[1].len();
     net.run_until(net.now + 6_000);
     assert!(net.drops[1].len() > before, "a's beats are dropped");
+    assert!(net.drops[1][before..].iter().all(|d| *d == DropReason::Retired));
+    // a's own endpoint, told of its new session number, retires its key.
+    let s = net.eps[0].set_account(bumped_view(&w), clock(net.now), &epochs());
+    assert!(s.effects.iter().all(|e| !matches!(e, Effect::Send { .. })));
+    assert_eq!(net.eps[0].begin_delegation(t0(), t0() + 1_000), Err(colophon_core::v06::session::keys::KeyError::Retired));
+}
+
+fn bumped_view(w: &World) -> SessionAccount {
+    SessionAccount::new(ACCOUNT)
+        .with_member(&w.a.point, 1, None, &[(NS, Access::Write)])
+        .with_member(&w.b.point, 0, None, &[(NS, Access::Write)])
 }
 
 #[test]
@@ -375,9 +389,9 @@ fn became(net: &Net, i: usize, via: Via, since: u64) -> Option<(u64, Claim, Byte
     })
 }
 
-fn handoff(seed: u64) -> Route {
+fn handoff(seed: u64, loss: u64) -> Route {
     let (w, a, b) = two(81, 82);
-    let mut net = Net::new(vec![a, b], seed, 15, 10, 300);
+    let mut net = Net::new(vec![a, b], seed, loss, 10, 300);
     net.command(0, Command::Join { state: None });
     net.command(1, Command::Join { state: None });
     net.run_until(2_000);
@@ -434,23 +448,32 @@ fn handoff(seed: u64) -> Route {
         let displaced = net.events[1]
             .iter()
             .any(|(_, e)| matches!(e, Event::Displaced { from, .. } if *from == w.a.id));
-        if displaced {
-            Route::Take
-        } else {
-            // a passed, the pass and its one resend were lost, b took on the ask timeout,
-            // learned of the passed claim from a's `hello.seen` and renewed over it. a resends
-            // a pass only while b speaks under an older claim, so the passed snapshot is never
-            // reported to b's application (a §S5 / G11 gap in revision 14, reported with the
-            // codec work). The holder still converges.
-            assert!(passed, "seed {seed}: b took over a live holder without a report");
-            Route::PassLost
-        }
+        // Revision 15: a pass is resent until acknowledged, so a pass a sent always reaches
+        // b's application; without one, b took over a's claim and a's state was reported.
+        assert!(!passed, "seed {seed}: a's pass never reached b's application");
+        assert!(displaced, "seed {seed}: b took over a live holder without a report");
+        Route::Take
     };
     assert!(!net.eps[0].machine().is_holder());
+    // Convergence is promised once the group is timely (§S0); at 30 % loss it may take a few
+    // beats: wait for it, up to two minutes.
+    let until = net.now + 120_000;
     net.run_until(net.now + 20_000);
+    while net.now < until && net.eps[0].machine().state() != net.eps[1].machine().state() {
+        net.run_until(net.now + 1_000);
+    }
     assert_eq!(net.eps[0].machine().holder(), Some(w.b.id.as_str()), "seed {seed}");
     let settled = net.eps[1].machine().state().clone();
-    assert_eq!(net.eps[0].machine().state(), &settled, "seed {seed}: a follows b's state");
+    assert_eq!(
+        net.eps[0].machine().state(),
+        &settled,
+        "seed {seed} loss {loss}: a follows b's state ({route:?}; a {:?} synced {} seq {}, b {:?} seq {})",
+        net.eps[0].machine().accepted(),
+        net.eps[0].machine().synced(),
+        net.eps[0].machine().seq(),
+        net.eps[1].machine().accepted(),
+        net.eps[1].machine().seq()
+    );
     if matches!(route, Route::Pass | Route::LatePass) {
         assert_eq!(settled, stopped, "seed {seed}");
     }
@@ -481,18 +504,24 @@ enum Route {
     Pass,
     LatePass,
     Take,
-    PassLost,
 }
 
 #[test]
 fn playback_handoff_over_a_lossy_duplicating_reordering_carrier() {
-    let mut routes = Vec::new();
-    for seed in 1..=40u64 {
-        routes.push(handoff(seed * 7_919));
+    for loss in [15, 30] {
+        let mut routes = Vec::new();
+        for seed in 1..=40u64 {
+            routes.push(handoff(seed * 7_919, loss));
+        }
+        let count = |r: Route| routes.iter().filter(|x| **x == r).count();
+        eprintln!(
+            "loss {loss}%: {} passes, {} late passes, {} takes, 0 lost",
+            count(Route::Pass),
+            count(Route::LatePass),
+            count(Route::Take)
+        );
+        assert!(count(Route::Pass) * 3 >= routes.len(), "the pass path is common: {routes:?}");
     }
-    let passes = routes.iter().filter(|r| **r == Route::Pass).count();
-    eprintln!("routes: {routes:?}");
-    assert!(passes * 2 >= routes.len(), "the pass path is the common one: {routes:?}");
 }
 
 #[test]
@@ -512,4 +541,172 @@ fn the_same_inputs_give_the_same_bytes() {
         (net.sent.clone(), out, net.eps[1].machine().digest())
     };
     assert_eq!(run(), run());
+}
+
+// ---------------------------------------------------------------------------------------
+// Revision 15: key lifecycle, probes, local authority, policy.
+
+/// The reviewer's attack end to end: a restarts five times quickly, so b closes a's first
+/// key; the home replays that key's delegation, its `hello` and its old frames. b drops them
+/// at the floor; when the first key really speaks again, the machine makes it pass a new
+/// freshness exchange before acting on anything but a `hello`.
+#[test]
+fn an_evicted_key_cannot_be_replayed_back_to_life() {
+    let w = world();
+    let view = w.view();
+    let ep = epochs();
+    let mut b = endpoint(&w.b, &view, 120, Policy::default());
+    b.command(Command::Join { state: None }, clock(0), &ep);
+    let mut a_keys: Vec<Endpoint> = (0..5).map(|i| endpoint(&w.a, &view, 121 + i, Policy::default())).collect();
+    let mut first_frames: Vec<Vec<u8>> = Vec::new();
+    let mut t = 10;
+    let (first_four, fifth) = a_keys.split_at_mut(4);
+    for (i, a) in first_four.iter_mut().enumerate() {
+        // Each "restart" joins, exchanges hellos with b, and (the first) takes.
+        let mut wire: Vec<Vec<u8>> = a.command(Command::Join { state: None }, clock(t), &ep).frames().map(<[u8]>::to_vec).collect();
+        if i == 0 {
+            wire.extend(a.command(Command::Take { state: Some(bytes("old")) }, clock(t), &ep).frames().map(<[u8]>::to_vec));
+        }
+        for _ in 0..4 {
+            let mut back = Vec::new();
+            for f in wire.drain(..) {
+                if i == 0 {
+                    first_frames.push(f.clone());
+                }
+                back.extend(b.receive(&f, clock(t), &ep).frames().map(<[u8]>::to_vec).collect::<Vec<_>>());
+            }
+            for f in back {
+                wire.extend(a.receive(&f, clock(t), &ep).frames().map(<[u8]>::to_vec).collect::<Vec<_>>());
+            }
+        }
+        t += 10;
+    }
+    let k1 = a_keys_id(first_four);
+    assert!(b.machine().window_admits(&w.a.id, &k1, u64::MAX), "four open windows");
+    // The fifth key sends one frame, without any exchange: the codec opens it and closes the
+    // first, and must close the first key's freshness window in the machine too.
+    let ping = fifth[0].command(Command::Join { state: None }, clock(t), &ep);
+    for f in ping.frames() {
+        b.receive(f, clock(t), &ep);
+    }
+    t += 10;
+    assert!(!b.receiver().knows(&w.a.id, &k1), "the fifth key closed the first");
+    assert!(!b.machine().window_admits(&w.a.id, &k1, u64::MAX), "and its freshness window");
+    let before = (b.machine().clone(), b.receiver().clone());
+    for f in &first_frames {
+        let s = b.receive(f, clock(t), &ep);
+        assert_eq!(s.dropped.map(|d| d.reason), Some(DropReason::Floor));
+    }
+    assert_eq!((b.machine().clone(), b.receiver().clone()), before, "replays changed nothing");
+    // The first key speaks again (after askTimeoutMs, so b may probe it): its key reopens,
+    // but its frames wait for a new exchange.
+    t += 2_000;
+    let s = a_keys[0].command(Command::Publish { id: id("new"), payload: bytes("new") }, clock(t), &ep);
+    let msg = s.frames().next().unwrap().to_vec();
+    let r = b.receive(&msg, clock(t), &ep);
+    assert!(r.dropped.is_none());
+    assert!(b.receiver().knows(&w.a.id, &k1));
+    assert!(!b.machine().window_admits(&w.a.id, &k1, u64::MAX), "no window without a new exchange");
+    assert!(r.frames().count() == 1, "b probes a with a hello");
+    assert!(!r.events().any(|e| matches!(e, Event::Message { .. })));
+}
+
+fn a_keys_id(keys: &[Endpoint]) -> String {
+    keys[0].key_id().to_owned()
+}
+
+#[test]
+fn unknown_key_hellos_are_limited_per_member_and_in_all() {
+    let w = world();
+    let mut view = w.view();
+    let extra: Vec<Member> = (30..40).map(member).collect();
+    for m in &extra {
+        view = view.with_member(&m.point, 0, None, &[(NS, Access::Write)]);
+    }
+    let ep = epochs();
+    let mut b = endpoint(&w.b, &view, 130, Policy::default());
+    b.command(Command::Join { state: None }, clock(0), &ep);
+    // One stripped frame from each of ten entitled members and ten fake ones, at once.
+    let mut hellos = 0;
+    for (i, m) in extra.iter().enumerate() {
+        let mut tx = sender(m, &view, 140 + i as u8, cell());
+        let f = tx.seal(&Frame { from: m.id.clone(), to: None, retain: false, body: Body::Ping { t: 1 } }, &ep, t0()).unwrap();
+        let stripped = edit(&f, |o| { o.remove("delegation"); });
+        hellos += b.receive(&stripped, clock(10), &ep).frames().count();
+        let fake = edit(&stripped, |o| { o.insert("from".into(), serde_json::json!(member(90 + i as u8).id)); });
+        assert_eq!(b.receive(&fake, clock(10), &ep).frames().count(), 0, "no hello to a fake member");
+    }
+    assert_eq!(hellos, 4, "four a second in all");
+    // A second later the budget is back, but each member still waits askTimeoutMs.
+    let mut later = 0;
+    for (i, m) in extra.iter().enumerate() {
+        let mut tx = sender(m, &view, 160 + i as u8, cell());
+        let f = tx.seal(&Frame { from: m.id.clone(), to: None, retain: false, body: Body::Ping { t: 1 } }, &ep, t0()).unwrap();
+        let stripped = edit(&f, |o| { o.remove("delegation"); });
+        later += b.receive(&stripped, clock(1_100), &ep).frames().count();
+    }
+    assert_eq!(later, 4);
+}
+
+#[test]
+fn local_authority_follows_the_account() {
+    let (w, mut net) = holder_and_follower();
+    let ep = epochs();
+    // a is reduced to read: it releases at once and seals no writer frame.
+    let read = SessionAccount::new(ACCOUNT)
+        .with_member(&w.a.point, 0, None, &[(NS, Access::Read)])
+        .with_member(&w.b.point, 0, None, &[(NS, Access::Write)]);
+    let s = net.eps[0].set_account(read.clone(), clock(net.now), &ep);
+    assert!(s.effects.iter().any(|e| matches!(e, Effect::Send { kind: "bye", .. })));
+    assert!(s.effects.iter().any(|e| matches!(e, Effect::Persist { released: true, .. })));
+    net.post(0, s);
+    assert!(!net.eps[0].machine().is_holder());
+    let s = net.eps[0].command(Command::Take { state: None }, clock(net.now), &ep);
+    assert!(s.frames().next().is_none(), "a reader cannot take");
+    let s = net.eps[1].set_account(read.clone(), clock(net.now), &ep);
+    net.post(1, s);
+    // b, told that a only reads, ignores the claim in a's `bye` (§S4 rule 1); a is silent,
+    // so it lapses, and b can take.
+    net.run_until(net.now + 20_000);
+    net.command(1, Command::Take { state: None });
+    net.run_until(net.now + 1_000);
+    assert!(net.eps[1].machine().is_holder());
+    // Promoted again, it may take.
+    let s = net.eps[0].set_account(w.view(), clock(net.now), &ep);
+    net.post(0, s);
+    let s = net.eps[1].set_account(w.view(), clock(net.now), &ep);
+    net.post(1, s);
+    net.command(1, Command::Release);
+    net.run_until(net.now + 1_000);
+    net.command(0, Command::Take { state: None });
+    net.run_until(net.now + 3_000);
+    assert!(net.eps[0].machine().is_holder());
+    assert_eq!(net.eps[1].machine().holder(), Some(w.a.id.as_str()));
+    // Without the namespace it leaves and seals nothing at all.
+    let none = SessionAccount::new(ACCOUNT).with_member(&w.b.point, 0, None, &[(NS, Access::Write)]);
+    let s = net.eps[0].set_account(none, clock(net.now), &ep);
+    assert!(!net.eps[0].entitled());
+    assert!(!net.eps[0].machine().joined());
+    assert!(s.effects.iter().all(|e| !matches!(e, Effect::Send { .. })));
+    assert!(s.effects.iter().any(|e| matches!(e, Effect::Unsent { error: SealError::NotEntitled, .. })));
+}
+
+#[test]
+fn policies_are_checked_at_construction() {
+    use colophon_core::v06::session::endpoint::{validate_policy, EndpointError};
+    let largest = validate_policy(&Policy::default(), &cell()).unwrap();
+    assert!(largest <= 16_384, "{largest}");
+    let w = world();
+    let bad = [
+        Policy { max_payload: 8_193, ..Policy::default() },
+        Policy { max_payload: 0, ..Policy::default() },
+        Policy { fold: Fold::Append, max_payload: 4, ..Policy::default() },
+        Policy { beat_ms: 0, ..Policy::default() },
+        Policy { holder_timeout_ms: 5_000, ..Policy::default() },
+        Policy { tail: 0, ..Policy::default() },
+    ];
+    for p in bad {
+        let e = Endpoint::new(cell(), &w.a.id, p.clone(), None, w.view(), &mut [1; 32], [1; 16], clock(0));
+        assert!(matches!(e, Err(EndpointError::Policy(_))), "{p:?}");
+    }
 }

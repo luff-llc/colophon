@@ -91,6 +91,8 @@ pub enum EndpointError {
     /// This member is not current in the account view, or has no `records` entry for the
     /// namespace.
     NotEntitled,
+    /// The cell policy is out of bounds, or its largest frame would not fit (§S1, §S3).
+    Policy(String),
 }
 impl std::fmt::Display for EndpointError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -98,6 +100,106 @@ impl std::fmt::Display for EndpointError {
     }
 }
 impl std::error::Error for EndpointError {}
+
+/// The largest `maxPayload` a cell may declare (§S1: the largest snapshot must fit a frame
+/// with its delegation).
+pub const MAX_PAYLOAD_LIMIT: u64 = 8_192;
+
+/// Check a cell policy: every duration positive, `holderTimeoutMs` above `beatMs`, `tail`
+/// at least 1, `maxPayload` from 1 (5 under `append`) to 8,192, and the largest frame of every
+/// kind, with every integer at 2^53 − 1, `to`, `retain` and the largest delegation attached,
+/// at most 16,384 bytes. Returns the largest frame size.
+pub fn validate_policy(policy: &Policy, cell: &CellId) -> Result<usize, String> {
+    use super::types::{Body, Bytes, Fold, Id, Seen, MAX_ECHO, MAX_INT, MAX_REASON, MAX_TERM};
+    use super::wire::{encode_body, Outer, WireFrame, MAX_FRAME_BYTES, TAG_BYTES};
+    let p = policy;
+    if p.beat_ms == 0 || p.ask_timeout_ms == 0 || p.presence_timeout_ms == 0 {
+        return Err("a timeout is zero".into());
+    }
+    if p.holder_timeout_ms <= p.beat_ms {
+        return Err("holderTimeoutMs must exceed beatMs".into());
+    }
+    if p.tail == 0 {
+        return Err("tail must be at least 1".into());
+    }
+    let min = if p.fold == Fold::Append { 5 } else { 1 };
+    if !(min..=MAX_PAYLOAD_LIMIT).contains(&p.max_payload) {
+        return Err(format!("maxPayload must be {min} to {MAX_PAYLOAD_LIMIT}"));
+    }
+    if !super::wire::valid_cell(&cell.cell)
+        || !super::wire::valid_account(&cell.account)
+        || !crate::v05::terms::valid_namespace(&cell.namespace)
+    {
+        return Err("invalid cell".into());
+    }
+    let id = "f".repeat(32);
+    let big = Claim::passed(MAX_TERM, &id, &id);
+    let blob = Bytes(vec![0xff; usize::try_from(p.max_payload).unwrap_or(usize::MAX)]);
+    let fid = Id([0xff; 16]);
+    let bodies = vec![
+        Body::Hello {
+            fresh: fid,
+            echo: vec![fid; MAX_ECHO],
+            seen: Some(Seen { claim: big.clone(), seq: Some(MAX_INT) }),
+            heard: None,
+            lapsed: false,
+        },
+        Body::State { claim: big.clone(), seq: MAX_INT, snapshot: blob.clone() },
+        Body::Beat { claim: big.clone(), seq: MAX_INT },
+        Body::Msg { claim: big.clone(), seq: MAX_INT, origin: id.clone(), id: fid, payload: blob.clone() },
+        Body::Submit { id: fid, payload: blob.clone() },
+        Body::Refuse { id: fid, reason: "z".repeat(MAX_REASON) },
+        Body::Presence { payload: blob.clone() },
+        Body::Ask { claim: big.clone() },
+        Body::Pass { claim: big.clone(), next: big.clone(), seq: MAX_INT, snapshot: blob.clone() },
+        Body::Decline { claim: big.clone() },
+        Body::Take { claim: big.clone() },
+        Body::Ping { t: MAX_INT },
+        Body::Pong { t: MAX_INT, echo: MAX_INT, hold: MAX_INT },
+        Body::Yielded { claim: big.clone(), seq: MAX_INT, snapshot: blob },
+        Body::Ack { yielded: None, passed: Some(big.clone()) },
+        Body::Bye { claim: Some(big), leaving: false },
+    ];
+    // The largest delegation: every field at its longest.
+    let body = format!(
+        r#"{{"account":"{}","expires":"9999-12-31T23:59:59.999Z","key":"{}","member":"{id}","namespace":"{}","notBefore":"9999-12-31T23:59:59.999Z","protocol":"colophon/session-key/6","session":{MAX_INT}}}"#,
+        cell.account,
+        crate::v05::encoding::encode_base64(&[4u8; 65]),
+        cell.namespace
+    );
+    let envelope = format!(
+        r#"{{"body":"{}","signature":"{}"}}"#,
+        crate::v05::encoding::encode_base64(body.as_bytes()),
+        crate::v05::encoding::encode_base64(&[0u8; 64])
+    );
+    let outer = Outer {
+        account: cell.account.clone(),
+        namespace: cell.namespace.clone(),
+        cell: cell.cell.clone(),
+        from: id.clone(),
+        key: id.clone(),
+        to: Some(id),
+        n: MAX_INT,
+        epoch: MAX_INT,
+        retain: true,
+    };
+    let mut largest = 0;
+    for b in &bodies {
+        let plaintext = encode_body(b)?;
+        let w = WireFrame {
+            outer: outer.clone(),
+            ciphertext: vec![0; plaintext.len() + TAG_BYTES],
+            signature: [0; 64],
+            delegation: Some(envelope.clone().into_bytes()),
+        };
+        let size = w.encode().len();
+        if size > MAX_FRAME_BYTES {
+            return Err(format!("the largest {} frame is {size} bytes", b.kind()));
+        }
+        largest = largest.max(size);
+    }
+    Ok(largest)
+}
 
 /// One member of one cell, with sealing.
 #[derive(Debug)]
@@ -109,12 +211,16 @@ pub struct Endpoint {
     sender: Sender,
     receiver: Receiver,
     account: SessionAccount,
+    /// This member holds a `records` entry for the namespace at the accepted head. Without
+    /// one nothing is sealed.
+    entitled: bool,
 }
 
 impl Endpoint {
     /// Start a session: a fresh session key from `key_random` (wiped), the machine seeded with
     /// `fresh_seed` (16 random bytes, new for every process start), and the account view.
-    /// `persisted` is what the host stored from earlier `Persist` effects.
+    /// `persisted` is what the host stored from earlier `Persist` effects. The policy is
+    /// checked with [`validate_policy`].
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         cell: CellId,
@@ -127,6 +233,7 @@ impl Endpoint {
         clock: Clock,
     ) -> Result<Self, EndpointError> {
         let key = SessionKey::generate(key_random).map_err(EndpointError::Key)?;
+        validate_policy(&policy, &cell).map_err(EndpointError::Policy)?;
         let access = account
             .access(me, &cell.namespace, clock.wall_ms)
             .ok_or(EndpointError::NotEntitled)?;
@@ -140,6 +247,7 @@ impl Endpoint {
             policy,
             machine,
             account: SessionAccount::default(),
+            entitled: true,
         };
         // The entitled set at construction produces no output (nothing is joined yet).
         let _ = e.apply_account(account, clock);
@@ -170,13 +278,18 @@ impl Endpoint {
     pub fn last_n(&self) -> u64 {
         self.sender.key().last_n()
     }
+    /// Whether this member holds a `records` entry for the namespace (it may send).
+    pub fn entitled(&self) -> bool {
+        self.entitled
+    }
     /// When the host should next call [`Endpoint::tick`] (monotonic ms), if ever.
     pub fn next_deadline(&self) -> Option<u64> {
         self.machine.next_deadline()
     }
 
     /// The exact `colophon/session-key/6` body for the host to sign `raw` with this member's
-    /// key (0.5 §3.4), for the window `[not_before_ms, expires_ms]` (at most 86,400 s).
+    /// key (0.5 §3.4), for the window `[not_before_ms, expires_ms]` (at most 86,400 s). A key
+    /// whose member's session number changed is retired: a new session needs a new endpoint.
     pub fn begin_delegation(&self, not_before_ms: i64, expires_ms: i64) -> Result<Vec<u8>, KeyError> {
         let session = self
             .account
@@ -192,9 +305,11 @@ impl Endpoint {
     }
 
     /// A newly accepted authority head (§S1, §S2). The host calls this before delivering any
-    /// frame received after it accepted that head. Keys of members that are no longer current,
-    /// lost the namespace or have a higher session number are dropped with their windows, and
-    /// the machine is given the new entitled writers.
+    /// frame received after it accepted that head. Other members' keys are dropped, retired
+    /// or kept as the receiver decides, and the machine follows; the machine is given the
+    /// new entitled writers; and this member's own access is applied: promoted, it may take;
+    /// reduced to read, it releases and seals only what a reader may send; without the
+    /// namespace, it leaves and seals nothing. A new session number retires its key.
     pub fn set_account(&mut self, account: SessionAccount, clock: Clock, epochs: &dyn EpochKeys) -> Step {
         let outs = self.apply_account(account, clock);
         Step {
@@ -203,13 +318,40 @@ impl Endpoint {
         }
     }
     fn apply_account(&mut self, account: SessionAccount, clock: Clock) -> Vec<Output> {
-        for m in self.receiver.set_account(&account, clock.wall_ms) {
-            self.machine.forget_member(&m);
+        let gone = self.receiver.set_account(&account, clock.wall_ms);
+        for m in &gone.members {
+            self.machine.forget_member(m);
+        }
+        for (m, k) in &gone.keys {
+            self.machine.close_window(m, k);
         }
         let writers = account.writers(&self.cell.namespace, clock.wall_ms);
+        let access = account.access(&self.me, &self.cell.namespace, clock.wall_ms);
+        let session = account.member(&self.me).map(|m| m.session);
+        self.sender.observe_session(session);
         self.account = account;
-        self.machine
-            .handle(Input::Entitled { writers }, clock.mono_ms)
+        let mut outs = self
+            .machine
+            .handle(Input::Entitled { writers }, clock.mono_ms);
+        outs.extend(
+            self.machine
+                .set_can_write(access == Some(Access::Write), clock.mono_ms),
+        );
+        match access {
+            None if self.entitled => {
+                // Without the namespace nothing this member sends would be accepted: leave.
+                if self.machine.joined() {
+                    outs.extend(
+                        self.machine
+                            .handle(Input::App { command: Command::Leave }, clock.mono_ms),
+                    );
+                }
+                self.entitled = false;
+            }
+            Some(_) => self.entitled = true,
+            None => {}
+        }
+        outs
     }
 
     /// An application command (§S10).
@@ -220,12 +362,19 @@ impl Endpoint {
             dropped: None,
         }
     }
-    /// A timer expiry (at or after [`Endpoint::next_deadline`]).
+    /// A timer expiry (at or after [`Endpoint::next_deadline`]). Also forgets the replay
+    /// floors of keys whose delegations have expired.
     pub fn tick(&mut self, clock: Clock, epochs: &dyn EpochKeys) -> Step {
+        self.expire(clock);
         let outs = self.machine.handle(Input::Tick, clock.mono_ms);
         Step {
             effects: self.run(outs, clock, epochs),
             dropped: None,
+        }
+    }
+    fn expire(&mut self, clock: Clock) {
+        for (m, k) in self.receiver.expire(clock.wall_ms) {
+            self.machine.close_window(&m, &k);
         }
     }
     /// Some carrier works again.
@@ -246,8 +395,9 @@ impl Endpoint {
     }
 
     /// Bytes received from a carrier. A frame that fails any §S3 check is dropped silently
-    /// and changes no state; a frame from a key this member has not accepted makes the machine
-    /// send that member a `hello` (rate limited).
+    /// and changes no state; a frame from a key this member has not accepted, sent by a
+    /// member entitled to the namespace, makes the machine send that member a `hello` (rate
+    /// limited per member and in all).
     pub fn receive(&mut self, bytes: &[u8], clock: Clock, epochs: &dyn EpochKeys) -> Step {
         match self.receiver.open(
             bytes,
@@ -257,6 +407,9 @@ impl Endpoint {
             self.policy.max_payload,
         ) {
             Ok(o) => {
+                if let Some(k) = &o.closed {
+                    self.machine.close_window(&o.frame.from, k);
+                }
                 let outs = self.machine.handle(
                     Input::Frame {
                         frame: o.frame,
@@ -290,7 +443,14 @@ impl Endpoint {
             match o {
                 Output::Send { frame } => {
                     let kind = frame.body.kind();
-                    match self.sender.seal(&frame, epochs, clock.wall_ms) {
+                    let sealed = if !self.entitled {
+                        Err(SealError::NotEntitled)
+                    } else if frame.body.needs_writer() && !self.machine.can_write() {
+                        Err(SealError::NotWriter)
+                    } else {
+                        self.sender.seal(&frame, epochs, clock.wall_ms)
+                    };
+                    match sealed {
                         Ok(bytes) => effects.push(Effect::Send {
                             bytes,
                             to: frame.to,

@@ -329,6 +329,8 @@ pub enum KeyError {
     Exhausted,
     /// A date is outside years 0001–9999, or the window is invalid.
     Window,
+    /// The member's session number changed since the key was delegated: the key is retired.
+    Retired,
 }
 impl std::fmt::Display for KeyError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -336,6 +338,7 @@ impl std::fmt::Display for KeyError {
             KeyError::Scalar => "the random bytes are not a P-256 scalar",
             KeyError::Exhausted => "the session key has used every n",
             KeyError::Window => "invalid delegation window",
+            KeyError::Retired => "the session key is retired",
         })
     }
 }
