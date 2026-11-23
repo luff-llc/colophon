@@ -73,7 +73,7 @@ fn a_sealed_frame_passes_the_home_with_its_outer_fields_and_opens_after_forwardi
 #[test]
 fn the_home_refuses_a_sealed_frame_outside_its_rules() {
     let w = world();
-    let (beat, _) = sealed(&w);
+    let (beat, up) = sealed(&w);
     let check = |bytes: &[u8], account: &str, member: &str, entitled: &[String]| {
         check_session_frame(bytes, account, member, entitled)
     };
@@ -104,6 +104,30 @@ fn the_home_refuses_a_sealed_frame_outside_its_rules() {
     })));
     assert!(malformed(&edit(&beat, |m| {
         m.insert("retain".into(), false.into());
+    })));
+    // Opaque fields outside the codec's grammar: a key that is not a key ID, a short
+    // signature, a ciphertext shorter than its tag.
+    for (field, value) in [
+        ("key", Value::from("k")),
+        ("signature", Value::from("AAAA")),
+        ("ciphertext", Value::from("AAAA")),
+    ] {
+        assert!(malformed(&edit(&beat, |m| {
+            m.insert(field.into(), value);
+        })), "{field}");
+    }
+    // A delegation for another session key, one that is not an envelope, and one over its bound.
+    let other = json(&up[0])["delegation"].clone();
+    assert!(malformed(&edit(&beat, |m| {
+        m.insert("delegation".into(), other);
+    })));
+    assert!(malformed(&edit(&beat, |m| {
+        m.insert("delegation".into(), serde_json::json!({"anything": [1, 2]}));
+    })));
+    let mut padded = json(&up[0])["delegation"].clone();
+    padded["body"] = STANDARD.encode(vec![b' '; 1_600]).into();
+    assert!(malformed(&edit(&beat, |m| {
+        m.insert("delegation".into(), padded);
     })));
     // Not canonical: the same object with a space.
     let text = String::from_utf8(beat.clone()).unwrap();
@@ -147,8 +171,9 @@ fn every_wire_vector_frame_passes_the_home() {
 
 #[test]
 fn the_home_refuses_exactly_the_negative_vectors_it_can_judge() {
-    // The home reads only the outer fields: it refuses frames a receiver drops as malformed,
-    // oversize or of another account, and forwards the rest, which only a receiver can judge.
+    // The home applies the receiver's parser and nothing after it: it refuses frames a receiver
+    // drops as malformed, oversize or of another account, and forwards the rest, which only a
+    // receiver can judge.
     let v = vectors();
     let account = v["account"].as_str().unwrap();
     let ns = vec![v["namespace"].as_str().unwrap().to_string()];
@@ -167,6 +192,12 @@ fn the_home_refuses_exactly_the_negative_vectors_it_can_judge() {
             ),
             Some("oversize") => assert_eq!(got, Err(FrameRefusal::TooLarge), "{name}"),
             Some("account") => assert_eq!(got, Err(FrameRefusal::Account), "{name}"),
+            // A delegation that is not a well-formed envelope naming (from, key) is refused; one
+            // that is well formed but does not verify is a receiver's to drop.
+            Some("delegation") => assert!(
+                got.is_ok() || matches!(got, Err(FrameRefusal::Malformed(_))),
+                "{name}: {got:?}"
+            ),
             _ => assert!(got.is_ok(), "{name}: {got:?}"),
         }
     }

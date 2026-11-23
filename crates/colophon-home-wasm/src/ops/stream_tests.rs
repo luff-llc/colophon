@@ -20,12 +20,13 @@ fn call(req: Value) -> Value {
 }
 
 /// A session frame in the codec's form (0.6 sessions §S3): one canonical JSON object. The home
-/// never opens the ciphertext or checks the signature, so both are placeholders.
+/// never opens the ciphertext or checks the signature, so both are zero bytes of the right
+/// lengths.
 fn frame(from: &str, extra: Value) -> String {
     let mut body = json!({"protocol": "colophon/session/6", "account": ACCOUNT,
         "namespace": "notes", "cell": "now-playing", "from": from,
         "key": "2bad0fd610d99eae443e932a26142bca", "n": 3, "epoch": 1,
-        "ciphertext": "AAAAAAAAAAAAAAAAAAAAAA==", "signature": "AAAA"});
+        "ciphertext": STANDARD.encode([0u8; 16]), "signature": STANDARD.encode([0u8; 64])});
     for (k, v) in extra.as_object().unwrap() {
         body[k] = v.clone();
     }
@@ -85,6 +86,8 @@ fn session_frame_refusals_carry_stream_codes() {
     );
     assert_eq!(code("not json".into(), A, json!(["notes"])), "badFrame");
     assert_eq!(code(frame(A, json!({"nonce": "AAAA"})), A, json!(["notes"])), "badFrame");
+    assert_eq!(code(frame(A, json!({"signature": "AAAA"})), A, json!(["notes"])), "badFrame");
+    assert_eq!(code(frame(A, json!({"key": "k"})), A, json!(["notes"])), "badFrame");
     // The former envelope over a base64 body is not a frame.
     let envelope = json!({"body": STANDARD.encode(frame(A, json!({}))), "signature": "AAAA"});
     assert_eq!(code(envelope.to_string(), A, json!(["notes"])), "badFrame");
