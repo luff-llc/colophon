@@ -1,6 +1,6 @@
 # Colophon 0.6: sessions
 
-**Status:** unfrozen draft, revision 16, 2026-11-23. Revision 2 adopted the findings of the
+**Status:** unfrozen draft, revision 17, 2026-11-23. Revision 2 adopted the findings of the
 reference machine (`docs/colophon-0.6-sessions-findings.md`, F1–F20); revision 3 added `via` to passed claims (F12, F21); revision 4 answers the first
 independent design review (R1–R9 in the findings document): evidence instead of hearsay,
 no silent loss of state, key bootstrap and freshness, bounded state; revision 5 adopts what
@@ -121,9 +121,9 @@ session number, and the verifier's clock is within the window widened by 60 s; t
 is checked again for every frame. A verifier
 that later accepts a history in which the member is no longer a current member (0.5
 §8.5), no longer has the `records` entry, or has a higher session number MUST stop
-accepting that member's session keys and every frame signed by them from then on. It keeps
-their replay floors (§S3) until the delegations expire, so that an old key presented again
-under a new delegation cannot replay old frames. A member MAY sign a new
+accepting that member's session keys and every frame signed by them from then on (§S3
+says how a later key of that member is opened). A member whose session number changes MUST
+make a new session key and MUST NOT sign a delegation for an old one. A member MAY sign a new
 delegation for the same session key before the old one expires; receivers keep that key's
 window.
 
@@ -197,11 +197,15 @@ its key is not open sends that key's member a `hello`, at most once per `askTime
 a lost `hello` or a lost answer does not leave the two unable to hear each other.
 
 A member keeps open windows for at most 4 session keys per member, closing the one it
-accepted first. A closed window is not forgotten: for every key it has accepted the member
-keeps the highest `n` it accepted until that key's delegation expires, and a frame from
-that key with a lower or equal `n` is dropped even if the key is presented again. It keeps
-such floors for at most 64 keys per member, and while it holds 64 it accepts no new key
-from that member. It drops everything it holds for a member it no longer accepts (§S2).
+opened first, and at most 4 further keys per member that have passed steps 1–7 but not yet
+the freshness rule (from these it takes only `hello` frames, §S3 "Freshness"). It keeps
+nothing for a closed key. What stops a carrier from replaying a closed key's old frames is
+freshness, not memory: for each member it records when it last closed one of that member's
+windows, or stopped accepting the member's keys under §S2, and it honours an echo from
+that member only of a `fresh` value it issued after that moment. A closed key can
+therefore be opened again only by its owner, answering a new challenge, and its window
+then starts at that answer's `n`. It drops everything it holds for a member it no longer
+accepts (§S2).
 
 The plaintext is `{"kind": …, …}`. Kinds and their fields:
 
@@ -244,8 +248,9 @@ A member accepts a claim it meets in any frame when all of these hold:
 1. The frame passed §S3 and its sender is a **writer** at the member's accepted authority
    head (§S1). A claim met in a frame from a member that may only read, in any field
    (`claim`, `next`, `hello.seen`, `bye`, `yielded`), is ignored, with one exception: a
-   `bye` releasing the sender's own claim is honoured even after the sender has lost write
-   access, so a demoted holder can say that it has stopped. A claim that names as holder a
+   `bye` whose claim equals the receiver's accepted claim and names the sender as holder
+   is honoured even after the sender has lost write access, so a demoted holder can say
+   that it has stopped. No other claim in a reader's `bye` is considered. A claim that names as holder a
    member that is not a writer is never accepted; when a writer's `hello.seen` reports
    one, a holder still renews over it (§S5) so that the reporter can move on. Readers take part in freshness, presence
    and the ordered lane as listeners only.
