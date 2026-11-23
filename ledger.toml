@@ -1,0 +1,28 @@
+# Edition ledger: what went where. Append-only; written by `edition`, never by hand.
+# A correction is a new entry; see Edition's docs/design.md.
+format = 2
+
+[[entry]]
+id = "2026-11-23T09:50:32Z/staging-home/1be97435e6/f1d17efb"
+at = "2026-11-23T09:50:32Z"
+by = "claude"
+action = "deploy"
+product = "colophon"
+channel = "staging-home"
+tier = "staging"
+target = "https://colophon.toolsperson.com"
+ref = "main"
+commit = "1be97435e6a081d99077a03ac4427cd821081b42"
+tree = "64bfa802dc9ae91d7c0280df838fa9ce8cfa98b7"
+version = "0.6.0-dev"
+platform = "home"
+result = "failed"
+prev = "0000000000000000000000000000000000000000000000000000000000000000"
+receipt = "f1d17efb0661d78d565508c8af25cdd5"
+command = [
+  "home 1be97435e6 to https://colophon.toolsperson.com: {var.home_kit_script} release {commit}",
+]
+steps = [
+  "check rust: exit 0",
+  "home 1be97435e6 to https://colophon.toolsperson.com: exit 1",
+]
