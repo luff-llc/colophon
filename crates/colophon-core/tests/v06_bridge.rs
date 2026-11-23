@@ -1,7 +1,13 @@
 //! The §S9 bridge on its own: arbitrary connected graphs of 2–6 members (chains of 4, 5 and
 //! 6, rings, stars, a graph with a cut vertex, complete graphs), links that lose, duplicate
-//! and reorder, and an origin whose session layer retransmits fairly (a new frame, new `n`,
-//! until every member has the content).
+//! and reorder.
+//!
+//! Delivery assumptions are stated per test. The flood tests assume an origin that
+//! retransmits fairly (a new frame, new `n`, until every member has the content): that is an
+//! assumption about the session layer, not something the bridge provides, and the session
+//! layer produces it only for frames it repeats (beats, `state` on contact, resent asks,
+//! `yielded` and submits); the session-level checks over bridges with loss are in
+//! `v06_session_carriers.rs`, which assumes nothing of the kind.
 //!
 //! Checked: every frame (key, n) reaches each member's session layer at most once per bridge
 //! incarnation; every content reaches every member; a bridge forwards a given frame at most
@@ -241,6 +247,8 @@ fn seeds() -> u64 {
     std::env::var("COLOPHON_BRIDGE_SEEDS").ok().and_then(|v| v.parse().ok()).unwrap_or(200)
 }
 
+/// Delivery assumption: links lose (up to 30 %), duplicate (up to 20 %) and reorder, and
+/// the origin retransmits fairly under new `n` (see the module note).
 #[test]
 fn bridged_delivery_on_connected_graphs() {
     for (name, n, edges) in topologies() {
@@ -254,7 +262,8 @@ fn bridged_delivery_on_connected_graphs() {
 }
 
 /// Without loss the very first frame of each content reaches everyone, exactly once, with
-/// at most one transmission per directed edge.
+/// at most one transmission per directed edge. Delivery assumption: no loss, no duplicates;
+/// no retransmission.
 #[test]
 fn lossless_flood_is_exact() {
     for (name, n, edges) in topologies() {
@@ -271,7 +280,8 @@ fn lossless_flood_is_exact() {
 
 /// A frame lost beyond the first hop is not repaired by the origin resending the same `n`:
 /// the bridges that have it treat the resend as a duplicate and do not forward it again.
-/// Repair needs a new frame from the session layer (finding B1).
+/// Repair needs a new frame from the session layer (finding B1). Delivery assumption: the
+/// one frame scripted by hand.
 #[test]
 fn same_n_resend_does_not_cross_a_bridge() {
     let mut net = Net::new(3, &[(0, 1), (1, 2)], 9);
@@ -301,7 +311,8 @@ fn wire(from: &str, key: &str, n: u64, t: u64) -> Wire {
 }
 
 /// (a) A bridge forwards a verified frame from an origin it has no freshness window with;
-/// its own session layer drops the frame (no window), the far member gets it.
+/// its own session layer drops the frame (no window), the far member gets it. Delivery
+/// assumption: none (handed directly).
 #[test]
 fn forwards_without_own_window() {
     let mut b = Bridge::new("mb");
@@ -322,7 +333,7 @@ fn forwards_without_own_window() {
     let mut s = Session::new("mb", true, Policy::default(), None).with_fresh_seed([3; 16]);
     s.handle(Input::App { command: Command::Join { state: None } }, 0);
     let w = r.deliver.unwrap();
-    let outs = s.handle(Input::Frame { frame: w.frame, writer: true, key: Some(w.key), n: Some(w.n), forwarded: None }, 10);
+    let outs = s.handle(Input::Frame { frame: w.frame, writer: true, key: Some(w.key), n: Some(w.n) }, 10);
     // It does not act on the frame; it only probes the origin with a hello (finding B5).
     let only_probe = outs.iter().all(|o| matches!(o, Output::Send { frame } if matches!(frame.body, Body::Hello { .. }) && frame.to.as_deref() == Some("ma")));
     assert!(only_probe && s.accepted().is_none() && s.windows_for("ma") == 0);
@@ -333,6 +344,7 @@ fn forwards_without_own_window() {
 
 /// (c) A carrier replaying old frames: within the window nothing is forwarded again, below
 /// it nothing at all; after the bridge restarts each replayed frame is forwarded at most once.
+/// Delivery assumption: none (an adversarial replayer).
 #[test]
 fn replays_are_bounded() {
     let mut b = Bridge::new("mb");
@@ -355,34 +367,90 @@ fn replays_are_bounded() {
     assert_eq!(desc, 129);
 }
 
-/// (d) The session's 4-keys-per-member cap does not touch the bridge's forwarding memory:
-/// a member that cycles through 10 keys cannot make a bridge forward an old key's frame
-/// again. Bound: each (key, n) is forwarded at most once per bridge incarnation; the memory
-/// is one 128-wide window per accepted key until the key is forgotten.
+/// (d) Revision 10: a bridge keeps forwarding windows for at most 4 keys per origin member,
+/// the oldest dropped. A member that cycles through 10 keys leaves 4 windows; a replay of an
+/// evicted key's frames is forwarded again at most once per frame (and only after the key was
+/// evicted), a replay of a kept key's frames not at all. Delivery assumption: none (frames are
+/// handed to the bridge directly).
 #[test]
-fn key_cycling_cannot_force_refloods() {
+fn key_cycling_is_bounded() {
     let mut b = Bridge::new("mb");
     b.add_link(0);
     b.add_link(1);
     for k in 0..10 {
         for n in 1..=5 {
-            b.receive(0, wire("ma", &format!("k{k}"), n, n));
+            assert_eq!(b.receive(0, wire("ma", &format!("k{k}"), n, n)).forward.len(), 1);
         }
     }
-    let replays: usize = (0..10)
+    assert_eq!(b.forwarding_keys(), 4);
+    let kept: usize = (6..10)
         .flat_map(|k| (1..=5).map(move |n| (k, n)))
         .map(|(k, n)| b.receive(0, wire("ma", &format!("k{k}"), n, n)).forward.len())
         .sum();
-    assert_eq!(replays, 0);
-    assert_eq!(b.forwarding_keys(), 10);
+    assert_eq!(kept, 0, "kept keys are not re-flooded");
+    // Replaying an evicted key re-admits it (and evicts the oldest kept one): each of its
+    // frames once.
+    let evicted: usize = (1..=5).map(|n| b.receive(0, wire("ma", "k0", n, n)).forward.len()).sum();
+    let again: usize = (1..=5).map(|n| b.receive(0, wire("ma", "k0", n, n)).forward.len()).sum();
+    assert_eq!((evicted, again), (5, 0));
+    assert_eq!(b.forwarding_keys(), 4);
     b.forget_key("k0");
-    assert_eq!(b.forwarding_keys(), 9);
+    assert_eq!(b.forwarding_keys(), 3);
+    // Many origins: the memory is 4 keys per origin.
+    for m in 0..20 {
+        for k in 0..6 {
+            b.receive(0, wire(&format!("m{m}"), &format!("m{m}-k{k}"), 1, 1));
+        }
+    }
+    assert_eq!(b.forwarding_keys(), 3 + 20 * 4);
+}
+
+/// (d) Revision 10: forwarding is rate-limited per origin member (default 50 frames/s and
+/// 262,144 bytes/s, a token bucket holding one second). An origin sending 500 new frames in
+/// one second has at most a full bucket plus one second's refill (100) forwarded; its frames are still delivered to the bridge's own
+/// session layer; another origin is not affected; after a second the budget is back.
+/// Delivery assumption: none (frames handed to the bridge directly, with a clock).
+#[test]
+fn forwarding_is_rate_limited_per_origin() {
+    let mut b = Bridge::new("mb");
+    b.add_link(0);
+    b.add_link(1);
+    let (mut fwd, mut del) = (0, 0);
+    for n in 1..=500u64 {
+        let r = b.receive_at(0, wire("ma", "k-ma", n, n), true, Some(n * 2));
+        fwd += r.forward.len();
+        del += usize::from(r.deliver.is_some());
+    }
+    assert!(fwd <= 100, "forwarded {fwd} in one second");
+    assert_eq!(del, 500, "rate limiting never drops delivery to this member");
+    assert!(b.rate_dropped() >= 400);
+    let other: usize = (1..=10u64).map(|n| b.receive_at(0, wire("mc", "k-mc", n, n), true, Some(1_000)).forward.len()).sum();
+    assert_eq!(other, 10);
+    let later: usize = (501..=540u64).map(|n| b.receive_at(0, wire("ma", "k-ma", n, n), true, Some(3_000)).forward.len()).sum();
+    assert_eq!(later, 40);
+    // The byte budget: frames of ~64 KiB, at most 4 a second.
+    let big = |n: u64| Wire {
+        key: "k-md".into(),
+        n,
+        frame: Frame { from: "md".into(), to: None, retain: false, body: Body::Msg {
+                claim: colophon_core::v06::session::Claim::new(1, 0, "md"),
+                seq: n,
+                origin: "md".into(),
+                id: colophon_core::v06::session::Id::from_label("m"),
+                payload: colophon_core::v06::session::Bytes(vec![7; 48_000]),
+            },
+        },
+    };
+    let bytes: usize = (1..=20u64).map(|n| b.receive_at(0, big(n), true, Some(10_000)).forward.len()).sum();
+    assert!(bytes <= 4, "forwarded {bytes} large frames at once");
 }
 
 #[allow(clippy::needless_range_loop)]
 /// (b) The fresh/echo handshake end to end across 1, 2 and 3 bridges (chains of 3, 4 and 5)
 /// under 20 % loss per hop: every member opens a window for the key of every member that sent frames
-/// other than hellos, and the group agrees on the holder.
+/// other than hellos, and the group agrees on the holder. Delivery assumption: independent
+/// 20 % loss per hop, FIFO, no retransmission by the harness: every repeat comes from the
+/// session machines (probes, beats, hellos on contact).
 fn handshake_chain(n: usize, seed: u64, fixes: colophon_core::v06::session::Fixes) -> Result<(), String> {
     let ids: Vec<String> = (0..n).map(|i| format!("{:02x}", i * 0x11)).collect();
     let mut s: Vec<Session> = ids
@@ -442,7 +510,7 @@ fn handshake_chain(n: usize, seed: u64, fixes: colophon_core::v06::session::Fixe
                 let dbg = std::env::var("COLOPHON_BRIDGE_DEBUG").is_ok() && matches!(w.frame.body, Body::Hello { .. });
                 let desc = format!("{} <- {} {:?} n={}", ids[to], w.frame.from, w.frame.body, w.n);
                 let outs = s[to].handle(
-                    Input::Frame { frame: w.frame, writer: true, key: Some(w.key), n: Some(w.n), forwarded: None },
+                    Input::Frame { frame: w.frame, writer: true, key: Some(w.key), n: Some(w.n) },
                     now,
                 );
                 if dbg {
