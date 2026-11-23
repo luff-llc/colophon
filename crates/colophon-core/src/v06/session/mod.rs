@@ -21,7 +21,7 @@ pub mod io;
 pub mod types;
 
 pub use clock::{sample, Sample, Samples};
-pub use io::{Command, Event, Input, Output, Via};
+pub use io::{Command, Event, Forwarded, Input, Output, Via};
 pub use types::{
     Body, Bytes, Claim, Fixes, Fold, Frame, Heard, Id, MemberId, Persisted, Policy, Seen,
     TakeRule, MAX_ECHO, MAX_INT, MAX_TERM,
@@ -49,6 +49,11 @@ struct Want {
     /// A holder frame from the holder arrived since the ask (a flag, not a time comparison:
     /// a beat accepted in the same millisecond as the ask must count).
     heard_since: bool,
+    /// The holder is known only from forwarded evidence (R1d): no take on the ask timeout,
+    /// only once the holder is lapsed.
+    evidence_only: bool,
+    /// The want exists only because this member had taken (no application ask).
+    kept: bool,
     /// The application's projection to start from.
     snapshot: Option<Bytes>,
 }
@@ -62,6 +67,18 @@ struct SentPass {
     snapshot: Bytes,
 }
 
+/// A `yielded` not yet acknowledged (§S5).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct PendingYield {
+    /// The member it was first sent to (the taker).
+    first: MemberId,
+    body: Body,
+    held: Claim,
+    /// Resends left (revision 4: one; revision 5: until acknowledged).
+    left: u8,
+    last: u64,
+}
+
 /// An unanswered submit (§S8, revision 4).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct PendingSubmit {
@@ -72,8 +89,6 @@ struct PendingSubmit {
 
 /// Resends of an unanswered submit before it is reported failed.
 pub const SUBMIT_TRIES: u8 = 8;
-/// Resends of `yielded` (finding R2d: one resend does not survive two losses).
-pub const YIELDED_RESENDS: u8 = 8;
 /// §S8: gap `hello`s at most once per second.
 pub const GAP_HELLO_MS: u64 = 1_000;
 /// Own `fresh` values remembered (§S3 freshness).
@@ -123,7 +138,11 @@ pub struct Session {
     evidence: Option<(Frame, u64)>,
     /// A `yielded` frame to resend to the new holder (§S5), with resends left and when last
     /// sent.
-    pending_yielded: Option<(MemberId, Body, u8, u64)>,
+    pending_yielded: Option<PendingYield>,
+    /// It holds because it wanted the role and took (R1d).
+    took_wanting: bool,
+    /// Transient during `handle`: the input is forwarded evidence.
+    in_evidence: bool,
     /// The claim each member's last `hello` named (finding R1c): a member that names a lesser
     /// claim or none is sent evidence as soon as this member has it.
     peers_seen: BTreeMap<MemberId, Option<Claim>>,
@@ -139,6 +158,8 @@ pub struct Session {
     link_down_since: Option<u64>,
     last_heard_holder: u64,
     lapse_reported: bool,
+    /// When the current lapse was reported (R1f).
+    lapse_since: Option<u64>,
     last_sent_all: Option<u64>,
     heard: BTreeMap<MemberId, u64>,
     heard_holding: BTreeMap<MemberId, u64>,
@@ -193,6 +214,8 @@ impl Session {
             asks: BTreeSet::new(),
             evidence: None,
             pending_yielded: None,
+            took_wanting: false,
+            in_evidence: false,
             peers_seen: BTreeMap::new(),
             reported: VecDeque::new(),
             submits: BTreeMap::new(),
@@ -204,6 +227,7 @@ impl Session {
             link_down_since: None,
             last_heard_holder: 0,
             lapse_reported: false,
+            lapse_since: None,
             last_sent_all: None,
             heard: BTreeMap::new(),
             heard_holding: BTreeMap::new(),
@@ -355,8 +379,9 @@ impl Session {
         self.evidence.as_ref().map(|(f, t)| (f, age(*t))).hash(h);
         self.pending_yielded
             .as_ref()
-            .map(|(to, b, n, t)| (to, b, n, age(*t)))
+            .map(|p| (&p.first, &p.body, &p.held, p.left, age(p.last)))
             .hash(h);
+        self.took_wanting.hash(h);
         self.peers_seen.hash(h);
         self.reported.hash(h);
         for (k, p) in &self.submits {
@@ -371,6 +396,8 @@ impl Session {
                 1u8.hash(h);
                 w.asked_at.map(age).hash(h);
                 w.heard_since.hash(h);
+                w.evidence_only.hash(h);
+                w.kept.hash(h);
                 w.declined.hash(h);
                 w.snapshot.hash(h);
             }
@@ -381,6 +408,7 @@ impl Session {
         self.link_down_since.map(age).hash(h);
         age(self.last_heard_holder).hash(h);
         self.lapse_reported.hash(h);
+        self.lapse_since.map(age).hash(h);
         self.last_sent_all.map(age).hash(h);
         if !self.fixes.answer_lesser {
             // Only the literal reading of "present" reads it.
@@ -417,7 +445,15 @@ impl Session {
                 writer,
                 key,
                 n,
-            } => self.on_frame(frame, writer, key, n, now, &mut out),
+                forwarded,
+            } => {
+                self.in_evidence = forwarded.is_some();
+                match forwarded {
+                    Some(fw) if !fw.windowed => self.claim_only(frame, writer, now, &mut out),
+                    _ => self.on_frame(frame, writer, key, n, now, &mut out),
+                }
+                self.in_evidence = false;
+            }
             Input::Tick => self.on_tick(now, &mut out),
             Input::LinkUp => self.on_link_up(now, &mut out),
             Input::LinkDown => {
@@ -610,7 +646,13 @@ impl Session {
     }
     /// The claim as this member orders it (revision 1: unverified rank 1 orders as rank 0).
     fn ordering(&self, c: &Claim, from: &str) -> Claim {
-        if c.rank == 1 && !self.rank1_ok(c, from) && self.accepted.as_ref() != Some(c) {
+        // Since revision 2 (F1) claims order as they are; only revision 1 ordered an
+        // unverified rank-1 claim as rank 0.
+        if !self.fixes.rank1_from_holder
+            && c.rank == 1
+            && !self.rank1_ok(c, from)
+            && self.accepted.as_ref() != Some(c)
+        {
             c.as_rank0()
         } else {
             c.clone()
@@ -649,6 +691,7 @@ impl Session {
     /// Accept `c` (greater than the current claim), optionally with its initial state.
     fn adopt(&mut self, c: Claim, snapshot: Option<Bytes>, now: u64, out: &mut Out) {
         let was_holder = self.is_holder();
+        let was_wanting = self.want.is_some() || (was_holder && self.took_wanting);
         let old = (self.accepted.clone(), self.seq, self.state.clone());
         self.accepted = Some(c.clone());
         self.released = false;
@@ -673,15 +716,35 @@ impl Session {
             // §S5 yielding state (revision 4): tell the taker what this member held.
             if let (true, 0, Some(held)) = (self.fixes.state_reports, c.rank, old.0) {
                 let body = Body::Yielded {
-                    claim: held,
+                    claim: held.clone(),
                     seq: old.1,
                     snapshot: old.2,
                 };
                 self.send(out, Some(&c.holder), false, body.clone());
-                let resends = if self.fixes.yielded_retry { YIELDED_RESENDS } else { 1 };
-                self.pending_yielded = Some((c.holder.clone(), body, resends, now));
+                self.pending_yielded = Some(PendingYield {
+                    first: c.holder.clone(),
+                    body,
+                    held,
+                    left: 1,
+                    last: now,
+                });
             }
         }
+        // R1d (revision 5): yielding to forwarded evidence keeps the wish for the role; take
+        // again only once that holder is lapsed (not on the ask timeout).
+        if !mine && was_wanting && self.in_evidence && self.fixes.evidence_keeps_want {
+            let snapshot = self.want.as_ref().and_then(|w| w.snapshot.clone());
+            let kept = self.want.is_none();
+            self.want = Some(Want {
+                asked_at: None,
+                declined: false,
+                heard_since: false,
+                evidence_only: true,
+                kept,
+                snapshot,
+            });
+        }
+        self.took_wanting = false;
         if !mine {
             Self::event(
                 out,
@@ -703,11 +766,16 @@ impl Session {
                 self.send_hello(out, Some(&c.holder), false, now);
             }
             if let Some(w) = &mut self.want {
-                // Ask the new holder.
+                // Ask the new holder. A want kept only because this member had taken does not
+                // ask (finding R1g): if the holder is in fact reachable, an immediate ask hands
+                // the role back to a returning holder; it waits for the lapse instead.
+                let silent = w.evidence_only && w.kept && self.fixes.evidence_refresh;
                 w.asked_at = Some(now);
                 w.declined = false;
                 w.heard_since = false;
-                self.send(out, Some(&c.holder), false, Body::Ask { claim: c.clone() });
+                if !silent {
+                    self.send(out, Some(&c.holder), false, Body::Ask { claim: c.clone() });
+                }
             }
             self.resend_submits(now, out);
         }
@@ -738,6 +806,8 @@ impl Session {
         self.order_own_submits(now, out);
     }
     fn become_holder(&mut self, claim: Claim, now: u64, out: &mut Out) {
+        // A displaced member that holds again keeps its own state.
+        self.pending_yielded = None;
         self.accepted = Some(claim);
         self.released = false;
         self.gate = None;
@@ -895,6 +965,10 @@ impl Session {
         now: u64,
         out: &mut Out,
     ) -> bool {
+        if self.in_evidence {
+            // The carrier reported an open window for the origin's key (§S3).
+            return true;
+        }
         let Body::Hello { fresh, echo, .. } = &f.body else {
             // Non-hello: only through an open window, at or above its floor.
             return match (key, n) {
@@ -971,20 +1045,28 @@ impl Session {
         }
         let from = f.from.clone();
         self.heard.insert(from.clone(), now);
-        // §S5 yielding state: resend `yielded` when the new holder is heard, at most once per
-        // askTimeoutMs and a bounded number of times (finding R2d: revision 4's single resend
-        // does not survive two losses; resending only when the link has just worked keeps a
-        // long partition from using the resends up).
+        // §S5 yielding state. Revision 5: resend to whichever member is now the holder, when
+        // it is heard directly, at most once per askTimeoutMs, until an `ack`. Revision 4:
+        // once, when the taker is heard.
         let ask = self.policy.ask_timeout_ms;
-        if let Some((to, body, left, last)) = self.pending_yielded.as_mut() {
-            if *to == from && now.saturating_sub(*last) >= ask {
-                let (to, body) = (to.clone(), body.clone());
-                *left -= 1;
-                *last = now;
-                if *left == 0 {
-                    self.pending_yielded = None;
+        let holder_now = self.holder().map(str::to_owned);
+        let direct = !self.in_evidence;
+        if let Some(p) = self.pending_yielded.as_mut() {
+            let target = if self.fixes.yielded_ack {
+                holder_now.filter(|h| *h == from && direct)
+            } else {
+                (p.first == from && p.left > 0).then(|| from.clone())
+            };
+            if let Some(to) = target {
+                if now.saturating_sub(p.last) >= ask {
+                    p.last = now;
+                    p.left = p.left.saturating_sub(1);
+                    let body = p.body.clone();
+                    if !self.fixes.yielded_ack && p.left == 0 {
+                        self.pending_yielded = None;
+                    }
+                    self.send(out, Some(&to), false, body);
                 }
-                self.send(out, Some(&to), false, body);
             }
         }
         let holding_frame = f.body.is_holder_frame() || matches!(f.body, Body::Take { .. });
@@ -997,8 +1079,18 @@ impl Session {
         if alive && self.holder() == Some(from.as_str()) {
             self.last_heard_holder = now;
             self.lapse_reported = false;
+            let direct = !(self.in_evidence && self.fixes.evidence_keeps_want);
+            // R1g (reading): a want kept only because the holder seemed unreachable ends when
+            // the holder is heard directly.
+            if direct && self.want.as_ref().is_some_and(|w| w.evidence_only) {
+                if self.want.as_ref().is_some_and(|w| w.kept) {
+                    self.want = None;
+                } else if let Some(w) = &mut self.want {
+                    w.evidence_only = false;
+                }
+            }
             if let Some(w) = &mut self.want {
-                if w.asked_at.is_some() {
+                if w.asked_at.is_some() && direct {
                     w.heard_since = true;
                 }
             }
@@ -1155,6 +1247,11 @@ impl Session {
                 snapshot,
             } => {
                 let key = (from.clone(), claim.clone());
+                if self.fixes.yielded_ack && !self.sends_as_holder() {
+                    // Revision 5: only the holder reports and acknowledges; the displaced
+                    // member resends to the holder it accepts.
+                    return;
+                }
                 if self.fixes.state_reports && !self.reported.contains(&key) {
                     self.reported.push_back(key);
                     while self.reported.len() > 8 {
@@ -1163,12 +1260,21 @@ impl Session {
                     Self::event(
                         out,
                         Event::Displaced {
-                            from,
-                            claim,
+                            from: from.clone(),
+                            claim: claim.clone(),
                             seq,
                             snapshot,
                         },
                     );
+                }
+                if self.fixes.yielded_ack {
+                    // Report first, then acknowledge (a crash between them loses no report).
+                    self.send(out, Some(&from), false, Body::Ack { yielded: claim });
+                }
+            }
+            Body::Ack { yielded } => {
+                if self.pending_yielded.as_ref().is_some_and(|p| p.held == yielded) {
+                    self.pending_yielded = None;
                 }
             }
             Body::Ping { t } => {
@@ -1229,7 +1335,11 @@ impl Session {
         }
         // Keep the latest broadcast holder frame of the accepted claim as evidence.
         let fe = frame_for_evidence;
-        if fe.to.is_none()
+        // Only a frame heard directly from its holder is evidence: a forwarded copy must not
+        // renew its freshness, or two members would keep a dead holder alive by forwarding it
+        // to each other (finding R1h).
+        if !self.in_evidence
+            && fe.to.is_none()
             && matches!(fe.body, Body::State { .. } | Body::Beat { .. } | Body::Msg { .. })
             && fe.body.claim() == self.accepted.as_ref()
             && fe.body.claim().is_some_and(|c| c.holder == fe.from)
@@ -1248,6 +1358,24 @@ impl Session {
                 }
             }
             self.evidence = Some((fe, now));
+        }
+    }
+
+    /// §S3 evidence without a window: only the claim, under §S4 rules 1–4, and the holder
+    /// counts as heard at receipt; `seq`, `snapshot` and `payload` are ignored.
+    fn claim_only(&mut self, f: Frame, writer: bool, now: u64, out: &mut Out) {
+        if !self.joined || f.from == self.me || !writer || !f.body.in_range(self.policy.max_payload) {
+            return;
+        }
+        let holding = matches!(f.body, Body::State { .. } | Body::Beat { .. } | Body::Msg { .. });
+        let Some(c) = f.body.claim().cloned().filter(|c| holding && c.holder == f.from) else {
+            return;
+        };
+        self.consider(&c, &f.from, now, out);
+        if self.accepted.as_ref() == Some(&c) && !self.released {
+            self.last_heard_holder = now;
+            self.lapse_reported = false;
+            self.heard_holding.insert(f.from.clone(), now);
         }
     }
 
@@ -1329,6 +1457,25 @@ impl Session {
                     return;
                 }
                 self.consider(&s.claim, from, now, out);
+            }
+        }
+        // R1f: a member with fresh evidence answers a report that the holder lapsed.
+        if self.fixes.evidence_refresh
+            && heard == Heard::Lapsed
+            && seen.as_ref().map(|s| &s.claim) == self.accepted.as_ref()
+        {
+            if self.sends_as_holder() {
+                self.send_state(out, Some(from), now);
+                return;
+            }
+            let timeout = self.policy.holder_timeout_ms;
+            if let Some((frame, _)) = self.evidence.as_ref().filter(|(e, t)| {
+                now.saturating_sub(*t) < timeout && e.body.claim() == self.accepted.as_ref()
+            }) {
+                out.push(Output::Forward {
+                    to: from.to_owned(),
+                    frame: frame.clone(),
+                });
             }
         }
         if !self.sends_as_holder() {
@@ -1446,6 +1593,7 @@ impl Session {
             let key = (from.to_owned(), next.clone());
             if verified
                 && self.fixes.state_reports
+                && self.fixes.yielded_ack
                 && next.holder == self.me
                 && self.is_holder()
                 && self.accepted.as_ref() != Some(&next)
@@ -1510,23 +1658,6 @@ impl Session {
                 },
             );
         }
-        // §S5 yielding state: also resend on time while the new holder has been heard within
-        // holderTimeoutMs (it may never speak to this member again).
-        let ask = self.policy.ask_timeout_ms;
-        let timeout = self.policy.holder_timeout_ms;
-        let heard = &self.heard;
-        if let Some((to, body, left, last)) = self.pending_yielded.as_mut() {
-            let recent = heard.get(to).is_some_and(|t| now.saturating_sub(*t) < timeout);
-            if recent && now.saturating_sub(*last) >= ask {
-                let (to, body) = (to.clone(), body.clone());
-                *left -= 1;
-                *last = now;
-                if *left == 0 {
-                    self.pending_yielded = None;
-                }
-                self.send(out, Some(&to), false, body);
-            }
-        }
         // §S8 (revision 4): resend unanswered submits every askTimeoutMs.
         if self.fixes.submit_retry {
             if let Some(h) = self.holder().map(str::to_owned).filter(|h| *h != self.me) {
@@ -1564,8 +1695,12 @@ impl Session {
             return;
         }
         let lapsed = self.lapsed(now);
+        if !lapsed {
+            self.lapse_since = None;
+        }
         if lapsed && !self.lapse_reported {
             self.lapse_reported = true;
+            self.lapse_since = Some(now);
             if let Some(h) = self.holder() {
                 let holder = h.to_owned();
                 if self.fixes.bye_resend {
@@ -1579,14 +1714,26 @@ impl Session {
                 return;
             }
             let ask_expired = w.asked_at.is_some_and(|at| {
-                !w.declined && now.saturating_sub(at) >= self.policy.ask_timeout_ms && !w.heard_since
+                !w.declined
+                    && !w.evidence_only
+                    && now.saturating_sub(at) >= self.policy.ask_timeout_ms
+                    && !w.heard_since
             });
             let unanswered = w.asked_at.is_some_and(|at| {
                 !w.declined && now.saturating_sub(at) >= self.policy.ask_timeout_ms && w.heard_since
             });
-            if self.no_holder() || lapsed || ask_expired {
+            // R1f: a want kept after evidence takes only askTimeoutMs after the lapse hello, so
+            // a member with fresh evidence can answer it.
+            let lapse_ok = lapsed
+                && !(w.evidence_only
+                    && self.fixes.evidence_refresh
+                    && self
+                        .lapse_since
+                        .is_none_or(|t| now.saturating_sub(t) < self.policy.ask_timeout_ms));
+            if self.no_holder() || lapse_ok || ask_expired {
                 let snapshot = w.snapshot.clone();
                 self.take(snapshot, Via::Take, now, out);
+                self.took_wanting = self.is_holder();
             } else if unanswered && self.fixes.ask_resend {
                 if let (Some(c), Some(w)) = (self.accepted.clone(), self.want.as_mut()) {
                     w.asked_at = Some(now);
@@ -1665,6 +1812,7 @@ impl Session {
                 let claim = self.accepted.clone();
                 self.released = true;
                 self.gate = None;
+                self.took_wanting = false;
                 self.persist(out);
                 self.send(out, None, false, Body::Bye { claim, leaving: false });
             }
@@ -1679,7 +1827,9 @@ impl Session {
                 let mut w = Want {
                     asked_at: None,
                     declined: false,
-                    heard_since: false,
+                        heard_since: false,
+                    evidence_only: false,
+                    kept: false,
                     snapshot: None,
                 };
                 if let (Some(c), false) = (self.accepted.clone(), self.no_holder()) {
@@ -1701,10 +1851,13 @@ impl Session {
                 let asked_at = self.want.as_ref().and_then(|w| w.asked_at);
                 let declined = self.want.as_ref().is_some_and(|w| w.declined);
                 let heard_since = self.want.as_ref().is_some_and(|w| w.heard_since);
+                let evidence_only = self.want.as_ref().is_some_and(|w| w.evidence_only);
                 self.want = Some(Want {
                     asked_at,
                     declined,
                     heard_since,
+                    evidence_only,
+                    kept: false,
                     snapshot,
                 });
                 self.on_tick(now, out);
@@ -1737,6 +1890,7 @@ impl Session {
                     seq: self.seq,
                     snapshot: snapshot.clone(),
                 };
+                self.took_wanting = false;
                 // R3: accept and persist `next` before the pass reveals it.
                 self.adopt(next.clone(), Some(snapshot.clone()), now, out);
                 self.send(

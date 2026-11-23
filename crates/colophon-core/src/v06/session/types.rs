@@ -265,6 +265,11 @@ pub enum Body {
         /// Its state.
         snapshot: Bytes,
     },
+    /// The holder reported a `yielded` to its application (§S5, revision 5).
+    Ack {
+        /// The claim named by the `yielded` it answers.
+        yielded: Claim,
+    },
     /// Round trip and offset (§S7).
     Ping {
         /// Sender clock, ms.
@@ -324,6 +329,7 @@ impl Body {
                 Body::Yielded {
                     claim, seq, snapshot,
                 } => claim.well_formed() && int(*seq) && size(snapshot),
+                Body::Ack { yielded } => yielded.well_formed(),
                 Body::Ping { t } => int(*t),
                 Body::Pong { t, echo, hold } => int(*t) && int(*echo) && int(*hold),
                 _ => true,
@@ -337,6 +343,7 @@ impl Body {
                 | Body::Beat { .. }
                 | Body::Msg { .. }
                 | Body::Refuse { .. }
+                | Body::Ack { .. }
                 | Body::Pass { .. }
                 | Body::Decline { .. }
         )
@@ -364,6 +371,7 @@ impl Body {
             Body::Pong { .. } => "pong",
             Body::Bye { .. } => "bye",
             Body::Yielded { .. } => "yielded",
+            Body::Ack { .. } => "ack",
         }
     }
 }
@@ -487,8 +495,8 @@ impl Default for Policy {
 /// Departures from the draft text that the explorer showed necessary
 /// (`docs/colophon-0.6-sessions-findings.md`). [`Fixes::default`] is the reference reading;
 /// [`Fixes::LITERAL`] reproduces the revision 1 draft so the counterexamples stay
-/// reproducible, and [`Fixes::REV3`] the revision 3 draft. Revision 4 adopts every fix
-/// (`ALL`); F12/F21 are settled by `Claim::via` rather than a switch.
+/// reproducible, [`Fixes::REV3`], [`Fixes::REV4`] and [`Fixes::REV5`] those drafts.
+/// [`Fixes::ALL`] is revision 5 plus R1f; F12/F21 are settled by `Claim::via`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Fixes {
@@ -531,14 +539,26 @@ pub struct Fixes {
     /// R5 (revision 4): unanswered submits are resent on holder change and every
     /// `askTimeoutMs`, at most 8 times, then reported failed.
     pub submit_retry: bool,
-    /// R1b/R1c (beyond revision 4's text): evidence also answers a `hello` naming a lesser
+    /// R1b/R1c (revision 5): evidence also answers a `hello` naming a lesser
     /// claim or none, and is pushed to members whose last `hello` did, as soon as this member
     /// has it. Off: revision 4 as written (only holder frames and `take` are corrected).
     pub evidence_push: bool,
-    /// R2d (beyond revision 4's text): `yielded` is resent every `askTimeoutMs` up to 8
-    /// times. Off: revision 4 as written (resent once).
-    pub yielded_retry: bool,
-    /// R1e (beyond revision 4's text): a holder renews on `heard: lapsed` only once its own
+    /// R2d/R2f (revision 5): `yielded` is acknowledged (`ack`) and resent to the current
+    /// holder, on hearing it, at most once per `askTimeoutMs`, until acknowledged; a late
+    /// pass to a member that has moved on is reported once (R2e). Off: revision 4 (one
+    /// resend, no `ack`).
+    pub yielded_ack: bool,
+    /// R1d (revision 5): forwarded evidence does not count for the ask-timeout take, and a
+    /// writer that took or wanted to take and yields to forwarded evidence keeps wanting,
+    /// taking only once that holder is lapsed to it. Off: revision 4.
+    pub evidence_keeps_want: bool,
+    /// R1f (beyond revision 5's text): a writer that keeps wanting after evidence takes only
+    /// askTimeoutMs after its lapse `hello`, and a member with fresh evidence answers a
+    /// `hello` reporting that holder lapsed with the evidence (the holder itself with
+    /// `state`). Without it, two wanting members that cannot reach each other on a chain
+    /// take from each other forever. Off: revision 5 as written.
+    pub evidence_refresh: bool,
+    /// R1e (revision 5): a holder renews on `heard: lapsed` only once its own
     /// link has worked for `holderTimeoutMs` (a returning holder must not win on the word of
     /// a member that merely missed the live holder's beats). Off: revision 4 as written.
     pub renew_guard: bool,
@@ -559,7 +579,9 @@ impl Fixes {
         persist_release: false,
         submit_retry: false,
         evidence_push: false,
-        yielded_retry: false,
+        yielded_ack: false,
+        evidence_keeps_want: false,
+        evidence_refresh: false,
         renew_guard: false,
     };
     /// The revision 3 draft: revisions 2 and 3 fixes, none of revision 4.
@@ -577,14 +599,23 @@ impl Fixes {
         persist_release: false,
         submit_retry: false,
         evidence_push: false,
-        yielded_retry: false,
+        yielded_ack: false,
+        evidence_keeps_want: false,
+        evidence_refresh: false,
         renew_guard: false,
     };
     /// Revision 4 as written (`ALL` without the fixes the explorer found beyond it).
     pub const REV4: Fixes = Fixes {
         evidence_push: false,
-        yielded_retry: false,
+        yielded_ack: false,
+        evidence_keeps_want: false,
+        evidence_refresh: false,
         renew_guard: false,
+        ..Fixes::ALL
+    };
+    /// Revision 5 as written (`ALL` without R1f).
+    pub const REV5: Fixes = Fixes {
+        evidence_refresh: false,
         ..Fixes::ALL
     };
     /// Every fix.
@@ -602,7 +633,9 @@ impl Fixes {
         persist_release: true,
         submit_retry: true,
         evidence_push: true,
-        yielded_retry: true,
+        yielded_ack: true,
+        evidence_keeps_want: true,
+        evidence_refresh: true,
         renew_guard: true,
     };
 }
