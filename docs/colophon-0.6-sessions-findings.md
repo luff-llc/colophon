@@ -1,10 +1,10 @@
 # Colophon 0.6 sessions: findings from the reference machine
 
-**Date:** 2026-11-22, updated 2026-11-23. **Against:** `spec/colophon-0.6-sessions.md`, revisions 1–12 (revision 12: `b8c5319`). **Code:** `crates/colophon-core/src/v06/session/`.
+**Date:** 2026-11-22, updated 2026-11-23. **Against:** `spec/colophon-0.6-sessions.md`, revisions 1–14 (revision 14: `fead177`). **Code:** `crates/colophon-core/src/v06/session/`.
 
 The reference machine implements the draft, and also the departures listed here. Each
 departure that changes behaviour has a switch in `Fixes`. `Fixes::default()` (= `ALL`) is the
-reference reading (revision 12; `Fixes::REV7` down to `REV3` are earlier drafts as written), and `Fixes::LITERAL` is the revision 1 draft, so every counterexample below
+reference reading (revision 14; `Fixes::REV7` down to `REV3` are earlier drafts as written), and `Fixes::LITERAL` is the revision 1 draft, so every counterexample below
 can be reproduced. Evidence comes from three sources:
 
 - **Explorer:** `tests/v06_session_explore.rs`, an exhaustive BFS to depth 8 with fair
@@ -672,11 +672,11 @@ every frame to every member, as the home carrier does.
 | G1 | every input in the explorer, simulator and carriers harness; restarts in the simulator; every output prefix in `crash_prefixes` | any (loss, duplication, reordering, partitions; adversarial delay in carriers) | more than 3 members exhaustively |
 | G2 | as G1 (`check_step`, including the pass-resend exemption) | any | as G1 |
 | G3 | as G1 (ghost of passes and snapshots) | any | as G1 |
-| G4 | carriers: `check_timely_end` asks the timely oracle (§V) for T and asserts G4 in the final window only when T + 30 s precedes it; explorer completions (FIFO, LIFO, rotate) at depth 8; simulator at the end (lossless, healed) | carriers: §S0 revision 12 conditions 1–3, decided per run by the oracle from the delivery log; simulator: healed and lossless; explorer: fair schedules | runs the oracle rejects (only safety is asserted there); the oracle in the explorer and simulator; more than 6 members |
+| G4 | carriers: after every input, each listener's state at its position is its holder's state at that position (the prefix form of revision 14, §W), including `g4_prefix_under_continuous_publishing`; `check_timely_end` asks the timely oracle (§V, closed intervals since §W) for T and asserts equality in the final window only when T + 30 s precedes it; explorer completions (FIFO, LIFO, rotate) at depth 8; simulator at the end (lossless, healed) | carriers: §S0 revision 12 conditions 1–3, decided per run by the oracle from the delivery log; simulator: healed and lossless; explorer: fair schedules | runs the oracle rejects (only safety is asserted there); the oracle in the explorer and simulator; more than 6 members |
 | G5 | carriers `g5_exact_bounds`: askTimeoutMs + 250 ms after asking and holderTimeoutMs + 250 ms after the last accepted holder frame, exactly, with timers fired at `next_deadline` plus 0–250 ms dispatch, and every 250 ms; simulator playback: the same bounds on the member's clock (±500 ppm); explorer: abstract ticks (askTimeoutMs plus one tick) | holder cut off (no frames to judge by the oracle) | the explorer's bound is in abstract ticks; clock stalls (only in random simulator seeds, where G5 is not timed) |
 | G6 | every accepted frame in explorer, simulator and carriers (U1) | any | — |
 | G7 | by construction: frames are not records; the bridge stores no payload beyond its windows | — | the encrypted carrier itself (out of this layer) |
-| G8 | host-level (the machine takes `writer` per frame and `Entitled`, failing closed until it has one); vectors `pass-not-entitled`, `entitlement-after-restart` | — | authority-history replay (host layer) |
+| G8 | host-level (the machine takes `writer` per frame and `Entitled`, failing closed until it has one); vectors `pass-not-entitled`, `entitlement-after-restart`, `revoked-writer-ignored`; `revocation_after_frames_is_outside_the_model` | the host tells the core of a removal before delivering later frames (§S1) | authority-history replay (host layer) |
 | G9 | the machine is a pure function of its inputs (`handle(input, now)`); vectors replay exact outputs; explorer hashing | — | other implementations beyond the vectors |
 | G10 | carriers: no claim change in the final 60–80 s window when the oracle finds the run timely early enough; `consecutive_lost_beats`; explorer completions | timely by the oracle (carriers); fair schedules (explorer) | runs the oracle rejects; the simulator (checked only as G4) |
 | G11 | ledger of owed reports in explorer completions, simulator and carriers (`owed` must empty) | displaced member keeps running, eventual delivery | members that crash (excluded by G11) |
@@ -754,6 +754,38 @@ With one beat lost in a row and up to 1 s of jitter, some gaps exceed 10 s and t
 rejects the run, yet every such run converges; likewise up to 5 s per hop across bridges.
 Convergence needs a listener never silent for holderTimeoutMs; condition 2 keeps beatMs in
 hand.
+
+## W. Fifth independent design review and revision 14
+
+The fifth review confirmed the four round-four fixes and found only precision items.
+Revision 14 reads condition 2 of §S0 over closed intervals and for every other member,
+restates G4 as every ordered message applied in order by every member, and requires the
+host to tell the core of a removal before delivering any later frame (§S1).
+
+- **Oracle, closed intervals.** `cond2_floor` keeps actual acceptances apart from the
+  holder span's endpoints. A closed interval of length L inside the span with no acceptance
+  rejects; a gap of exactly L between two acceptances passes, since every closed interval
+  of length L across it holds one of them. `cond2_closed_interval_boundaries`: gaps of
+  L − 1 and L pass and L + 1 fails, between acceptances, from the span's start and before
+  its end; a holder acting for exactly L with no acceptance fails. The home profile's
+  verdicts are unchanged (880, 267, 120 and 0 timely runs).
+- **Every other member.** The oracle never asks a holder to accept its own frames.
+- **G4 as a prefix.** After every input in the carriers harness, a listener's state at
+  position `seq` under a claim must be the state its holder had at that position (from
+  the holder's own states, or under `fold: latest` the payload of its `msg` at `seq`); a
+  listener ahead of its holder fails. `g4_prefix_under_continuous_publishing` is the
+  review's trace: the holder publishes every millisecond for 3 s with every delivery 1 ms
+  later; with 3 and 5 members the listeners are behind in about half and three quarters of
+  the samples, never off the holder's sequence, and equal once publishing stops. Every
+  carriers run checks the prefix property.
+- **Revocation order.** Vector `revoked-writer-ignored`: after the `entitled` input
+  without c, a and b drop c's `take`, `state`, `msg` and `beat` under the greater claim
+  2.0.c and c's `ask`; they keep 1.0.a and a's state. Outside the model,
+  `revocation_after_frames_is_outside_the_model`: when b's host delivers those frames first,
+  b accepts 2.0.c and its state, and the later `entitled` input does not undo it; a's next
+  beat corrects b, a renews to 3.0.a, and b follows a again.
+
+No change to `Frame`, `Body` or the `key`/`n` freshness inputs in this pass.
 
 ## Where the machine and the spec differed (resolved 2026-11-23)
 

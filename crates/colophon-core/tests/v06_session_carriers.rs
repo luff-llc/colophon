@@ -103,6 +103,63 @@ fn counts_as_holder(b: &Body) -> bool {
     b.is_holder_frame() || matches!(b, Body::Take { .. })
 }
 
+/// Condition 2 of §S0 (revision 14) for one listener and one holder span `[a, b]` (closed:
+/// the holder acts from the input at `a` up to the input at `b` that ends it, or to the end
+/// of the observed run): the least T such that every closed interval `[t, t + l]` with
+/// `t ≥ max(T, a)` and `t + l ≤ b` contains one of `points` (the listener's actual
+/// acceptances, sorted, in `[a, b]`). Span endpoints are not acceptances. Returns `a` when
+/// the whole span passes.
+fn cond2_floor(points: &[u64], a: u64, b: u64, l: u64) -> u64 {
+    let mut t = a;
+    // From the start a to the first acceptance q: [a, a + l] is empty iff q − a > l.
+    if let Some(&q) = points.first() {
+        if q - a > l {
+            t = t.max(q - l);
+        }
+    }
+    // Between consecutive acceptances p < q some [t', t' + l] fits strictly between them
+    // iff q − p > l; a T inside the gap then needs q − T ≤ l.
+    for w in points.windows(2) {
+        if w[1] - w[0] > l {
+            t = t.max(w[1] - l);
+        }
+    }
+    // The tail: after the last acceptance q an interval fits iff b − q > l; with none, the
+    // interval [a, a + l] fits iff b − a ≥ l. T must then leave no room: T + l > b.
+    let tail = match points.last() {
+        Some(&q) => b - q > l,
+        None => b - a >= l,
+    };
+    if tail {
+        t = t.max((b + 1).saturating_sub(l));
+    }
+    t
+}
+
+#[test]
+fn cond2_closed_interval_boundaries() {
+    let l = 10_000;
+    // Interior gaps between acceptances: L − 1 and L pass, L + 1 fails.
+    for (gap, ok) in [(l - 1, true), (l, true), (l + 1, false)] {
+        let pts = [1_000, 1_000 + gap, 1_000 + gap + 5_000];
+        let f = cond2_floor(&pts, 1_000, 1_000 + gap + 5_001, l);
+        assert_eq!(f == 1_000, ok, "interior gap {gap}: floor {f}");
+    }
+    // From the span's start to the first acceptance, and after the last one.
+    for (gap, ok) in [(l - 1, true), (l, true), (l + 1, false)] {
+        assert_eq!(cond2_floor(&[gap, gap + 1], 0, gap + 2, l) == 0, ok, "start gap {gap}");
+        assert_eq!(cond2_floor(&[500], 500, 500 + gap, l) == 500, ok, "tail gap {gap}");
+    }
+    // A holder acting with no acceptance at all: L − 1 passes; exactly L fails (the closed
+    // interval [a, a + L] lies in the span), as does L + 1.
+    assert_eq!(cond2_floor(&[], 0, l - 1, l), 0);
+    assert!(cond2_floor(&[], 0, l, l) > 0);
+    assert!(cond2_floor(&[], 0, l + 1, l) > 0);
+    // The floor is the earliest T that passes.
+    assert_eq!(cond2_floor(&[0, 20_000], 0, 25_000, l), 10_000);
+    assert_eq!(cond2_floor(&[0], 0, 30_000, l), 20_001);
+}
+
 /// Allowance after the oracle's T before the final window may be judged.
 const SETTLE: u64 = 30_000;
 
@@ -144,6 +201,8 @@ struct Net {
     log_membership: Vec<u64>,
     /// (time, member) of every `becameHolder`.
     became: Vec<(u64, usize)>,
+    /// G4 as a prefix property, checked after every input.
+    prefix: Prefix,
 }
 
 impl Net {
@@ -193,6 +252,7 @@ impl Net {
             log_holding: Vec::new(),
             log_membership: vec![0],
             became: Vec::new(),
+            prefix: Prefix::default(),
         };
         for &i in home {
             net.b[i].add_link(HOME);
@@ -322,6 +382,9 @@ impl Net {
             let due = self.s[i].next_deadline().map(|d| d.max(self.now));
             self.tick_at[i] = due.map(|d| d + self.rng.below(max + 1));
         }
+        if let Err(e) = self.prefix.observe(&self.s[i]) {
+            self.violation.get_or_insert(format!("t={} {e}", self.now));
+        }
         if let Err(e) = check_step_input(&mut self.ghost, &id, &before, &self.s[i], &outs, delivered.as_ref())
             .and_then(|_| match &delivered {
                 Some(f) if accepted => check_g6(f, &self.s[i]),
@@ -333,6 +396,7 @@ impl Net {
         for o in outs {
             match o {
                 Output::Send { frame } => {
+                    self.prefix.sent(&frame);
                     self.log_sent.push((self.now, i, frame.clone()));
                     self.n[i] += 1;
                     let w = Wire { key: format!("k-{id}"), n: self.n[i], frame };
@@ -499,20 +563,18 @@ impl Net {
             }
         }
         for &(h, a, b) in &spans {
+            // "Every other member": a holder does not accept its own frames.
             for m in (0..n).filter(|m| *m != h) {
-                let mut points = vec![a];
-                points.extend(
-                    self.log_accepted
-                        .iter()
-                        .filter(|(at, to, f)| *to == m && f.from == self.ids[h] && *at >= a && *at <= b && counts_as_holder(&f.body))
-                        .map(|(at, ..)| *at),
-                );
-                points.push(b);
-                for w in points.windows(2) {
-                    if w[1] - w[0] > l && w[1] - l > t {
-                        t = w[1] - l;
-                        why = format!("condition 2: {} accepted no holder frame from {} between {} and {} ms", self.ids[m], self.ids[h], w[0], w[1]);
-                    }
+                let points: Vec<u64> = self
+                    .log_accepted
+                    .iter()
+                    .filter(|(at, to, f)| *to == m && f.from == self.ids[h] && *at >= a && *at <= b && counts_as_holder(&f.body))
+                    .map(|(at, ..)| *at)
+                    .collect();
+                let floor = cond2_floor(&points, a, b, l);
+                if floor > t {
+                    t = floor;
+                    why = format!("condition 2: {} accepted no holder frame from {} in a closed {l} ms interval of its span {a}..{b} ms", self.ids[m], self.ids[h]);
                 }
             }
         }
@@ -830,6 +892,37 @@ fn g5_exact_bounds() {
             assert!(net.violation.is_none(), "{:?}", net.violation);
         }
         println!("G5 with {ticks:?}: worst {} ms after asking (bound {}), {} ms after the last holder frame (bound {})", worst.0, p.ask_timeout_ms + 250, worst.1, p.holder_timeout_ms + 250);
+    }
+}
+
+/// G4 (revision 14), the fifth review's trace: the holder publishes every millisecond for
+/// 3 s and every delivery takes exactly 1 ms, so listeners never hold the holder's latest
+/// state while it sends. After every input each listener's state at its position is the
+/// holder's state at that position (a prefix); once publishing stops all are equal.
+#[test]
+fn g4_prefix_under_continuous_publishing() {
+    for n in [2usize, 3, 5] {
+        let home: Vec<usize> = (0..n).collect();
+        let mut net = Net::new(n, &home, &[], Fixes::ALL, true, 3);
+        net.delay = Delay::Fixed(1);
+        net.join_all();
+        net.run(1_000);
+        net.input(0, Input::App { command: Command::Take { state: Some(Bytes(b"0".to_vec())) } });
+        net.run(2_000);
+        let mut behind = 0u64;
+        for k in 1..=3_000u64 {
+            let payload = Bytes(k.to_string().into_bytes());
+            let id = colophon_core::v06::session::Id::from_label(&format!("m{k}"));
+            net.input(0, Input::App { command: Command::Publish { id, payload } });
+            let t = net.now + 1;
+            net.run(t);
+            behind += (1..n).filter(|i| net.s[*i].state() != net.s[0].state()).count() as u64;
+        }
+        assert!(net.violation.is_none(), "n={n}: {:?}", net.violation);
+        net.run(net.now + 1_000);
+        check_converged(&net.s).unwrap_or_else(|e| panic!("n={n}: {e}"));
+        assert_eq!(net.s[1].seq(), 3_000);
+        println!("{n} members: {} prefix checks, listeners behind the holder in {behind} of {} samples, equal once publishing stopped", net.prefix.checks, 3_000 * (n as u64 - 1));
     }
 }
 
