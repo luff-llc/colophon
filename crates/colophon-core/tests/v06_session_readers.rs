@@ -114,7 +114,7 @@ fn holder_events(outs: &[Output]) -> Vec<String> {
         .collect()
 }
 
-/// HIGH finding of the first codec review: a reader's `hello` naming itself at 2^53 − 1 made
+/// Before revision 15, a reader's `hello` naming itself at 2^53 − 1 made
 /// non-holders adopt it, after which nobody could take or renew.
 #[test]
 fn no_frame_from_a_reader_changes_who_holds() {

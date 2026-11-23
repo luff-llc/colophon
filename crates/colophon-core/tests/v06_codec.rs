@@ -607,9 +607,7 @@ fn sender_window(m: &Member, view: &SessionAccount, random: u8, nb: i64, ex: i64
     s
 }
 
-/// The reviewer's attack: five rapid keys close the first; a carrier then replays the first
-/// key's delegation and old frames (its `hello` included). Every one is dropped at the floor.
-/// Revision 17 (third review): the receiver never evicts on its own; the caller (the
+/// Revision 17: the receiver never evicts on its own; the caller (the
 /// machine, through the endpoint) decides, and `retain` applies exactly that.
 #[test]
 fn the_receiver_never_evicts_on_its_own() {

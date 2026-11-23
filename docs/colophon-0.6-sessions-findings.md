@@ -1,8 +1,11 @@
-# Colophon 0.6 sessions: findings from the reference machine
+# Colophon 0.6 sessions: design history and evidence
 
-**Date:** 2026-11-22, updated 2026-11-23. **Against:** `spec/colophon-0.6-sessions.md`, revisions 1–14 (revision 14: `fead177`). **Code:** `crates/colophon-core/src/v06/session/`.
+**Covers:** `spec/colophon-0.6-sessions.md`, revisions 1–17, 2026-11-22 to 2026-11-23.
+**Code:** `crates/colophon-core/src/v06/session/`. The byte-level wire, and the decisions
+of revisions 15–17 about it, are in `docs/colophon-0.6-sessions-wire.md`.
 
-The reference machine implements the draft, and also the departures listed here. Each
+This document records how the draft changed and what evidence supports each change. The
+reference machine implements the draft, and also the departures listed here. Each
 departure that changes behaviour has a switch in `Fixes`. `Fixes::default()` (= `ALL`) is the
 reference reading (revision 14; `Fixes::REV7` down to `REV3` are earlier drafts as written), and `Fixes::LITERAL` is the revision 1 draft, so every counterexample below
 can be reproduced. Evidence comes from three sources:
@@ -679,7 +682,7 @@ every frame to every member, as the home carrier does.
 | G8 | host-level (the machine takes `writer` per frame and `Entitled`, failing closed until it has one); vectors `pass-not-entitled`, `entitlement-after-restart`, `revoked-writer-ignored`; `revocation_after_frames_is_outside_the_model` | the host tells the core of a removal before delivering later frames (§S1) | authority-history replay (host layer) |
 | G9 | the machine is a pure function of its inputs (`handle(input, now)`); vectors replay exact outputs; explorer hashing | — | other implementations beyond the vectors |
 | G10 | carriers: no claim change in the final 60–80 s window when the oracle finds the run timely early enough; `consecutive_lost_beats`; explorer completions | timely by the oracle (carriers); fair schedules (explorer) | runs the oracle rejects; the simulator (checked only as G4) |
-| G11 | ledger of owed reports in explorer completions, simulator and carriers (`owed` must empty) | displaced member keeps running, eventual delivery | members that crash (excluded by G11) |
+| G11 | ledger of owed reports in explorer completions, simulator and carriers (`owed` must empty); since revision 15 also every pass, strictly (`owed_passes`); the endpoint handoff at 15 % and 30 % loss with real sealing | displaced member or passer keeps running, eventual delivery | members that crash (excluded by G11) |
 | G12 | `crash_prefixes` (every output prefix, 2 and 3 members); simulator restarts | any | crashes in the carriers harness |
 
 Not checked anywhere: the simulator does not run the real freshness exchange (its frames
@@ -816,3 +819,51 @@ Over 3,000 playback seeds and 3,000 random seeds:
 - **Takes:** the worst take error was 107 ms. The bound
   `rate × (ceil(rtt/2) + |drift difference| × sample age + 3 ms)` was never exceeded; the
   largest bound computed was 292 ms.
+
+## X. The signing and sealing layer, revisions 15–17
+
+The codec (`keys`, `wire`, `codec`, `endpoint`) was reviewed for security three times;
+each round changed the draft. What changed, and the evidence:
+
+- **Writer-only claims (revision 15, §S4 rule 1).** A member that may only read could send
+  a `hello` naming itself at 2^53 − 1; other members adopted it and could never take or
+  renew again. A claim in any field of a reader's frame is now ignored, and so is one more
+  than 2^20 terms above the accepted term. Evidence: `no_frame_from_a_reader_changes_who_holds`
+  (every kind and claim shape, in every role), the explorer's check from every reachable
+  state, reader frames injected in the random simulator, vector `reader-claims-ignored`.
+- **A writer's `hello.seen` naming a former writer.** Ignoring it outright made a holder and
+  a member that had accepted the claim before learning of a revocation answer each other
+  for ever (`revocation_after_frames_is_outside_the_model` hit its quiescence guard). It is
+  kept: never adopted, but renewed over.
+- **Pass acknowledgement (revisions 15–16, §S5).** A pass and its one resend could both be
+  lost; the asker took, renewed over the passed claim after a `hello.seen`, and the passer
+  stopped resending, so the passed state never reached an application (1 of 40 handoff
+  seeds at 15 % loss). The passer now resends until `ack {passed}`. Resending only on
+  hearing the asker was not enough: in `two_passes_to_one_asker_explored` an asker that had
+  moved on listened quietly and the pass stayed owed; the resend is timed (revision 16),
+  backing off from `askTimeoutMs` to `holderTimeoutMs` (revision 17).
+- **Replay floors (revision 15) and their removal (revision 17).** Closing the first of five
+  keys let a carrier replay the closed key's delegation and an old echoing `hello` and
+  reopen it with a fresh window. Revision 15 kept a floor per key; that could lock a member
+  out once a carrier replayed one frame from each of 64 old keys. Revision 17 keeps nothing
+  for a closed key: an echo opens a window only of a `fresh` issued after the member's last
+  close, with at most 4 open windows and 4 candidates per member. Evidence:
+  `a_closed_key_reopens_only_through_a_new_challenge`, `a_hundred_old_keys_cannot_touch_the_current_key`,
+  `a_ninth_key_never_evicts_an_open_keys_replay_window`, vector `closed-key-reopen`.
+- **One owner for key state.** The codec's cache once evicted independently of the machine;
+  a ninth key could cost an open key its replay window. The codec now never evicts, and the
+  endpoint checks after every frame that its cache equals the machine's key set.
+- **Probes and answers.** Unknown-key `hello`s go only to members entitled to the
+  namespace; they, and answers to candidate `hello`s, are limited per member and in all; a
+  suppressed answer is deferred, so replayed old `hello`s delay a new key by at most
+  `askTimeoutMs` plus a tick (`replayed_candidate_hellos_cannot_starve_a_new_key`).
+- **A demoted holder's release (revisions 16–17).** A reader's `bye` is honoured only when its
+  claim equals the receiver's accepted claim and names the sender
+  (`a_demoted_holders_release_is_honoured_and_nothing_else`, vector `demoted-holder-release`).
+- **Reopening costs one frame.** When only the receiver closed a window, the key's owner
+  still has its own window open and, by the rule that ends the exchange (R4a), does not
+  answer the challenge in the receiver's reply to its `hello`; its next frame other than a
+  `hello` is dropped and the receiver's probe reopens the window.
+
+Each of these checks was confirmed by removing it and watching a named test fail.
+

@@ -569,7 +569,7 @@ fn frames_of(s: Step) -> Vec<Vec<u8>> {
     s.frames().map(<[u8]>::to_vec).collect()
 }
 
-/// The first review's attack against revision 17: five keys of `a` open in turn, so the
+/// The eviction-replay attack against revision 17: five keys of `a` open in turn, so the
 /// fifth closes the first. The home then replays the first key's delegation, its old
 /// echoing `hello` (whose echoed `fresh` is still inside b's 60 s memory) and its old action
 /// frames. None reopens the key or acts on b. When the key's owner speaks again, a new
@@ -764,7 +764,7 @@ fn policies_are_checked_at_construction() {
     }
 }
 
-/// Third review: with four open keys and four candidates of `a`, a ninth authentic candidate
+/// With four open keys and four candidates of `a`, a ninth authentic candidate
 /// `hello` must not cost an open key its replay window. The machine drops a candidate; the
 /// codec follows it exactly; a replay of an open key's old frame is still a replay.
 #[test]
@@ -809,7 +809,7 @@ fn a_ninth_key_never_evicts_an_open_keys_replay_window() {
     assert_eq!(b.machine().windows_for(&w.a.id), 4);
 }
 
-/// Third review: old candidate hellos are answered only under the probe limit.
+/// Old candidate hellos are answered only under the probe limit.
 #[test]
 fn candidate_hellos_are_answered_under_the_probe_limit() {
     let w = world();
@@ -827,7 +827,7 @@ fn candidate_hellos_are_answered_under_the_probe_limit() {
     assert_eq!(answers, 1, "once per askTimeoutMs for one member");
 }
 
-/// Fourth review hardening: a home replaying old candidate hellos of `a` every second, so
+/// A home replaying old candidate hellos of `a` every second, so
 /// that each takes a's probe slot, cannot keep b from answering a's genuine new key: the
 /// suppressed answer is deferred and sent when the slot reopens, and the new key's window
 /// opens within askTimeoutMs plus a tick even though its owner then only answers.

@@ -1305,7 +1305,7 @@ impl Session {
         // through a window that was already open (finding R4a: otherwise the two members
         // answer each other's answers forever).
         let answers_us = echo.iter().any(|e| self.honours(e, now, &f.from));
-        // Revision 17 (third review): a hello from a key without an open window (a candidate,
+        // Revision 17: a hello from a key without an open window (a candidate,
         // possibly an old key replayed) is answered under the probe limit, per member once per
         // askTimeoutMs and four a second in all.
         let wants = self.answered.get(&f.from) != Some(fresh) && (!answers_us || opened);
