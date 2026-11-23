@@ -1,10 +1,10 @@
 # Colophon 0.6: sessions
 
-**Status:** unfrozen draft, revision 5, 2026-11-23. Revision 2 adopted the findings of the
+**Status:** unfrozen draft, revision 6, 2026-11-23. Revision 2 adopted the findings of the
 reference machine (`docs/colophon-0.6-sessions-findings.md`, F1–F20); revision 3 added `via` to passed claims (F12, F21); revision 4 answers the first
 independent design review (R1–R9 in the findings document): evidence instead of hearsay,
 no silent loss of state, key bootstrap and freshness, bounded state; revision 5 adopts what
-the rebuilt harness found wrong in revision 4 (R1c–R4a). Additive to `colophon-0.5.md`; nothing here changes a
+the rebuilt harness found wrong in revision 4 (R1c–R4a); revision 6 adopts R1f–R1h. Additive to `colophon-0.5.md`; nothing here changes a
 0.5 object, verdict or path. A 0.5 host that ignores this document stays conformant with 0.5.
 
 The words MUST, SHOULD and MAY are used as in 0.5 §0. "0.5 §N" refers to `colophon-0.5.md`.
@@ -197,7 +197,9 @@ claim less than its accepted claim answers the sender:
 - a holder, with `state`;
 - a member that released that greater claim, with its `bye` again;
 - any other member, with **evidence** when it has it: the most recent holder frame it
-  accepted from the greater claim's holder within `holderTimeoutMs`, forwarded unchanged
+  accepted directly from the greater claim's holder within `holderTimeoutMs`, forwarded
+  unchanged. A frame that itself arrived as forwarded evidence is never forwarded again
+  and never counts toward this: its age is the age of the direct hearing
   (a frame is signed by its origin, so anyone may forward it). The sender then accepts the
   greater claim under rule 2 or 3 as if the holder had sent it directly, and yields;
 - otherwise with `hello`, whose `heard` is `lapsed` if the member's own link has worked for
@@ -242,11 +244,21 @@ the term of its accepted claim (0 if none) when one of these holds:
 - it sent `ask` and has accepted no holder frame from the holder for `askTimeoutMs` since.
   A frame received as forwarded evidence does not count here.
 
-A writer that took, or wanted to take, and then yields to forwarded evidence of a holder it
-cannot reach keeps wanting the role. It asks that holder again, and takes, at a term above
-the evidence, once that holder is lapsed to it (§S6, counted from when the evidence
-arrived). It does not take again sooner on the ask timeout, so two members that both want
-the role cannot displace each other in a loop.
+A writer that took, or wanted to take, and then yields to forwarded evidence keeps wanting
+the role, because it cannot tell whether that holder is reachable:
+
+- If it then hears the holder directly, a want that existed only because it had taken is
+  dropped (the returning member yields, §S6); a want its application asked for continues
+  as an ordinary `ask`.
+- Otherwise it stays silent until that holder is lapsed to it (§S6, counted from when the
+  evidence arrived), sends its lapse `hello`, waits `askTimeoutMs`, and only then takes, at
+  a term above the evidence.
+- A member that accepted a holder frame of that claim directly within `holderTimeoutMs`
+  answers a `hello` reporting that holder `lapsed` with the frame as evidence, and a holder
+  answers it with `state`; either clears the lapse and cancels the take.
+
+So members that want the role cannot displace each other in a loop, whether or not they
+can hear each other.
 
 It becomes holder at once, with the state it last held for the cell (application-defined
 projection included, §S7) or a state the application supplies with the take, `seq` 0, and
