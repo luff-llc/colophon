@@ -1,0 +1,147 @@
+# Release configuration for Colophon, read by Edition (https://github.com/luff-llc/edition).
+# The branching model is described in docs/branching.md.
+
+product = "colophon"
+remote = "origin"
+main = "main"
+ledger = "releases/ledger.toml"
+
+[tags]
+final = "v{version}"
+prerelease = "v{version}-rc.{n}"
+# Version files carry 0.6.0 at every 0.6.0-rc.N tag; only the tag name changes.
+prerelease_files = "base"
+
+[lines]
+branch = "release/{line}"
+dev_suffix = "dev"            # main builds as X.Y.0-dev
+hotfix_branch = "hotfix/{version}"
+
+[verify]
+tags_since = "0.5.0"
+
+# Every file that states the package version. They must agree with each other, and
+# with the tag at every release tag. `edition bump <version>` rewrites all of them.
+[[version_files]]
+path = "Cargo.toml"
+after = "[workspace.package]"
+pattern = 'version = "{version}"'
+
+[[version_files]]
+path = "crates/colophon-ffi/Cargo.toml"
+pattern = 'path = "../colophon-core", version = "={version}"'
+
+[[version_files]]
+path = "crates/colophon-home-wasm/Cargo.toml"
+pattern = 'path = "../colophon-core", version = "={version}"'
+
+[[version_files]]
+path = "crates/colophon-wasm/Cargo.toml"
+pattern = 'path = "../colophon-core", version = "={version}"'
+
+[[version_files]]
+path = "Cargo.lock"
+after = 'name = "colophon-core"'
+pattern = 'version = "{version}"'
+
+[[version_files]]
+path = "Cargo.lock"
+after = 'name = "colophon-ffi"'
+pattern = 'version = "{version}"'
+
+[[version_files]]
+path = "Cargo.lock"
+after = 'name = "colophon-home-wasm"'
+pattern = 'version = "{version}"'
+
+[[version_files]]
+path = "Cargo.lock"
+after = 'name = "colophon-wasm"'
+pattern = 'version = "{version}"'
+
+[[version_files]]
+path = "js/package.json"
+after = '"name": "@colophon/core",'
+pattern = '"version": "{version}"'
+
+[[version_files]]
+path = "js/package-lock.json"
+after = '"name": "@colophon/core",'
+pattern = '"version": "{version}"'
+
+[[version_files]]
+path = "js/package-lock.json"
+after = '"": {'
+pattern = '"version": "{version}"'
+
+[[version_files]]
+path = "relay/package.json"
+after = '"name": "@colophon/relay",'
+pattern = '"version": "{version}"'
+
+[[version_files]]
+path = "sdk/android/build.gradle.kts"
+pattern = 'version = "{version}"'
+
+[[version_files]]
+path = "sdk/kotlin/build.gradle.kts"
+pattern = 'version = "{version}"'
+
+# One version for every platform this repository ships. Homes have no build number;
+# the commit is the build.
+[platforms.home]
+
+# This repository is public: Edition reports internal coordination notes before they
+# are pushed (`edition check-push origin`, usable as a pre-push hook).
+[remotes.origin]
+public = true
+
+# Machine-specific values come from the environment (EDITION_VAR_<NAME>).
+[vars]
+# Directory holding colophon-home.sh, the home deployment kit.
+home_kit = ""
+
+[checks.rust]
+run = ["cargo", "test", "--workspace", "--locked"]
+
+[checks.relay]
+run = ["bun", "test"]
+note = "Run from relay/; see relay/README.md."
+
+[checks.home-bundle]
+run = ["scripts/package-release.sh", "--only", "home"]
+note = "Builds the home bundle from the exact commit; never signs or publishes."
+
+# dev: what is being tested on this machine. Any ref; never recorded.
+[channels.dev-home]
+tier = "dev"
+kind = "home"
+platform = "home"
+target = "http://localhost:4795"
+run = ["scripts/package-release.sh", "--only", "home", "--allow-dirty", "--force"]
+note = "Builds a home bundle from the working tree for a local relay."
+
+# staging: always the tip of main.
+[channels.staging-home]
+tier = "staging"
+kind = "home"
+platform = "home"
+target = "https://colophon.toolsperson.com"
+checks = ["rust"]
+run = ["{var.home_kit}/colophon-home.sh", "release", "{commit}"]
+env = { COLOPHON_HOME_SITE = "staging.env" }
+probe = ["curl", "-fsS", "https://colophon.toolsperson.com/healthz"]
+
+# prod: a final vX.Y.Z tag on release/X.Y, on the remote. The home kit additionally
+# accepts only the commit its production settings pin, so an upgrade is a reviewed
+# change to that pin followed by this deploy.
+[channels.production-home]
+tier = "prod"
+kind = "home"
+platform = "home"
+target = "https://colophon.luff.works"
+approval = "owner"
+checks = ["rust"]
+run = ["{var.home_kit}/colophon-home.sh", "release", "{commit}"]
+env = { COLOPHON_HOME_SITE = "production.env" }
+probe = ["curl", "-fsS", "https://colophon.luff.works/healthz"]
