@@ -2,8 +2,10 @@
 
 This is how Colophon's history is organised, for the people and agents who work on it.
 Releases are driven by [Edition](https://github.com/luff-llc/edition) from
-[`edition.toml`](../edition.toml); every command below is a dry run until `--apply`, and
-anything that pushes needs `--confirm`.
+[`edition.toml`](../edition.toml). Every command below is a dry run that prints its plan.
+Local steps run with `--apply`; a plan that pushes or deploys also needs
+`--confirm <receipt>`, using the receipt its dry run printed (valid once, for 30 minutes,
+and only while the refs and configuration are unchanged).
 
 ## The model
 
@@ -26,7 +28,7 @@ CI runs on pushes and pull requests to `main` and to every `release/**` branch.
 | --- | --- | --- | --- |
 | dev | any ref, on one machine | no | no |
 | staging | the tip of `main`, nothing else | no | yes |
-| prod | a final `vX.Y.Z` tag on `release/X.Y`, present on the remote | yes | yes |
+| prod | a final `vX.Y.Z` tag, named explicitly, on `release/X.Y` and present on the remote | yes | yes |
 
 The staging home (`colophon.toolsperson.com`) follows `main`: every merge to `main` can be
 deployed there without further approval. The production home (`colophon.luff.works`) only
@@ -47,14 +49,14 @@ edition verify --online             # invariants: versions, forward merges, tags
 **Ship main to staging**
 
 ```sh
-edition deploy staging-home main                                  # prints the plan
-edition deploy staging-home main --apply --confirm staging-home
+edition deploy staging-home main                       # prints the plan and a receipt
+edition deploy staging-home main --apply --confirm <receipt>
 ```
 
 **Cut a line at feature freeze**
 
 ```sh
-edition cut 0.6 --apply --confirm push    # creates and pushes release/0.6 from main
+edition cut 0.6                           # creates and pushes release/0.6 from main
 # on release/0.6: edition bump 0.6.0 --apply, commit, merge
 # on main:        edition bump 0.7.0-dev --apply, commit, merge
 ```
@@ -62,18 +64,20 @@ edition cut 0.6 --apply --confirm push    # creates and pushes release/0.6 from 
 **Release candidates and the release**
 
 ```sh
-edition rc 0.6.0 --apply --confirm push   # v0.6.0-rc.1, then rc.2, ...
-edition tag 0.6.0 --apply --confirm push  # v0.6.0 on release/0.6
-edition deploy production-home v0.6.0 --approved-by <name> --apply --confirm production-home
+edition rc 0.6.0                          # v0.6.0-rc.1, then rc.2, ...
+edition tag 0.6.0                         # v0.6.0 on release/0.6
+edition deploy production-home v0.6.0 --approved-by <name>
 ```
+
+Each pushing command prints a receipt; run it again with `--apply --confirm <receipt>`.
 
 **Hotfix a shipped line**
 
 ```sh
 edition hotfix start 0.5 --apply          # hotfix/0.5.3 from release/0.5
 # fix, edition bump 0.5.3 --apply, open a pull request into release/0.5, merge it
-edition hotfix finish 0.5.3               # tags v0.5.3, then offers the forward merge
-edition forward --apply --confirm pr      # pull request: release/0.5 -> main
+edition hotfix finish 0.5.3               # one plan: tag v0.5.3, publish it, open the
+                                          # pull request release/0.5 -> main
 ```
 
 `edition verify` fails while any release line has commits that are not in `main`, so a
@@ -83,10 +87,6 @@ forgotten forward merge is visible on the next check.
 
 This repository is public. Specifications, design rationale, roadmaps and code belong
 here. Working notes, questions addressed to a person, local machine paths and transcripts
-do not. `edition check-push origin` reports such text before it is pushed; it can run as
-a pre-push hook:
-
-```sh
-printf '#!/bin/sh\nexec edition check-push "$1" "$2"\n' > .git/hooks/pre-push
-chmod +x .git/hooks/pre-push
-```
+do not. Edition scans what its own plans would publish here, and
+`edition hooks install --apply` adds a pre-push hook that blocks other pushes carrying
+such text.

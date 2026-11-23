@@ -98,8 +98,9 @@ public = true
 
 # Machine-specific values come from the environment (EDITION_VAR_<NAME>).
 [vars]
-# Directory holding colophon-home.sh, the home deployment kit.
-home_kit = ""
+# Path to colophon-home.sh, the home deployment kit, on this machine. It is printed by
+# name and never recorded.
+home_kit_script = ""
 
 [checks.rust]
 run = ["cargo", "test", "--workspace", "--locked"]
@@ -128,7 +129,7 @@ kind = "home"
 platform = "home"
 target = "https://colophon.toolsperson.com"
 checks = ["rust"]
-run = ["{var.home_kit}/colophon-home.sh", "release", "{commit}"]
+run = ["{var.home_kit_script}", "release", "{commit}"]
 env = { COLOPHON_HOME_SITE = "staging.env" }
 probe = ["curl", "-fsS", "https://colophon.toolsperson.com/healthz"]
 
@@ -142,6 +143,6 @@ platform = "home"
 target = "https://colophon.luff.works"
 approval = "owner"
 checks = ["rust"]
-run = ["{var.home_kit}/colophon-home.sh", "release", "{commit}"]
+run = ["{var.home_kit_script}", "release", "{commit}"]
 env = { COLOPHON_HOME_SITE = "production.env" }
 probe = ["curl", "-fsS", "https://colophon.luff.works/healthz"]
