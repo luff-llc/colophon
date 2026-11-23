@@ -65,6 +65,7 @@
     "evidenceKeepsWant": false,
     "evidencePush": false,
     "evidenceRefresh": false,
+    "freshnessProbe": true,
     "helloCorrection": true,
     "livenessHolderFrames": true,
     "persistRelease": true,

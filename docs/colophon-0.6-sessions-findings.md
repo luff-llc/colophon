@@ -1,10 +1,10 @@
 # Colophon 0.6 sessions: findings from the reference machine
 
-**Date:** 2026-11-22, updated 2026-11-23. **Against:** `spec/colophon-0.6-sessions.md`, revisions 1–7 (revision 7: `63375bf`). **Code:** `crates/colophon-core/src/v06/session/`.
+**Date:** 2026-11-22, updated 2026-11-23. **Against:** `spec/colophon-0.6-sessions.md`, revisions 1–8 (revision 8: `d80435c`). **Code:** `crates/colophon-core/src/v06/session/`.
 
 The reference machine implements the draft, and also the departures listed here. Each
 departure that changes behaviour has a switch in `Fixes`. `Fixes::default()` (= `ALL`) is the
-reference reading (revision 7; `Fixes::REV6` down to `REV3` are earlier drafts as written), and `Fixes::LITERAL` is the revision 1 draft, so every counterexample below
+reference reading (revision 8 plus B5; `Fixes::REV7` down to `REV3` are earlier drafts as written), and `Fixes::LITERAL` is the revision 1 draft, so every counterexample below
 can be reproduced. Evidence comes from three sources:
 
 - **Explorer:** `tests/v06_session_explore.rs`, an exhaustive BFS to depth 8 with fair
@@ -560,6 +560,31 @@ The simulator's network is complete, so the hello-correction and renewal rules o
 | Bridged chain, two holders | 624 |
 | Two holders passing to one asker | 128,486 |
 | Crash prefixes, every prefix | 26,247 + 5,694 |
+
+## T. Revision 8
+
+Revision 8 settles the four open points from revision 7:
+
+- **B1.** §S9 now states that the session layer repairs loss with new frames. `far_hop_loss_is_repaired_by_new_frames` loses half of all frames on the far hops of chains of 3 and 4, and the group still settles under all three schedules.
+- **B2.** Every member bridges. A frame that passed the §S3 checks through its signature is forwarded without waiting for the bridge's own freshness exchange with its origin. The forwarding window is kept apart from the delivery window. `v06::bridge` implements both, and `v06_bridge` checks them:
+  - (a) `forwards_without_own_window`: the frame is forwarded, while the bridge's own session layer does not act on it.
+  - (b) `handshake_across_bridges_under_loss`: the fresh/echo exchange completes across 1, 2 and 3 bridges at 20 % loss per hop, on 100 seeds each.
+  - (c) `replays_are_bounded`: a replay within the window is never forwarded again. After a restart each replayed frame is forwarded at most once. Replayed newest first, only the 129 frames within the window of the first one are forwarded.
+  - (d) `key_cycling_cannot_force_refloods`: the session's four-key cap does not touch the bridge's forwarding memory. Each (key, n) is forwarded at most once per bridge incarnation, and the memory is one 128-wide window per accepted key until the key is forgotten.
+- **B3.** §S9 says every member bridges, so the unbridged case is outside the model. `rev7_without_bridging_is_outside_the_model` documents it.
+- **B4.** An `append` payload is at most maxPayload − 4 bytes. Both `publish` and `submit` refuse a larger one, and receivers drop it (`append_state_fits_a_frame`, vector `append-bound`).
+
+### B5. The freshness exchange is never retried (spec gap; fixed, switch `freshness_probe`)
+
+**Trace.** `handshake_stalls_without_probe`: chain of 3 at 20 % loss, revision 8 as written. 24 of 50 seeds never complete the exchange.
+
+1. A member's own join `hello` is lost, or the answer to it is.
+2. The member then drops every non-`hello` frame from the holder, because it has no window for the holder's key.
+3. It has no claim, so it never lapses, and it never sends another `hello`.
+
+**Fix.** A member that drops a frame for want of a window sends that sender a `hello`, at most once per askTimeoutMs per sender. `Fixes::ALL` includes it; `Fixes::REV7` is revision 8 without it.
+
+**Proposed spec text (§S3 freshness).** "A member that drops a frame because it has no window for the sender's key sends that sender a `hello`, at most once per `askTimeoutMs`."
 
 ## Where the machine and the spec differed (resolved 2026-11-23)
 

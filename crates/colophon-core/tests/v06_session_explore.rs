@@ -1564,28 +1564,31 @@ fn third_writer_cannot_clear_or_inject_reports() {
     assert!(injected_old, "revision 6 accepted the injected yielded");
 }
 
-/// The `append` fold never makes a snapshot larger than maxPayload (revision 7), so a joiner
-/// gets `state` even after a maxPayload-sized payload.
-fn append_bound(fixes: Fixes) -> (usize, bool) {
+/// The `append` fold never makes a snapshot larger than maxPayload (revision 7), and a
+/// payload is at most maxPayload − 4 bytes (revision 8), so a joiner gets `state`.
+fn append_bound(fixes: Fixes, big: usize) -> (usize, bool, bool) {
     let policy = Policy { fold: Fold::Append, max_payload: 64, ..Policy::default() };
     let mut r = Router::new(&["a", "b"], fixes, policy);
     r.cmd("a", Command::Join { state: None }, 0);
     r.cmd("a", Command::Take { state: None }, 10);
     r.cmd("a", Command::Publish { id: Id::from_label("small"), payload: Bytes(vec![1; 20]) }, 20);
-    r.cmd("a", Command::Publish { id: Id::from_label("big"), payload: Bytes(vec![2; 64]) }, 30);
+    r.cmd("a", Command::Publish { id: Id::from_label("big"), payload: Bytes(vec![2; big]) }, 30);
+    let rejected = r.events.iter().any(|(_, e)| matches!(e, Event::Rejected { command, .. } if command == "publish"));
     r.net.clear();
     let size = r.m[0].state().len();
     r.cmd("b", Command::Join { state: None }, 40);
     r.deliver(50);
-    (size, r.m[1].synced())
+    (size, r.m[1].synced(), rejected)
 }
 
 #[test]
 fn append_state_fits_a_frame() {
-    let (size, synced) = append_bound(Fixes::ALL);
-    assert!(size <= 64, "state is {size} bytes");
-    assert!(synced, "the joiner gets state");
-    let (old, old_synced) = append_bound(Fixes::REV6);
+    let (size, synced, rejected) = append_bound(Fixes::ALL, 64);
+    assert!(rejected, "a 64-byte append payload exceeds maxPayload - 4");
+    assert!(size <= 64 && synced);
+    let (size, synced, rejected) = append_bound(Fixes::ALL, 60);
+    assert!(!rejected && size == 64 && synced, "60 bytes + 4 fit exactly: {size}");
+    let (old, old_synced, _) = append_bound(Fixes::REV6, 64);
     assert!(old > 64 && !old_synced, "revision 6: {old} bytes, joiner synced {old_synced}");
 }
 

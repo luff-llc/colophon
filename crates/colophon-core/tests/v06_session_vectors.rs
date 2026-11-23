@@ -394,11 +394,13 @@ fn scenarios() -> Vec<Script> {
     assert_eq!(s.session("b").accepted(), Some(&Claim::new(3, 0, "a")));
     v.push(s);
 
-    let mut s = Script::new("append-bound", "fold append with maxPayload 64: after a 20-byte and then a 64-byte payload the state keeps only what fits in 64 bytes once encoded (each payload costs 4 bytes of framing, so the 64-byte payload alone does not fit and the state is empty); a joiner gets that state (§S1 fold, revision 7).", Policy { fold: Fold::Append, max_payload: 64, ..Policy::default() }, &["a", "b"]);
+    let mut s = Script::new("append-bound", "fold append with maxPayload 64: a 64-byte payload is refused (at most maxPayload − 4 bytes, revision 8); after a 20-byte and a 60-byte payload the state keeps only what fits in 64 bytes once encoded (the 60-byte one with its 4-byte frame); a joiner gets that state (§S1 fold, revisions 7 and 8).", Policy { fold: Fold::Append, max_payload: 64, ..Policy::default() }, &["a", "b"]);
     s.cmd("a", 0, Command::Join { state: None });
     s.cmd("a", 10, Command::Take { state: None });
     s.cmd("a", 20, Command::Publish { id: id("small"), payload: Bytes(vec![1; 20]) });
-    s.cmd("a", 30, Command::Publish { id: id("big"), payload: Bytes(vec![2; 64]) });
+    s.cmd("a", 25, Command::Publish { id: id("too-big"), payload: Bytes(vec![3; 64]) });
+    s.cmd("a", 30, Command::Publish { id: id("big"), payload: Bytes(vec![2; 60]) });
+    assert_eq!(s.session("a").state().len(), 64);
     s.lose_all();
     assert!(s.session("a").state().len() <= 64);
     s.cmd("b", 40, Command::Join { state: None });

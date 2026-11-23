@@ -289,3 +289,211 @@ fn same_n_resend_does_not_cross_a_bridge() {
     let r = net.bridges[to].receive(back, wire);
     assert!(r.deliver.is_none() && r.forward.is_empty());
 }
+
+// ---------------------------------------------------------------------------------------------
+// Revision 8: forwarding without the bridge's own freshness exchange, the handshake across
+// bridges, replays and the key cap.
+
+use colophon_core::v06::session::{Command, Input, Output, Policy, Session};
+
+fn wire(from: &str, key: &str, n: u64, t: u64) -> Wire {
+    Wire { key: key.into(), n, frame: Frame { from: from.into(), to: None, retain: false, body: Body::Ping { t } } }
+}
+
+/// (a) A bridge forwards a verified frame from an origin it has no freshness window with;
+/// its own session layer drops the frame (no window), the far member gets it.
+#[test]
+fn forwards_without_own_window() {
+    let mut b = Bridge::new("mb");
+    b.add_link(0);
+    b.add_link(1);
+    let beat = Wire {
+        key: "k-ma".into(),
+        n: 5,
+        frame: Frame {
+            from: "ma".into(),
+            to: None,
+            retain: false,
+            body: Body::Beat { claim: colophon_core::v06::session::Claim::new(1, 0, "ma"), seq: 0 },
+        },
+    };
+    let r = b.receive(0, beat.clone());
+    assert_eq!(r.forward.iter().map(|(l, _)| *l).collect::<Vec<_>>(), vec![1]);
+    let mut s = Session::new("mb", true, Policy::default(), None).with_fresh_seed([3; 16]);
+    s.handle(Input::App { command: Command::Join { state: None } }, 0);
+    let w = r.deliver.unwrap();
+    let outs = s.handle(Input::Frame { frame: w.frame, writer: true, key: Some(w.key), n: Some(w.n), forwarded: None }, 10);
+    // It does not act on the frame; it only probes the origin with a hello (finding B5).
+    let only_probe = outs.iter().all(|o| matches!(o, Output::Send { frame } if matches!(frame.body, Body::Hello { .. }) && frame.to.as_deref() == Some("ma")));
+    assert!(only_probe && s.accepted().is_none() && s.windows_for("ma") == 0);
+    // An unverified frame is neither forwarded nor delivered.
+    let r = b.receive_checked(0, wire("ma", "k-ma", 6, 1), false);
+    assert!(r.forward.is_empty() && r.deliver.is_none());
+}
+
+/// (c) A carrier replaying old frames: within the window nothing is forwarded again, below
+/// it nothing at all; after the bridge restarts each replayed frame is forwarded at most once.
+#[test]
+fn replays_are_bounded() {
+    let mut b = Bridge::new("mb");
+    b.add_link(0);
+    b.add_link(1);
+    for n in 1..=300 {
+        assert_eq!(b.receive(0, wire("ma", "k-ma", n, n)).forward.len(), 1);
+    }
+    let again: usize = (1..=300).map(|n| b.receive(0, wire("ma", "k-ma", n, n)).forward.len()).sum();
+    assert_eq!(again, 0, "no re-flood within or below the window");
+    b.restart();
+    let first: usize = (1..=300).map(|n| b.receive(0, wire("ma", "k-ma", n, n)).forward.len()).sum();
+    let second: usize = (1..=300).map(|n| b.receive(0, wire("ma", "k-ma", n, n)).forward.len()).sum();
+    assert!(first <= 300, "at most once per frame after a restart: {first}");
+    assert_eq!(second, 0);
+    // Replayed in descending order after a restart, only frames within 128 of the first
+    // replayed one are forwarded.
+    b.restart();
+    let desc: usize = (1..=300).rev().map(|n| b.receive(0, wire("ma", "k-ma", n, n)).forward.len()).sum();
+    assert_eq!(desc, 129);
+}
+
+/// (d) The session's 4-keys-per-member cap does not touch the bridge's forwarding memory:
+/// a member that cycles through 10 keys cannot make a bridge forward an old key's frame
+/// again. Bound: each (key, n) is forwarded at most once per bridge incarnation; the memory
+/// is one 128-wide window per accepted key until the key is forgotten.
+#[test]
+fn key_cycling_cannot_force_refloods() {
+    let mut b = Bridge::new("mb");
+    b.add_link(0);
+    b.add_link(1);
+    for k in 0..10 {
+        for n in 1..=5 {
+            b.receive(0, wire("ma", &format!("k{k}"), n, n));
+        }
+    }
+    let replays: usize = (0..10)
+        .flat_map(|k| (1..=5).map(move |n| (k, n)))
+        .map(|(k, n)| b.receive(0, wire("ma", &format!("k{k}"), n, n)).forward.len())
+        .sum();
+    assert_eq!(replays, 0);
+    assert_eq!(b.forwarding_keys(), 10);
+    b.forget_key("k0");
+    assert_eq!(b.forwarding_keys(), 9);
+}
+
+#[allow(clippy::needless_range_loop)]
+/// (b) The fresh/echo handshake end to end across 1, 2 and 3 bridges (chains of 3, 4 and 5)
+/// under 20 % loss per hop: every member opens a window for the key of every member that sent frames
+/// other than hellos, and the group agrees on the holder.
+fn handshake_chain(n: usize, seed: u64, fixes: colophon_core::v06::session::Fixes) -> Result<(), String> {
+    let ids: Vec<String> = (0..n).map(|i| format!("{:02x}", i * 0x11)).collect();
+    let mut s: Vec<Session> = ids
+        .iter()
+        .enumerate()
+        .map(|(i, id)| Session::with_fixes(id, true, Policy::default(), None, fixes).with_fresh_seed([i as u8 + 1; 16]))
+        .collect();
+    let mut b: Vec<Bridge> = ids.iter().map(|id| Bridge::new(id)).collect();
+    // link 2i: i -> i+1, 2i+1: i+1 -> i
+    for i in 0..n - 1 {
+        b[i].add_link((2 * i) as u32);
+        b[i + 1].add_link((2 * i + 1) as u32);
+    }
+    let dest = |l: u32| -> (usize, u32) {
+        let i = (l / 2) as usize;
+        if l % 2 == 0 { (i + 1, l + 1) } else { (i, l - 1) }
+    };
+    let mut rng = Rng(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1);
+    let mut counters = vec![0u64; n];
+    let mut queue: Vec<(u32, Wire)> = Vec::new();
+    let mut now = 0u64;
+    let mut spoke = vec![false; n];
+    let route = |i: usize, outs: Vec<Output>, b: &mut Vec<Bridge>, counters: &mut Vec<u64>, queue: &mut Vec<(u32, Wire)>, ids: &Vec<String>, spoke: &mut Vec<bool>| {
+        for o in outs {
+            if let Output::Send { frame } = o {
+                if !matches!(frame.body, Body::Hello { .. }) {
+                    spoke[i] = true;
+                }
+                counters[i] += 1;
+                let w = Wire { key: format!("k-{}", ids[i]), n: counters[i], frame };
+                queue.extend(b[i].send(w));
+            }
+        }
+    };
+    for i in 0..n {
+        let outs = s[i].handle(Input::App { command: Command::Join { state: None } }, now);
+        route(i, outs, &mut b, &mut counters, &mut queue, &ids, &mut spoke);
+    }
+    let outs = s[0].handle(Input::App { command: Command::Take { state: None } }, now);
+    route(0, outs, &mut b, &mut counters, &mut queue, &ids, &mut spoke);
+    // Each probe round trip crosses up to 2 × 4 lossy hops, so give it ten minutes.
+    while now < 600_000 {
+        let mut guard = 0;
+        while !queue.is_empty() {
+            guard += 1;
+            if guard > 100_000 {
+                return Err("frames never quiesce".into());
+            }
+            let (l, w) = queue.remove(0);
+            if rng.chance(200) {
+                continue;
+            }
+            let (to, back) = dest(l);
+            let r = b[to].receive(back, w);
+            queue.extend(r.forward);
+            if let Some(w) = r.deliver {
+                let dbg = std::env::var("COLOPHON_BRIDGE_DEBUG").is_ok() && matches!(w.frame.body, Body::Hello { .. });
+                let desc = format!("{} <- {} {:?} n={}", ids[to], w.frame.from, w.frame.body, w.n);
+                let outs = s[to].handle(
+                    Input::Frame { frame: w.frame, writer: true, key: Some(w.key), n: Some(w.n), forwarded: None },
+                    now,
+                );
+                if dbg {
+                    println!("t={now} {desc} -> {} outs, windows {:?}", outs.len(), (0..n).map(|j| s[to].windows_for(&ids[j])).collect::<Vec<_>>());
+                }
+                route(to, outs, &mut b, &mut counters, &mut queue, &ids, &mut spoke);
+            }
+        }
+        now += 500;
+        for i in 0..n {
+            let outs = s[i].handle(Input::Tick, now);
+            route(i, outs, &mut b, &mut counters, &mut queue, &ids, &mut spoke);
+        }
+    }
+    for i in 0..n {
+        for j in 0..n {
+            // Every member that sent anything but hellos is heard by everyone.
+            if i != j && spoke[j] && s[i].windows_for(&ids[j]) == 0 {
+                return Err(format!("{} never opened a window for {}'s key", ids[i], ids[j]));
+            }
+        }
+    }
+    let claims: Vec<_> = s.iter().map(|x| x.accepted().cloned()).collect();
+    if claims.iter().any(|c| *c != claims[0]) || claims[0].is_none() {
+        return Err(format!("no agreement: {claims:?}"));
+    }
+    Ok(())
+}
+
+#[test]
+fn handshake_across_bridges_under_loss() {
+    for n in [3, 4, 5] {
+        let mut fails = Vec::new();
+        for seed in 1..=100 {
+            if let Err(e) = handshake_chain(n, seed, colophon_core::v06::session::Fixes::ALL) {
+                fails.push((seed, e));
+            }
+        }
+        println!("handshake chain{n} ({} bridges): {}/100 seeds fail; first {:?}", n - 2, fails.len(), fails.first());
+        assert!(fails.is_empty(), "chain{n}: {:?}", fails.first());
+    }
+}
+
+/// Finding B5: revision 8 as written (no probe) stalls the handshake under loss: a member
+/// whose own hellos were lost drops the holder's frames for want of a window and never
+/// speaks again.
+#[test]
+fn handshake_stalls_without_probe() {
+    let fails = (1..=50)
+        .filter(|seed| handshake_chain(3, *seed, colophon_core::v06::session::Fixes::REV7).is_err())
+        .count();
+    println!("handshake chain3 without probe: {fails}/50 seeds fail");
+    assert!(fails > 0);
+}

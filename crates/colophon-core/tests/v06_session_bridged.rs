@@ -39,6 +39,9 @@ struct World {
     now: u64,
     persists: u64,
     connected: bool,
+    /// Per-link loss in per mille, and a xorshift state.
+    loss: BTreeMap<LinkId, u64>,
+    rng: u64,
 }
 
 impl World {
@@ -61,6 +64,8 @@ impl World {
             now: 0,
             persists: 0,
             connected: false,
+            loss: BTreeMap::new(),
+            rng: 0x9e37_79b9_7f4a_7c15,
         };
         let mut id = 0;
         for &(a, c) in edges {
@@ -106,6 +111,14 @@ impl World {
         }
     }
     fn push(&mut self, l: LinkId, w: Wire) {
+        if let Some(pm) = self.loss.get(&l).copied() {
+            self.rng ^= self.rng << 13;
+            self.rng ^= self.rng >> 7;
+            self.rng ^= self.rng << 17;
+            if self.rng % 1000 < pm {
+                return;
+            }
+        }
         self.order += 1;
         self.queues.get_mut(&l).unwrap().push_back((self.order, w));
     }
@@ -173,7 +186,23 @@ impl World {
 
 /// Holders at both ends, then the links come up; run 200 s. Returns G4/G10 verdicts.
 fn ends_hold(n: usize, edges: &[(usize, usize)], fixes: Fixes, bridging: bool, s: Schedule) -> Result<(), String> {
+    ends_hold_lossy(n, edges, fixes, bridging, s, &[])
+}
+
+/// As `ends_hold`, losing `(from, to, per mille)` of the frames on some links.
+fn ends_hold_lossy(
+    n: usize,
+    edges: &[(usize, usize)],
+    fixes: Fixes,
+    bridging: bool,
+    s: Schedule,
+    loss: &[(usize, usize, u64)],
+) -> Result<(), String> {
     let mut w = World::new(n, edges, fixes, bridging);
+    for &(a, b, pm) in loss {
+        let l = w.link_of[&(a, b)];
+        w.loss.insert(l, pm);
+    }
     for i in 0..n {
         w.input(i, Input::App { command: Command::Join { state: None } });
     }
@@ -235,12 +264,25 @@ fn bridged_topologies_settle_under_rev7() {
     }
 }
 
-/// Revision 7's rules need the group model: without bridging the four-member chain is not
-/// one group, and the rules make no promise there (shown, not asserted either way).
+/// Outside the model (§S9: every member bridges): without bridging the four-member chain is
+/// not one group, and the rules make no promise there (shown, not asserted either way).
 #[test]
 fn rev7_without_bridging_is_outside_the_model() {
     for s in SCHEDULES {
         let r = ends_hold(4, &chain(4), Fixes::ALL, false, s);
         println!("rev7 unbridged chain4 {s:?}: {r:?}");
+    }
+}
+
+/// B1 (revision 8, §S9): a frame lost beyond the first hop is not resent under the same `n`;
+/// the session layer repairs with new frames. Half of everything on the far hops of the
+/// chains is lost, and the group still settles.
+#[test]
+fn far_hop_loss_is_repaired_by_new_frames() {
+    for s in SCHEDULES {
+        ends_hold_lossy(3, &chain(3), Fixes::ALL, true, s, &[(1, 2, 500), (2, 1, 500)])
+            .unwrap_or_else(|e| panic!("chain3 {s:?}: {e}"));
+        ends_hold_lossy(4, &chain(4), Fixes::ALL, true, s, &[(2, 3, 500), (3, 2, 500), (1, 2, 300)])
+            .unwrap_or_else(|e| panic!("chain4 {s:?}: {e}"));
     }
 }
