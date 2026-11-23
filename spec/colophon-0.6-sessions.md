@@ -1,12 +1,13 @@
 # Colophon 0.6: sessions
 
-**Status:** unfrozen draft, revision 7, 2026-11-23. Revision 2 adopted the findings of the
+**Status:** unfrozen draft, revision 8, 2026-11-23. Revision 2 adopted the findings of the
 reference machine (`docs/colophon-0.6-sessions-findings.md`, F1–F20); revision 3 added `via` to passed claims (F12, F21); revision 4 answers the first
 independent design review (R1–R9 in the findings document): evidence instead of hearsay,
 no silent loss of state, key bootstrap and freshness, bounded state; revision 5 adopts what
 the rebuilt harness found wrong in revision 4 (R1c–R4a); revision 6 adopted R1f–R1h. Revision 7 answers the second design review by separating
 two layers: carriers make every connected group of members fully reachable (§S9
-bridging), and the session rules above them assume that and are simpler for it. Additive to `colophon-0.5.md`; nothing here changes a
+bridging), and the session rules above them assume that and are simpler for it. Revision 8 states
+what a bridge checks and how loss beyond the first hop is repaired (B1–B4). Additive to `colophon-0.5.md`; nothing here changes a
 0.5 object, verdict or path. A 0.5 host that ignores this document stays conformant with 0.5.
 
 The words MUST, SHOULD and MAY are used as in 0.5 §0. "0.5 §N" refers to `colophon-0.5.md`.
@@ -60,7 +61,7 @@ core, as live rules are in 0.5 §20) together with its **policy**:
 | `retainMs` | 60,000 | Longest time a carrier keeps a retained frame (§S9). |
 | `tail` | 256 | Ordered messages the holder keeps for resume. |
 | `maxPayload` | 8,192 | Largest application payload, bytes. |
-| `fold` | `latest` | How ordered messages become state: `latest` (state is the last payload) or `append` (state is the most recent payloads, at most `tail` of them and at most `maxPayload` bytes once encoded as a snapshot; oldest dropped first). A snapshot therefore always fits in a frame. |
+| `fold` | `latest` | How ordered messages become state: `latest` (state is the last payload) or `append` (state is the most recent payloads, at most `tail` of them and at most `maxPayload` bytes once encoded as a snapshot; oldest dropped first). A snapshot therefore always fits in a frame. With `append`, a payload is at most `maxPayload` − 4 bytes. |
 | `take` | `free` | `free`: any eligible member may take. Other values are reserved; a host that meets one MUST NOT take in that cell. |
 
 **Who may join.** A current member whose terms hold a `records` entry for the namespace
@@ -344,11 +345,17 @@ application learns of the session from the carrier without waiting for the holde
 **Direct carriers** (device to device) are defined by their own documents and MUST carry
 frames unchanged.
 
-**Bridging.** A member with more than one carrier, or a carrier that reaches only some
-members, forwards every frame it accepts for the first time, unchanged, on each of its
-other carriers and to each of its other direct peers; it never forwards a frame back to
-where it came from, and never forwards a frame it has already accepted (the §S3 window is
-the memory of that). A frame addressed with `to` is forwarded the same way and ignored by
+**Bridging.** Every member bridges. A member with more than one carrier, or a carrier that
+reaches only some members, forwards every frame it sees for the first time, unchanged, on
+each of its other carriers and to each of its other direct peers; it never forwards a frame
+back to where it came from, and never forwards the same `(key, n)` twice. To be forwarded a
+frame need only pass the outer checks of §S3 up to and including the frame signature under
+an accepted session key; a bridge does not wait for its own freshness exchange with the
+origin, which governs only what the bridge itself acts on. It remembers forwarded `(key,
+n)` values in the same 128-wide window shape as §S3, kept separately from its acceptance
+window, and does not forward a frame older than that window. A frame lost beyond the first
+hop is not sent again under the same `n`: the session rules repair loss with new frames
+(`hello`, `state`, resends), which are bridged like any other. A frame addressed with `to` is forwarded the same way and ignored by
 members it does not name. Frames are signed by their origin, so a bridged frame is verified
 exactly as a direct one, and the freshness exchange of §S3 works across bridges because
 hellos are bridged too. Bridging is what makes a group fully reachable; with only the home
