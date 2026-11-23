@@ -64,3 +64,29 @@ commit = "1339f1c98eda99d4633b953241144e7c02b58c83"
 result = "ok"
 prev = "cac346e763542aa33c1354414cc31e359fe2415fc1ca6ff5100b210841a62107"
 note = "re-chained 2 entries from ledger format 1 (git object hashes) to format 2 (SHA-256); in-tree ledger sha256 38f4ed6248542ba87b79bf352cd894fb3103628d11fc0cc40cfcb040916bea7c"
+
+[[entry]]
+id = "2026-11-23T20:57:31Z/staging-home/fb48fd583d/45c9d177"
+at = "2026-11-23T20:57:31Z"
+by = "claude"
+action = "deploy"
+product = "colophon"
+channel = "staging-home"
+tier = "staging"
+target = "https://colophon.toolsperson.com"
+ref = "main"
+commit = "fb48fd583da40e350c08058d25fc170d39257c7b"
+tree = "15820631ed3c53499af2d565206358fcd68c71d2"
+version = "0.6.0-dev"
+platform = "home"
+result = "ok"
+prev = "bd27653fe1c3bc55d4ff8918ce25a0087898c3d22db4381cd0bd460806c1c267"
+receipt = "45c9d177b5e7ee198e6961ab23177ab9"
+command = [
+  "home fb48fd583d to https://colophon.toolsperson.com: {var.home_kit_script} release {commit}",
+]
+steps = [
+  "check rust: exit 0",
+  "home fb48fd583d to https://colophon.toolsperson.com: exit 0",
+  "probe: exit 0",
+]
