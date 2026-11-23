@@ -465,13 +465,12 @@ export class HomeSlot {
    * `signed`, `fresh` (nothing was due), or `due` (a head is due and the module could not
    * produce one now: the guard refused, the clock has not passed the latest head's `issued`, or
    * the history stops at a fork). */
-  async ensureHead() {
-    const now = this.clock();
+  async ensureHead(now = this.clock()) {
     const r = this.wasm.call({ op: 'head_request', state: this.state, now });
     await this.commit(r.state);
     this.note('head', r.sign || !r.due ? '' : `home ${this.key.memberId}: a head is due and cannot be signed now: ${r.why}`);
     // When no head is due, the module says from when one could be over this same state.
-    this.headWake = !r.sign && !r.due && typeof r.wakeAt === 'number' ? r.wakeAt : null;
+    this.headWake = !r.sign && !r.due && Number.isFinite(r.wakeAt) && r.wakeAt > now ? r.wakeAt : null;
     if (!r.sign) return r.due ? 'due' : 'fresh';
     const signature = b64(await this.key.sign(unb64(r.sign.body)));
     const f = this.wasm.call({ op: 'finish_head', state: this.state, now, seq: r.sign.seq, digest: r.sign.digest, issued: r.sign.issued, signature });
@@ -493,7 +492,9 @@ export class HomeSlot {
     if (this.isQuiet(now)) return 'fresh';
     this.quiet = null;
     const asked = this.state;
-    const st = this.status();
+    // One clock reading for the whole pass: the quiet it may leave certifies exactly the reading
+    // every module call of the pass was asked at.
+    const st = this.status(now);
     if (!st.appointed) {
       // An unappointed slot's answers change only with its state.
       this.quiet = { state: asked, now, until: Infinity, status: st };
@@ -516,9 +517,9 @@ export class HomeSlot {
       // a GET is answered 503, a peer is sent none) and the next pass asks again.
       if (r.settled === false) return 'due';
       this.lastDue = { state: this.state, now };
-      if (typeof r.wakeAt === 'number' && this.state === asked) recordWake = r.wakeAt;
+      if (Number.isFinite(r.wakeAt) && r.wakeAt > now && this.state === asked) recordWake = r.wakeAt;
     }
-    const outcome = await this.ensureHead();
+    const outcome = await this.ensureHead(now);
     // Quiet only when this pass changed nothing and both answers gave a time: an entry recorded,
     // a receipt or a head signed may make something else due at once (a `final` over the new
     // head), so the next pass asks again.
@@ -564,7 +565,7 @@ export class HomeSlot {
     return JSON.parse((await this.slot.readFile(p)).toString('utf8'));
   }
 
-  status() { return this.wasm.call({ op: 'status', state: this.state, now: this.clock() }); }
+  status(now = this.clock()) { return this.wasm.call({ op: 'status', state: this.state, now }); }
 
   // -------------------------------------------------------------------------------------------
   // The replay table (§12.4). The module decides; this keeps the rows durable: an append-only
