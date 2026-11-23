@@ -59,7 +59,7 @@ fn connect(s: &mut HomeStream, t: i64, i: u8, cursor: &str) -> String {
         step = s.next(t);
     }
     assert_eq!(step, StreamStep::NeedTicketCall);
-    let req = s.ticket_request(b"signed call").unwrap();
+    let req = s.ticket_request(b"signed call", t).unwrap();
     assert_eq!(req.method, Method::Post);
     assert_eq!(req.url, format!("{BASE}/stream/ticket"));
     assert!(req.body.is_empty());
@@ -193,7 +193,7 @@ fn a_dropped_stream_resumes_from_its_cursor_and_a_resync_wakes_a_poll() {
     ));
     let url = connect(&mut s, retry_at, 2, "c.12");
     assert!(url.ends_with("&after=c.12"), "{url}");
-    assert_eq!(s.attempts(), 0, "a good hello resets the backoff");
+    assert_eq!(s.attempts(), 1, "a hello alone does not reset the backoff");
 
     // `gone`: the cursor is forgotten and a pass is woken; `tooFar` keeps it and wakes.
     let t = retry_at + 10_000;
@@ -264,7 +264,7 @@ fn a_gap_in_frame_numbers_closes_and_resumes() {
     }
     let mut s = HomeStream::new("h", BASE, StreamConfig::default(), None);
     assert_eq!(s.next(0), StreamStep::NeedTicketCall);
-    s.ticket_request(b"c").unwrap();
+    s.ticket_request(b"c", 0).unwrap();
     s.on_ticket(Some(&ok_ticket(&ticket(1))), 0);
     let _ = s.next(0);
     s.on_open(0);
@@ -317,7 +317,7 @@ fn access_ended_and_released_stop_reconnecting_until_the_history_changes() {
     // An upgrade refused as revoked: blocked as well.
     let mut s = HomeStream::new("h", BASE, StreamConfig::default(), None);
     assert_eq!(s.next(0), StreamStep::NeedTicketCall);
-    s.ticket_request(b"c").unwrap();
+    s.ticket_request(b"c", 0).unwrap();
     s.on_ticket(Some(&ok_ticket(&ticket(1))), 0);
     let _ = s.next(0);
     let ev = s.on_refused(&status(403, json!({"result": "refused:revoked"})), 1);
@@ -371,7 +371,7 @@ fn a_restart_comes_back_after_retry_ms_and_idle_connections_are_pinged_then_clos
                 closed = true;
                 break;
             }
-            StreamStep::Send { .. } | StreamStep::Sleep { .. } => {}
+            StreamStep::Send { .. } | StreamStep::Sleep { .. } | StreamStep::Wake => {}
             other => panic!("{other:?}"),
         }
     }
@@ -387,6 +387,7 @@ fn the_backoff_is_jittered_exponential_capped_seeded_and_reset_by_hello() {
     let schedule = |seed: u64| {
         let cfg = StreamConfig {
             seed,
+            mint_budget: 100,
             ..StreamConfig::default()
         };
         let mut s = HomeStream::new("h", BASE, cfg, None);
@@ -394,7 +395,7 @@ fn the_backoff_is_jittered_exponential_capped_seeded_and_reset_by_hello() {
         let mut delays = Vec::new();
         for _ in 0..10 {
             assert_eq!(s.next(t), StreamStep::NeedTicketCall);
-            s.ticket_request(b"c").unwrap();
+            s.ticket_request(b"c", t).unwrap();
             let ev = s.on_ticket(None, t);
             let StreamEvent::Down { retry_at } = ev[0] else {
                 panic!("{ev:?}")
@@ -421,7 +422,7 @@ fn the_backoff_is_jittered_exponential_capped_seeded_and_reset_by_hello() {
     }
     // Refusals the home rate-limits: at least its Retry-After.
     assert_eq!(s.next(t), StreamStep::NeedTicketCall);
-    s.ticket_request(b"c").unwrap();
+    s.ticket_request(b"c", 0).unwrap();
     let r = Response {
         status: 429,
         headers: vec![("Retry-After".into(), "120".into())],
@@ -431,14 +432,20 @@ fn the_backoff_is_jittered_exponential_capped_seeded_and_reset_by_hello() {
         panic!()
     };
     assert!(retry_at - t >= 120_000);
-    // A good hello resets it.
+    // A connection that stays live `stable_ms` resets it; a hello alone does not.
     connect(&mut s, retry_at, 1, "c");
-    assert_eq!(s.attempts(), 0);
-    let _ = settle(&mut s, retry_at + 1_000);
-    let StreamEvent::Down { retry_at: r2 } = s.on_closed(Some(1011), retry_at + 1_000)[0] else {
+    assert!(s.attempts() > 0);
+    let mut now = retry_at;
+    for (i, step) in (0..14).map(|i| (i, 5_000)) {
+        now += step;
+        let _ = settle(&mut s, now);
+        s.on_frame(&json!({"type": "pong", "n": 2 + i}).to_string(), now);
+    }
+    assert_eq!(s.attempts(), 0, "stable for 70 s");
+    let StreamEvent::Down { retry_at: r2 } = s.on_closed(Some(1011), now)[0] else {
         panic!()
     };
-    assert!(r2 - (retry_at + 1_000) <= 1_000);
+    assert!(r2 - now <= 1_000);
 }
 
 #[test]
@@ -454,7 +461,7 @@ fn a_refused_or_unsupported_stream_falls_back_to_polling() {
     ] {
         let mut s = HomeStream::new("h", BASE, StreamConfig::default(), None);
         assert_eq!(s.next(0), StreamStep::NeedTicketCall);
-        s.ticket_request(b"c").unwrap();
+        s.ticket_request(b"c", 0).unwrap();
         assert_eq!(s.on_ticket(Some(&r), 0), [StreamEvent::Blocked(why)]);
         assert!(s.polling());
         assert_eq!(s.next(1_000_000), StreamStep::Sleep { until: None });
@@ -462,7 +469,7 @@ fn a_refused_or_unsupported_stream_falls_back_to_polling() {
     // A hello for another protocol: closed, unsupported.
     let mut s = HomeStream::new("h", BASE, StreamConfig::default(), None);
     assert_eq!(s.next(0), StreamStep::NeedTicketCall);
-    s.ticket_request(b"c").unwrap();
+    s.ticket_request(b"c", 0).unwrap();
     s.on_ticket(Some(&ok_ticket(&ticket(1))), 0);
     let _ = s.next(0);
     s.on_open(0);
@@ -484,7 +491,7 @@ fn a_refused_or_unsupported_stream_falls_back_to_polling() {
     // A ticket answer that names another path, or no valid ticket: not presented.
     let mut s = HomeStream::new("h", BASE, StreamConfig::default(), None);
     assert_eq!(s.next(0), StreamStep::NeedTicketCall);
-    s.ticket_request(b"c").unwrap();
+    s.ticket_request(b"c", 0).unwrap();
     let r = status(200, json!({"ticket": ticket(1), "path": "/elsewhere"}));
     assert!(matches!(
         s.on_ticket(Some(&r), 0)[0],
@@ -494,7 +501,7 @@ fn a_refused_or_unsupported_stream_falls_back_to_polling() {
     // A ticket too old to present safely is minted again.
     let mut s = HomeStream::new("h", BASE, StreamConfig::default(), None);
     assert_eq!(s.next(0), StreamStep::NeedTicketCall);
-    s.ticket_request(b"c").unwrap();
+    s.ticket_request(b"c", 0).unwrap();
     s.on_ticket(Some(&ok_ticket(&ticket(1))), 0);
     assert_eq!(s.next(25_000), StreamStep::NeedTicketCall);
 }
@@ -570,7 +577,7 @@ fn drive(
                         return false;
                     }
                 };
-                let req = stream.ticket_request(&call).unwrap();
+                let req = stream.ticket_request(&call, now).unwrap();
                 let r = sim.call(host, &req, now);
                 stream.on_ticket(Some(&r), now);
             }
@@ -813,4 +820,159 @@ fn a_forged_change_frame_makes_the_engine_accept_nothing_a_poll_would_not() {
         .iter()
         .any(|r| r.contains("forged")));
     w.host = host;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Review fixes: a home cannot make the device sign without bound, tickets never reach `Debug`,
+// and a live but silent stream still syncs.
+
+#[test]
+fn a_home_that_says_hello_and_closes_at_once_cannot_make_the_device_sign_without_bound() {
+    let cfg = StreamConfig::default();
+    let (budget, window) = (cfg.mint_budget as usize, cfg.mint_window_ms);
+    let mut s = HomeStream::new("h", BASE, cfg, None);
+    s.on_history(5);
+    let mut t = 0_i64;
+    let mut mints: Vec<i64> = Vec::new();
+    let mut throttled = false;
+    let end = 3 * 3_600_000;
+    let mut i = 0u8;
+    while t < end {
+        match s.next(t) {
+            StreamStep::NeedTicketCall => {
+                mints.push(t);
+                s.ticket_request(b"signed", t).unwrap();
+                i = i.wrapping_add(1);
+                s.on_ticket(Some(&ok_ticket(&ticket(i))), t);
+                let StreamStep::Connect { .. } = s.next(t) else {
+                    panic!()
+                };
+                s.on_open(t);
+                s.on_frame(&hello(1, "c"), t);
+                // ...and the home closes at once.
+                s.on_closed(Some(1000), t);
+            }
+            StreamStep::Sleep { until: Some(u) } => {
+                if matches!(s.status(), StreamStatus::Throttled(_)) {
+                    throttled = true;
+                    assert!(s.polling(), "a throttled stream keeps the poll timer");
+                }
+                t = u.max(t + 1);
+            }
+            StreamStep::Wake => {}
+            other => panic!("{other:?}"),
+        }
+    }
+    assert!(throttled, "the budget was reached");
+    // Never more than the budget in any window, whatever the home does.
+    for (k, m) in mints.iter().enumerate() {
+        let in_window = mints[k..].iter().take_while(|x| **x - m < window).count();
+        assert!(
+            in_window <= budget,
+            "{in_window} mints within a window from {m}"
+        );
+    }
+    let per_hour = mints.len() as f64 / 3.0;
+    println!(
+        "hello/close loop: {} mints in 3 h ({per_hour:.0}/h), attempts {}",
+        mints.len(),
+        s.attempts()
+    );
+    assert!(mints.len() <= budget * (end / window + 1) as usize);
+    assert!(
+        s.attempts() >= 8,
+        "hello does not reset the backoff: {}",
+        s.attempts()
+    );
+    // A changed history lifts the throttle (a new standing); the same one does not.
+    let mut s2 = s.clone();
+    s2.on_history(5);
+    s2.on_history(6);
+    let st = s2.next(t);
+    assert!(
+        matches!(st, StreamStep::NeedTicketCall | StreamStep::Sleep { .. }),
+        "{st:?}"
+    );
+}
+
+#[test]
+fn a_ticket_never_appears_in_debug_output() {
+    let mut s = HomeStream::new("h", BASE, StreamConfig::default(), Some("c.1".into()));
+    assert_eq!(s.next(0), StreamStep::NeedTicketCall);
+    s.ticket_request(b"signed", 0).unwrap();
+    let secret = ticket(7);
+    s.on_ticket(Some(&ok_ticket(&secret)), 0);
+    assert!(!format!("{s:?}").contains(&secret), "{s:?}");
+    let step = s.next(0);
+    let StreamStep::Connect { url } = &step else {
+        panic!()
+    };
+    assert!(
+        url.contains(&secret),
+        "the host still gets the URL it must open"
+    );
+    let shown = format!("{step:?} {step:#?}");
+    assert!(!shown.contains(&secret), "{shown}");
+    assert!(
+        shown.contains("ticket=<redacted>") && shown.contains("after=c.1"),
+        "{shown}"
+    );
+    assert!(!format!("{s:?}").contains(&secret));
+    assert!(!colophon_core::v05::engine::stream::redact_url(url).contains(&secret));
+}
+
+#[test]
+fn a_live_stream_that_only_sends_pongs_still_wakes_a_pass_every_safety_interval() {
+    let mut s = HomeStream::new("h", BASE, StreamConfig::default(), None);
+    let safety = s.config().safety_poll_ms;
+    connect(&mut s, 0, 1, "c.1");
+    let mut wakes = Vec::new();
+    let mut n = 2;
+    let mut t = 0;
+    while t < 10 * 60_000 {
+        t += 5_000;
+        // The home answers every ping and sends frames nobody wakes for.
+        loop {
+            match s.next(t) {
+                StreamStep::Wake => wakes.push(t),
+                StreamStep::Send { .. } => {
+                    s.on_frame(&json!({"type": "pong", "n": n}).to_string(), t);
+                    n += 1;
+                }
+                StreamStep::Sleep { until } => {
+                    assert!(until.is_some_and(|u| u <= wakes.last().copied().unwrap_or(0) + safety));
+                    break;
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+        s.on_frame(&json!({"type": "future", "n": n}).to_string(), t);
+        n += 1;
+        assert!(!s.polling(), "live");
+    }
+    assert!(wakes.len() >= 9, "{wakes:?}");
+    for w in wakes.windows(2) {
+        assert!(w[1] - w[0] <= safety + 5_000, "{wakes:?}");
+    }
+}
+
+#[test]
+fn the_engine_lowers_the_safety_poll_to_the_accounts_recovery_rule() {
+    let w = world();
+    let home = w.s.home.clone();
+    let cfg = StreamConfig {
+        safety_poll_ms: 24 * 3_600_000,
+        ..StreamConfig::default()
+    };
+    let s = w.b.stream_client(&home, cfg, None).unwrap();
+    // The fixture's recoveryDelay is 3,600 s: at least every 600 s (§17.5).
+    assert_eq!(s.config().safety_poll_ms, 600_000);
+    let s =
+        w.b.stream_client(&home, StreamConfig::default(), None)
+            .unwrap();
+    assert_eq!(
+        s.config().safety_poll_ms,
+        60_000,
+        "a shorter interval is kept"
+    );
 }

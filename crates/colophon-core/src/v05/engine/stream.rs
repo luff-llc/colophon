@@ -56,6 +56,19 @@ pub struct StreamConfig {
     pub ping_ms: i64,
     /// See `ping_ms`.
     pub idle_ms: i64,
+    /// How long a connection must stay live before its `hello` resets the backoff. A home that
+    /// sends `hello` and closes at once keeps backing off. Default 60 s.
+    pub stable_ms: i64,
+    /// The most tickets minted (calls signed) in any `mint_window_ms`: past it the stream stays
+    /// on polling ([`StreamStatus::Throttled`]) until the window clears or the history changes,
+    /// so no home can make a device sign (or prompt for) calls without bound. Default 8.
+    pub mint_budget: u32,
+    /// See `mint_budget`. Default 10 minutes.
+    pub mint_window_ms: i64,
+    /// While live, a pass is woken at least this often whatever the frames say, so a silent but
+    /// connected home is never worse than polling. [`Engine::stream_client`] lowers it to
+    /// `recoveryDelay / 6` (§17.5) when that is shorter. Default 60 s.
+    pub safety_poll_ms: i64,
 }
 impl Default for StreamConfig {
     fn default() -> Self {
@@ -66,6 +79,10 @@ impl Default for StreamConfig {
             seed: 0x9e37_79b9_7f4a_7c15,
             ping_ms: 20_000,
             idle_ms: 60_000,
+            stable_ms: 60_000,
+            mint_budget: 8,
+            mint_window_ms: 600_000,
+            safety_poll_ms: 60_000,
         }
     }
 }
@@ -97,10 +114,12 @@ pub enum StreamStatus {
     Closing,
     /// Not tried again until the history changes ([`HomeStream::on_history`]).
     Blocked(Blocked),
+    /// The ticket budget is spent: polling until this time, or until the history changes.
+    Throttled(i64),
 }
 
-/// What the host should do now.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// What the host should do now. Its `Debug` never shows the ticket a `Connect` URL carries.
+#[derive(Clone, PartialEq, Eq)]
 pub enum StreamStep {
     /// Run an exchange pass with this home now (frames since the last wake are coalesced).
     Wake,
@@ -131,6 +150,48 @@ pub enum StreamStep {
         /// When to ask again.
         until: Option<i64>,
     },
+}
+
+impl std::fmt::Debug for StreamStep {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Wake => f.write_str("Wake"),
+            Self::NeedTicketCall => f.write_str("NeedTicketCall"),
+            Self::Connect { url } => f
+                .debug_struct("Connect")
+                .field("url", &redact_url(url))
+                .finish(),
+            Self::Send { text } => f.debug_struct("Send").field("text", text).finish(),
+            Self::Close { code } => f.debug_struct("Close").field("code", code).finish(),
+            Self::Waiting => f.write_str("Waiting"),
+            Self::Sleep { until } => f.debug_struct("Sleep").field("until", until).finish(),
+        }
+    }
+}
+
+/// `url` with the value of its `ticket` parameter replaced: a ticket is a bearer credential
+/// until it is presented, and must not reach logs.
+pub fn redact_url(url: &str) -> String {
+    let Some((head, query)) = url.split_once('?') else {
+        return url.to_string();
+    };
+    let query: Vec<String> = query
+        .split('&')
+        .map(|kv| match kv.split_once('=') {
+            Some(("ticket", _)) => "ticket=<redacted>".to_string(),
+            _ => kv.to_string(),
+        })
+        .collect();
+    format!("{head}?{}", query.join("&"))
+}
+
+/// A ticket held by the client: compared and cloned, never shown by `Debug`.
+#[derive(Clone, PartialEq, Eq)]
+struct Secret(String);
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("<redacted>")
+    }
 }
 
 /// What a frame or a transport event told the host.
@@ -192,7 +253,7 @@ enum Conn {
     /// The ticket request is out.
     Minting,
     /// A ticket, minted at this time.
-    Ticket(String, i64),
+    Ticket(Secret, i64),
     /// The socket is opening.
     Opening,
     /// Open; `hello` not yet received when `hello` is false.
@@ -201,6 +262,8 @@ enum Conn {
     Closing(Closing, bool),
     /// Not tried until the history changes from `seq`.
     Blocked(Blocked, Option<u64>),
+    /// The ticket budget is spent until this time.
+    Throttled(i64),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -240,6 +303,13 @@ pub struct HomeStream {
     /// Whether a `hello` was ever received (the first wakes a catch-up).
     ever_live: bool,
     next_ticket: u64,
+    /// When this connection's `hello` came, until it has been live `stable_ms` (then the backoff
+    /// resets and this is cleared).
+    live_since: Option<i64>,
+    /// When the tickets of the current window were asked for.
+    mints: std::collections::VecDeque<i64>,
+    /// When a pass was last woken while live (the safety poll counts from here).
+    last_wake: i64,
 }
 
 fn q(v: &str) -> String {
@@ -305,9 +375,16 @@ impl HomeStream {
             history: None,
             ever_live: false,
             next_ticket: 1,
+            live_since: None,
+            mints: std::collections::VecDeque::new(),
+            last_wake: 0,
         }
     }
 
+    /// The configuration in force (after [`Engine::stream_client`] applied the account's floor).
+    pub fn config(&self) -> &StreamConfig {
+        &self.config
+    }
     /// The home.
     pub fn home(&self) -> &str {
         &self.home
@@ -316,7 +393,7 @@ impl HomeStream {
     pub fn cursor(&self) -> Option<&str> {
         self.cursor.as_deref()
     }
-    /// Reconnect attempts since the last good `hello`.
+    /// Reconnect attempts since a connection was last live for `stable_ms`.
     pub fn attempts(&self) -> u32 {
         self.attempts
     }
@@ -332,6 +409,7 @@ impl HomeStream {
             Conn::Open { hello: false } => StreamStatus::Connecting,
             Conn::Closing(..) => StreamStatus::Closing,
             Conn::Blocked(b, _) => StreamStatus::Blocked(b.clone()),
+            Conn::Throttled(t) => StreamStatus::Throttled(*t),
         }
     }
 
@@ -344,7 +422,24 @@ impl HomeStream {
     pub fn next(&mut self, now: i64) -> StreamStep {
         if self.wake_at.is_some_and(|t| now >= t) {
             self.wake_at = None;
+            self.last_wake = now;
             return StreamStep::Wake;
+        }
+        if self.conn == (Conn::Open { hello: true }) {
+            // A connection that stayed up long enough has earned a fresh backoff.
+            if self
+                .live_since
+                .is_some_and(|t| now - t >= self.config.stable_ms)
+            {
+                self.attempts = 0;
+                self.live_since = None;
+            }
+            // The safety poll: never longer than `safety_poll_ms` without a pass, whatever the
+            // home sends (pongs and unknown frames keep a socket alive, not the sync).
+            if now - self.last_wake >= self.config.safety_poll_ms {
+                self.last_wake = now;
+                return StreamStep::Wake;
+            }
         }
         let wake = self.wake_at;
         let soonest = |t: Option<i64>| match (t, wake) {
@@ -352,14 +447,11 @@ impl HomeStream {
             (a, b) => a.or(b),
         };
         match self.conn.clone() {
-            Conn::Backoff(t) if now >= t => {
-                self.conn = Conn::NeedTicket;
-                StreamStep::NeedTicketCall
-            }
-            Conn::Backoff(t) => StreamStep::Sleep {
+            Conn::Backoff(t) | Conn::Throttled(t) if now >= t => self.ticket_step(now, wake),
+            Conn::Backoff(t) | Conn::Throttled(t) => StreamStep::Sleep {
                 until: soonest(Some(t)),
             },
-            Conn::NeedTicket => StreamStep::NeedTicketCall,
+            Conn::NeedTicket => self.ticket_step(now, wake),
             Conn::Closing(why, false) => {
                 self.conn = Conn::Closing(why, true);
                 StreamStep::Close {
@@ -372,8 +464,7 @@ impl HomeStream {
             Conn::Minting | Conn::Opening | Conn::Closing(_, true) => StreamStep::Waiting,
             Conn::Ticket(_, at) if now - at > TICKET_USE_MS => {
                 // Too old to present safely: mint another.
-                self.conn = Conn::NeedTicket;
-                StreamStep::NeedTicketCall
+                self.ticket_step(now, wake)
             }
             Conn::Ticket(ticket, _) => {
                 let scheme_base = if let Some(rest) = self.base.strip_prefix("https://") {
@@ -383,7 +474,7 @@ impl HomeStream {
                 } else {
                     self.base.clone()
                 };
-                let mut url = format!("{scheme_base}/stream?ticket={}", q(&ticket));
+                let mut url = format!("{scheme_base}/stream?ticket={}", q(&ticket.0));
                 if let Some(c) = &self.cursor {
                     url.push_str(&format!("&after={}", q(c)));
                 }
@@ -404,8 +495,16 @@ impl HomeStream {
                 }
                 let idle = self.last_rx + self.idle_ms + 1;
                 let ping = self.last_ping.max(self.last_rx) + self.ping_ms;
+                let safety = self.last_wake + self.config.safety_poll_ms;
+                let stable = self
+                    .live_since
+                    .map_or(i64::MAX, |t| t + self.config.stable_ms);
                 StreamStep::Sleep {
-                    until: soonest(Some(if hello { idle.min(ping) } else { idle })),
+                    until: soonest(Some(if hello {
+                        idle.min(ping).min(safety).min(stable)
+                    } else {
+                        idle
+                    })),
                 }
             }
             Conn::Blocked(..) => StreamStep::Sleep { until: wake },
@@ -414,13 +513,14 @@ impl HomeStream {
 
     /// The ticket request for the call the host built ([`Engine::stream_begin_call`]): `POST
     /// {base}/stream/ticket` with no body. Answer it with [`HomeStream::on_ticket`].
-    pub fn ticket_request(&mut self, call: &[u8]) -> Result<Request> {
+    pub fn ticket_request(&mut self, call: &[u8], now: i64) -> Result<Request> {
         require(
             self.conn == Conn::NeedTicket,
             "the stream is not waiting for a ticket call",
         )?;
         require(!call.is_empty() && call.len() <= 16_384, "a call is small")?;
         self.conn = Conn::Minting;
+        self.mints.push_back(now);
         let ticket = self.next_ticket;
         self.next_ticket += 1;
         Ok(Request {
@@ -473,7 +573,7 @@ impl HomeStream {
                     .is_none_or(|p| p == "/stream");
                 match (ticket, path_ok) {
                     (Some(t), true) => {
-                        self.conn = Conn::Ticket(t.to_string(), now);
+                        self.conn = Conn::Ticket(Secret(t.to_string()), now);
                         Vec::new()
                     }
                     _ => {
@@ -565,7 +665,10 @@ impl HomeStream {
                 self.idle_ms =
                     limit("idleMs", self.config.idle_ms).clamp(self.ping_ms + 1_000, 1_200_000);
                 self.conn = Conn::Open { hello: true };
-                self.attempts = 0;
+                // The backoff resets only once this connection has stayed up `stable_ms`
+                // (`next`, `on_closed`): a `hello` alone proves nothing.
+                self.live_since = Some(now);
+                self.last_wake = now;
                 out.push(StreamEvent::Connected {
                     principal: v
                         .get("principal")
@@ -673,6 +776,13 @@ impl HomeStream {
             _ => return Vec::new(),
         };
         let bye = self.bye.take();
+        if self
+            .live_since
+            .take()
+            .is_some_and(|t| now - t >= self.config.stable_ms)
+        {
+            self.attempts = 0;
+        }
         if let Some(c) = ours {
             return match c {
                 Closing::Unsupported => self.block(Blocked::Unsupported),
@@ -701,6 +811,13 @@ impl HomeStream {
     /// The account's verified history is at `seq` (call it after every pass, and on open). A
     /// stream blocked by the home's judgement of our standing is tried again once it changes.
     pub fn on_history(&mut self, seq: u64) {
+        // A new history is a new standing: the ticket budget starts again.
+        if self.history.is_some_and(|h| h != seq) {
+            self.mints.clear();
+            if matches!(self.conn, Conn::Throttled(_)) {
+                self.conn = Conn::NeedTicket;
+            }
+        }
         if let Conn::Blocked(_, at) = &mut self.conn {
             match *at {
                 Some(a) if a != seq => {
@@ -716,7 +833,7 @@ impl HomeStream {
 
     /// Try again now whatever the stream's state (for example on foreground entry after a long
     /// time, or when the network changed): a blocked or backing-off stream mints a new ticket.
-    /// An open stream is left alone.
+    /// An open stream is left alone, and the ticket budget still holds.
     pub fn retry_now(&mut self) {
         if matches!(self.conn, Conn::Backoff(_) | Conn::Blocked(..)) {
             self.conn = Conn::NeedTicket;
@@ -772,6 +889,25 @@ impl HomeStream {
     }
 
     // ---------------------------------------------------------------------------------------
+
+    /// Ask for a ticket call, unless the ticket budget of the window is spent: then stay on
+    /// polling until the oldest mint leaves the window.
+    fn ticket_step(&mut self, now: i64, wake: Option<i64>) -> StreamStep {
+        let window = self.config.mint_window_ms.max(1);
+        while self.mints.front().is_some_and(|t| now - *t >= window) {
+            self.mints.pop_front();
+        }
+        let budget = usize::try_from(self.config.mint_budget.max(1)).unwrap_or(usize::MAX);
+        if self.mints.len() >= budget {
+            let until = self.mints.front().map_or(now, |t| t + window);
+            self.conn = Conn::Throttled(until);
+            return StreamStep::Sleep {
+                until: Some(wake.map_or(until, |w| w.min(until))),
+            };
+        }
+        self.conn = Conn::NeedTicket;
+        StreamStep::NeedTicketCall
+    }
 
     fn wake(&mut self, now: i64) {
         if self.wake_at.is_none() {
@@ -835,6 +971,14 @@ impl<S: RecordSource> Engine<S> {
             .find(|h| h.id == home)
             .and_then(|h| h.endpoints.first().cloned())
             .ok_or_else(|| malformed("not a home of this account, or it names no endpoint"))?;
+        let mut config = config;
+        let floor = i64::try_from(self.account.policy().recovery_delay)
+            .unwrap_or(i64::MAX / 1_000)
+            .saturating_mul(1_000)
+            / 6;
+        if floor > 0 {
+            config.safety_poll_ms = config.safety_poll_ms.min(floor);
+        }
         let mut s = HomeStream::new(home, &base, config, cursor);
         s.on_history(self.account.head().0);
         Ok(s)

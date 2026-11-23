@@ -194,7 +194,7 @@ fn a_write_reaches_another_device_by_a_stream_wake_and_one_batch_against_the_rea
         .unwrap();
     let sigs = host.sign(action.steps());
     let call = b.finish_write(action, sigs).unwrap().artifact.unwrap();
-    let req = stream.ticket_request(&call).unwrap();
+    let req = stream.ticket_request(&call, t).unwrap();
     let r = wire.call(&host, &req, t);
     assert_eq!(r.status, 200, "{}", String::from_utf8_lossy(&r.body));
     assert!(stream.on_ticket(Some(&r), t).is_empty());

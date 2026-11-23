@@ -246,6 +246,10 @@ enum Hostile {
     Fails,
     /// Not JSON.
     Garbage,
+    /// An honest answer padded past the 4 MiB bound.
+    Oversized,
+    /// No item, `truncated` set.
+    EmptyTruncated,
 }
 struct Wrapped<'a> {
     sim: &'a mut SimHome,
@@ -285,6 +289,11 @@ impl Wire for Wrapped<'_> {
                 r.body = b"not json".to_vec();
                 return r;
             }
+            Hostile::Oversized => v["pad"] = json!("x".repeat(4 * 1024 * 1024)),
+            Hostile::EmptyTruncated => {
+                items.clear();
+                v["truncated"] = json!(true);
+            }
         }
         r.body = serde_json::to_vec(&v).unwrap();
         r
@@ -302,6 +311,8 @@ fn a_hostile_batch_answer_is_never_data_and_the_records_are_read_singly_in_the_s
         Hostile::Reordered,
         Hostile::Fails,
         Hostile::Garbage,
+        Hostile::Oversized,
+        Hostile::EmptyTruncated,
     ] {
         let mut w = world(N);
         let home = w.s.home.clone();
@@ -515,4 +526,173 @@ fn measure_a_cold_catch_up_of_2000_records() {
             sim.requests.len()
         );
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// A batch item and a single GET of the same record end the same way: same faults, same state,
+// same stored paths.
+
+/// What the home does to one path, whichever way it is read.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Twist {
+    /// The path is listed but the read says 404.
+    Absent,
+    /// The read says 503.
+    Unavailable,
+}
+struct Twisted<'a> {
+    sim: &'a mut SimHome,
+    path: String,
+    twist: Option<Twist>,
+}
+impl Wire for Twisted<'_> {
+    fn call(&mut self, host: &Host, req: &Request, now: i64) -> Response {
+        let mut r = self.sim.call(host, req, now);
+        let Some(twist) = self.twist else { return r };
+        let code = match twist {
+            Twist::Absent => 404,
+            Twist::Unavailable => 503,
+        };
+        if req.url.ends_with(&format!("/records/{}", self.path)) {
+            return Response {
+                status: code,
+                headers: vec![],
+                body: b"{}".to_vec(),
+            };
+        }
+        if req.url.ends_with("/records/batch") && r.status == 200 {
+            let mut v: Value = serde_json::from_slice(&r.body).unwrap();
+            for it in v["records"].as_array_mut().unwrap() {
+                if it["path"] == json!(self.path) {
+                    *it = json!({"path": self.path, "status": code});
+                }
+            }
+            r.body = serde_json::to_vec(&v).unwrap();
+        }
+        r
+    }
+}
+
+/// The outcome of a reader's pass: faults, the namespace's state and the stored paths.
+fn outcome(
+    sim: &SimHome,
+    s: &Setup,
+    host: &Host,
+    reader: &str,
+    batch: bool,
+    path: &str,
+    twist: Option<Twist>,
+    preload: Option<(&str, Vec<u8>)>,
+) -> (Vec<Fault>, Value, Vec<String>, usize) {
+    let mut sim = sim.clone();
+    sim.batch = batch;
+    sim.requests.clear();
+    let src = device_source(s);
+    if let Some((p, b)) = preload {
+        src.put(p, b);
+    }
+    let mut e = member_engine(&s.f, host, &src, reader, NOW);
+    let mut wire = Twisted {
+        sim: &mut sim,
+        path: path.to_string(),
+        twist,
+    };
+    let faults = sync_pass(&mut e, &src, &s.home, &mut wire, host, NOW + 1_000);
+    let batches = count(&sim.requests, "Post /records/batch");
+    (faults, view(&e).state, src.listing(), batches)
+}
+
+#[test]
+fn a_404_or_503_item_is_the_same_as_a_404_or_503_single_read() {
+    let w = world(4);
+    let path =
+        w.s.sim
+            .files
+            .keys()
+            .find(|p| p.starts_with("ops/"))
+            .unwrap()
+            .clone();
+    for twist in [Twist::Absent, Twist::Unavailable] {
+        let b = outcome(
+            &w.s.sim,
+            &w.s,
+            &w.host,
+            &w.reader,
+            true,
+            &path,
+            Some(twist),
+            None,
+        );
+        let single = outcome(
+            &w.s.sim,
+            &w.s,
+            &w.host,
+            &w.reader,
+            false,
+            &path,
+            Some(twist),
+            None,
+        );
+        assert!(
+            b.3 >= 1 && single.3 == 1,
+            "batched, and the single run probed once"
+        );
+        assert!(!b.0.is_empty(), "{twist:?}: reported");
+        assert_eq!(b.0, single.0, "{twist:?}: same faults");
+        assert_eq!(b.1, single.1, "{twist:?}: same state");
+        assert_eq!(b.2, single.2, "{twist:?}: same stored paths");
+        assert!(!b.2.contains(&path));
+    }
+}
+
+/// A twin (the same body under another envelope) is judged the same in a batch as singly. A
+/// *conflict* (another valid body at a held path) cannot be built through the API: the path names
+/// the operation ID, which binds the namespace, author, epoch, nonce and plaintext (with
+/// `created`). Both reads end in the same `take_record`, which holds the conflict rule.
+#[test]
+fn a_twin_record_is_judged_the_same_in_a_batch_as_singly() {
+    let w = world(4);
+    let path =
+        w.s.sim
+            .files
+            .keys()
+            .find(|p| p.starts_with("ops/"))
+            .unwrap()
+            .clone();
+    let original = w.s.sim.files[&path].clone();
+    let v: Value = serde_json::from_slice(&original).unwrap();
+    let twin = format!(
+        "{{\"signature\":{},\"body\":{}}}",
+        v["signature"], v["body"]
+    )
+    .into_bytes();
+    assert_ne!(twin, original);
+    // The reader holds the original; the home serves (and lists) the twin.
+    let mut sim = w.s.sim.clone();
+    sim.files.insert(path.clone(), twin);
+    let bat = outcome(
+        &sim,
+        &w.s,
+        &w.host,
+        &w.reader,
+        true,
+        &path,
+        None,
+        Some((&path, original.clone())),
+    );
+    let one = outcome(
+        &sim,
+        &w.s,
+        &w.host,
+        &w.reader,
+        false,
+        &path,
+        None,
+        Some((&path, original.clone())),
+    );
+    println!("twin faults: {:?}", bat.0);
+    assert!(bat.3 >= 1, "batched");
+    assert_eq!(bat.0, one.0);
+    assert_eq!(bat.1, one.1);
+    assert_eq!(bat.2, one.2);
 }

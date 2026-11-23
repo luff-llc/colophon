@@ -72,7 +72,7 @@ does not hold the engine. The host passes in the time, and it seeds the jitter o
 3. Loop on `client.next(now)` and act on the step:
    - `NeedTicketCall`: call `engine.stream_begin_call(home, key, request_id)`, sign its step,
      call `engine.finish_write(action, sigs)` and take `artifact`, then call
-     `client.ticket_request(&artifact)`. Send the request (`POST {base}/stream/ticket`, no body)
+     `client.ticket_request(&artifact, now)`. Send the request (`POST {base}/stream/ticket`, no body)
      and pass the answer to `client.on_ticket(Some(&resp), now)`, or pass `None` on a transport
      error.
    - `Connect { url }`: open a WebSocket at `url`. For an `https` home the URL is already
@@ -81,7 +81,8 @@ does not hold the engine. The host passes in the time, and it seeds the jitter o
    - `Send { text }`: send this text frame (an application `ping`).
    - `Close { code }`: close the socket, then call `on_closed(Some(code), now)`.
    - `Wake`: run an ordinary exchange pass with the home now. Then call
-     `client.on_history(engine.account().head().0)`.
+     `client.on_history(engine.account().head().0)`. While the stream is live, `Wake` also comes
+     at least every `safety_poll_ms`, whatever the home sends.
    - `Sleep { until }`: wait for a frame, a host event or `until`. `None` means nothing is
      scheduled.
    - `Waiting`: a request or socket is still outstanding.
@@ -93,12 +94,19 @@ does not hold the engine. The host passes in the time, and it seeds the jitter o
      does not read it.
    - `Error`, `Ack`: replies to client frames.
    - `Violation`, `Down`, `Blocked`: diagnostics.
-5. **Polling.** Whenever `client.polling()` is true (connecting, backing off, blocked or
-   unsupported), keep the existing poll timer at its existing interval. While the stream is live,
-   timer polls can be skipped. Keep a safety poll at least every `recoveryDelay / 6`
-   (§17.5), on foreground entry, and on a local change. The stream does not replace the pending
-   feed: every pass still reads it.
-6. Use `subscribe`, `unsubscribe` and `session_frame` to build client frames for session cells.
+5. **Polling.** Whenever `client.polling()` is true (connecting, backing off, throttled,
+   blocked or unsupported), keep the existing poll timer at its existing interval. While the
+   stream is live, the timer can be skipped. The client then emits `Wake` itself at least every
+   `safety_poll_ms`: 60 s by default, lowered by `stream_client` to `recoveryDelay / 6` when that
+   is shorter (§17.5). So pending transitions are seen no later than a 0.5 poll would see them,
+   even when a connected home sends only pongs or unknown frames. Also run a pass on foreground
+   entry and on a local change. The stream does not replace the pending feed: every pass still
+   reads it.
+6. **Logging.** `StreamStep`, `HomeStream` and their contents can be logged with `{:?}`: their
+   `Debug` shows a `Connect` URL with `ticket=<redacted>` (`stream::redact_url`), and the held
+   ticket as `<redacted>`. The `url` field itself carries the ticket, so the host must not log
+   it, its own WebSocket URL or the `Authorization` header of the ticket request.
+7. Use `subscribe`, `unsubscribe` and `session_frame` to build client frames for session cells.
    They work only while the stream is live.
 
 ### Behaviour
@@ -126,10 +134,16 @@ does not hold the engine. The host passes in the time, and it seeds the jitter o
   and resumes.
 - **Backoff.** The delay is `min(cap, base · 2^attempts)` with base 1 s and cap 60 s. "Equal
   jitter" puts the actual delay between half and all of that, using xorshift seeded from
-  `StreamConfig::seed`. A good `hello` resets `attempts`. A 429 waits at least `Retry-After`.
-  A restart (`bye` `restart`, close 1012) waits `retryMs` plus up to 1 s of jitter and does not
-  count as a failure. With seed 1 the schedule is 542, 1,328, 2,846, 4,376, 11,182, 28,271,
+  `StreamConfig::seed`. A `hello` alone does not reset `attempts`: the connection must stay live
+  for `stable_ms` (60 s), so a home that says `hello` and closes keeps backing off. A 429 waits at
+  least `Retry-After`. A restart (`bye` `restart`, close 1012) waits `retryMs` plus up to 1 s of
+  jitter and does not count as a failure. With seed 1 the schedule is 542, 1,328, 2,846, 4,376, 11,182, 28,271,
   49,933, 30,709, 31,293 and 33,062 ms.
+- **Ticket budget.** Every reconnect signs a call, which may use a hardware key or prompt the
+  user. At most `mint_budget` tickets (8) are minted in any `mint_window_ms` (10 minutes). Past
+  that the stream is `Throttled(until)` and stays on polling until the oldest mint leaves the
+  window, or until `on_history` reports a new seq. A home that sends `hello` and closes at once,
+  forever, gets 8 signatures per 10 minutes (48 an hour), not one a second.
 - **Do not reconnect until the history changes** (`Blocked`; the client resumes after
   `on_history` reports a different seq, or after `retry_now`):
 
@@ -183,6 +197,11 @@ served 5 records in 4 round trips instead of 8.
 
 ## 4. Doc ambiguities found (no server bug found)
 
+Items 2, 3, 5, 6, 7, 8 and 9 are now written into the drafts, describing what the reference home
+does (`colophon-0.6-w1-batch.md`, `colophon-0.6-stream.md` §1.1, §2, §4 and §7). Item 4 is
+written as client guidance. Items 1 and 5 would each need a server change to resolve properly:
+a published feature list, and one expiry format.
+
 Neither the reference relay nor the simulated home showed a server bug. The engine was run
 against `relay/server.js` (Bun, home module in WebAssembly) in all existing real-relay suites
 (`v05_relay_journeys`, `_home`, `_h2`, `_succession`, `_stopped`), which now batch. The new
@@ -233,7 +252,7 @@ batch. The points below are places where the two drafts are ambiguous or silent.
   `exchange_batch_support(home)` is a read-only diagnostic and can be exposed.
 - **Stream:** an object wrapping `HomeStream` with `next`, `ticket_request`, `on_ticket`,
   `on_open`, `on_refused`, `on_frame`, `on_closed`, `ticket_call_failed`, `on_history`,
-  `retry_now`, `polling`, `status`, `cursor`, `subscribe`, `unsubscribe` and `session_frame`;
+  `retry_now`, `polling`, `status`, `config`, `cursor`, `subscribe`, `unsubscribe` and `session_frame` (`ticket_request` takes `now`, for the ticket budget);
   `StreamStep`, `StreamEvent`, `StreamStatus`, `Blocked` and `StreamConfig` as records and enums;
   and `Engine::stream_begin_call` and `Engine::stream_client`. Each platform needs a WebSocket
   transport: `URLSessionWebSocketTask`, OkHttp or `java.net.http.WebSocket`, and the browser
