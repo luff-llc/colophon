@@ -296,6 +296,10 @@ enum Tag {
         path: String,
         sha: String,
     },
+    /// `POST /records/batch` for these `(path, listed SHA-256)`, in the body's order.
+    PullBatch {
+        items: Vec<(String, String)>,
+    },
     PutRecord {
         path: String,
         sha: String,
@@ -396,6 +400,12 @@ struct Home {
     home_live: BTreeMap<String, u64>,
     /// Pulled records waiting to be judged in one batch.
     pulled: Vec<(String, Vec<u8>)>,
+    /// Whether the home serves batch reads: unknown until one is answered; `Some(false)` for the
+    /// rest of the session once it answered one with a 4xx other than 429 (a 0.5 home answers
+    /// 405 or 404).
+    batch: Option<bool>,
+    /// A batch failed for a reason that may pass (429, 5xx): the rest of this pass reads singly.
+    batch_off_pass: bool,
 }
 impl Default for Home {
     fn default() -> Self {
@@ -433,6 +443,8 @@ impl Default for Home {
             verified_live: BTreeMap::new(),
             home_live: BTreeMap::new(),
             pulled: Vec::new(),
+            batch: None,
+            batch_off_pass: false,
         }
     }
 }
@@ -620,6 +632,17 @@ impl<S: RecordSource> Engine<S> {
             .and_then(|i| i.endpoints.first().map(|e| base_of(e)))
             .ok_or_else(|| malformed("the home names no endpoint"))?;
         let acked = h.acked;
+        if matches!(item.0, Tag::PullBatch { .. }) {
+            // Judged path by path as the home will (`check_home_batch_as_signer`).
+            return self.account.begin_home_batch_call(
+                key,
+                &[],
+                &endpoint,
+                &item.3,
+                (acked > 0).then_some(acked),
+                request_id,
+            );
+        }
         let call = crate::v05::account::HomeCall {
             audience: endpoint,
             method: item.1.as_str().to_string(),
@@ -668,7 +691,7 @@ impl<S: RecordSource> Engine<S> {
                     ticket,
                     home: home.to_string(),
                     audience: endpoint.clone(),
-                    purpose: purpose_of(item.1),
+                    purpose: crate::v05::calls::home_purposes(item.1.as_str(), &item.2)[0].into(),
                     method: item.1,
                     url: format!("{endpoint}{}", item.2),
                     path: item.2.clone(),
@@ -683,9 +706,12 @@ impl<S: RecordSource> Engine<S> {
             }
             if let Some(item) = h.queue.pop_front() {
                 let public = is_public(&item.0);
-                let needs = !public
-                    && ((item.1 == Method::Get && h.require_read)
-                        || (item.1 != Method::Get && h.require_write));
+                // A batch always carries its own `colophon.home.read` call (0.6 W1), whatever
+                // single reads need.
+                let needs = matches!(item.0, Tag::PullBatch { .. })
+                    || (!public
+                        && ((item.1 == Method::Get && h.require_read)
+                            || (item.1 != Method::Get && h.require_write)));
                 let ticket = self.exchange.next_ticket;
                 self.exchange.next_ticket += 1;
                 if needs {
@@ -718,6 +744,7 @@ impl<S: RecordSource> Engine<S> {
                 h.pred_pulled = 0;
                 h.genesis_asked.clear();
                 h.verified_live.clear();
+                h.batch_off_pass = false;
             }
             h.phase = match phase {
                 Phase::Head => Phase::PullAuthority,
@@ -1398,7 +1425,7 @@ impl<S: RecordSource> Engine<S> {
             let h = self.home_mut(home);
             (h.remote.clone(), h.junk.clone())
         };
-        let mut queued = 0usize;
+        let mut wanted: Vec<(String, String)> = Vec::new();
         for (p, sha) in remote {
             let want = matches!(
                 paths::classify(&p),
@@ -1414,25 +1441,83 @@ impl<S: RecordSource> Engine<S> {
                 .is_none_or(|h| super::hex(&h.sha) != sha)
                 || self.repull.contains(&p);
             if want && differs && !junk.contains(&sha) {
-                if queued >= MAX_PULLS_PER_PASS {
+                if wanted.len() >= MAX_PULLS_PER_PASS {
                     self.home_mut(home).notes.push(Fault::More {
                         home: home.into(),
                         feed: "records".into(),
                     });
                     break;
                 }
-                queued += 1;
-                self.enqueue(
-                    home,
-                    Tag::PullRecord {
-                        path: p.clone(),
-                        sha,
-                    },
-                    Method::Get,
-                    format!("/records/{p}"),
-                    vec![],
-                    vec![],
-                );
+                wanted.push((p, sha));
+            }
+        }
+        self.queue_pulls(home, wanted, false);
+    }
+
+    /// Queue the pulls of `wanted`: in batches when the home is worth batching for (reads there
+    /// need a call each, so a batch of N records saves N - 1 calls and round trips) and is not
+    /// known to refuse them, singly otherwise. A lone record is always read singly. `front`
+    /// queues them ahead of what is queued (a truncated batch's rest, a fallback).
+    fn queue_pulls(&mut self, home: &str, wanted: Vec<(String, String)>, front: bool) {
+        let h = self.home_mut(home);
+        let batching = h.require_read && h.batch != Some(false) && !h.batch_off_pass;
+        let mut items: Vec<Queued> = Vec::new();
+        let single = |(path, sha): (String, String)| -> Queued {
+            let url = format!("/records/{path}");
+            (
+                Tag::PullRecord { path, sha },
+                Method::Get,
+                url,
+                vec![],
+                vec![],
+            )
+        };
+        if batching && wanted.len() >= 2 {
+            for chunk in super::batch::split(wanted) {
+                if chunk.len() == 1 {
+                    items.extend(chunk.into_iter().map(single));
+                    continue;
+                }
+                let paths: Vec<String> = chunk.iter().map(|(p, _)| p.clone()).collect();
+                items.push((
+                    Tag::PullBatch { items: chunk },
+                    Method::Post,
+                    super::batch::BATCH_PATH.into(),
+                    super::batch::body(&paths),
+                    json_post(),
+                ));
+            }
+        } else {
+            items.extend(wanted.into_iter().map(single));
+        }
+        if front {
+            for it in items.into_iter().rev() {
+                h.queue.push_front(it);
+            }
+        } else {
+            h.queue.extend(items);
+        }
+    }
+
+    /// Turn every batch still queued for `home` into single reads (the home refused batches).
+    fn unbatch_queue(&mut self, home: &str) {
+        let h = self.home_mut(home);
+        let queue = std::mem::take(&mut h.queue);
+        for it in queue {
+            match it.0 {
+                Tag::PullBatch { items } => {
+                    for (path, sha) in items {
+                        let url = format!("/records/{path}");
+                        h.queue.push_back((
+                            Tag::PullRecord { path, sha },
+                            Method::Get,
+                            url,
+                            vec![],
+                            vec![],
+                        ));
+                    }
+                }
+                _ => h.queue.push_back(it),
             }
         }
     }
@@ -1627,7 +1712,7 @@ impl<S: RecordSource> Engine<S> {
             }
         };
         let mut report = Report::default();
-        let pulls = matches!(tag, Tag::PullRecord { .. });
+        let pulls = matches!(tag, Tag::PullRecord { .. } | Tag::PullBatch { .. });
         // A 401/403: a home that wants a call for this kind of request says so once; the
         // request is asked again with a fresh call. A request that carried a call and was
         // refused, or a public one, ends the pass.
@@ -1636,7 +1721,9 @@ impl<S: RecordSource> Engine<S> {
             self.on_peer_head(peer, &response, &mut report)?;
             return Ok(report);
         }
-        if matches!(response.status, 401 | 403) {
+        // A batch carried its own call: its refusal is the batch's (`on_batch`), never a reason
+        // to ask for a call or to end the pass.
+        if matches!(response.status, 401 | 403) && !matches!(tag, Tag::PullBatch { .. }) {
             let item = self.home_mut(home).last_item.take();
             let carried = self.home_mut(home).carried_call;
             // 401 asks for a call (§14: "a request that needs a call and carries none is answered 401").
@@ -1713,6 +1800,7 @@ impl<S: RecordSource> Engine<S> {
             Tag::PullRecord { path, sha } => {
                 self.on_pull_record(home, &path, &sha, &response, &mut report)?
             }
+            Tag::PullBatch { items } => self.on_batch(home, items, &response, &mut report)?,
             Tag::PutRecord { path, sha } => {
                 self.on_put(home, &path, &sha, false, &response, &mut report)
             }
@@ -1749,7 +1837,7 @@ impl<S: RecordSource> Engine<S> {
                 .home_mut(home)
                 .queue
                 .iter()
-                .any(|q| matches!(q.0, Tag::PullRecord { .. }))
+                .any(|q| matches!(q.0, Tag::PullRecord { .. } | Tag::PullBatch { .. }))
         {
             self.flush_pulled(home, &mut report)?;
         }
@@ -2698,7 +2786,20 @@ impl<S: RecordSource> Engine<S> {
             });
             return Ok(());
         }
-        if super::hex(&super::sha(&r.body)) != sha || r.body.len() > super::MAX_RECORD {
+        self.take_record(home, path, sha, &r.body, report)
+    }
+
+    /// The bytes a home served for the record `path` it listed with `sha`, by a single GET or as
+    /// a found batch item: judged here, the same way for both.
+    fn take_record(
+        &mut self,
+        home: &str,
+        path: &str,
+        sha: &str,
+        body: &[u8],
+        report: &mut Report,
+    ) -> Result<()> {
+        if super::hex(&super::sha(body)) != sha || body.len() > super::MAX_RECORD {
             report.faults.push(Fault::Mismatch {
                 home: home.into(),
                 path: path.into(),
@@ -2708,7 +2809,7 @@ impl<S: RecordSource> Engine<S> {
         }
         // Judge before it is held: what is no record is dropped, its digest remembered so it
         // is not fetched again, and it never enters the account.
-        if !self.account.would_hold(path, &r.body) {
+        if !self.account.would_hold(path, body) {
             let h = self.home_mut(home);
             if h.junk.len() < MAX_JUNK {
                 h.junk.insert(sha.to_string());
@@ -2734,7 +2835,7 @@ impl<S: RecordSource> Engine<S> {
                 .and_then(|b| self.account.verdict_of(path, b))
                 .is_some_and(|c| !super::is_not_a_record(&c));
             if local_is_record {
-                if body_of(&r.body) != held.as_deref().and_then(body_of) {
+                if body_of(body) != held.as_deref().and_then(body_of) {
                     report.faults.push(Fault::Conflict {
                         home: home.into(),
                         path: path.into(),
@@ -2755,11 +2856,106 @@ impl<S: RecordSource> Engine<S> {
         // last queued pull has been answered, whatever that answer was.
         let batch = self.options.batch;
         let h = self.home_mut(home);
-        h.pulled.push((path.to_string(), r.body.clone()));
+        h.pulled.push((path.to_string(), body.to_vec()));
         if h.pulled.len() >= batch {
             self.flush_pulled(home, report)?;
         }
         Ok(())
+    }
+
+    /// The answer to a batch read of `items`. A well-formed 200 is split into items and each
+    /// found item is judged as a single GET's answer is ([`Engine::take_record`]); an item the
+    /// home could not fit (413) is read singly, and a truncated answer's rest is asked for with
+    /// a fresh call. Anything else fails the batch as a whole, nothing of it is used, and its
+    /// records are read singly in this same pass: a home that does not serve batches (any 4xx
+    /// but 429) is not asked again this session; one that failed for a reason that may pass
+    /// (429, 5xx, a malformed answer) is not asked again this pass. A batch never fails a pass.
+    fn on_batch(
+        &mut self,
+        home: &str,
+        items: Vec<(String, String)>,
+        r: &Response,
+        report: &mut Report,
+    ) -> Result<()> {
+        if r.status == 200 {
+            let requested: Vec<String> = items.iter().map(|(p, _)| p.clone()).collect();
+            match super::batch::parse(&requested, &r.body) {
+                Ok(answer) => {
+                    self.home_mut(home).batch = Some(true);
+                    let returned = answer.items.len();
+                    let mut singly: Vec<(String, String)> = Vec::new();
+                    for (item, (path, sha)) in answer.items.into_iter().zip(items.iter()) {
+                        match item {
+                            // The item's own etag is the hash of its bytes (checked when the
+                            // answer was read); the bytes must also be what the change feed
+                            // listed, as for a single GET.
+                            super::batch::Item::Found { bytes } => {
+                                self.take_record(home, path, sha, &bytes, report)?;
+                            }
+                            super::batch::Item::Absent => report.faults.push(Fault::Status {
+                                home: home.into(),
+                                status: 404,
+                            }),
+                            super::batch::Item::Unavailable => report.faults.push(Fault::Status {
+                                home: home.into(),
+                                status: 503,
+                            }),
+                            super::batch::Item::TooLarge => {
+                                singly.push((path.clone(), sha.clone()))
+                            }
+                        }
+                    }
+                    let rest: Vec<(String, String)> = items.into_iter().skip(returned).collect();
+                    if answer.truncated && !rest.is_empty() {
+                        self.queue_pulls(home, rest, true);
+                    }
+                    for (path, sha) in singly.into_iter().rev() {
+                        let url = format!("/records/{path}");
+                        self.home_mut(home).queue.push_front((
+                            Tag::PullRecord { path, sha },
+                            Method::Get,
+                            url,
+                            vec![],
+                            vec![],
+                        ));
+                    }
+                }
+                Err(why) => {
+                    report.faults.push(Fault::Malformed {
+                        home: home.into(),
+                        why,
+                    });
+                    self.home_mut(home).batch_off_pass = true;
+                    self.unbatch_queue(home);
+                    self.queue_pulls(home, items, true);
+                }
+            }
+            return Ok(());
+        }
+        let unsupported = (400..500).contains(&r.status) && r.status != 429;
+        {
+            let h = self.home_mut(home);
+            if unsupported {
+                h.batch = Some(false);
+            } else {
+                h.batch_off_pass = true;
+            }
+        }
+        if !unsupported {
+            report.faults.push(Fault::Status {
+                home: home.into(),
+                status: r.status,
+            });
+        }
+        self.unbatch_queue(home);
+        self.queue_pulls(home, items, true);
+        Ok(())
+    }
+
+    /// Whether `home` serves batch record reads, as far as this session has learned: `None`
+    /// until one was answered, `Some(false)` once the home refused one as unsupported.
+    pub fn exchange_batch_support(&self, home: &str) -> Option<bool> {
+        self.exchange.homes.get(home).and_then(|h| h.batch)
     }
 
     /// Judge the pulled records in one batch (one merge, not one per record) and hand the host
