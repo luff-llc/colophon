@@ -1,6 +1,6 @@
 # Colophon 0.6: sessions
 
-**Status:** unfrozen draft, revision 11, 2026-11-23. Revision 2 adopted the findings of the
+**Status:** unfrozen draft, revision 12, 2026-11-23. Revision 2 adopted the findings of the
 reference machine (`docs/colophon-0.6-sessions-findings.md`, F1–F20); revision 3 added `via` to passed claims (F12, F21); revision 4 answers the first
 independent design review (R1–R9 in the findings document): evidence instead of hearsay,
 no silent loss of state, key bootstrap and freshness, bounded state; revision 5 adopts what
@@ -46,10 +46,20 @@ because bridging makes reachability inside it complete.
 kind from settling: an adversary that always delivers a holder's frames just too late
 makes members renew over each other for ever. So this document separates two kinds of
 guarantee. **Safety** (G1–G3, G6–G9, G11, G12) holds whatever the network does.
-**Convergence** (G4, G5, G10) holds from the moment the group is **timely**: its membership
-has stopped changing and every frame sent to all reaches every member within `beatMs`
-(so that a live holder is never silent to anyone for `holderTimeoutMs`), counting a frame
-that is lost as one that a later frame replaces. Before that moment claims may change;
+**Convergence** (G4, G5, G10) holds from the moment the group is **timely**. A group is
+timely from a time T when, from T on:
+
+1. its membership does not change;
+2. in every interval of `holderTimeoutMs` − `beatMs` (10 s by default), every member
+   accepts at least one holder frame from each member that is acting as holder throughout
+   that interval; and
+3. every `hello`, `state`, `take`, `pass`, `yielded`, `ack` and `bye` is accepted by each
+   member it concerns within that same length of time after it is first sent, counting the
+   resends this document requires.
+
+Loss is allowed as long as these hold: two beats lost in a row are within the condition,
+three are not. A home that delivers every frame within `beatMs` and loses none satisfies it
+with room to spare. Before that moment claims may change;
 they never go backwards and nothing is dropped silently.
 
 **What is and is not promised.** Under this model no protocol can both let a member take
@@ -76,6 +86,11 @@ core, as live rules are in 0.5 §20) together with its **policy**:
 | `maxPayload` | 8,192 | Largest application payload, bytes. |
 | `fold` | `latest` | How ordered messages become state: `latest` (state is the last payload) or `append` (state is the most recent payloads, at most `tail` of them and at most `maxPayload` bytes once encoded as a snapshot; oldest dropped first). A snapshot therefore always fits in a frame. With `append`, a payload is at most `maxPayload` − 4 bytes. |
 | `take` | `free` | `free`: any eligible member may take. Other values are reserved; a host that meets one MUST NOT take in that cell. |
+
+**Entitlement comes from the host.** The session core is told, by the host, which members
+are entitled at the accepted authority head, and is told again whenever that head changes.
+Until it has been told, it treats nobody as entitled: it accepts no frame as coming from a
+writer and passes to no one.
 
 **Who may join.** A current member whose terms hold a `records` entry for the namespace
 (0.5 §10.1). **Who may hold or submit.** A member whose entry has access `write`. A frame
@@ -412,7 +427,9 @@ guarantees and hold from the moment the group is timely (§S0); the rest hold al
   claim and, for that claim, the same ordered state. With no live holder, members may hold
   different dead claims until the next take or renewal.
 - **G5.** A writer with no holder reachable becomes holder within `askTimeoutMs` of asking,
-  or `holderTimeoutMs` of the holder's last frame, whichever its trigger was.
+  or `holderTimeoutMs` of the holder's last frame, whichever its trigger was, measured on
+  its own clock, plus the delay with which its host delivers timer expiries. A host MUST
+  deliver a timer expiry within 250 ms of its due time.
 - **G6.** Once a member accepts a frame carrying a claim, sent by that claim's holder (the
   frame names that member or no one, and passes §S3, freshness included), that member does
   not act as holder under any lesser claim.
