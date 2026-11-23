@@ -1297,7 +1297,7 @@ fn head_request(req: &Value) -> R<Value> {
         .and_then(|o| own_latest_head(o, &l.slot.home));
     let due = match &latest {
         None => true,
-        Some((s, d, issued)) => (*s, d) != (seq, &digest) || now_ms - issued >= half,
+        Some((s, d, issued)) => (*s, d) != (seq, &digest) || now_ms.saturating_sub(*issued) >= half,
     };
     if !is_home || !due {
         // `wakeAt`: the earliest clock reading at which a head could be due over this same

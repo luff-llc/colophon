@@ -1403,7 +1403,8 @@ impl<'a> VerifiedObjects<'a> {
     /// - an `activate` is held until its transition's due time (§8.7 "Times"): the due time of
     ///   each held transition not recorded on the branch whose held receipts decide its timing.
     ///   A transition whose timing they do not decide waits for an object, not for the clock;
-    ///   one more than 7 days past its due time can never be activated;
+    ///   one whose `activate` would be issued more than 7 days after its due time (the last
+    ///   entry's `issued` is later than that) can never be activated;
     /// - a head more than 60 s ahead of the clock is not used for a `final` (§13.3) until it is
     ///   no longer: each such head's `issued` less 60 s, while an activation is provisional.
     ///
@@ -1412,7 +1413,8 @@ impl<'a> VerifiedObjects<'a> {
     /// predecessor's objects, a succession or a `successor` (whose windows are not bounded
     /// here); a held veto of a transition not recorded, or of a provisional activation (a
     /// `vetoed` is not timed here); and a transition already due, within its 7 days, and not
-    /// recorded. `Some(i64::MAX)` when nothing held waits on the clock.
+    /// recorded and still activatable; and a bound not after the clock. `Some(i64::MAX)` when
+    /// nothing held waits on the clock.
     pub fn next_due_ms(&self) -> Option<i64> {
         const DAY: i64 = 86_400 * SEC;
         let now_ms = self.now_ms;
@@ -1462,7 +1464,10 @@ impl<'a> VerifiedObjects<'a> {
             };
             if timing.due_ms > now_ms {
                 due = due.min(timing.due_ms);
-            } else if now_ms <= timing.due_ms.saturating_add(7 * DAY) {
+            } else if state.last_issued_ms() <= timing.due_ms.saturating_add(7 * DAY) {
+                // Due and not recorded, and still activatable: the verifier bounds the
+                // `activate`'s determined `issued`, max(last issued, due), to 7 days after the
+                // due time, whatever the clock reads.
                 return None;
             }
         }
@@ -1479,9 +1484,14 @@ impl<'a> VerifiedObjects<'a> {
                     continue;
                 };
                 if issued > now_ms.saturating_add(60 * SEC) {
-                    due = due.min(issued - 60 * SEC);
+                    due = due.min(issued.saturating_sub(60 * SEC));
                 }
             }
+        }
+        // A time not after the clock bounds nothing (the verifier's `held_until` for a held
+        // `activate` can be its `issued` less 60 s, before its due time): ask again next pass.
+        if due <= now_ms {
+            return None;
         }
         Some(due)
     }
