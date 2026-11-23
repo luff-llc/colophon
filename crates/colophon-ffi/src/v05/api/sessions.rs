@@ -8,8 +8,8 @@
 //!
 //! The endpoint reads the account's epoch keys from the engine on every call that seals or
 //! opens, as an opaque copy that never leaves Rust: no key crosses the boundary in either
-//! direction. The conformance surface (`conformance.rs`) is compiled only with the
-//! `conformance` feature.
+//! direction. The conformance surface (supplied views and keys, the machine and the receiver on
+//! their own) is in the unpublished `colophon-conformance` crate, never in this one.
 //!
 //! Commands, events, claims, policies and persisted claims cross as the JSON the conformance
 //! vectors use (tagged by `command`, `event`, `input`, `output`). Every JSON argument is decoded
@@ -165,8 +165,8 @@ fn effect_out(e: Effect) -> R<SessionEffect> {
 #[cfg_attr(feature = "web05", wasm_bindgen::prelude::wasm_bindgen)]
 pub struct SessionAccountView {
     pub(crate) v: SessionAccount,
-    /// The engine and authority head it was taken at; none for a supplied view.
-    pub(crate) stamp: Option<(u64, u64)>,
+    /// The engine and authority head it was taken at.
+    pub(crate) stamp: Option<Head>,
 }
 #[cfg_attr(feature = "native05", uniffi::export)]
 #[cfg_attr(feature = "web05", wasm_bindgen::prelude::wasm_bindgen)]
@@ -191,6 +191,20 @@ impl SessionAccountView {
 
 // --- The endpoint -------------------------------------------------------------------------------
 
+/// The most inputs an endpoint queues while a `Persist` is unacknowledged. A durable write
+/// takes milliseconds to a few hundred; at the session rates (a beat every `beatMs`, a frame per
+/// member event) 64 inputs cover several seconds of a busy cell, and bound the queue to about
+/// 1 MiB of frames. Ticks never take a slot: they coalesce into one.
+pub(super) const MAX_QUEUED: usize = 64;
+
+/// The engine and authority head (seq and body digest) a view was taken at.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct Head {
+    owner: u64,
+    seq: u64,
+    digest: String,
+}
+
 /// Effects held back behind a `Persist` until the host acknowledges it.
 struct HeldEffects {
     /// The acknowledgement ID of the `Persist` that ends what was released.
@@ -199,53 +213,132 @@ struct HeldEffects {
     rest: Vec<Effect>,
 }
 
+/// An input that arrived while a `Persist` was unacknowledged, kept in arrival order.
+enum Queued {
+    Tick,
+    Receive(Vec<u8>),
+    LinkUp,
+    LinkDown,
+    Command(Command),
+}
+
+/// What one call hands back, accumulated across the inputs it ran.
+struct Out {
+    effects: Vec<SessionEffect>,
+    drops: Vec<SessionDrop>,
+    dropped: Option<SessionDrop>,
+    awaiting: Option<u64>,
+    queued: bool,
+}
+impl Out {
+    fn new() -> Self {
+        Self {
+            effects: Vec::new(),
+            drops: Vec::new(),
+            dropped: None,
+            awaiting: None,
+            queued: false,
+        }
+    }
+    fn step(self) -> SessionStep {
+        SessionStep {
+            effects: self.effects,
+            dropped: self.dropped,
+            awaiting_persist: self.awaiting,
+            queued: self.queued,
+            drops: self.drops,
+        }
+    }
+}
+
 struct EndpointState {
     e: Endpoint,
-    /// The engine and authority head of the view installed last (`None`: a view that did not
-    /// come from an engine, which no engine-driven call accepts).
-    installed: Option<(u64, u64)>,
+    /// The head of the view installed last (`None`: a view that did not come from an engine,
+    /// which no engine-driven call accepts).
+    installed: Option<Head>,
     /// The body `begin_delegation` returned and `finish_delegation` has not installed yet.
     delegation: Option<Vec<u8>>,
     held: Option<HeldEffects>,
+    queue: std::collections::VecDeque<Queued>,
     next_ack: u64,
 }
 
 impl EndpointState {
-    /// Release effects up to and including the first `Persist`; hold the rest behind it.
-    fn release(&mut self, effects: Vec<Effect>, dropped: Option<SessionDrop>) -> R<SessionStep> {
-        let mut out = Vec::new();
+    /// Release effects up to and including the first `Persist`, holding the rest behind it.
+    /// True when a `Persist` now waits.
+    fn absorb(&mut self, effects: Vec<Effect>, out: &mut Out) -> R<bool> {
         let mut it = effects.into_iter();
-        let mut awaiting = None;
         for e in it.by_ref() {
             let persist = matches!(e, Effect::Persist { .. });
-            out.push(effect_out(e)?);
+            out.effects.push(effect_out(e)?);
             if persist {
                 self.next_ack = self.next_ack.wrapping_add(1).max(1);
-                awaiting = Some(self.next_ack);
-                break;
+                out.awaiting = Some(self.next_ack);
+                self.held = Some(HeldEffects {
+                    ack: self.next_ack,
+                    rest: it.collect(),
+                });
+                return Ok(true);
             }
         }
-        if let Some(ack) = awaiting {
-            self.held = Some(HeldEffects {
-                ack,
-                rest: it.collect(),
-            });
-        }
-        Ok(SessionStep {
-            effects: out,
-            dropped,
-            awaiting_persist: awaiting,
-        })
+        Ok(false)
     }
-    fn not_held(&self) -> R<()> {
-        match self.held {
-            Some(_) => Err(AccountError::Unavailable {
-                code: "session:persistPending".into(),
-                detail: "a Persist effect is not acknowledged yet: store it and call persisted"
-                    .into(),
-            }),
-            None => Ok(()),
+    fn run(&mut self, input: Queued, clock: Clock, epochs: &SessionEpochs) -> Step {
+        match input {
+            Queued::Tick => self.e.tick(clock, epochs),
+            Queued::Receive(b) => self.e.receive(&b, clock, epochs),
+            Queued::LinkUp => self.e.link_up(clock, epochs),
+            Queued::LinkDown => self.e.link_down(clock, epochs),
+            Queued::Command(c) => self.e.command(c, clock, epochs),
         }
+    }
+    /// Run queued inputs in arrival order, with this call's clock, until one persists.
+    fn drain(&mut self, clock: Clock, epochs: &SessionEpochs, out: &mut Out) -> R<bool> {
+        while let Some(input) = self.queue.pop_front() {
+            let step = self.run(input, clock, epochs);
+            if let Some(d) = step.dropped.as_ref() {
+                out.drops.push(drop_out(d));
+            }
+            if self.absorb(step.effects, out)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+    /// Queue an input that arrived while a `Persist` waits.
+    fn enqueue(&mut self, input: Queued, out: &mut Out) -> R<()> {
+        out.queued = true;
+        out.awaiting = self.held.as_ref().map(|h| h.ack);
+        if matches!(input, Queued::Tick) {
+            if !self.queue.iter().any(|q| matches!(q, Queued::Tick)) {
+                self.queue.push_back(Queued::Tick);
+            }
+            return Ok(());
+        }
+        let used = self
+            .queue
+            .iter()
+            .filter(|q| !matches!(q, Queued::Tick))
+            .count();
+        if used >= MAX_QUEUED {
+            return match input {
+                // A frame that cannot be kept is lost, as on any carrier.
+                Queued::Receive(_) => {
+                    out.queued = false;
+                    out.dropped = Some(SessionDrop {
+                        reason: "queueFull".into(),
+                        hello_to: None,
+                    });
+                    Ok(())
+                }
+                _ => Err(AccountError::Bound {
+                    code: "session:queueFull".into(),
+                    detail: "too many inputs wait for an unacknowledged Persist".into(),
+                }),
+            };
+        }
+        self.queue.push_back(input);
+        Ok(())
     }
 }
 
@@ -257,24 +350,31 @@ fn stale() -> AccountError {
             .into(),
     }
 }
-
-/// What an engine-driven call reads from the engine: its identity and authority head, and the
-/// epoch keys of the cell's namespace (an opaque copy, wiped on drop).
-fn engine_now(engine: &AccountEngine, namespace: &str) -> R<((u64, u64), SessionEpochs)> {
-    engine.ensure_live()?;
-    engine.acct(|a| Ok(((engine.owner, a.head().0), a.session_epochs(namespace))))
+fn wrong_ack() -> AccountError {
+    AccountError::WrongObject {
+        code: "session:wrongAck".into(),
+        detail: "no Persist with this acknowledgement ID is waiting".into(),
+    }
 }
 
 /// One member of one cell, with sealing. Calls are serialized (one at a time, as §6 of the wire
 /// document requires): a second thread waits for the first.
 ///
-/// Two orders are enforced here rather than left to the host. Every call that consults the
-/// account (`receive`, `command`, `tick`, `link_up`, `link_down`) takes the engine and is refused
-/// with `session:staleAccount`, changing nothing, when the engine has accepted an authority head
-/// newer than the view last installed; `set_account` installs a view of the engine's current
-/// head. And a step releases its effects only up to and including the first `Persist`: the
-/// effects after it are held until `persisted` acknowledges it, and every other mutating call is
-/// refused with `session:persistPending` until then.
+/// Two orders are enforced here rather than left to the host.
+///
+/// The authority head: every call that consults the account takes the engine, and runs while
+/// holding the engine's lock, so the head it checks cannot change before the call has finished.
+/// The lock order is always engine, then endpoint; no path takes them the other way (the
+/// endpoint's own readers and the delegation calls take only the endpoint), the engine never
+/// calls an endpoint, and no host callback runs while both are held, so there is no cycle. A view
+/// older than the engine's head (sequence and digest) is refused with `session:staleAccount`,
+/// changing nothing; `set_account` installs a view of the engine's current head.
+///
+/// Persist before what reveals it: a step releases its effects only up to and including the
+/// first `Persist`; the rest wait for `persisted`. Inputs that arrive meanwhile (`tick`,
+/// `receive`, `link_up`, `link_down`, `command`) are queued in arrival order (ticks coalesced,
+/// at most `MAX_QUEUED` others) and run when the `Persist` is acknowledged, with the clock of
+/// that call.
 #[cfg_attr(feature = "native05", derive(uniffi::Object))]
 #[cfg_attr(feature = "web05", wasm_bindgen::prelude::wasm_bindgen)]
 pub struct SessionEndpoint {
@@ -316,9 +416,10 @@ impl SessionEndpoint {
                 Ok(e) => Ok(Self {
                     s: Cell::new(EndpointState {
                         e,
-                        installed: view.stamp,
+                        installed: view.stamp.clone(),
                         delegation: None,
                         held: None,
+                        queue: std::collections::VecDeque::new(),
                         next_ack: 0,
                     }),
                 }),
@@ -337,25 +438,53 @@ impl SessionEndpoint {
         wipe(&mut fresh_seed);
         r
     }
-    /// Run one engine-driven call: read the engine, then refuse a pending acknowledgement or a
-    /// stale view before anything changes.
+    /// Run `f` with the engine locked (its head and the namespace's epoch keys read under that
+    /// lock), then the endpoint locked: engine first, always.
+    fn with_engine<T>(
+        &self,
+        engine: &AccountEngine,
+        f: impl FnOnce(&mut EndpointState, Head, &SessionEpochs) -> R<T>,
+    ) -> R<T> {
+        let ns = guard(|| Ok(self.s.lock()?.e.cell().namespace.clone()))?;
+        let owner = engine.owner;
+        engine.run(|eng| {
+            if eng.is_locked() {
+                return Err(AccountError::locked());
+            }
+            let a = eng.account();
+            let (seq, digest) = a.head();
+            let head = Head { owner, seq, digest };
+            let epochs = a.session_epochs(&ns);
+            let mut s = self.s.lock()?;
+            f(&mut s, head, &epochs)
+        })
+    }
+    /// One input: queued while a `Persist` waits, else refused on a stale view, else run after
+    /// whatever is still queued.
     fn driven(
         &self,
         engine: &AccountEngine,
         clock: &SessionClock,
-        f: impl FnOnce(&mut Endpoint, Clock, &SessionEpochs) -> Step,
+        input: Queued,
     ) -> R<SessionStep> {
-        guard(|| {
-            let ns = self.s.lock()?.e.cell().namespace.clone();
-            let (head, epochs) = engine_now(engine, &ns)?;
-            let mut s = self.s.lock()?;
-            s.not_held()?;
-            if s.installed != Some(head) {
+        let clock = clock_in(clock);
+        self.with_engine(engine, |s, head, epochs| {
+            let mut out = Out::new();
+            if s.held.is_some() {
+                s.enqueue(input, &mut out)?;
+                return Ok(out.step());
+            }
+            if s.installed.as_ref() != Some(&head) {
                 return Err(stale());
             }
-            let step = f(&mut s.e, clock_in(clock), &epochs);
-            let dropped = step.dropped.as_ref().map(drop_out);
-            s.release(step.effects, dropped)
+            if s.drain(clock, epochs, &mut out)? {
+                s.enqueue(input, &mut out)?;
+                return Ok(out.step());
+            }
+            let step = s.run(input, clock, epochs);
+            out.dropped = step.dropped.as_ref().map(drop_out);
+            s.absorb(step.effects, &mut out)?;
+            Ok(out.step())
         })
     }
 }
@@ -416,26 +545,37 @@ impl SessionEndpoint {
             Ok(())
         })
     }
-    /// A newly accepted authority head: install `view`, which must be the engine's
-    /// `session_account` at its current head (else `session:staleAccount`). Call it after every
-    /// pass that moved the head, before any frame received after it.
+    /// A newly accepted authority head: install `view`, which must be `engine`'s
+    /// `session_account` at its current head (else `session:staleAccount`), then run any inputs
+    /// queued behind a stale view. Call it after every pass that moved the head. Refused with
+    /// `session:persistPending` while a `Persist` waits: acknowledge it first.
     pub fn set_account(
         &self,
         view: &SessionAccountView,
         engine: &AccountEngine,
         clock: SessionClock,
     ) -> Result<SessionStep, AccountError> {
-        guard(|| {
-            let ns = self.s.lock()?.e.cell().namespace.clone();
-            let (head, epochs) = engine_now(engine, &ns)?;
-            let mut s = self.s.lock()?;
-            s.not_held()?;
-            if view.stamp != Some(head) {
+        let clock = clock_in(&clock);
+        self.with_engine(engine, |s, head, epochs| {
+            if let Some(h) = &s.held {
+                return Err(AccountError::Unavailable {
+                    code: "session:persistPending".into(),
+                    detail: format!(
+                        "Persist {} is not acknowledged yet: store it and call persisted",
+                        h.ack
+                    ),
+                });
+            }
+            if view.stamp.as_ref() != Some(&head) {
                 return Err(stale());
             }
-            let step = s.e.set_account(view.v.clone(), clock_in(&clock), &epochs);
+            let mut out = Out::new();
+            let step = s.e.set_account(view.v.clone(), clock, epochs);
             s.installed = Some(head);
-            s.release(step.effects, None)
+            if !s.absorb(step.effects, &mut out)? {
+                s.drain(clock, epochs, &mut out)?;
+            }
+            Ok(out.step())
         })
     }
     /// An application command (§S10), as JSON tagged by `command`.
@@ -446,7 +586,7 @@ impl SessionEndpoint {
         clock: SessionClock,
     ) -> Result<SessionStep, AccountError> {
         let c: Command = guard(|| strict!(Command, &command_json, "the session command"))?;
-        self.driven(engine, &clock, |e, c2, k| e.command(c, c2, k))
+        self.driven(engine, &clock, Queued::Command(c))
     }
     /// A timer expiry: call at or soon after `next_deadline` (within 250 ms).
     pub fn tick(
@@ -454,7 +594,7 @@ impl SessionEndpoint {
         engine: &AccountEngine,
         clock: SessionClock,
     ) -> Result<SessionStep, AccountError> {
-        self.driven(engine, &clock, |e, c, k| e.tick(c, k))
+        self.driven(engine, &clock, Queued::Tick)
     }
     /// Some carrier works again.
     pub fn link_up(
@@ -462,7 +602,7 @@ impl SessionEndpoint {
         engine: &AccountEngine,
         clock: SessionClock,
     ) -> Result<SessionStep, AccountError> {
-        self.driven(engine, &clock, |e, c, k| e.link_up(c, k))
+        self.driven(engine, &clock, Queued::LinkUp)
     }
     /// No carrier works.
     pub fn link_down(
@@ -470,11 +610,11 @@ impl SessionEndpoint {
         engine: &AccountEngine,
         clock: SessionClock,
     ) -> Result<SessionStep, AccountError> {
-        self.driven(engine, &clock, |e, c, k| e.link_down(c, k))
+        self.driven(engine, &clock, Queued::LinkDown)
     }
     /// Bytes received from a carrier, exactly as the sender sealed them. A frame that fails any
-    /// §S3 check changes nothing and is reported in `dropped`. Refused (the frame not judged:
-    /// keep it and deliver it again) while a `Persist` is unacknowledged or the view is stale.
+    /// §S3 check changes nothing and is reported in `dropped`. While a `Persist` waits the frame
+    /// is queued (`queued`), or, past the bound, lost (`dropped` with reason `queueFull`).
     pub fn receive(
         &self,
         bytes: Vec<u8>,
@@ -482,32 +622,43 @@ impl SessionEndpoint {
         clock: SessionClock,
     ) -> Result<SessionStep, AccountError> {
         bytes_ok(&bytes, MAX_FRAME_ARG, "a session frame")?;
-        self.driven(engine, &clock, |e, c, k| e.receive(&bytes, c, k))
+        self.driven(engine, &clock, Queued::Receive(bytes))
     }
     /// The host stored the `Persist` whose acknowledgement ID is `ack` (the step's
-    /// `awaiting_persist`): the effects held behind it, again up to and including the next
-    /// `Persist`. Any other ID, or one already acknowledged, is `session:wrongAck`.
-    pub fn persisted(&self, ack: u64) -> Result<SessionStep, AccountError> {
-        guard(|| {
-            let mut s = self.s.lock()?;
+    /// `awaiting_persist`): the effects held behind it, then the queued inputs run in arrival
+    /// order with this call's clock, all up to and including the next `Persist`. Any other ID,
+    /// or one already acknowledged, is `session:wrongAck`. If the engine's head moved meanwhile,
+    /// the queued inputs wait for `set_account`.
+    pub fn persisted(
+        &self,
+        ack: u64,
+        engine: &AccountEngine,
+        clock: SessionClock,
+    ) -> Result<SessionStep, AccountError> {
+        let clock = clock_in(&clock);
+        self.with_engine(engine, |s, head, epochs| {
             match &s.held {
                 Some(h) if h.ack == ack => {}
-                _ => {
-                    return Err(AccountError::WrongObject {
-                        code: "session:wrongAck".into(),
-                        detail: "no Persist with this acknowledgement ID is waiting".into(),
-                    })
-                }
+                _ => return Err(wrong_ack()),
             }
+            let mut out = Out::new();
             let rest = s.held.take().map(|h| h.rest).unwrap_or_default();
-            s.release(rest, None)
+            if !s.absorb(rest, &mut out)? && s.installed.as_ref() == Some(&head) {
+                s.drain(clock, epochs, &mut out)?;
+            }
+            Ok(out.step())
         })
     }
     /// The acknowledgement ID of the `Persist` waiting for `persisted`, if any.
     pub fn awaiting_persist(&self) -> Result<Option<u64>, AccountError> {
         guard(|| Ok(self.s.lock()?.held.as_ref().map(|h| h.ack)))
     }
-    /// When to call `tick` next (monotonic ms), if ever.
+    /// How many inputs are queued (a coalesced tick counts as one).
+    pub fn queued(&self) -> Result<u32, AccountError> {
+        guard(|| Ok(u32::try_from(self.s.lock()?.queue.len()).unwrap_or(u32::MAX)))
+    }
+    /// When to call `tick` next (monotonic ms), if ever. While a `Persist` waits this is still
+    /// the machine's deadline: a tick then is queued (and coalesced) and runs at `persisted`.
     pub fn next_deadline(&self) -> Result<Option<u64>, AccountError> {
         guard(|| Ok(self.s.lock()?.e.next_deadline()))
     }
@@ -642,9 +793,14 @@ impl SessionEndpoint {
 impl AccountEngine {
     fn session_account_inner(&self, at_ms: i64) -> R<SessionAccountView> {
         self.acct(|a| {
+            let (seq, digest) = a.head();
             Ok(SessionAccountView {
                 v: a.session_account(at_ms),
-                stamp: Some((self.owner, a.head().0)),
+                stamp: Some(Head {
+                    owner: self.owner,
+                    seq,
+                    digest,
+                }),
             })
         })
     }
