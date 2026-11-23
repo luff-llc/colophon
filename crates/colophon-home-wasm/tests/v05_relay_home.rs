@@ -919,3 +919,72 @@ fn two_homes_at_quorum_2_append_identical_activate_vetoed_and_final() {
         assert_eq!(ea[i], eb[i], "{} is byte-identical at both homes", ka[i]);
     }
 }
+
+/// The scheduler leaves a home alone while nothing can come due (the module's `wakeAt`), and
+/// still does each piece of time-driven work at the first pass at or after its time: a held
+/// transition is activated at its due time, never a pass later, and not one pass before; the
+/// `final` follows; a head is signed again once half of `headMaxAge` has passed since the last.
+/// Each check reads the home's files, not `/head` (a head read settles the home by itself).
+#[test]
+fn time_driven_work_is_done_on_time_while_idle_passes_are_skipped() {
+    let Some(mut w) = world("on-time", "public", 1, false) else {
+        return;
+    };
+    let mut ctl = w.controller(NOW);
+    w.clocks(NOW);
+    let head_file = w.a.dir.join(format!("data/home/records/heads/{}.json", w.ha));
+    let head_issued = || -> i64 {
+        let v: Value = serde_json::from_slice(&std::fs::read(&head_file).unwrap()).unwrap();
+        let h: Value = serde_json::from_slice(&STANDARD.decode(v["body"].as_str().unwrap()).unwrap()).unwrap();
+        colophon_core::v05::encoding::parse_date(h["issued"].as_str().unwrap()).unwrap()
+    };
+    let d = w.f.d.clone();
+    let digest = propose_by(&mut w, &mut ctl, 600, &[d]);
+    let mut wire = w.wire();
+    let ha = w.ha.clone();
+    let faults = relay_pass(&mut ctl, &w.src, &ha, &mut wire, &w.host, NOW + 1_000);
+    assert!(faults.is_empty(), "{faults:?}");
+    let due = ctl
+        .account()
+        .pending()
+        .iter()
+        .find(|t| t.digest == digest)
+        .and_then(|t| t.due_ms)
+        .expect("the home's receipt decides the due time");
+    let before = kinds(&w.a).len();
+    // Passes before the due time record nothing (most of them are skipped: nothing is due).
+    for t in [NOW + 2_000, NOW + 4_000, due - 60_000, due - 2, due - 1] {
+        w.a.set_clock(t);
+        w.a.tick();
+        assert_eq!(kinds(&w.a).len(), before, "nothing is recorded at {t}, before {due}");
+    }
+    // The first pass at the due time records the `activate`.
+    w.a.set_clock(due);
+    w.a.tick();
+    let k = kinds(&w.a);
+    assert_eq!(k.len(), before + 1, "the activate at its due time: {k:?}");
+    assert_eq!(k[before], "activate");
+    // Its `final` follows within the next passes (it needs this home's head over it).
+    let mut at = due;
+    ticks_until("the final", 4, &[&w.a], || {
+        at += 1_000;
+        w.a.set_clock(at);
+        kinds(&w.a).len() > before + 1
+    });
+    assert_eq!(kinds(&w.a)[before + 1], "final");
+    // A head over everything; then quiet passes until half of headMaxAge has passed.
+    at += 1_000;
+    w.a.set_clock(at);
+    w.a.tick();
+    w.a.tick();
+    let issued = head_issued();
+    let half = ctl.account().policy().head_max_age as i64 * 500;
+    for t in [issued + 1_000, issued + half / 2, issued + half - 1] {
+        w.a.set_clock(t);
+        w.a.tick();
+        assert_eq!(head_issued(), issued, "no new head at {t}, before {}", issued + half);
+    }
+    w.a.set_clock(issued + half);
+    w.a.tick();
+    assert_eq!(head_issued(), issued + half, "a new head at half of headMaxAge");
+}
