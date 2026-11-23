@@ -14,9 +14,10 @@
 //!
 //! The §S3 freshness gate is in the machine, and is used when the codec passes the sender's
 //! key and `n` with each frame and the host seeds `fresh` ([`Session::with_fresh_seed`]).
-//! Signatures, sealing, the 128-wide `n` window and the lifecycle of session keys (open,
-//! closed with a replay floor, retired) are in [`codec`]; the codec tells the machine when it
-//! closes a key ([`Session::close_window`]). [`endpoint`] wires the two for the bindings.
+//! The machine also owns which session keys of other members are open or candidates
+//! (revision 17); signatures, sealing and the 128-wide `n` window of each cached key are in
+//! [`codec`], which caches only keys the machine knows ([`Session::knows_key`]).
+//! [`endpoint`] wires the two for the bindings.
 
 pub mod clock;
 pub mod codec;
@@ -74,6 +75,9 @@ struct SentPass {
     snapshot: Bytes,
     /// When it was last sent (revision 15: resent at most once per `askTimeoutMs`).
     last: u64,
+    /// The wait before the next resend: `askTimeoutMs`, doubled after each resend up to
+    /// `holderTimeoutMs` while unacknowledged.
+    interval: u64,
 }
 
 /// A `yielded` not yet acknowledged (§S5).
@@ -193,7 +197,8 @@ pub struct Session {
     /// last `fresh` answered per member.
     fresh_seed: Option<[u8; 16]>,
     fresh_count: u64,
-    own_fresh: VecDeque<(Id, u64)>,
+    /// Own `fresh` values: the value, when it was issued, and its issue number.
+    own_fresh: VecDeque<(Id, u64, u64)>,
     /// The writers entitled at the accepted authority head, once the host said (§S1). Until
     /// then nobody is entitled (revision 12: fail closed).
     entitled: Option<BTreeSet<MemberId>>,
@@ -207,11 +212,28 @@ pub struct Session {
     probe_times: VecDeque<u64>,
     /// Keys with windows per member, oldest first (revision 7 cap).
     window_order: BTreeMap<MemberId, VecDeque<String>>,
+    /// Revision 17: keys per member that passed the codec's checks but have no open window
+    /// yet (only their `hello`s are used), at most [`MAX_KEYS_PER_MEMBER`], oldest first.
+    candidates: BTreeMap<MemberId, VecDeque<String>>,
+    /// Revision 17: per member, the issue number of this member's last `fresh` when one of
+    /// that member's windows was last closed or its keys stopped being accepted. An echo from
+    /// that member opens a window only for a `fresh` issued after it.
+    closed_after: BTreeMap<MemberId, u64>,
     answered: BTreeMap<MemberId, Id>,
     to_echo: VecDeque<Id>,
 }
 
 type Out = Vec<Output>;
+
+/// The next wait between resends of an unacknowledged pass (revision 17: doubled up to
+/// `holderTimeoutMs`; before, always `askTimeoutMs`).
+fn backoff(interval: u64, policy: &Policy, fixes: Fixes) -> u64 {
+    if fixes.reopen_challenge {
+        interval.saturating_mul(2).min(policy.holder_timeout_ms.max(policy.ask_timeout_ms))
+    } else {
+        policy.ask_timeout_ms
+    }
+}
 
 impl Session {
     /// A member before `join`. `persisted` is what it stored with [`Output::Persist`].
@@ -276,6 +298,8 @@ impl Session {
             pending_join: None,
             windows: BTreeMap::new(),
             window_order: BTreeMap::new(),
+            candidates: BTreeMap::new(),
+            closed_after: BTreeMap::new(),
             probed: BTreeMap::new(),
             probe_times: VecDeque::new(),
             answered: BTreeMap::new(),
@@ -288,7 +312,27 @@ impl Session {
     pub fn forget_member(&mut self, member: &str) {
         self.windows.retain(|(m, _), _| m != member);
         self.window_order.remove(member);
+        self.candidates.remove(member);
         self.answered.remove(member);
+        // Revision 17: no echo of an earlier `fresh` reopens any of its keys.
+        self.closed_after.insert(member.to_owned(), self.fresh_count);
+    }
+    /// Whether this member holds anything for `member`'s session key `key`: an open window
+    /// or a candidate (revision 17). The codec keeps keys only while this holds.
+    pub fn knows_key(&self, member: &str, key: &str) -> bool {
+        self.windows.contains_key(&(member.to_owned(), key.to_owned()))
+            || self
+                .candidates
+                .get(member)
+                .is_some_and(|c| c.iter().any(|k| k == key))
+    }
+    /// The number of candidate keys held for `member` (revision 17).
+    pub fn candidates_for(&self, member: &str) -> usize {
+        self.candidates.get(member).map_or(0, VecDeque::len)
+    }
+    /// The number of members with a `closed after` mark (revision 17).
+    pub fn closed_marks(&self) -> usize {
+        self.closed_after.len()
     }
     /// The number of freshness windows held for `member`.
     pub fn windows_for(&self, member: &str) -> usize {
@@ -325,7 +369,7 @@ impl Session {
         }
         if self.fixes.pass_ack {
             for sp in &self.sent_passes {
-                at(sp.last.saturating_add(p.ask_timeout_ms));
+                at(sp.last.saturating_add(sp.interval));
             }
         }
         if self.sends_as_holder() {
@@ -509,7 +553,7 @@ impl Session {
         self.tail.hash(h);
         self.ordered.hash(h);
         for p in &self.sent_passes {
-            (&p.claim, &p.next, p.seq, &p.snapshot, age(p.last)).hash(h);
+            (&p.claim, &p.next, p.seq, &p.snapshot, age(p.last), p.interval).hash(h);
         }
         self.asks.hash(h);
         self.evidence.as_ref().map(|(f, t)| (f, age(*t))).hash(h);
@@ -563,9 +607,11 @@ impl Session {
         self.clocks.hash(h);
         self.fresh_seed.hash(h);
         self.fresh_count.hash(h);
-        for (id, t) in &self.own_fresh {
-            (id, now.saturating_sub(*t).min(FRESH_MEMORY_MS + 1)).hash(h);
+        for (id, t, c) in &self.own_fresh {
+            (id, now.saturating_sub(*t).min(FRESH_MEMORY_MS + 1), c).hash(h);
         }
+        self.candidates.hash(h);
+        self.closed_after.hash(h);
         self.entitled.hash(h);
         self.pending_join.hash(h);
         self.windows.hash(h);
@@ -708,17 +754,29 @@ impl Session {
         let mut b = [0u8; 16];
         b.copy_from_slice(&d.finalize()[..16]);
         let id = Id(b);
-        self.own_fresh.push_back((id, self.fresh_now));
+        self.own_fresh.push_back((id, self.fresh_now, self.fresh_count));
         while self.own_fresh.len() > OWN_FRESH {
             self.own_fresh.pop_front();
         }
         id
     }
-    /// Whether `e` is one of this member's `fresh` values sent within the last 60 s.
-    fn honours(&self, e: &Id, now: u64) -> bool {
+    /// Whether `e`, echoed by `from`, is one of this member's `fresh` values sent within the
+    /// last 60 s and (revision 17) after `from`'s windows were last closed.
+    fn honours(&self, e: &Id, now: u64, from: &str) -> bool {
+        let after = if self.fixes.reopen_challenge {
+            self.closed_after.get(from).copied().unwrap_or(0)
+        } else {
+            0
+        };
         self.own_fresh
             .iter()
-            .any(|(id, t)| id == e && now.saturating_sub(*t) <= FRESH_MEMORY_MS)
+            .any(|(id, t, c)| id == e && now.saturating_sub(*t) <= FRESH_MEMORY_MS && *c > after)
+    }
+    /// Revision 17: `from`'s windows were closed now; only a later challenge reopens one.
+    fn mark_closed(&mut self, from: &str) {
+        if self.fixes.reopen_challenge {
+            self.closed_after.insert(from.to_owned(), self.fresh_count);
+        }
     }
     fn send_hello_echo(
         &mut self,
@@ -1187,19 +1245,36 @@ impl Session {
             Some(floor) if n < *floor => return false,
             Some(_) => {}
             None => {
-                if echo.iter().any(|e| self.honours(e, now)) {
+                if echo.iter().any(|e| self.honours(e, now, &f.from)) {
+                    if let Some(c) = self.candidates.get_mut(&wk.0) {
+                        c.retain(|k| *k != wk.1);
+                    }
                     self.windows.insert(wk.clone(), n);
                     if self.fixes.window_cap {
-                        // Revision 7: at most 4 keys per member, the oldest dropped.
+                        // Revision 7: at most 4 keys per member, the first opened closed.
                         let order = self.window_order.entry(wk.0.clone()).or_default();
                         order.push_back(wk.1.clone());
+                        let mut closed = false;
                         while order.len() > MAX_KEYS_PER_MEMBER {
                             if let Some(old) = order.pop_front() {
                                 self.windows.remove(&(wk.0.clone(), old));
+                                closed = true;
                             }
+                        }
+                        if closed {
+                            self.mark_closed(&wk.0);
                         }
                     }
                     opened = true;
+                } else if self.fixes.reopen_challenge {
+                    // Revision 17: a candidate, at most 4 per member, the oldest dropped.
+                    let c = self.candidates.entry(wk.0.clone()).or_default();
+                    if !c.contains(&wk.1) {
+                        c.push_back(wk.1.clone());
+                        while c.len() > MAX_KEYS_PER_MEMBER {
+                            c.pop_front();
+                        }
+                    }
                 }
             }
         }
@@ -1207,7 +1282,7 @@ impl Session {
         // Answer a fresh we have not answered, unless the hello is itself an answer to us
         // through a window that was already open (finding R4a: otherwise the two members
         // answer each other's answers forever).
-        let answers_us = echo.iter().any(|e| self.honours(e, now));
+        let answers_us = echo.iter().any(|e| self.honours(e, now, &f.from));
         if self.answered.get(&f.from) != Some(fresh) && (!answers_us || opened) {
             self.answered.insert(f.from.clone(), *fresh);
             let to = f.from.clone();
@@ -1329,12 +1404,13 @@ impl Session {
                 continue;
             }
             let due = if pass_ack {
-                now.saturating_sub(p.last) >= ask
+                now.saturating_sub(p.last) >= p.interval
             } else {
                 f.body.claim().is_some_and(|c| *c < p.next)
             };
             if due {
                 p.last = now;
+                p.interval = backoff(p.interval, &self.policy, self.fixes);
                 resend.push(Body::Pass {
                     claim: p.claim.clone(),
                     next: p.next.clone(),
@@ -1650,7 +1726,16 @@ impl Session {
                 true
             }
             Body::Bye { claim, .. } => {
-                if claim.as_ref().is_some_and(|c| !from_writer || !ok(c)) {
+                // Revision 17: a reader's `bye` counts only when it releases exactly the
+                // accepted claim and that claim is the reader's own (a demoted holder
+                // stopping); no other claim in it is considered.
+                let demoted = |c: &Claim| {
+                    self.fixes.reopen_challenge && Some(c) == accepted && c.holder == f.from
+                };
+                if claim
+                    .as_ref()
+                    .is_some_and(|c| if from_writer { !ok(c) } else { !demoted(c) })
+                {
                     *claim = None;
                 }
                 true
@@ -2012,11 +2097,12 @@ impl Session {
         // most once per askTimeoutMs, since an asker that moved on and listens quietly may
         // never send a frame the passer hears.
         if self.fixes.pass_ack {
-            let ask = self.policy.ask_timeout_ms;
+            let (policy, fixes) = (self.policy.clone(), self.fixes);
             let mut resend = Vec::new();
             for p in self.sent_passes.iter_mut() {
-                if now.saturating_sub(p.last) >= ask {
+                if now.saturating_sub(p.last) >= p.interval {
                     p.last = now;
+                    p.interval = backoff(p.interval, &policy, fixes);
                     resend.push((
                         p.next.holder.clone(),
                         Body::Pass {
@@ -2290,6 +2376,7 @@ impl Session {
                     seq: self.seq,
                     snapshot: snapshot.clone(),
                     last: now,
+                    interval: self.policy.ask_timeout_ms,
                 };
                 self.took_wanting = false;
                 // R3: accept and persist `next` before the pass reveals it.

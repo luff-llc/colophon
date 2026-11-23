@@ -1,10 +1,10 @@
 //! What the codec layer tells the machine beyond frames: a `hello` for an unknown key, a
 //! session key whose window was closed, and a change of this member's own write access.
 //!
-//! The codec owns the lifecycle of other members' session keys (accepted, open, closed,
-//! retired); the machine owns freshness. These hooks keep the two from disagreeing: the
-//! codec closes a key in the machine whenever it closes it itself, so a key presented again
-//! must pass a new freshness exchange.
+//! The machine owns the lifecycle of other members' session keys (revision 17): at most 4
+//! open windows and 4 candidates per member, and per member the mark after which an echo
+//! may open a window. The codec caches a key's delegation and replay window only while the
+//! machine knows the key ([`Session::knows_key`]).
 use super::io::{Event, Output};
 use super::types::Body;
 use super::{Session, PROBES_PER_SECOND};
@@ -42,13 +42,19 @@ impl Session {
         out
     }
 
-    /// The codec closed `member`'s session key `key` (§S3: at most 4 open windows per member;
-    /// a closed key keeps only its replay floor). Its freshness window closes too: a frame
-    /// from that key is again accepted only after a new exchange.
+    /// `member`'s session key `key` stopped being accepted (§S2: its delegation no longer
+    /// holds, or it expired). Its window or candidacy ends; a window closing marks the member,
+    /// so the key reopens only through a new challenge (§S3, revision 17).
     pub fn close_window(&mut self, member: &str, key: &str) {
-        self.windows.remove(&(member.to_owned(), key.to_owned()));
+        let had = self.windows.remove(&(member.to_owned(), key.to_owned())).is_some();
         if let Some(order) = self.window_order.get_mut(member) {
             order.retain(|k| k != key);
+        }
+        if let Some(c) = self.candidates.get_mut(member) {
+            c.retain(|k| k != key);
+        }
+        if had {
+            self.mark_closed(member);
         }
     }
 

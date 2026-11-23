@@ -62,12 +62,6 @@ pub enum DropReason {
     Replay,
     /// `n` is more than 128 below the highest accepted for this key.
     TooOld,
-    /// The key's window was closed and `n` is at or below its replay floor (§S3, revision 15).
-    Floor,
-    /// The key's member has a new session number: the key is dead until it expires.
-    Retired,
-    /// The member already has 64 keys with floors: no new key is accepted from it.
-    KeyLimit,
     /// The receiver lacks namespace epoch `epoch`; it should sync.
     NoEpoch(u64),
     /// AES-GCM failed: wrong key, AAD, nonce or a modified ciphertext.
@@ -95,9 +89,6 @@ impl DropReason {
             DropReason::Signature => "signature",
             DropReason::Replay => "replay",
             DropReason::TooOld => "tooOld",
-            DropReason::Floor => "floor",
-            DropReason::Retired => "retired",
-            DropReason::KeyLimit => "keyLimit",
             DropReason::NoEpoch(_) => "noEpoch",
             DropReason::Open => "open",
             DropReason::Plaintext(_) => "plaintext",

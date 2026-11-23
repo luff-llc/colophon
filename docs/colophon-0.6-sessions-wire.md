@@ -2,7 +2,7 @@
 
 How a session frame is signed, sealed, carried and opened, at the byte level, for
 implementers of the Swift, Kotlin and JS runtimes. The normative text is
-`spec/colophon-0.6-sessions.md` (revision 15) §S2 and §S3; this document states exactly what
+`spec/colophon-0.6-sessions.md` (revision 17) §S2 and §S3; this document states exactly what
 the reference core (`colophon_core::v06::session::{keys, wire, codec, endpoint}`)
 implements. Byte-for-byte vectors are in `conformance/0.6-sessions/wire/`.
 
@@ -15,15 +15,15 @@ lowercase hex characters of SHA-256 of a signing point (0.5 §3.1).
 | Layer | Owns |
 | --- | --- |
 | Host | Member private keys and their signatures (0.5 §3.4), epoch keys, the accepted authority head, clocks, randomness, storage of `Persist` effects, carriers. |
-| Codec (`keys`, `wire`, `codec`) | This member's session key, delegations, the frame envelope, sealing and opening, frame signatures, and the lifecycle of other members' session keys: accepted, open (at most 4 per member), closed with a replay floor, retired, expired (at most 64 per member), with a 128-wide replay window per open key. |
-| State machine (`session::Session`) | Claims and ordering, writer-only claims (§S4 rule 1), and the §S3 freshness exchange: `fresh`, `echo`, the window floor opened by an echoing `hello`, the 60 s / 32-value memory of its own `fresh` values, and the rate-limited `hello`s. |
+| Codec (`keys`, `wire`, `codec`) | This member's session key, delegations, the frame envelope, sealing and opening, frame signatures, and a cache of other members' delegations and 128-wide replay windows for the keys the machine knows (at most 8 per member). |
+| State machine (`session::Session`) | Claims and ordering, writer-only claims (§S4 rule 1), the §S3 freshness exchange (`fresh`, `echo`, the window floor opened by an echoing `hello`, the 60 s / 32-value memory of its own `fresh` values, the rate-limited `hello`s), and the lifecycle of other members' keys: at most 4 open windows and 4 candidates per member, and per member the mark after which an echo may open a window. |
 | Façade (`endpoint::Endpoint`) | Wiring: application commands, ticks, account views and received bytes in; sealed frames, `Persist` and events out. It applies this member's own access. |
 
 The codec hands the machine each opened frame with the sender's `writer` flag, the session
-key ID and `n`, and tells it when it closes a key (`close_window`), retires or expires one,
-or forgets a member (`forget_member`). The codec is the one owner of which keys are known,
-open or closed; the machine's freshness windows exist only for keys the codec has open, so
-the two cannot disagree. The machine never sees bytes; the codec never interprets claims.
+key ID and `n`, and tells it when a new authority head ends a key (`close_window`) or a
+member (`forget_member`). The machine is the one owner of which keys are open, candidates
+or closed; after every frame the façade drops from the codec's cache every key the machine
+does not know (`Session::knows_key`), so the two cannot disagree. The machine never sees bytes; the codec never interprets claims.
 
 ## 2. Session keys (§S2)
 
@@ -61,17 +61,17 @@ Rules 3–5 are re-checked for every frame.
 **Renewal.** A member may sign a new delegation for the same key before the old one
 expires. Receivers replace the stored delegation and keep the key's replay window, so an
 old frame re-wrapped with the renewed delegation is still a replay. A key is never delegated
-under another session number: a sender whose session number changes retires its key, and a
-new session needs a new key.
+under another session number (§S2: a member whose session number changes makes a new key):
+the sender refuses, and a new session needs a new endpoint.
 
 **A new authority head.** The host gives the core a new account view before any frame
 received after it accepted that head. For other members: a member that is no longer current
-or lost the `records` entry is forgotten (every key, window and floor dropped; the machine
-forgets it); a member with another session number keeps its keys only as retired tombstones
-until they expire, so no delegation signed again for an old key revives its frames. For this
-member: promoted to write, it may ask, take and submit; reduced to read, it releases at once
-(`bye` with its claim, release persisted) and seals only what a reader may send; without the
-namespace, it leaves and seals nothing.
+or lost the `records` entry is forgotten (every key and window dropped); a member with
+another session number has its old keys dropped and their windows closed. Either way the
+machine marks the member, so no echo of an earlier `fresh` opens any key of it again. For
+this member: promoted to write, it may ask, take and submit; reduced to read, it releases at
+once (`bye` with its claim, release persisted; receivers honour that one `bye`, §3.3) and
+seals only what a reader may send; without the namespace, it leaves and seals nothing.
 
 ## 3. Frames (§S3)
 
@@ -154,7 +154,9 @@ Only a writer sends `state`, `beat`, `msg`, `refuse`, `pass`, `decline`, `submit
 `take`, `yielded` and `ack`; the machine drops them from anyone else. From a member that may
 only read, every claim is ignored, `hello.seen` included (it survives only when it names the
 receiver's own accepted claim, as a resume position) and `bye.claim` included; readers take
-part in freshness, presence, pings and the ordered lane as listeners. A claim more than
+part in freshness, presence, pings and the ordered lane as listeners. The one exception
+(revision 17): a reader's `bye` whose claim equals the receiver's accepted claim and names
+the reader as holder is honoured, so a demoted holder can release. A claim more than
 1,048,576 terms above the receiver's accepted term is ignored from anyone.
 
 ### 3.4 Policy bounds
@@ -177,27 +179,40 @@ state: a key is remembered, and `n` recorded, only when steps 1–7 have all pas
    its point's key ID is `key`), else the frame is dropped; it must verify under §2. A
    delegation byte-identical to the one already accepted for `(from, key)` is not verified
    again.
-4. Find an accepted session key for `(from, key)`: the one just verified, or a stored one
-   that is not retired, with §2 rules 3–5 re-checked. If there is none, drop the frame, and
-   if `from` is a member entitled to the namespace at the accepted head (any `records`
-   entry), have the machine send it `hello`: at most once per `askTimeoutMs` per member and
-   four times a second in all. A new key from a member that already has 64 is refused.
+4. Find an accepted session key for `(from, key)`: the one just verified, or a cached one,
+   with §2 rules 3–5 re-checked. If there is none, drop the frame, and if `from` is a member
+   entitled to the namespace at the accepted head (any `records` entry), have the machine
+   send it `hello`: at most once per `askTimeoutMs` per member and four times a second in
+   all.
 5. Verify `signature` over the signed body under the session key.
-6. Check `n`: a key that was ever closed drops every `n` at or below its floor; then the
-   key's window: the highest accepted `n` and which of the 128 values below it were
-   accepted. Drop an accepted `n`, or one more than 128 below the highest.
+6. Check `n` against the key's window: the highest accepted `n` and which of the 128 values
+   below it were accepted. Drop an accepted `n`, or one more than 128 below the highest.
 7. Look up epoch `epoch` (if absent, drop; the host should sync epochs); derive `K`, decrypt
    with the nonce and AAD, decode the plaintext (§3.3).
-8. Commit: remember or renew the key and record `n`. A new key, or a closed key presented
-   again above its floor, opens a window; beyond four open windows the member's
-   first-opened key is closed (its floor is its highest accepted `n`) and the machine closes
-   its freshness window. Hand the machine the frame, `writer` (the sender's entry has access
-   `write`), `key` and `n`; the machine applies freshness: until the window for
-   `(from, key)` is open it uses only a `hello`'s `fresh` and `echo`, and drops frames below
-   the `n` of the `hello` that opened it.
+8. Commit: cache or renew the key and record `n`. Hand the machine the frame, `writer` (the
+   sender's entry has access `write`), `key` and `n`. The machine applies freshness. A key
+   without an open window is a candidate (at most 4 per member, the oldest dropped): only
+   its `hello`s are used. A candidate's `hello` that echoes a `fresh` this member issued
+   within 60 s, and after it last closed one of that member's windows or stopped accepting
+   its keys, opens its window at that `hello`'s `n`. Beyond four open windows the member's
+   first-opened window is closed, and the member is marked. Frames of a key without a window
+   are dropped (with a rate-limited probe `hello`), and so are frames below the opening `n`.
+   Afterwards the codec drops every cached key the machine does not know.
 
-Floors are kept until the key's delegation has expired and its 60 s slack has passed; the
-façade frees them on `tick`.
+**Why closed keys need no memory.** A closed key's old frames are authentic; what stops a
+carrier from replaying them is that opening a window needs an echo of a `fresh` issued after
+the close, which only the key's owner can produce. An old echoing `hello` replayed within the
+60 s memory echoes a `fresh` issued before the close, so it opens nothing. A home replaying
+frames of any number of old keys only cycles the member's 4 candidate slots; open windows,
+including the member's current key, are untouched, and the state per member stays bounded
+(4 windows, 4 candidates, 8 cached keys, one mark).
+
+**Reopening.** When the owner of a closed key returns, its own window for this member is
+usually still open, so by the rule that ends the exchange (a member does not answer a `hello`
+that echoes its own `fresh` unless that opened a window) it does not answer the challenge in
+this member's reply to its `hello`. Its next frame other than a `hello` is dropped; this
+member's probe is a new challenge, and the answer reopens the window. The cost is that one
+frame.
 
 **Why recording `n` before freshness is safe.** A frame that the machine then drops for want
 of a window has passed steps 1–7: it is an authentic frame of that key, so recording its `n`
@@ -218,7 +233,7 @@ The façade takes everything from the host, so it is deterministic given its inp
 | Member signature | `begin_delegation` returns the body; the host signs it `raw` with the member key; `finish_delegation` verifies and installs it. Before that, nothing can be sent. Called again to renew. |
 | Account view | At construction and after every newly accepted authority head (`set_account`), before any frame received after it. `SessionAccount::from_history_state` builds it from a verified 0.5 history. |
 | Epoch keys | `current_epoch(namespace)` (frames are sealed under it) and `epoch_key(namespace, epoch)`, per call. Returned key bytes are wiped after use. |
-| Clocks | With every call: monotonic ms (all session timers) and wall-clock ms (delegation windows, member expiry, floor expiry). |
+| Clocks | With every call: monotonic ms (all session timers) and wall-clock ms (delegation windows, member expiry). |
 | Ticks | At `next_deadline`, within 250 ms (§S11 G5). |
 
 Each call returns the effects in order (`Send`, `Persist`, `Event`, `Unsent`); `Persist` must
@@ -253,14 +268,15 @@ restarts (a new `key`), see when a member's session number changes, and often gu
 from size, `to` and `retain` (a `hello` carries a delegation; `beat` frames have a fixed
 size). It cannot read any payload, snapshot, claim, `seq` or presence value, and it cannot
 forge, alter or reorder a frame into acceptance: every field but `delegation` is signed, the
-delegation carries its own member signature, and a replayed `(key, n)` is dropped, also for
-keys a receiver has closed. This is the list §S9 gives since revision 15.
+delegation carries its own member signature, a replayed `(key, n)` is dropped, and a closed
+key cannot be reopened without its owner answering a new challenge. This is the list §S9
+gives since revision 15.
 
 ## 8. Decisions
 
-What the first implementation found open in revision 14, and what revision 15 decided.
+What the first implementation found open in revision 14, and what revisions 15–17 decided.
 
-| # | Question | Decision (revision 15) |
+| # | Question | Decision |
 | --- | --- | --- |
 | 1 | Freshness needs the plaintext kind, but was listed before opening. | Eight ordered steps: the replay window before opening, freshness after (§4). |
 | 2 | The frame signature's field and body were not defined. | One canonical object; `signature` covers every field except `delegation`. |
@@ -271,16 +287,16 @@ What the first implementation found open in revision 14, and what revision 15 de
 | 7 | The unknown-key `hello` was unbounded. | Only to a member entitled to the namespace; once per `askTimeoutMs` per member and four a second in all. |
 | 8 | Size headroom and `refuse.reason`. | `maxPayload` at most 8,192, checked with the largest frame at construction; `reason` at most 64 bytes of `a–z 0–9 -`. |
 | 9 | Sessions longer than a day. | A member may sign a new delegation for the same key; receivers keep its window. |
-| 10 | "Oldest" key, and eviction re-enabling replay. | At most 4 open windows per member, closing the first opened; a closed key keeps a replay floor until its delegation expires; at most 64 floors per member, and no new key while 64 are held. |
+| 10 | "Oldest" key, and eviction re-enabling replay. | Revision 17: at most 4 open windows per member, closing the first opened, and at most 4 candidates; nothing is kept for a closed key; an echo opens a window only of a `fresh` issued after the member's last close (revision 15's replay floors could lock a member out and were removed). |
 | 11 | What a carrier learns. | §S9 lists it (§7). |
-| 12 | A pass could be lost for good. | The passer resends the same `pass` on any frame from the asker, at most once per `askTimeoutMs`, until `ack {passed}`; the member a pass names gives its snapshot to the application and answers `ack` every time. |
+| 12 | A pass could be lost for good. | The passer resends the same `pass` until `ack {passed}`, on its timer and on frames from the asker (revision 16); the member a pass names gives its snapshot to the application and answers `ack` every time. |
+| 14 | A demoted holder could not release. | Revision 17: a reader's `bye` is honoured only when its claim equals the receiver's accepted claim and names the sender. |
 | 13 | "Suspended" members. | §S2 uses the 0.5 current-member rule. |
 
-Beyond the text, the reference core also: retires a member's keys (rather than forgetting
-them) when its session number changes, so that a delegation signed again for an old key
-cannot revive replayed frames; keeps up to four unacknowledged passes per member and also
-resends them on a timer, at most once per `askTimeoutMs` (an asker that has moved on and
-listens quietly may never send a frame the passer hears); drops a pass once its asker is no
-longer a writer; and keeps a
+Beyond the text, the reference core also: keeps up to four unacknowledged passes and backs
+their resends off, from `askTimeoutMs` doubling to `holderTimeoutMs`. The cost while acks are
+lost is at most four frames of up to about 16 KiB per `holderTimeoutMs` (about 4.4 KiB/s with
+the defaults), after a first minute of faster resends. It also drops a pass once its asker
+is no longer a writer, and keeps a
 writer's `hello.seen` that names a member no longer a writer (it is never adopted, but a
 holder renews over it, so a claim accepted before a revocation was known still converges).

@@ -1,6 +1,6 @@
 # 0.6 session wire vectors
 
-Byte-level vectors for session keys and frames (`spec/colophon-0.6-sessions.md` revision 15,
+Byte-level vectors for session keys and frames (`spec/colophon-0.6-sessions.md` revision 17,
 §S2 and §S3), for the Swift, Kotlin and JS runtimes. The recipe they exercise is written out
 in `docs/colophon-0.6-sessions-wire.md`. They are generated and checked by
 `crates/colophon-core/tests/v06_wire_vectors.rs` (`COLOPHON_REGEN_VECTORS=1` rewrites
@@ -23,7 +23,7 @@ Every key in this file is a fixed test key. None is used anywhere else.
 | `frames` | Positive vectors, sealed in order with `n` from 1: one or more per plaintext kind. |
 | `negative` | Frames that must be dropped, each with the reason. |
 | `views` | Named account views (members with signing points, session numbers and access) that scenarios switch between; `default` is the view of `members`. |
-| `scenarios` | Multi-step receiver runs (revision 15): eviction replay, probes only to entitled members, a read-only member's claims, entitlement changes, floor exhaustion, delegation renewal, pass acknowledgement. |
+| `scenarios` | Multi-step receiver runs (revision 17): probes only to entitled members, a read-only member's claims, entitlement changes, delegation renewal, pass acknowledgement. Which keys are open, candidates or closed is the machine's, so closing and reopening a key is in the machine vectors (`closed-key-reopen.json`). |
 
 Each positive frame gives `plaintext` (the exact canonical bytes), `to`, `retain`, `n`, the
 12-byte `nonce` (hex), the `aad` and `signedBody` (exact bytes as strings), the `ciphertext`
@@ -42,16 +42,14 @@ the file's), starting with the `default` view, through its `steps` in order:
 - `{"open": frame, "clockMs"?, "expect": {...}}`: open the frame at `clockMs` (default the
   file's). `expect.drop` is a drop code or `null` (accepted); for a drop the receiver's state
   must be unchanged and, when given, `helloTo` is the member §S3 step 4 sends `hello` to
-  (`null`: none). For an accepted frame, `writer` is the flag handed to the machine and
-  `closed` the key ID whose window the acceptance closed (`null`: none).
+  (`null`: none). For an accepted frame, `writer` is the flag handed to the machine.
 - `{"setView": name, "expect": {"forgottenMembers": [...], "closedKeys": [[member, key], ...]}}`:
-  a newly accepted authority head; the members forgotten entirely and the keys retired.
-- `{"expire": clockMs, "expect": {"expired": n}}`: forget the floors of keys whose delegation
-  expired more than 60 s before `clockMs`; `n` were.
+  a newly accepted authority head; the members forgotten entirely and the keys dropped
+  while their member stays accepted (a new session number).
 
 Drop codes: `oversize`, `malformed`, `account`, `namespace`, `cell`, `fromSelf`,
-`delegation`, `noKey`, `keyWindow`, `retired`, `keyLimit`, `signature`, `floor`, `replay`,
-`tooOld`, `noEpoch`, `open`, `plaintext`, `unknownKind`, `range`. On the wire every drop is silent; the code is what a
+`delegation`, `noKey`, `keyWindow`, `signature`, `replay`, `tooOld`, `noEpoch`, `open`,
+`plaintext`, `unknownKind`, `range`. On the wire every drop is silent; the code is what a
 conformance harness compares.
 
 ## How to check

@@ -254,3 +254,55 @@ fn an_ack_from_another_member_does_not_stop_the_resends() {
     assert_eq!(bb.state(), &b("stopped"));
     assert!(sends(&outs).iter().any(|f| matches!(&f.body, Body::Ack { passed: Some(n), .. } if *n == next)));
 }
+
+/// Revision 17: a demoted holder's `bye` releasing exactly the claim the receiver accepted,
+/// held by itself, is honoured; any other claim in a reader's `bye` is not.
+#[test]
+fn a_demoted_holders_release_is_honoured_and_nothing_else() {
+    let (_, listener) = roles().into_iter().nth(1).unwrap();
+    let demoted = |s: &mut Session| {
+        s.handle(Input::Entitled { writers: vec!["b".into(), "c".into()] }, 15);
+    };
+    let mut s = listener.clone();
+    demoted(&mut s);
+    let outs = s.handle(input(frame("a", Body::Bye { claim: Some(Claim::new(1, 0, "a")), leaving: false }), false), 20);
+    assert_eq!(s.holder(), None, "{outs:?}");
+    assert!(outs.iter().any(|o| matches!(o, Output::Event { event: Event::HolderChanged { claim: None } })));
+    for claim in [Claim::new(2, 0, "a"), Claim::new(1, 0, "c"), Claim::new(MAX_TERM, 0, "a"), Claim::passed(2, "a", "c")] {
+        let mut s = listener.clone();
+        demoted(&mut s);
+        let before = (s.accepted().cloned(), s.holder().map(str::to_owned));
+        let outs = s.handle(input(frame("a", Body::Bye { claim: Some(claim.clone()), leaving: false }), false), 20);
+        assert_eq!((s.accepted().cloned(), s.holder().map(str::to_owned)), before, "{}", show_claim(&claim));
+        assert!(holder_events(&outs).is_empty());
+    }
+    // A reader that never held cannot release the holder's claim either.
+    let mut s = listener.clone();
+    s.handle(input(frame(READER, Body::Bye { claim: Some(Claim::new(1, 0, "a")), leaving: false }), false), 20);
+    assert_eq!(s.holder(), Some("a"));
+}
+
+/// Revision 17: an unacknowledged pass is resent on a timer, backing off from askTimeoutMs
+/// to holderTimeoutMs, and not at all once acknowledged.
+#[test]
+fn an_unacknowledged_pass_backs_off() {
+    let (mut a, _) = pair();
+    a.handle(Input::App { command: Command::Pass { to: "b".into(), snapshot: b("stopped") } }, 30);
+    let mut times = Vec::new();
+    let mut now = 30;
+    while now < 120_000 {
+        now = a.next_deadline().unwrap().max(now + 1);
+        let resent = sends(&a.handle(Input::Tick, now)).into_iter().filter(|f| matches!(f.body, Body::Pass { .. })).count();
+        if resent > 0 {
+            times.push(now);
+        }
+    }
+    let gaps: Vec<u64> = std::iter::once(30).chain(times.iter().copied()).collect::<Vec<_>>().windows(2).map(|w| w[1] - w[0]).collect();
+    assert_eq!(&gaps[..4], &[1_500, 3_000, 6_000, 12_000], "{gaps:?}");
+    assert!(gaps[4..].iter().all(|g| *g == 15_000), "{gaps:?}");
+    // At most 4 passes are kept: about four near-16 KiB frames per holderTimeoutMs at worst.
+    let next = Claim::passed(2, "b", "a");
+    a.handle(input(frame("b", Body::Ack { yielded: None, passed: Some(next) }), true), now);
+    let later = sends(&a.handle(Input::Tick, now + 60_000));
+    assert!(!later.iter().any(|f| matches!(f.body, Body::Pass { .. })));
+}

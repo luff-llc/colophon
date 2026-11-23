@@ -539,7 +539,7 @@ impl Default for Policy {
 /// (`docs/colophon-0.6-sessions-findings.md`). [`Fixes::default`] is the reference reading;
 /// [`Fixes::LITERAL`] reproduces the revision 1 draft so the counterexamples stay
 /// reproducible, [`Fixes::REV3`] to [`Fixes::REV7`] those drafts. [`Fixes::ALL`] is the
-/// current revision (15). The revision 4–6 evidence rules (`evidence*` switches) are reached
+/// current revision (17). The revision 4–6 evidence rules (`evidence*` switches) are reached
 /// only through the hidden `Input::LegacyEvidence`, for those regression presets.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -630,6 +630,12 @@ pub struct Fixes {
     /// gives its snapshot to the application and acknowledges it every time.
     #[serde(default)]
     pub pass_ack: bool,
+    /// Revision 17 §S3: no replay floors; a closed key reopens only through an echo of a
+    /// `fresh` issued after its member's windows were last closed; at most 4 candidate keys
+    /// per member; a reader's `bye` releasing exactly the receiver's accepted claim, held by
+    /// the reader, is honoured; an unacknowledged pass is resent with backoff.
+    #[serde(default)]
+    pub reopen_challenge: bool,
 }
 impl Fixes {
     /// The revision 1 draft as written.
@@ -658,6 +664,7 @@ impl Fixes {
         freshness_probe: false,
         writer_claims: false,
         pass_ack: false,
+        reopen_challenge: false,
     };
     /// The revision 3 draft: revisions 2 and 3 fixes, none of revision 4.
     pub const REV3: Fixes = Fixes {
@@ -685,6 +692,7 @@ impl Fixes {
         freshness_probe: false,
         writer_claims: false,
         pass_ack: false,
+        reopen_challenge: false,
     };
     /// Revision 4 as written.
     pub const REV4: Fixes = Fixes {
@@ -726,6 +734,7 @@ impl Fixes {
         freshness_probe: false,
         writer_claims: false,
         pass_ack: false,
+        reopen_challenge: false,
     };
     /// Revision 8, plus finding B5: carriers bridge (`crate::v06::bridge`), so the session
     /// rules assume a fully reachable group; no evidence forwarding, no `hello.heard`.
@@ -741,6 +750,7 @@ impl Fixes {
         freshness_probe: true,
         writer_claims: true,
         pass_ack: true,
+        reopen_challenge: true,
         ..Fixes::REV6
     };
     /// Revision 7 (and 8, whose changes are in the bridge and the `append` payload bound).
@@ -748,12 +758,14 @@ impl Fixes {
         freshness_probe: false,
         writer_claims: false,
         pass_ack: false,
+        reopen_challenge: false,
         ..Fixes::ALL
     };
     /// Revision 14: everything before revision 15's writer-only claims and pass `ack`.
     pub const REV14: Fixes = Fixes {
         writer_claims: false,
         pass_ack: false,
+        reopen_challenge: false,
         ..Fixes::ALL
     };
 }

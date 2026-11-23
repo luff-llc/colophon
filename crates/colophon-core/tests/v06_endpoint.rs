@@ -320,14 +320,13 @@ fn a_new_session_number_mid_session_drops_the_old_key() {
         .with_member(&w.b.point, 0, None, &[(NS, Access::Write)]);
     let s = net.eps[1].set_account(bumped, clock(net.now), &epochs());
     net.post(1, s);
-    // The key is retired (a tombstone until it expires), and its window closed.
-    assert_eq!(net.eps[1].receiver().keys_for(&w.a.id), 1);
-    assert!(!net.eps[1].receiver().knows(&w.a.id, net.eps[0].key_id()));
+    // Revision 17: nothing is kept for the old key, and its window is closed.
+    assert_eq!(net.eps[1].receiver().keys_for(&w.a.id), 0);
     assert_eq!(net.eps[1].machine().windows_for(&w.a.id), 0);
     let before = net.drops[1].len();
     net.run_until(net.now + 6_000);
     assert!(net.drops[1].len() > before, "a's beats are dropped");
-    assert!(net.drops[1][before..].iter().all(|d| *d == DropReason::Retired));
+    assert!(net.drops[1][before..].iter().all(|d| matches!(d, DropReason::Delegation(_))));
     // a's own endpoint, told of its new session number, retires its key.
     let s = net.eps[0].set_account(bumped_view(&w), clock(net.now), &epochs());
     assert!(s.effects.iter().all(|e| !matches!(e, Effect::Send { .. })));
@@ -546,73 +545,122 @@ fn the_same_inputs_give_the_same_bytes() {
 // ---------------------------------------------------------------------------------------
 // Revision 15: key lifecycle, probes, local authority, policy.
 
-/// The reviewer's attack end to end: a restarts five times quickly, so b closes a's first
-/// key; the home replays that key's delegation, its `hello` and its old frames. b drops them
-/// at the floor; when the first key really speaks again, the machine makes it pass a new
-/// freshness exchange before acting on anything but a `hello`.
+/// Deliver `frames` to `b` and its answers back to `a`, until quiet; returns every frame `a`
+/// sent to `b` (including the first batch).
+fn exchange(a: &mut Endpoint, b: &mut Endpoint, frames: Vec<Vec<u8>>, t: u64) -> Vec<Vec<u8>> {
+    let ep = epochs();
+    let mut sent = Vec::new();
+    let mut wire = frames;
+    for _ in 0..6 {
+        let mut back = Vec::new();
+        for f in wire.drain(..) {
+            sent.push(f.clone());
+            back.extend(b.receive(&f, clock(t), &ep).frames().map(<[u8]>::to_vec).collect::<Vec<_>>());
+        }
+        for f in back {
+            wire.extend(a.receive(&f, clock(t), &ep).frames().map(<[u8]>::to_vec).collect::<Vec<_>>());
+        }
+    }
+    sent
+}
+fn frames_of(s: Step) -> Vec<Vec<u8>> {
+    s.frames().map(<[u8]>::to_vec).collect()
+}
+
+/// The first review's attack against revision 17: five keys of `a` open in turn, so the
+/// fifth closes the first. The home then replays the first key's delegation, its old
+/// echoing `hello` (whose echoed `fresh` is still inside b's 60 s memory) and its old action
+/// frames. None reopens the key or acts on b. When the key's owner speaks again, a new
+/// challenge reopens it.
 #[test]
-fn an_evicted_key_cannot_be_replayed_back_to_life() {
+fn a_closed_key_reopens_only_through_a_new_challenge() {
     let w = world();
     let view = w.view();
     let ep = epochs();
     let mut b = endpoint(&w.b, &view, 120, Policy::default());
     b.command(Command::Join { state: None }, clock(0), &ep);
-    let mut a_keys: Vec<Endpoint> = (0..5).map(|i| endpoint(&w.a, &view, 121 + i, Policy::default())).collect();
-    let mut first_frames: Vec<Vec<u8>> = Vec::new();
+    let mut keys: Vec<Endpoint> = (0..5).map(|i| endpoint(&w.a, &view, 121 + i, Policy::default())).collect();
+    let mut first = Vec::new();
     let mut t = 10;
-    let (first_four, fifth) = a_keys.split_at_mut(4);
-    for (i, a) in first_four.iter_mut().enumerate() {
-        // Each "restart" joins, exchanges hellos with b, and (the first) takes.
-        let mut wire: Vec<Vec<u8>> = a.command(Command::Join { state: None }, clock(t), &ep).frames().map(<[u8]>::to_vec).collect();
+    for (i, a) in keys.iter_mut().enumerate() {
+        let mut f = frames_of(a.command(Command::Join { state: None }, clock(t), &ep));
         if i == 0 {
-            wire.extend(a.command(Command::Take { state: Some(bytes("old")) }, clock(t), &ep).frames().map(<[u8]>::to_vec));
+            f.extend(frames_of(a.command(Command::Take { state: Some(bytes("old")) }, clock(t), &ep)));
         }
-        for _ in 0..4 {
-            let mut back = Vec::new();
-            for f in wire.drain(..) {
-                if i == 0 {
-                    first_frames.push(f.clone());
-                }
-                back.extend(b.receive(&f, clock(t), &ep).frames().map(<[u8]>::to_vec).collect::<Vec<_>>());
-            }
-            for f in back {
-                wire.extend(a.receive(&f, clock(t), &ep).frames().map(<[u8]>::to_vec).collect::<Vec<_>>());
-            }
+        let sent = exchange(a, &mut b, f, t);
+        if i == 0 {
+            first = sent;
+            assert!(b.machine().window_admits(&w.a.id, a.key_id(), u64::MAX));
         }
         t += 10;
     }
-    let k1 = a_keys_id(first_four);
-    assert!(b.machine().window_admits(&w.a.id, &k1, u64::MAX), "four open windows");
-    // The fifth key sends one frame, without any exchange: the codec opens it and closes the
-    // first, and must close the first key's freshness window in the machine too.
-    let ping = fifth[0].command(Command::Join { state: None }, clock(t), &ep);
-    for f in ping.frames() {
-        b.receive(f, clock(t), &ep);
-    }
-    t += 10;
-    assert!(!b.receiver().knows(&w.a.id, &k1), "the fifth key closed the first");
-    assert!(!b.machine().window_admits(&w.a.id, &k1, u64::MAX), "and its freshness window");
-    let before = (b.machine().clone(), b.receiver().clone());
-    for f in &first_frames {
+    let k1 = keys[0].key_id().to_owned();
+    assert!(!b.machine().knows_key(&w.a.id, &k1), "the fifth key closed the first");
+    assert!(!b.receiver().knows(&w.a.id, &k1), "and nothing is kept for it");
+    assert_eq!(b.machine().windows_for(&w.a.id), 4);
+    // The replays: every one of them, at a time when the old echoed fresh is still recent.
+    let claim = b.machine().accepted().cloned();
+    let old_echo = first.iter().filter(|f| String::from_utf8_lossy(f).contains("delegation")).count();
+    assert!(old_echo > 0);
+    for f in &first {
         let s = b.receive(f, clock(t), &ep);
-        assert_eq!(s.dropped.map(|d| d.reason), Some(DropReason::Floor));
+        assert!(!s.events().any(|e| matches!(e, Event::Message { .. } | Event::Snapshot { .. } | Event::BecameHolder { .. } | Event::HolderChanged { .. })));
+        assert!(!b.machine().window_admits(&w.a.id, &k1, u64::MAX), "a replay reopened the key");
+        assert_eq!(b.machine().accepted().cloned(), claim);
     }
-    assert_eq!((b.machine().clone(), b.receiver().clone()), before, "replays changed nothing");
-    // The first key speaks again (after askTimeoutMs, so b may probe it): its key reopens,
-    // but its frames wait for a new exchange.
+    assert!(b.machine().candidates_for(&w.a.id) <= 4);
+    assert!(b.receiver().keys_for(&w.a.id) <= 8);
+    // The owner returns. Its own window for b is still open, so it does not answer the
+    // challenge in b's reply to its hello (§S3 R4a); its next frame other than a hello is
+    // dropped, and b's probe is a new challenge whose answer reopens the key.
     t += 2_000;
-    let s = a_keys[0].command(Command::Publish { id: id("new"), payload: bytes("new") }, clock(t), &ep);
-    let msg = s.frames().next().unwrap().to_vec();
-    let r = b.receive(&msg, clock(t), &ep);
-    assert!(r.dropped.is_none());
-    assert!(b.receiver().knows(&w.a.id, &k1));
-    assert!(!b.machine().window_admits(&w.a.id, &k1, u64::MAX), "no window without a new exchange");
-    assert!(r.frames().count() == 1, "b probes a with a hello");
-    assert!(!r.events().any(|e| matches!(e, Event::Message { .. })));
+    let mut f = frames_of(keys[0].link_down(clock(t), &ep));
+    f.extend(frames_of(keys[0].link_up(clock(t), &ep)));
+    exchange(&mut keys[0], &mut b, f, t);
+    assert!(!b.machine().window_admits(&w.a.id, &k1, u64::MAX));
+    let p1 = frames_of(keys[0].command(Command::Publish { id: id("p1"), payload: bytes("p1") }, clock(t), &ep));
+    exchange(&mut keys[0], &mut b, p1, t);
+    assert!(b.machine().window_admits(&w.a.id, &k1, u64::MAX), "the owner reopened it");
+    let p2 = frames_of(keys[0].command(Command::Publish { id: id("new"), payload: bytes("new") }, clock(t), &ep));
+    exchange(&mut keys[0], &mut b, p2, t + 1_500);
+    assert_eq!(b.machine().state(), &bytes("new"), "the reopened key is acted on");
 }
 
-fn a_keys_id(keys: &[Endpoint]) -> String {
-    keys[0].key_id().to_owned()
+/// A home replaying frames of a hundred old keys of `a` cannot affect a's current key, and
+/// b's state stays bounded.
+#[test]
+fn a_hundred_old_keys_cannot_touch_the_current_key() {
+    let w = world();
+    let view = w.view();
+    let ep = epochs();
+    let mut b = endpoint(&w.b, &view, 150, Policy::default());
+    b.command(Command::Join { state: None }, clock(0), &ep);
+    let mut current = endpoint(&w.a, &view, 151, Policy::default());
+    let mut f = frames_of(current.command(Command::Join { state: None }, clock(10), &ep));
+    f.extend(frames_of(current.command(Command::Take { state: Some(bytes("s")) }, clock(10), &ep)));
+    exchange(&mut current, &mut b, f, 10);
+    let k = current.key_id().to_owned();
+    assert!(b.machine().window_admits(&w.a.id, &k, u64::MAX));
+    for i in 0..100u64 {
+        let mut old = Endpoint::new(cell(), &w.a.id, Policy::default(), None, view.clone(), &mut [10 + i as u8; 32], [i as u8; 16], clock(0)).unwrap();
+        let body = old.begin_delegation(t0(), t0() + 86_400_000).unwrap();
+        old.finish_delegation(&body, &host_sign(&w.a, &body), clock(0)).unwrap();
+        let mut f = frames_of(old.command(Command::Join { state: None }, clock(20), &ep));
+        f.extend(frames_of(old.command(Command::Presence { payload: bytes("old") }, clock(20), &ep)));
+        for x in f {
+            b.receive(&x, clock(20 + i), &ep);
+        }
+        assert!(b.machine().candidates_for(&w.a.id) <= 4);
+        assert!(b.machine().windows_for(&w.a.id) <= 4);
+        assert!(b.receiver().keys_for(&w.a.id) <= 8);
+    }
+    assert!(b.machine().window_admits(&w.a.id, &k, u64::MAX), "the current key is untouched");
+    let s = current.command(Command::Publish { id: id("p"), payload: bytes("after") }, clock(200), &ep);
+    for x in frames_of(s) {
+        b.receive(&x, clock(200), &ep);
+    }
+    assert_eq!(b.machine().state(), &bytes("after"));
+    assert!(b.machine().closed_marks() <= 1);
 }
 
 #[test]
@@ -665,9 +713,10 @@ fn local_authority_follows_the_account() {
     assert!(s.frames().next().is_none(), "a reader cannot take");
     let s = net.eps[1].set_account(read.clone(), clock(net.now), &ep);
     net.post(1, s);
-    // b, told that a only reads, ignores the claim in a's `bye` (§S4 rule 1); a is silent,
-    // so it lapses, and b can take.
-    net.run_until(net.now + 20_000);
+    // Revision 17: b, told that a only reads, still honours a's `bye` releasing exactly the
+    // claim b accepted, held by a: the cell has no holder at once, and b can take.
+    net.run_until(net.now + 1_000);
+    assert_eq!(net.eps[1].machine().holder(), None);
     net.command(1, Command::Take { state: None });
     net.run_until(net.now + 1_000);
     assert!(net.eps[1].machine().is_holder());

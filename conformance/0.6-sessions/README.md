@@ -1,7 +1,7 @@
 # 0.6 session vectors
 
 Transcripts of the reference session machine (`colophon_core::v06::session`, spec
-`spec/colophon-0.6-sessions.md` revision 15, §S3–§S9), for replay by the Swift, Kotlin and JS bindings.
+`spec/colophon-0.6-sessions.md` revision 17, §S3–§S9), for replay by the Swift, Kotlin and JS bindings.
 They are generated and checked by `crates/colophon-core/tests/v06_session_vectors.rs`
 (`COLOPHON_REGEN_VECTORS=1` rewrites them). The draft is unfrozen: these files change with it.
 
@@ -69,7 +69,11 @@ machine with a new one built from what the member persisted (the last `persist` 
   kept.
 - Frames may come from a member in no entitled set (`r` in `reader-claims-ignored`); its
   `writer` flag may be either value, and every claim it carries is ignored (§S4 rule 1,
-  revision 15).
+  revision 15), except that a `bye` releasing exactly the receiver's accepted claim, held by
+  its sender, is honoured (revision 17, `demoted-holder-release`).
+- Keyed scenarios may use several session keys of one member (`closed-key-reopen`): the
+  machine keeps at most 4 open windows and 4 candidate keys per member, and once it has closed
+  one of a member's windows it honours that member's echo only of a `fresh` issued after.
 - `view` is `{accepted, holder, holding, gated, synced, seq, state}`; `digest` is the SHA-256 of
   its JSON as written by the reference (fields in that order, no spaces).
 

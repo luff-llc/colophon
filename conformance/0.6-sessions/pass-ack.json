@@ -1,5 +1,5 @@
 {
-  "description": "a passes to b and the pass is lost; b takes on the ask timeout; a resends the same pass when it hears b (any frame, at most once per askTimeoutMs); b reports it as a late pass, renews over it and acknowledges; a stops resending (§S5, revision 15, G11).",
+  "description": "a passes to b and the pass is lost; b takes on the ask timeout; a resends the same pass when it hears b (on any frame from b or on its timer, backing off from askTimeoutMs to holderTimeoutMs, revision 17); b reports it as a late pass, renews over it and acknowledges; a stops resending (§S5, revision 15, G11).",
   "final": [
     {
       "digest": "ce0922139ed0ab8a70c61e8e72962b39f15b12928f662d07661ce23087ad0111",
@@ -54,6 +54,7 @@
     "renewGuard": true,
     "renewNeedsContact": true,
     "renewWider": true,
+    "reopenChallenge": true,
     "seenUnsynced": true,
     "senderChecks": true,
     "stateReports": true,

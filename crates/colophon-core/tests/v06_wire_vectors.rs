@@ -196,7 +196,7 @@ fn build() -> Value {
 
     json!({
         "format": "colophon/session-wire-vectors/6",
-        "spec": "colophon-0.6-sessions revision 14, §S2 and §S3",
+        "spec": "colophon-0.6-sessions revision 17, §S2 and §S3",
         "account": ACCOUNT,
         "namespace": NS,
         "cell": CELL,
@@ -274,30 +274,12 @@ fn dropped(code: &str) -> Value {
     json!({"drop": code})
 }
 
-/// Multi-step receiver scenarios (revision 15): key lifecycle, probes, entitlement changes,
-/// renewal and the read-only member's frames.
+/// Multi-step receiver scenarios (revision 17): probes, entitlement changes, renewal, the
+/// read-only member's frames and pass acknowledgement. Which keys are open or closed is the
+/// machine's (machine vectors `closed-key-reopen`).
 fn scenarios(w: &World) -> Value {
     let mut out = Vec::new();
     let day = t0() + 86_400_000;
-
-    // Eviction replay: five keys of a; the fifth closes the first; the first key's frames,
-    // its hello included, are dropped at its floor; a new frame above the floor reopens it.
-    let mut keys: Vec<Sender> = (0..5).map(|i| keyed(&w.a, 0x30 + i, 0, t0(), day)).collect();
-    let hello = Body::Hello { fresh: id("a-old"), echo: vec![id("b-fresh")], seen: None, heard: None, lapsed: false };
-    let k1: Vec<String> = [hello, Body::Ping { t: 1 }, Body::Ping { t: 2 }]
-        .into_iter()
-        .map(|body| s(&keys[0].seal(&Frame { from: w.a.id.clone(), to: None, retain: false, body }, &epochs(), t0()).unwrap()))
-        .collect();
-    let mut steps: Vec<Value> = k1.iter().map(|f| open(f, json!({"drop": null, "closed": null}))).collect();
-    for (i, k) in keys.iter_mut().enumerate().skip(1) {
-        let closed = if i == 4 { json!(keys_id(0x30)) } else { Value::Null };
-        steps.push(open(&ping(k, &w.a, 1), json!({"drop": null, "closed": closed})));
-    }
-    for f in &k1 {
-        steps.push(open(f, dropped("floor")));
-    }
-    steps.push(open(&ping(&mut keys[0], &w.a, 3), json!({"drop": null, "closed": keys_id(0x31)})));
-    out.push(json!({"name": "eviction-replay", "steps": steps}));
 
     // Probes: a frame without a delegation from an entitled member asks for a hello; the same
     // from a fake member ID or a member without the namespace does not.
@@ -328,9 +310,11 @@ fn scenarios(w: &World) -> Value {
     }
     out.push(json!({"name": "reader-claims", "steps": rsteps}));
 
-    // Entitlement changes: reduced to read, a's frames open with writer false; a new session
-    // number retires a's key (even under a delegation signed again for the new number);
-    // without a, a's frames fail their delegation.
+    // Entitlement changes: reduced to read, a's frames open with writer false; with a new
+    // session number a's old key is dropped and its frames fail their delegation. An old key
+    // delegated again under the new number (which §S2 forbids) passes the codec, but only as
+    // a new key: the machine opens it only through a new challenge (machine vectors).
+    // Without a, its frames fail their delegation.
     let mut tx = keyed(&w.a, 0x42, 0, t0(), day);
     let f1 = ping(&mut tx, &w.a, 1);
     let f2 = ping(&mut tx, &w.a, 2);
@@ -343,27 +327,11 @@ fn scenarios(w: &World) -> Value {
         {"setView": "aRead", "expect": {"forgottenMembers": [], "closedKeys": []}},
         open(&f2, json!({"drop": null, "writer": false})),
         {"setView": "aSession1", "expect": {"forgottenMembers": [], "closedKeys": [[w.a.id, keys_id(0x42)]]}},
-        open(&f3, dropped("retired")),
-        open(&f4, dropped("retired")),
+        open(&f3, dropped("delegation")),
+        open(&f4, json!({"drop": null, "writer": true})),
         {"setView": "withoutA", "expect": {"forgottenMembers": [w.a.id], "closedKeys": []}},
         open(&f4, dropped("delegation")),
     ]}));
-
-    // Floor exhaustion: 64 keys of c; the 65th is refused; expiry of the first 32 (one hour
-    // windows, plus 60 s) frees room for it.
-    let hour = t0() + 3_600_000;
-    let mut fsteps = Vec::new();
-    for i in 0..64u8 {
-        let ex = if i < 32 { hour } else { day };
-        let mut k = keyed(&w.c, 0x50 + i, 0, t0(), ex);
-        fsteps.push(open(&ping(&mut k, &w.c, 1), json!({"drop": null})));
-    }
-    let mut extra = keyed(&w.c, 0xa0, 0, t0(), day);
-    let e1 = ping(&mut extra, &w.c, 1);
-    fsteps.push(open(&e1, dropped("keyLimit")));
-    fsteps.push(json!({"expire": hour + 60_001, "expect": {"expired": 32}}));
-    fsteps.push(json!({"open": e1, "clockMs": hour + 60_001, "expect": {"drop": null}}));
-    out.push(json!({"name": "floor-exhaustion", "steps": fsteps}));
 
     // Renewal: a renewed delegation for the same key keeps its window; an old frame
     // re-wrapped with the renewed delegation is still a replay.
@@ -457,20 +425,12 @@ fn check(v: &Value) {
                 assert_eq!(gone.keys, keys, "{what}");
                 continue;
             }
-            if let Some(at) = step.get("expire") {
-                let n = rx.expire(at.as_i64().unwrap()).len() as u64;
-                assert_eq!(n, ex["expired"].as_u64().unwrap(), "{what}");
-                continue;
-            }
             let at = step.get("clockMs").and_then(Value::as_i64).unwrap_or(clock);
             let before = rx.clone();
             match (rx.open(st(&step["open"]).as_bytes(), &view, at, &table, max), ex["drop"].as_str()) {
                 (Ok(o), None) => {
                     if let Some(wr) = ex.get("writer") {
                         assert_eq!(o.writer, wr.as_bool().unwrap(), "{what}");
-                    }
-                    if let Some(cl) = ex.get("closed") {
-                        assert_eq!(o.closed.as_deref(), cl.as_str(), "{what}");
                     }
                 }
                 (Err(d), Some(code)) => {

@@ -74,6 +74,7 @@
     "renewGuard": true,
     "renewNeedsContact": true,
     "renewWider": true,
+    "reopenChallenge": true,
     "seenUnsynced": true,
     "senderChecks": true,
     "stateReports": true,

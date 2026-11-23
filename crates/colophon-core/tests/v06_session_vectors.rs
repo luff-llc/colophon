@@ -518,7 +518,50 @@ fn scenarios() -> Vec<Script> {
     assert_eq!(s.session("b").accepted(), Some(&Claim::new(2, 0, "b")));
     v.push(s);
 
-    let mut s = started("pass-ack", "a passes to b and the pass is lost; b takes on the ask timeout; a resends the same pass when it hears b (any frame, at most once per askTimeoutMs); b reports it as a late pass, renews over it and acknowledges; a stops resending (§S5, revision 15, G11).", p(), &["a", "b"]);
+    let mut s = started("demoted-holder-release", "a holds; b's host learns that a may now only read; a's bye releasing exactly 1.0.a, b's accepted claim, held by a, is honoured, so the cell has no holder; a bye from a reader naming a greater claim of its own changes nothing (§S4 rule 1, revision 17).", p(), &["a", "b"]);
+    s.step("b", 100, Input::Entitled { writers: vec!["b".into()] });
+    let bye = |claim| Input::Frame { frame: Frame { from: "a".into(), to: None, retain: false, body: Body::Bye { claim: Some(claim), leaving: false } }, writer: false, key: None, n: None };
+    s.step("b", 110, bye(Claim::new(5, 0, "a")));
+    assert_eq!(s.session("b").holder(), Some("a"));
+    s.step("b", 120, bye(Claim::new(1, 0, "a")));
+    assert_eq!(s.session("b").holder(), None);
+    v.push(s);
+
+    // Revision 17: a closed key reopens only through a new challenge.
+    let mut s = Script::new("closed-key-reopen", "keyed frames, b alone, five session keys of a (k1–k5): each opens a window by echoing a fresh b issued; the fifth closes k1. A replay of k1's echoing hello (its echoed fresh still inside the 60 s memory) and of a take under k1 do nothing. k1 then answers a new challenge and its take is accepted (§S3 freshness, revision 17). a's own machine is idle: its frames are written by hand.", p(), &["a", "b"]).keyed();
+    s.join_all(0);
+    let hello = |fresh: &str, echo: Vec<Id>| Body::Hello { fresh: id(fresh), echo, seen: None, heard: None, lapsed: false };
+    let fresh_of = |outs: &[Output]| outs.iter().find_map(|o| match o {
+        Output::Send { frame: Frame { body: Body::Hello { fresh, .. }, .. } } => Some(*fresh),
+        _ => None,
+    }).unwrap();
+    let keyed_in = |body, key: &str, n| Input::Frame { frame: Frame { from: "a".into(), to: None, retain: false, body }, writer: true, key: Some(key.into()), n: Some(n) };
+    let mut k1_answer = None;
+    for k in 1..=5u64 {
+        let key = format!("k{k}");
+        let outs = s.step("b", 10 * k, keyed_in(hello(&format!("a{k}"), vec![]), &key, 1));
+        let challenge = fresh_of(&outs);
+        let answer = hello(&format!("a{k}'"), vec![challenge]);
+        if k == 1 {
+            k1_answer = Some(answer.clone());
+        }
+        s.step("b", 10 * k + 1, keyed_in(answer, &key, 2));
+        assert!(s.session("b").window_admits("a", &key, 3));
+    }
+    assert!(!s.session("b").window_admits("a", "k1", 3), "the fifth key closed k1");
+    s.step("b", 100, keyed_in(k1_answer.unwrap(), "k1", 2));
+    s.step("b", 101, keyed_in(Body::Take { claim: Claim::new(1, 0, "a") }, "k1", 3));
+    assert!(!s.session("b").window_admits("a", "k1", 3));
+    assert_eq!(s.session("b").accepted(), None);
+    let outs = s.step("b", 200, keyed_in(hello("a1-again", vec![]), "k1", 4));
+    let challenge = fresh_of(&outs);
+    s.step("b", 201, keyed_in(hello("a1-answer", vec![challenge]), "k1", 5));
+    assert!(s.session("b").window_admits("a", "k1", 6));
+    s.step("b", 202, keyed_in(Body::Take { claim: Claim::new(1, 0, "a") }, "k1", 6));
+    assert_eq!(s.session("b").accepted(), Some(&Claim::new(1, 0, "a")));
+    v.push(s);
+
+    let mut s = started("pass-ack", "a passes to b and the pass is lost; b takes on the ask timeout; a resends the same pass when it hears b (on any frame from b or on its timer, backing off from askTimeoutMs to holderTimeoutMs, revision 17); b reports it as a late pass, renews over it and acknowledges; a stops resending (§S5, revision 15, G11).", p(), &["a", "b"]);
     s.cmd("b", 1_000, Command::Ask);
     s.deliver(1_010);
     s.cmd("a", 1_020, Command::Pass { to: "b".into(), snapshot: b("stopped") });

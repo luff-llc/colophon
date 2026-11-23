@@ -7,6 +7,7 @@ mod v06_codec_support;
 use colophon_core::v06::bridge;
 use colophon_core::v06::session::codec::{
     frame_key, nonce, Attach, CellId, EpochTable, Receiver, ReplayWindow, SealError, Sender,
+    CACHED_PER_MEMBER,
 };
 use colophon_core::v06::session::keys::{
     Delegation, KeyError, SessionAccount, SessionKey, MAX_WINDOW_MS,
@@ -467,14 +468,11 @@ fn revocation_or_a_new_session_number_drops_keys() {
     let gone = rx.set_account(&bumped, t0());
     assert!(gone.members.is_empty());
     assert_eq!(gone.keys, vec![(w.a.id.clone(), tx.key().id().to_owned())]);
-    // The key is retired, not forgotten: it stays dead even under a fresh delegation.
-    assert_eq!(rx.keys_for(&w.a.id), 1);
-    assert!(!rx.knows(&w.a.id, tx.key().id()));
-    let next = tx.seal(&frame(&w.a, Body::Ping { t: 9 }), &epochs(), t0()).unwrap();
-    assert_eq!(assert_dropped(&mut rx, &bumped, &next, "after bump"), DropReason::Retired);
-    let revoked = SessionAccount::new(ACCOUNT).with_member(&w.b.point, 0, None, &[(NS, colophon_core::v05::terms::Access::Write)]);
-    assert_eq!(rx.set_account(&revoked, t0()).members, vec![w.a.id.clone()]);
+    // Revision 17: nothing is kept for the old key; its frames fail their delegation.
     assert_eq!(rx.keys_for(&w.a.id), 0);
+    let next = tx.seal(&frame(&w.a, Body::Ping { t: 9 }), &epochs(), t0()).unwrap();
+    assert!(matches!(assert_dropped(&mut rx, &bumped, &next, "after bump"), DropReason::Delegation(_)));
+    let revoked = SessionAccount::new(ACCOUNT).with_member(&w.b.point, 0, None, &[(NS, colophon_core::v05::terms::Access::Write)]);
     assert!(matches!(assert_dropped(&mut rx, &revoked, &next, "after revoke"), DropReason::Delegation(_)));
 }
 
@@ -611,75 +609,24 @@ fn sender_window(m: &Member, view: &SessionAccount, random: u8, nb: i64, ex: i64
 
 /// The reviewer's attack: five rapid keys close the first; a carrier then replays the first
 /// key's delegation and old frames (its `hello` included). Every one is dropped at the floor.
+/// Revision 17: the receiver caches at most 8 keys per member and nothing for keys it
+/// dropped; replaying frames from a hundred old keys cannot grow it.
 #[test]
-fn a_closed_key_keeps_its_floor_and_its_old_frames_stay_dead() {
+fn the_receiver_cache_is_bounded_per_member() {
     let w = world();
     let view = w.view();
     let ep = epochs();
     let mut rx = Receiver::new(cell(), &w.b.id);
-    let mut senders: Vec<Sender> = (0..5).map(|i| sender(&w.a, &view, 60 + i, cell())).collect();
-    let hello = Body::Hello { fresh: id("old"), echo: vec![id("b-fresh")], seen: None, heard: None, lapsed: false };
-    let old: Vec<Vec<u8>> = (0..3)
-        .map(|i| {
-            let body = if i == 0 { hello.clone() } else { Body::Take { claim: claim(i, &w.a) } };
-            senders[0].seal(&frame(&w.a, body), &ep, t0()).unwrap()
-        })
-        .collect();
-    for f in &old {
-        rx.open(f, &view, t0(), &ep, MAXP).unwrap();
-    }
-    let k1 = senders[0].key().id().to_owned();
-    let mut closed = Vec::new();
-    for s in senders.iter_mut().skip(1) {
-        let f = s.seal(&frame(&w.a, Body::Ping { t: 1 }), &ep, t0()).unwrap();
-        closed.push(rx.open(&f, &view, t0(), &ep, MAXP).unwrap().closed);
-    }
-    assert_eq!(closed, vec![None, None, None, Some(k1.clone())], "the fifth key closes the first");
-    assert_eq!(rx.open_for(&w.a.id), 4);
-    assert_eq!(rx.keys_for(&w.a.id), 5);
-    assert_eq!(rx.floor(&w.a.id, &k1), Some(3));
-    for f in &old {
-        assert_eq!(assert_dropped(&mut rx, &view, f, "replayed closed key"), DropReason::Floor);
-    }
-    // A new frame of the first key, above its floor, reopens it (closing the next oldest);
-    // the machine then requires a new freshness exchange (endpoint tests).
-    let f = senders[0].seal(&frame(&w.a, Body::Ping { t: 2 }), &ep, t0()).unwrap();
-    let o = rx.open(&f, &view, t0(), &ep, MAXP).unwrap();
-    assert_eq!(o.closed.as_deref(), Some(senders[1].key().id()));
-    assert!(rx.knows(&w.a.id, &k1));
-    for f in &old {
-        assert_eq!(assert_dropped(&mut rx, &view, f, "after reopening"), DropReason::Floor);
-    }
-}
-
-#[test]
-fn at_most_64_floors_per_member_until_delegations_expire() {
-    let w = world();
-    let view = w.view();
-    let ep = epochs();
-    let mut rx = Receiver::new(cell(), &w.b.id);
-    // The first 32 keys expire after an hour, the rest after a day.
-    for i in 0..64u8 {
-        let ex = if i < 32 { t0() + 3_600_000 } else { t0() + 86_400_000 };
-        let mut s = sender_window(&w.a, &view, 100 + i, t0(), ex);
+    for i in 0..100u8 {
+        let mut s = sender_window(&w.a, &view, 20 + i, t0(), t0() + 86_400_000);
         let f = s.seal(&frame(&w.a, Body::Ping { t: 1 }), &ep, t0()).unwrap();
         rx.open(&f, &view, t0(), &ep, MAXP).unwrap();
+        assert!(rx.keys_for(&w.a.id) <= CACHED_PER_MEMBER);
     }
-    assert_eq!(rx.keys_for(&w.a.id), 64);
-    let mut extra = sender(&w.a, &view, 200, cell());
-    let f = extra.seal(&frame(&w.a, Body::Ping { t: 1 }), &ep, t0()).unwrap();
-    assert_eq!(assert_dropped(&mut rx, &view, &f, "65th key"), DropReason::KeyLimit);
-    // Another member is unaffected.
-    let mut c = sender(&w.c, &view, 201, cell());
-    let fc = c.seal(&frame(&w.c, Body::Ping { t: 1 }), &ep, t0()).unwrap();
-    rx.open(&fc, &view, t0(), &ep, MAXP).unwrap();
-    // Expiry (plus the 60 s slack) frees the first 32 floors.
-    assert!(rx.expire(t0() + 3_600_000 + 60_000).is_empty());
-    let late = t0() + 3_600_000 + 60_001;
-    assert_eq!(rx.expire(late).len(), 32);
-    assert_eq!(rx.keys_for(&w.a.id), 32);
-    let f = extra.seal(&frame(&w.a, Body::Ping { t: 2 }), &ep, late).unwrap();
-    rx.open(&f, &view, late, &ep, MAXP).unwrap();
+    assert_eq!(rx.len(), CACHED_PER_MEMBER);
+    // What the machine does not know is dropped.
+    rx.retain(|_, _| false);
+    assert!(rx.is_empty());
 }
 
 #[test]
@@ -696,21 +643,6 @@ fn renewing_a_delegation_keeps_the_window_and_rewrapped_replays_fail() {
     let before = rx.window(&w.a.id, tx.key().id()).unwrap();
     rx.open(&next, &view, t0() + 1_000, &epochs(), MAXP).unwrap();
     assert!(rx.window(&w.a.id, tx.key().id()).unwrap().high() > before.high());
-    // A session-number change retires the key: a delegation signed again does not revive it.
-    let bumped = SessionAccount::new(ACCOUNT)
-        .with_member(&w.a.point, 1, None, &[(NS, colophon_core::v05::terms::Access::Write)])
-        .with_member(&w.b.point, 0, None, &[(NS, colophon_core::v05::terms::Access::Write)]);
-    rx.set_account(&bumped, t0());
-    let key = tx.key().point().to_vec();
-    let body = String::from_utf8(body).unwrap().replace("\"session\":0", "\"session\":1").into_bytes();
-    let d = Delegation::assemble(&body, &host_sign(&w.a, &body)).unwrap();
-    assert_eq!(d.body.key, key);
-    d.verify(&bumped, NS, t0()).unwrap();
-    let revived = edit(&next, |m| {
-        m.insert("delegation".into(), json(&d.envelope));
-        m.insert("n".into(), json!(99));
-    });
-    assert_eq!(assert_dropped(&mut rx, &bumped, &revived, "revived"), DropReason::Retired);
     // The sender refuses to delegate a key under another session number.
     assert_eq!(tx.delegation_body(1, t0(), t0() + 1_000), Err(KeyError::Retired));
 }

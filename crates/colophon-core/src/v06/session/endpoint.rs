@@ -2,8 +2,8 @@
 //! events and back.
 //!
 //! An [`Endpoint`] owns the state machine ([`Session`]), the sending side ([`Sender`]: the
-//! session key, `n` and the delegation) and the receiving side ([`Receiver`]: other members'
-//! accepted keys and replay windows). It is sans-IO and deterministic given its inputs: the
+//! session key, `n` and the delegation) and the receiving side ([`Receiver`]: cached
+//! delegations and replay windows of the keys the machine has open or as candidates). It is sans-IO and deterministic given its inputs: the
 //! host passes the clock with every call ([`Clock`]), randomness at construction (the session
 //! key and the `fresh` seed), epoch keys through [`EpochKeys`], and the account view through
 //! [`Endpoint::set_account`]. The member key signs only the delegation, in the host, between
@@ -305,8 +305,8 @@ impl Endpoint {
     }
 
     /// A newly accepted authority head (§S1, §S2). The host calls this before delivering any
-    /// frame received after it accepted that head. Other members' keys are dropped, retired
-    /// or kept as the receiver decides, and the machine follows; the machine is given the
+    /// frame received after it accepted that head. Other members' keys whose delegations no
+    /// longer hold are dropped and the machine closes or forgets them; the machine is given the
     /// new entitled writers; and this member's own access is applied: promoted, it may take;
     /// reduced to read, it releases and seals only what a reader may send; without the
     /// namespace, it leaves and seals nothing. A new session number retires its key.
@@ -325,6 +325,8 @@ impl Endpoint {
         for (m, k) in &gone.keys {
             self.machine.close_window(m, k);
         }
+        let machine = &self.machine;
+        self.receiver.retain(|m, k| machine.knows_key(m, k));
         let writers = account.writers(&self.cell.namespace, clock.wall_ms);
         let access = account.access(&self.me, &self.cell.namespace, clock.wall_ms);
         let session = account.member(&self.me).map(|m| m.session);
@@ -362,19 +364,12 @@ impl Endpoint {
             dropped: None,
         }
     }
-    /// A timer expiry (at or after [`Endpoint::next_deadline`]). Also forgets the replay
-    /// floors of keys whose delegations have expired.
+    /// A timer expiry (at or after [`Endpoint::next_deadline`]).
     pub fn tick(&mut self, clock: Clock, epochs: &dyn EpochKeys) -> Step {
-        self.expire(clock);
         let outs = self.machine.handle(Input::Tick, clock.mono_ms);
         Step {
             effects: self.run(outs, clock, epochs),
             dropped: None,
-        }
-    }
-    fn expire(&mut self, clock: Clock) {
-        for (m, k) in self.receiver.expire(clock.wall_ms) {
-            self.machine.close_window(&m, &k);
         }
     }
     /// Some carrier works again.
@@ -407,9 +402,6 @@ impl Endpoint {
             self.policy.max_payload,
         ) {
             Ok(o) => {
-                if let Some(k) = &o.closed {
-                    self.machine.close_window(&o.frame.from, k);
-                }
                 let outs = self.machine.handle(
                     Input::Frame {
                         frame: o.frame,
@@ -419,6 +411,10 @@ impl Endpoint {
                     },
                     clock.mono_ms,
                 );
+                // Revision 17: the machine owns which keys are open or candidates; the
+                // receiver caches nothing for any other.
+                let machine = &self.machine;
+                self.receiver.retain(|m, k| machine.knows_key(m, k));
                 Step {
                     effects: self.run(outs, clock, epochs),
                     dropped: None,
