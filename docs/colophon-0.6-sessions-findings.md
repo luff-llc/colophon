@@ -1,10 +1,10 @@
 # Colophon 0.6 sessions: findings from the reference machine
 
-**Date:** 2026-11-22, updated 2026-11-23. **Against:** `spec/colophon-0.6-sessions.md`, revision 1 (findings) and revision 2 (`eb5843b`, which adopts F1–F20). **Code:** `crates/colophon-core/src/v06/session/`.
+**Date:** 2026-11-22, updated 2026-11-23. **Against:** `spec/colophon-0.6-sessions.md`, revisions 1–4 (revision 4: `f63cbad`). **Code:** `crates/colophon-core/src/v06/session/`.
 
 The reference machine implements the draft, and also the departures listed here. Each
 departure that changes behaviour has a switch in `Fixes`. `Fixes::default()` (= `ALL`) is the
-reference reading (= revision 3), and `Fixes::LITERAL` is the revision 1 draft, so every counterexample below
+reference reading (revision 4 plus the R-fixes below; `Fixes::REV4` is revision 4 as written, `Fixes::REV3` revision 3), and `Fixes::LITERAL` is the revision 1 draft, so every counterexample below
 can be reproduced. Evidence comes from three sources:
 
 - **Explorer:** `tests/v06_session_explore.rs`, an exhaustive BFS to depth 8 with fair
@@ -355,6 +355,61 @@ Proposed wording: "…and a member that becomes holder by that `pass` starts wit
 - **F20. The holder's ordered state.** The holder must produce `state` at any moment, so the
   core folds messages itself. `Reducer::Latest` is the §S12 rule; `Reducer::Append` is for
   logs and tests. A cell's fold should be part of its declaration in §S1. (Spec gap.)
+
+## R. First independent design review (`docs/colophon-0.6-sessions-review-1.md`) and revision 4
+
+**Machine:** revision 4 is `Fixes::REV4`. The reference reading is `Fixes::ALL`, which is revision 4 plus five fixes, R1c, R1e, R2d and R2e, that the explorer and the simulator showed revision 4 needs. Each fix has its own switch. **Harness changes (H1–H5):**
+
+- per-directed-edge reachability, including a chain profile a↔b↔c with a↮c;
+- completions that keep the topology, under three fair schedules (FIFO, LIFO, rotating);
+- a strict G5: the asking writer itself must become holder;
+- G10 (no claim changes in the second half of a long quiet completion);
+- G11 provenance checks: a ghost ledger of displaced states, and late passes checked on each transition;
+- G12 crash-prefix steps: every single-member step is cut after each prefix of its outputs, then the member restarts from what it persisted;
+- the review's traces scripted.
+
+| Review item | Resolution | Evidence |
+| --- | --- | --- |
+| Renew livelock A↔B↔C, A↮C | **R1** (revision 4 §S4 evidence, `heard`). The `hearsay` renewal is behind `Fixes::REV3`. | `chain_two_holders_rev3_livelocks` reproduces the livelock: a G10 failure with 12 claim changes in 11 ticks. `chain_two_holders_settle` passes under revision 4 (132 states). `chain_handoff` passes (14,437 states). |
+| Take racing a delayed pass loses SA | **R2a** (`LatePass`). | `h5_take_races_delayed_pass`: revision 3 never tells `b`'s application SA; revision 4 reports it. Sim: with R2 off, 12/500 seeds fail. |
+| Released holder restarts and overwrites newer state | **R2c** (tombstone persisted). | `h5_released_restart_does_not_overwrite`: revision 3 overwrites N; revision 4 keeps N. Vector `release`. |
+| Pass emitted before its claim is persisted | **R3**: `adopt` (which persists) runs before `Send(pass)`; release and leave persist before `bye`. | `crash_prefixes` (26,709 + 5,835 states): G12/G1, and G3 including "no holder frame under a claim passed away". |
+| Session-key bootstrap, nonces | **R4**: codec layer (delegation in the clear, per-key key, nonce = `n`). The `fresh`/`echo` gate is in the machine and used when the codec passes `key` and `n`. | Vector `freshness`. |
+| Submit neither at-most- nor at-least-once | **R5**: at-least-once with resends and `SubmitFailed`. | `h5_submit_across_holder_change`: revision 3 orders nothing and tells no one; revision 4 orders X at least once. |
+| Unbounded `ordered`, append growth, overflow | **R6**: last `tail` ids; `tail` early messages; `append` keeps the last `tail` payloads; checked arithmetic; `MAX_INT`; oversize frames dropped; ids are 16-byte unpadded base64url. | `offset.json` now uses 2^53−1 instead of `u64::MAX`. |
+| Pass need not answer an ask | **R7**: `Pass` is rejected unless the member's ask is pending under the current claim. Asks are cleared on claim change, decline and `bye leaving`. | Explorer passes only to asks the machine recorded. |
+| Explorer heals to a mesh, one FIFO suffix; weak G5 | **H1/H2**. | See above. |
+
+### Where revision 4 is wrong or incomplete (the explorer and simulator contradict it)
+
+- **R1b/R1c. Evidence never reaches a silent member** (spec gap; fixed beyond revision 4, switch `evidence_push`). Revision 4 corrects only holder frames and `take`. A member with no claim, or with a lesser claim, that is not a holder sends neither. On the chain, `c` joined before `a` took, and it never learns the holder.
+  - Trace: `rev4_text_counterexamples`, first case. It fails G4 with `c has None but the holder a has 1.0.a`.
+  - Fix: evidence also answers a `hello` that names a lesser claim or none. Each member remembers the claim named in every peer's last `hello` and forwards new evidence to peers that are behind.
+- **R1d. G5's askTimeoutMs bound does not hold** (guarantee contradicted; reported, not fixed).
+  - `b` asks while the holder `a` (3.0.a) has just been cut off, and takes 2.0.b on time.
+  - `c` heard `a` less than holderTimeoutMs ago and forwards `a`'s state as evidence. `b` yields to a holder that nobody can reach. `b`'s want is gone, so it never takes again.
+  - Trace: printed by `COLOPHON_EXPLORE_SHOW_R1D=1`; 11 states in `three_members_handoff`.
+  - Keeping the want after such a yield livelocks: two members that each took because they wanted to take from each other every askTimeoutMs, because askTimeoutMs < beatMs. G10 fails at once.
+  - Proposal: G5 promises holderTimeoutMs + askTimeoutMs when evidence is involved, and a writer displaced by evidence of a holder that then lapses may take again.
+- **R1e. A returning holder wins on a missed-beats testimony** (spec bug; fixed beyond revision 4, switch `renew_guard`). Revision 4 moved the "link has worked for holderTimeoutMs" guard from the renewer to the witness. Under loss, a witness can miss three beats of a live holder and report `heard: lapsed`.
+  - Trace: sim playback seed 943. `1b` returns lapsed and retakes 4.0.1b, which is below 2c's live 4.0.2c. `0a` missed 2c's beats, so `0a`'s `hello` says lapsed, and `1b` renews to 5.0.1b, displacing the live holder.
+  - Fix: keep the guard on the renewer as well. (No seed among the first 500 fails with the guard off; seed 943 appears in a 2,000-seed run.)
+- **R2d. One `yielded` resend does not survive two losses** (spec bug; fixed beyond revision 4, switch `yielded_retry`).
+  - Trace: `rev4_text_counterexamples`, second case. Both copies are lost to the cap, which fails G11. Sim: 6/500 playback seeds fail.
+  - Fix: resend on hearing the new holder, and on ticks while it was heard within holderTimeoutMs; at most once per askTimeoutMs, 8 times.
+- **R2e. A pass's snapshot is lost when the holder renews first on a `hello`** (spec bug; fixed). The passer, which accepted `next`, answers the taker's lesser `take` with a `hello` naming `next`. The taker renews on that `hello` before the delayed pass arrives. The pass then names a lesser claim and is dropped without a report.
+  - Fix: a pass naming a holder that has moved past it is still reported once (`LatePass`). Covered by `h5_take_races_delayed_pass`.
+- **R2f. G11 cannot be guaranteed without an acknowledgement** (guarantee contradicted; reported). If the taker is itself displaced and never speaks to the displaced member again, or if every resend falls inside a partition, no bounded resend scheme delivers the report.
+  - Explorer: 33 completions in the two-holder profile. Sim: 2 of 2,000 random seeds, for example seed 485. These are counted and reported, not failed.
+  - Proposal: the new holder acknowledges `yielded`, and the displaced member resends on every frame from it until it is acknowledged.
+- **R4a. The freshness answer rule loops** (spec bug; fixed). As written, "answer each `hello` ... whose `fresh` it has not answered" makes two members answer each other's answers forever, because every answer carries a new `fresh`.
+  - Fix: do not answer a `hello` that itself echoes one of this member's `fresh` values, unless that `hello` just opened the window. The handshake then ends after four hellos (vector `freshness`).
+- **R5a.** A submitter that becomes holder orders its own pending submits.
+- **G11 and crashes.** A displaced holder that crashes before its `yielded` goes out cannot report a state it no longer has. G12 does not cover G11. The ghost ledger drops such entries.
+- **Forwarded frames and the `n` window.** A forwarded frame keeps its origin's `n`. A receiver whose window for that origin has moved more than 128 past that `n` drops it, so the evidence is lost and the next correction resends it. The simulator does not model the window for forwarded frames.
+- **Implementation choices.**
+  - Ask liveness uses a "heard since ask" flag rather than comparing timestamps; a beat in the same millisecond as the ask counts.
+  - `Pass` is rejected when its snapshot exceeds `maxPayload`.
 
 ## Where the machine and the spec differed (resolved 2026-11-23)
 
