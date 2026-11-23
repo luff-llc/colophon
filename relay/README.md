@@ -135,7 +135,7 @@ home holds no account secret: no controller or member key, no PRF output, no see
 | TLS | `COLOPHON_RELAY_TLS_CERT`, `COLOPHON_RELAY_TLS_KEY`, or `"tls":{…}` | off |
 | CORS origins | `COLOPHON_RELAY_CORS_ORIGINS="https://app.example,…"` or `cors.origins`: each exactly `scheme://host[:port]`, lower case, compared whole; `*`, `null`, a path or a default port refuse start-up | none: no CORS header |
 | Provisioning | config `provision` (below) | off |
-| Client address | config `clientAddress`: `{"header": "CF-Connecting-IP", "trustedPeers": ["127.0.0.1", "::1"]}` | the socket address |
+| Client address | config `clientAddress`: `{"header": "CF-Connecting-IP", "trustedPeers": ["127.0.0.1", "::1", "172.16.0.0/12"]}` (addresses or CIDR ranges; a `/0` or a range with host bits set refuses start-up) | the socket address |
 
 **Provisioning.** A home slot serves one account, by its account ID, from before anything is
 uploaded. Its first upload is accepted only if it starts with the genesis whose digest is that ID;
@@ -359,6 +359,9 @@ real time. Without `--test-clock` stdin is not read.
 
 Production use is over TLS (directly, or behind Caddy/nginx or Tailscale, as for the 0.3 relay:
 pass `Authorization`, `If-None-Match`, `If-Match` and `Content-Length`, do not buffer bodies).
+
+A container image configured by environment variables, with its key, token and data on one
+volume, is described in [`docs/self-hosting/docker.md`](../docs/self-hosting/docker.md).
 
 ## What a home serves
 
