@@ -1,11 +1,10 @@
 # Colophon 0.6 sessions: findings from the reference machine
 
-**Date:** 2026-11-22. **Against:** `spec/colophon-0.6-sessions.md` (unfrozen draft of the same
-day). **Code:** `crates/colophon-core/src/v06/session/`.
+**Date:** 2026-11-22, updated 2026-11-23. **Against:** `spec/colophon-0.6-sessions.md`, revision 1 (findings) and revision 2 (`eb5843b`, which adopts F1–F20). **Code:** `crates/colophon-core/src/v06/session/`.
 
 The reference machine implements the draft, and also the departures listed here. Each
 departure that changes behaviour has a switch in `Fixes`. `Fixes::default()` (= `ALL`) is the
-reference reading, and `Fixes::LITERAL` is the draft as written, so every counterexample below
+reference reading (= revision 2, plus the proposed F21), and `Fixes::LITERAL` is the revision 1 draft, so every counterexample below
 can be reproduced. Evidence comes from three sources:
 
 - **Explorer:** `tests/v06_session_explore.rs`, an exhaustive BFS to depth 8 with fair
@@ -36,13 +35,30 @@ in the simulator.
 | F9 | A lost `ask` is never repaired | spec bug | playback 151/1000 |
 | F10 | Renewal by a member that has just returned steals the role | spec bug | playback 19/1000 |
 | F11 | G6 as worded is false | wording | analysis plus checked operational form |
-| F12 | Two passes can name the same `next` | spec bug (not reproduced) | analysis |
+| F12 | Two passes can name the same `next` | spec bug | scripted test `f12_two_passes_to_one_asker` |
+| F21 | F12's renewal misses a lost second pass | spec bug (open in revision 2) | the same test, second half |
 | F13–F20 | Smaller readings | ambiguity or choice | — |
+
+**Ablation rerun against revision 2 (2026-11-23, 1,000 seeds).** The simulator has changed since the first run: it models the 128-wide `n` window, its anchors use `ratePermille`, restarts supply state, and the workload now includes publish bursts. So the seed streams differ from those cited in the sections below. With each fix off, the seeds that fail are:
+
+| Fix off | Random workload | Playback script |
+| --- | --- | --- |
+| Revision 1 draft (all fixes off) | 331/1000 | 345/1000 |
+| F1 | 113/1000 | 0/1000 |
+| F2 | 249/1000 | 42/1000 |
+| F9 | 0/1000 | 90/1000 |
+| F10 | 0/1000 | 14/1000 |
+
+With F5, F6, F7, F8, F12 or F21 off, alone or with F5–F8 off together, no seed fails. Seed 930 no longer reproduces with the new stream. F12 and F21 are shown by the scripted test.
+
+The early-hold buffer now does real work: about 330 messages were applied from it per 300 seeds.
 
 Every 300-seed and 1,000-seed simulator run and every explorer profile passes with all fixes
 on.
 
 ## F1. Rank-1 acceptance strands members (spec bug)
+
+**Status:** adopted in revision 2: §S4 rule 3.
 
 **Spec (§S4 rule 3).** A rank-1 claim is accepted only after "a `pass` frame from the holder
 of the member's previous accepted claim". Until then, it "treats a rank-1 claim as rank 0 for
@@ -72,10 +88,12 @@ Rule 3 gives no protection against a dishonest member, which can take at any ter
 members that follow the document, a member claims rank 1 only after it received a pass, so
 the check only costs liveness.
 
-**Proposed spec text.** "For rank 1, the frame is from `claim.holder`, or is a `pass` from
+**Spec text (as proposed, now adopted).** "For rank 1, the frame is from `claim.holder`, or is a `pass` from
 `pass.claim.holder` with `next = claim`."
 
 ## F2. `hello.seen` cannot say "no snapshot" (spec bug)
+
+**Status:** adopted in revision 2: §S3 (`hello`), §S8.
 
 **Spec (§S8).** A member that "changes claim without a snapshot sends `hello`". The holder
 answers "with the missing `msg` frames when `seen` names its current claim … else with
@@ -94,9 +112,11 @@ answers "with the missing `msg` frames when `seen` names its current claim … e
 **Fix applied (`seen_unsynced`).** `seen.seq` is `null` when the sender holds no snapshot
 for `seen`'s claim. The holder answers `null` with `state`.
 
-**Proposed spec text.** "`seq` is `null` when the member holds no state for that claim."
+**Spec text (as proposed, now adopted).** "`seq` is `null` when the member holds no state for that claim."
 
 ## F3. Whether the passer accepts its own `next` (ambiguity)
+
+**Status:** adopted in revision 2: §S5 (the passer accepts `next`).
 
 **Spec.** The spec says the passer "is not holder" from the moment it sends `pass`. It does
 not say which claim the passer then holds.
@@ -109,15 +129,19 @@ would supersede the pass silently, and the resend rule of §S5 would never fire.
 
 ## F4. Pass resend contradicts G2/G3 (wording)
 
+**Status:** adopted in revision 2: §S11 G2, G3.
+
 **Spec.** §S5 says the passer "resends the same `pass` when it next hears the asker speak
 under an older claim". A `pass` is a holder frame, and it is sent under the old claim, which
 is now less than the passer's accepted claim. That breaks G2 and G3 as worded.
 
 **Checker.** The checker exempts an identical resend of a pass the member already sent.
 
-**Proposal.** G2 and G3 should say "other than a resend of the same `pass`".
+**Proposal (now adopted).** G2 and G3 should say "other than a resend of the same `pass`".
 
 ## F5–F7. A claim whose holder has gone quiet is never corrected (spec bug, as a group)
+
+**Status:** adopted in revision 2: §S4 "Correcting lesser claims", §S5 renewing, §S6 (lapse `hello` to all), §S11 G4.
 
 **Spec.** In the draft, claims travel only in their own holder's frames. Only a holder
 answers lesser claims, and renewal reacts only to `hello.seen`. When the holder of the
@@ -158,7 +182,7 @@ released.
 F5, F6 or F7 alone is shown necessary: the others cover for it. With F5–F8 off together, sim
 seed 930 fails. They are kept as one mechanism.
 
-**Proposal.** Extend §S4 "Stale holders" to every member: a member that meets a holder frame
+**Proposal (now adopted).** Extend §S4 "Stale holders" to every member: a member that meets a holder frame
 under a lesser claim answers with `hello`. Read "not present" in renewing as "not heard
 holding".
 
@@ -168,6 +192,8 @@ was lost). The checker therefore applies G4's claim agreement only while a holde
 next take or renewal restores agreement. G4 should be stated for a live holder.
 
 ## F8. Pings and pongs keep a non-holder "alive" (spec bug)
+
+**Status:** adopted in revision 2: §S5 take, §S6 lapsing.
 
 **Spec.** Lapsing (§S6) and the ask timeout (§S5) count what the member "accepted from" or
 "heard from" the holder.
@@ -187,6 +213,8 @@ triggers the pass resend. F8 is kept because liveness should not depend on pings
 
 ## F9. A lost `ask` is never repaired (spec bug)
 
+**Status:** adopted in revision 2: §S5 (ask resend).
+
 **Spec.** The asker may take only when it has "heard nothing from the holder for
 `askTimeoutMs`". The draft never resends an `ask`.
 
@@ -200,6 +228,8 @@ triggers the pass resend. F8 is kept because liveness should not depend on pings
 within `askTimeoutMs` sends `ask` again.
 
 ## F10. Renewal by a member that has just returned steals the role (spec bug)
+
+**Status:** adopted in revision 2: §S5 renewing (the link-has-worked guard).
 
 **Spec.** §S5 renewing uses "is not present". A member that has just come back has heard
 nobody, so to it every other holder is "not present".
@@ -219,6 +249,8 @@ has worked for `holderTimeoutMs`. Before that, it treats everyone as present.
 
 ## F11. G6 as worded is false (wording)
 
+**Status:** adopted in revision 2: §S11 G6.
+
 **Spec.** G6 says "Two members both acting as holder have, since each one's claim began,
 exchanged no frame".
 
@@ -233,10 +265,12 @@ exchanged a frame. G6's second clause has two gaps:
 **What is checked.** The operational form: once a frame that carries claim `c` from
 `c.holder` reaches a member, that member does not act as holder under a claim less than `c`.
 
-**Proposal.** "Once a frame carrying the greater claim, from that claim's holder, reaches the
+**Proposal (now adopted).** "Once a frame carrying the greater claim, from that claim's holder, reaches the
 other, the other stops."
 
-## F12. Two passes can name the same `next` (spec bug, not reproduced)
+## F12. Two passes can name the same `next` (spec bug)
+
+**Status:** adopted in revision 2: §S5 (the conflicting-pass renewal); switch `pass_conflict_renew`. Now reproduced; but it is incomplete on its own, see F21.
 
 **Scenario.**
 
@@ -249,10 +283,30 @@ other, the other stops."
 **Checker.** The checker flags two passes that name the same `next` with different snapshots.
 Neither the explorer at its bounds nor the simulator produced one.
 
-**Proposal.** A holder made by a pass renews when it meets a different `pass` naming its
+**Proposal (now adopted).** A holder made by a pass renews when it meets a different `pass` naming its
 claim. Alternatively, put the passer's claim in rank-1 ordering.
 
+## F21. F12's renewal misses a lost second pass (spec bug, open in revision 2)
+
+**Spec (revision 2, §S5).** "A holder made by a pass that later meets a different `pass` naming its own claim … renews."
+
+**Counterexample (`tests/v06_session_explore.rs` `f12_two_passes_to_one_asker`, second half).**
+
+1. `a` holds `1.0.a` and `b` holds `1.0.b`, and they cannot reach each other. `x` asks `a`, then accepts `1.0.b` and re-asks `b`.
+2. Both pass `next = 2.1.x`: `b` with state `B`, `a` with state `A`. `a`'s pass to `x` is lost.
+3. `x` holds `2.1.x` with `B` and never meets a different pass, so it never renews.
+4. `a` accepted its own `next` with `A`. `x`'s beats carry `2.1.x` at seq 0, which `a` already holds, so nothing repairs it. `a` resends its pass only when `x` speaks under an older claim, and `x` never does.
+5. Result: G3 and G4 fail forever after the partition heals.
+
+**Fix applied (`pass_echo`, proposed).** A passer also resends its `pass` once, on the first holder frame it gets from the new holder under `next`. The new holder then meets the different pass and renews (F12). The echo is identical to the pass, so it falls under the G2 resend exemption.
+
+**Remaining weakness.** If the echo itself is lost, the case stays open. Two sturdier options are a repeated echo, or letting a `state` from the claim's holder replace a different state at the same `seq`.
+
+**Proposed spec text (§S5, after the pass-resend sentence).** "It also resends it once when it first accepts a holder frame from `next.holder` under `next`."
+
 ## F13–F20. Smaller readings (ambiguity or implementation choice)
+
+**Status:** adopted in revision 2: F13 §S6; F14 §S5 take, §S6 restart, §S12; F15 §S3 `bye.leaving`, §S5 release; F16 §S3 (`lapsed` is informational); F17 §S3 (`n` window), §S8 (gap hellos once per second); F18 `take.basis` removed from §S3, automatic ordering remains a choice of this layer; F19 §S12 `ratePermille`; F20 §S1 `fold`.
 
 - **F13. Lapse while the link is down.** Lapse time counts only while a link works: from
   `max(last heard, link up)`. Otherwise a member coming back would take before hearing the
@@ -282,6 +336,25 @@ claim. Alternatively, put the passer's claim in rank-1 ordering.
 - **F20. The holder's ordered state.** The holder must produce `state` at any moment, so the
   core folds messages itself. `Reducer::Latest` is the §S12 rule; `Reducer::Append` is for
   logs and tests. A cell's fold should be part of its declaration in §S1. (Spec gap.)
+
+## Where the machine and revision 2 still differ
+
+- **Correcting lesser claims (§S4).** The machine is broader than the text in two ways, without changing any outcome the explorer or simulator distinguishes:
+  - A holder answers a lesser claim with `state` in any claim-carrying frame (`hello`, `ask`, `decline`, `pass`, holder frames, `take`), not only in holder frames and `take`.
+  - A member that released answers with `bye` any claim-carrying frame under a claim *up to and including* its released claim. So the lapse `hello` of a member that missed the `bye` (naming the released claim itself) is answered too.
+- **Gap hellos (§S8).** The once-per-second limit also covers the repeated "still no snapshot" `hello` that a beat triggers. The first `hello` after a claim change is not limited.
+- **F21.** The pass echo is in the machine (`pass_echo`) but not in revision 2.
+- **Automatic ordering of submits (F18).** This remains a choice of this layer.
+
+Everything else in revision 2 is checked against the machine and matches exactly:
+- `seen.seq` is `null` (§S3).
+- Lapsing counts only holder frames under the accepted claim, from the later of the last such frame and the last link-up, and the listener then sends `hello` to all (§S6).
+- Ask resend (§S5).
+- The four renewal triggers, with a renewal target of "not less than its own" and the link-has-worked guard (§S5).
+- `bye.leaving`; release is `leaving: false` (§S5).
+- `take` has no `basis`.
+- `Join` and `Take` carry the application's state, and the restarted holder retakes with it (§S6).
+- `policy.fold` (§S1).
 
 ## Take accuracy (§S12)
 
