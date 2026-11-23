@@ -23,7 +23,11 @@ pub const MAX_BATCH_RESPONSE: usize = 4 * 1024 * 1024;
 
 /// The request body for `paths`: `{"paths":[…]}`, compact JSON.
 pub(crate) fn body(paths: &[String]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(16 + paths.iter().map(|p| p.len() + 3).sum::<usize>());
+    let mut out = Vec::with_capacity(
+        paths
+            .iter()
+            .fold(16_usize, |n, p| n.saturating_add(p.len()).saturating_add(3)),
+    );
     out.extend_from_slice(b"{\"paths\":[");
     for (i, p) in paths.iter().enumerate() {
         if i > 0 {
@@ -48,12 +52,18 @@ pub(crate) fn split(wanted: Vec<(String, String)>) -> Vec<Vec<(String, String)>>
     let mut cur: Vec<(String, String)> = Vec::new();
     let mut bytes = FRAME;
     for item in wanted {
-        let add = json_string(&item.0).len() + usize::from(!cur.is_empty());
-        if !cur.is_empty() && (cur.len() >= MAX_BATCH_PATHS || bytes + add > MAX_BATCH_BODY) {
+        let add = json_string(&item.0)
+            .len()
+            .saturating_add(usize::from(!cur.is_empty()));
+        if !cur.is_empty()
+            && (cur.len() >= MAX_BATCH_PATHS || bytes.saturating_add(add) > MAX_BATCH_BODY)
+        {
             out.push(std::mem::take(&mut cur));
             bytes = FRAME;
         }
-        bytes += json_string(&item.0).len() + usize::from(!cur.is_empty());
+        bytes = bytes
+            .saturating_add(json_string(&item.0).len())
+            .saturating_add(usize::from(!cur.is_empty()));
         cur.push(item);
     }
     if !cur.is_empty() {

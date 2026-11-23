@@ -63,8 +63,9 @@ pub enum Method {
     /// PUT.
     Put,
 }
-/// A request for the host to send.
-#[derive(Clone, Debug)]
+/// A request for the host to send. Its `Debug` shows `Authorization` as `<redacted>`: a call or
+/// a bearer token is a credential and must not reach logs.
+#[derive(Clone)]
 pub struct Request {
     /// The ticket to answer with.
     pub ticket: u64,
@@ -81,6 +82,31 @@ pub struct Request {
     /// The body (empty for a GET).
     pub body: Vec<u8>,
 }
+impl std::fmt::Debug for Request {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let headers: Vec<(&str, &str)> = self
+            .headers
+            .iter()
+            .map(|(k, v)| {
+                let shown = if k.eq_ignore_ascii_case("authorization") {
+                    "<redacted>"
+                } else {
+                    v.as_str()
+                };
+                (k.as_str(), shown)
+            })
+            .collect();
+        f.debug_struct("Request")
+            .field("ticket", &self.ticket)
+            .field("home", &self.home)
+            .field("method", &self.method)
+            .field("url", &self.url)
+            .field("headers", &headers)
+            .field("body", &self.body.len())
+            .finish()
+    }
+}
+
 /// What the host got back.
 #[derive(Clone, Debug)]
 pub struct Response {

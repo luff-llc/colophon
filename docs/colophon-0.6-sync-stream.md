@@ -62,6 +62,17 @@ GET, both as for a single read.
 does not hold the engine. The host passes in the time, and it seeds the jitter once
 (`StreamConfig::seed`).
 
+**Time.** `now` must be monotonic milliseconds: a monotonic clock, not wall time. The client is
+robust anyway, and all of its time arithmetic saturates, so even extreme values (0, `i64::MAX`,
+`i64::MIN`) cannot panic. If `now` goes back:
+
+- remembered instants are brought back to it, and deadlines are due at once;
+- the live safety poll fires immediately;
+- the idle check and the ticket window count from the rollback point;
+- a held ticket is not presented, because its age can no longer be told.
+
+A rollback therefore never delays anything past its configured duration.
+
 ### Host contract (Swift, Kotlin, JS)
 
 1. **Run a pass first.** A ticket call, like any call, needs a fresh head of the home (§12.3 step
@@ -104,8 +115,9 @@ does not hold the engine. The host passes in the time, and it seeds the jitter o
    reads it.
 6. **Logging.** `StreamStep`, `HomeStream` and their contents can be logged with `{:?}`: their
    `Debug` shows a `Connect` URL with `ticket=<redacted>` (`stream::redact_url`), and the held
-   ticket as `<redacted>`. The `url` field itself carries the ticket, so the host must not log
-   it, its own WebSocket URL or the `Authorization` header of the ticket request.
+   ticket as `<redacted>`. The exchange's `Request` shows `Authorization` as `<redacted>` and
+   its body as a length. The `url` field itself carries the ticket, so the host must not log it
+   or its own WebSocket URL.
 7. Use `subscribe`, `unsubscribe` and `session_frame` to build client frames for session cells.
    They work only while the stream is live.
 
@@ -144,6 +156,18 @@ does not hold the engine. The host passes in the time, and it seeds the jitter o
   that the stream is `Throttled(until)` and stays on polling until the oldest mint leaves the
   window, or until `on_history` reports a new seq. A home that sends `hello` and closes at once,
   forever, gets 8 signatures per 10 minutes (48 an hour), not one a second.
+- **Circuit breaker.** The rolling budget alone reopens every window. The client therefore also
+  counts tickets minted, or signed for (`ticket_call_failed`), since the last stable connection,
+  meaning one that stayed live for `stable_ms`. After `suspend_after` (16, two spent windows)
+  the stream is `Suspended(until)` and mints nothing. It resumes when any of these happens:
+  - the verified history changes (`on_history`);
+  - the host calls `retry_now`, which it must do only on an explicit user action or on
+    foreground entry, never from a timer;
+  - `suspend_ms` (6 hours) passes.
+
+  Polling continues throughout, and a stable connection resets the count. A home that sends
+  `hello` and closes at once, for 24 hours, gets 64 signatures in total. A flaky network that
+  holds one connection in four never suspends.
 - **Do not reconnect until the history changes** (`Blocked`; the client resumes after
   `on_history` reports a different seq, or after `retry_now`):
 

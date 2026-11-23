@@ -976,3 +976,222 @@ fn the_engine_lowers_the_safety_poll_to_the_accounts_recovery_rule() {
         "a shorter interval is kept"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// Second review: the circuit breaker, clock rollback and extreme times, request redaction.
+
+/// Drive `s` from `t` to `end` against a home that answers every ticket and says `hello`; a
+/// connection is held for `stable` (with pongs) when `keep(mint index)` says so, and closed at
+/// once otherwise. Returns the mint times and whether the stream was ever suspended.
+fn hostile_run(
+    s: &mut HomeStream,
+    mut t: i64,
+    end: i64,
+    keep: &dyn Fn(usize) -> bool,
+) -> (Vec<i64>, bool) {
+    let stable = s.config().stable_ms;
+    let mut mints = Vec::new();
+    let mut suspended = false;
+    while t < end {
+        if matches!(s.status(), StreamStatus::Suspended(_)) {
+            suspended = true;
+        }
+        match s.next(t) {
+            StreamStep::NeedTicketCall => {
+                let k = mints.len();
+                mints.push(t);
+                s.ticket_request(b"signed", t).unwrap();
+                s.on_ticket(Some(&ok_ticket(&ticket((k % 200) as u8))), t);
+                let StreamStep::Connect { .. } = s.next(t) else {
+                    panic!()
+                };
+                s.on_open(t);
+                s.on_frame(&hello(1, "c"), t);
+                if keep(k) {
+                    let mut n = 2;
+                    let until = t + stable + 1_000;
+                    while t < until {
+                        t += 5_000;
+                        while let StreamStep::Send { .. } | StreamStep::Wake = s.next(t) {}
+                        s.on_frame(&json!({"type": "pong", "n": n}).to_string(), t);
+                        n += 1;
+                    }
+                }
+                s.on_closed(Some(1000), t);
+            }
+            StreamStep::Sleep { until: Some(u) } => t = u.max(t + 1),
+            StreamStep::Wake => {}
+            other => panic!("{other:?}"),
+        }
+    }
+    (mints, suspended)
+}
+
+const DAY: i64 = 24 * 3_600_000;
+
+#[test]
+fn a_day_of_hello_then_close_mints_a_bounded_total_then_suspends() {
+    let cfg = StreamConfig::default();
+    let bound = cfg.suspend_after as i64 * (DAY / cfg.suspend_ms + 1);
+    let mut s = HomeStream::new("h", BASE, cfg, None);
+    s.on_history(5);
+    let (mints, suspended) = hostile_run(&mut s, 0, DAY, &|_| false);
+    println!("24 h hello/close loop: {} mints", mints.len());
+    assert!(suspended);
+    assert!(s.polling());
+    // Each 6-hour cool-off allows one more run of 16: four runs in a day.
+    assert_eq!(mints.len(), 64);
+    assert!(mints.len() as i64 <= bound);
+}
+
+#[test]
+fn a_suspended_stream_recovers_by_history_retry_now_or_cool_off() {
+    let mut s = HomeStream::new("h", BASE, StreamConfig::default(), None);
+    s.on_history(5);
+    let (mints, _) = hostile_run(&mut s, 0, 3 * 3_600_000, &|_| false);
+    assert_eq!(mints.len(), 16);
+    let StreamStatus::Suspended(until) = s.status() else {
+        panic!("{:?}", s.status())
+    };
+    // The run's clock ended at 3 h (time stays monotonic here).
+    let t = 3 * 3_600_000;
+    assert!(until >= *mints.last().unwrap() + 6 * 3_600_000 && until > t);
+    assert!(matches!(s.next(t), StreamStep::Sleep { until: Some(u) } if u == until));
+    // (a) The verified history changed.
+    let mut a = s.clone();
+    a.on_history(5);
+    assert!(
+        matches!(a.next(t), StreamStep::Sleep { .. }),
+        "the same history does not"
+    );
+    a.on_history(6);
+    assert_eq!(a.next(t), StreamStep::NeedTicketCall);
+    // (b) The host's explicit retry.
+    let mut b = s.clone();
+    b.retry_now();
+    assert_eq!(b.next(t), StreamStep::NeedTicketCall);
+    assert_eq!(b.unstable_mints(), 0);
+    // (c) The cool-off.
+    let mut c = s.clone();
+    assert!(matches!(c.next(until - 1), StreamStep::Sleep { .. }));
+    assert_eq!(c.next(until), StreamStep::NeedTicketCall);
+}
+
+#[test]
+fn a_flaky_network_that_sometimes_holds_a_connection_never_suspends() {
+    let cfg = StreamConfig::default();
+    let (budget, window) = (cfg.mint_budget as usize, cfg.mint_window_ms);
+    let mut s = HomeStream::new("h", BASE, cfg, None);
+    s.on_history(5);
+    // Every fourth connection stays up past `stable_ms`.
+    let (mints, suspended) = hostile_run(&mut s, 0, DAY, &|k| k % 4 == 3);
+    println!("24 h flaky network: {} mints", mints.len());
+    assert!(!suspended);
+    assert!(mints.len() > 64, "it keeps reconnecting: {}", mints.len());
+    for (k, m) in mints.iter().enumerate() {
+        assert!(mints[k..].iter().take_while(|x| **x - m < window).count() <= budget);
+    }
+}
+
+#[test]
+fn a_clock_rollback_never_delays_the_safety_poll_idle_check_backoff_or_window() {
+    let t0 = 10 * 3_600_000;
+    let back = t0 - 3_600_000;
+    // Live: the safety poll is due at once after a rollback; the idle check counts from it.
+    let mut s = HomeStream::new("h", BASE, StreamConfig::default(), None);
+    connect(&mut s, t0, 1, "c");
+    let _ = settle(&mut s, t0 + 300);
+    assert_eq!(s.next(back), StreamStep::Wake, "safety poll due at once");
+    let idle = s.config().idle_ms;
+    let mut closed_at = None;
+    let mut t = back;
+    while t < back + 3 * idle {
+        match s.next(t) {
+            StreamStep::Close { .. } => {
+                closed_at = Some(t);
+                break;
+            }
+            _ => t += 1_000,
+        }
+    }
+    let closed = closed_at.expect("the idle check still fires");
+    assert!(closed <= back + idle + 1_000, "{closed} vs {}", back + idle);
+    // A backoff deadline is due at once.
+    let mut s = HomeStream::new("h", BASE, StreamConfig::default(), None);
+    assert_eq!(s.next(t0), StreamStep::NeedTicketCall);
+    s.ticket_request(b"c", t0).unwrap();
+    let StreamEvent::Down { retry_at } = s.on_ticket(None, t0)[0] else {
+        panic!()
+    };
+    assert!(retry_at > t0);
+    assert_eq!(s.next(back), StreamStep::NeedTicketCall);
+    // A spent ticket window clears within the window from the rollback point.
+    let cfg = StreamConfig::default();
+    let window = cfg.mint_window_ms;
+    let mut s = HomeStream::new("h", BASE, cfg, None);
+    s.on_history(1);
+    let (_, _) = hostile_run(&mut s, t0, t0 + 120_000, &|_| false);
+    if let StreamStatus::Throttled(_) = s.status() {
+        let StreamStep::Sleep { until: Some(u) } = s.next(back) else {
+            panic!()
+        };
+        assert!(u <= back + window, "{u} vs {}", back + window);
+    }
+    // A ticket held across a rollback is not presented: its age is unknown.
+    let mut s = HomeStream::new("h", BASE, StreamConfig::default(), None);
+    assert_eq!(s.next(t0), StreamStep::NeedTicketCall);
+    s.ticket_request(b"c", t0).unwrap();
+    s.on_ticket(Some(&ok_ticket(&ticket(1))), t0);
+    assert_eq!(s.next(back), StreamStep::NeedTicketCall);
+}
+
+#[test]
+fn extreme_times_do_not_panic_and_give_sane_deadlines() {
+    for start in [0, i64::MAX - 10, i64::MAX] {
+        let mut s = HomeStream::new("h", BASE, StreamConfig::default(), None);
+        assert_eq!(s.next(start), StreamStep::NeedTicketCall);
+        s.ticket_request(b"c", start).unwrap();
+        s.on_ticket(Some(&ok_ticket(&ticket(1))), start);
+        let StreamStep::Connect { .. } = s.next(start) else {
+            panic!()
+        };
+        s.on_open(start);
+        s.on_frame(&hello(1, "c"), start);
+        s.on_frame(&change(2, "c.2"), start);
+        for _ in 0..8 {
+            match s.next(start) {
+                StreamStep::Sleep { until } => {
+                    assert!(until.is_some_and(|u| u >= start));
+                    break;
+                }
+                StreamStep::Wake | StreamStep::Send { .. } => {}
+                other => panic!("{start}: {other:?}"),
+            }
+        }
+        let ev = s.on_closed(Some(1011), start);
+        let StreamEvent::Down { retry_at } = ev[0] else {
+            panic!("{ev:?}")
+        };
+        assert!(retry_at >= start, "{start}: {retry_at}");
+        let _ = s.next(i64::MAX);
+        let _ = s.next(0); // and back again
+        let _ = s.next(i64::MIN);
+    }
+}
+
+#[test]
+fn requests_never_show_their_authorization_in_debug() {
+    let mut s = HomeStream::new("h", BASE, StreamConfig::default(), None);
+    assert_eq!(s.next(0), StreamStep::NeedTicketCall);
+    let call = br#"{"body":"c2VjcmV0LWNhbGw","signature":"AAAA"}"#;
+    let req = s.ticket_request(call, 0).unwrap();
+    let encoded = req
+        .headers
+        .iter()
+        .find(|(k, _)| k == "Authorization")
+        .map(|(_, v)| v.clone())
+        .unwrap();
+    let shown = format!("{req:?} {req:#?}");
+    assert!(!shown.contains(&encoded["Colophon ".len()..]), "{shown}");
+    assert!(shown.contains("<redacted>"));
+}

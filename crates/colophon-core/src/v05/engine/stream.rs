@@ -69,6 +69,13 @@ pub struct StreamConfig {
     /// connected home is never worse than polling. [`Engine::stream_client`] lowers it to
     /// `recoveryDelay / 6` (§17.5) when that is shorter. Default 60 s.
     pub safety_poll_ms: i64,
+    /// Consecutive tickets minted without a stable connection (one live for `stable_ms`) after
+    /// which the stream is [`StreamStatus::Suspended`]: it mints nothing until the history
+    /// changes, the host calls [`HomeStream::retry_now`], or `suspend_ms` passes. Default 16 (two
+    /// spent ticket windows).
+    pub suspend_after: u32,
+    /// How long a suspension lasts at most. Default 6 hours.
+    pub suspend_ms: i64,
 }
 impl Default for StreamConfig {
     fn default() -> Self {
@@ -83,6 +90,8 @@ impl Default for StreamConfig {
             mint_budget: 8,
             mint_window_ms: 600_000,
             safety_poll_ms: 60_000,
+            suspend_after: 16,
+            suspend_ms: 6 * 3_600_000,
         }
     }
 }
@@ -116,6 +125,9 @@ pub enum StreamStatus {
     Blocked(Blocked),
     /// The ticket budget is spent: polling until this time, or until the history changes.
     Throttled(i64),
+    /// Too many tickets in a row led to no stable connection: polling, and minting nothing until
+    /// this time, a change of the history, or [`HomeStream::retry_now`].
+    Suspended(i64),
 }
 
 /// What the host should do now. Its `Debug` never shows the ticket a `Connect` URL carries.
@@ -264,6 +276,8 @@ enum Conn {
     Blocked(Blocked, Option<u64>),
     /// The ticket budget is spent until this time.
     Throttled(i64),
+    /// Suspended until this time (see [`StreamConfig::suspend_after`]).
+    Suspended(i64),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -310,6 +324,10 @@ pub struct HomeStream {
     mints: std::collections::VecDeque<i64>,
     /// When a pass was last woken while live (the safety poll counts from here).
     last_wake: i64,
+    /// Tickets minted (or signed for) since the last stable connection.
+    unstable: u32,
+    /// The last `now` the host gave: a smaller one is a clock rollback.
+    clock: Option<i64>,
 }
 
 fn q(v: &str) -> String {
@@ -378,7 +396,52 @@ impl HomeStream {
             live_since: None,
             mints: std::collections::VecDeque::new(),
             last_wake: 0,
+            unstable: 0,
+            clock: None,
         }
+    }
+
+    /// Tickets minted since the last stable connection (the circuit breaker's count).
+    pub fn unstable_mints(&self) -> u32 {
+        self.unstable
+    }
+
+    /// Take the host's `now`. Time should be monotonic milliseconds; when it goes back, every
+    /// remembered instant after it is brought back to it and every deadline is due at once, so a
+    /// rollback never delays the safety poll, the idle check, a backoff or a window clearing past
+    /// its configured duration from the rollback point. The live safety poll is made due now.
+    fn observe(&mut self, now: i64) -> i64 {
+        if self.clock.is_some_and(|c| now < c) {
+            let clamp = |t: &mut i64| *t = (*t).min(now);
+            clamp(&mut self.last_rx);
+            clamp(&mut self.last_ping);
+            self.last_wake = now.saturating_sub(self.config.safety_poll_ms.max(0));
+            if let Some(t) = self.live_since.as_mut() {
+                clamp(t);
+            }
+            if let Some(t) = self.wake_at.as_mut() {
+                clamp(t);
+            }
+            for t in self.mints.iter_mut() {
+                clamp(t);
+            }
+            match &mut self.conn {
+                Conn::Backoff(t) | Conn::Throttled(t) => clamp(t),
+                Conn::Suspended(t) => *t = (*t).min(now.saturating_add(self.config.suspend_ms)),
+                // A ticket's age can no longer be told: it is not presented.
+                Conn::Ticket(_, at) => *at = i64::MIN,
+                _ => {}
+            }
+        }
+        self.clock = Some(now);
+        now
+    }
+
+    /// A connection stayed live long enough: the backoff and the circuit breaker start again.
+    fn stable(&mut self) {
+        self.attempts = 0;
+        self.unstable = 0;
+        self.live_since = None;
     }
 
     /// The configuration in force (after [`Engine::stream_client`] applied the account's floor).
@@ -410,6 +473,7 @@ impl HomeStream {
             Conn::Closing(..) => StreamStatus::Closing,
             Conn::Blocked(b, _) => StreamStatus::Blocked(b.clone()),
             Conn::Throttled(t) => StreamStatus::Throttled(*t),
+            Conn::Suspended(t) => StreamStatus::Suspended(*t),
         }
     }
 
@@ -420,6 +484,7 @@ impl HomeStream {
 
     /// The next thing to do at `now` (milliseconds on the host's clock).
     pub fn next(&mut self, now: i64) -> StreamStep {
+        let now = self.observe(now);
         if self.wake_at.is_some_and(|t| now >= t) {
             self.wake_at = None;
             self.last_wake = now;
@@ -429,14 +494,13 @@ impl HomeStream {
             // A connection that stayed up long enough has earned a fresh backoff.
             if self
                 .live_since
-                .is_some_and(|t| now - t >= self.config.stable_ms)
+                .is_some_and(|t| now.saturating_sub(t) >= self.config.stable_ms)
             {
-                self.attempts = 0;
-                self.live_since = None;
+                self.stable();
             }
             // The safety poll: never longer than `safety_poll_ms` without a pass, whatever the
             // home sends (pongs and unknown frames keep a socket alive, not the sync).
-            if now - self.last_wake >= self.config.safety_poll_ms {
+            if now.saturating_sub(self.last_wake) >= self.config.safety_poll_ms {
                 self.last_wake = now;
                 return StreamStep::Wake;
             }
@@ -451,6 +515,14 @@ impl HomeStream {
             Conn::Backoff(t) | Conn::Throttled(t) => StreamStep::Sleep {
                 until: soonest(Some(t)),
             },
+            Conn::Suspended(t) if now >= t => {
+                self.unstable = 0;
+                self.mints.clear();
+                self.ticket_step(now, wake)
+            }
+            Conn::Suspended(t) => StreamStep::Sleep {
+                until: soonest(Some(t)),
+            },
             Conn::NeedTicket => self.ticket_step(now, wake),
             Conn::Closing(why, false) => {
                 self.conn = Conn::Closing(why, true);
@@ -462,7 +534,7 @@ impl HomeStream {
                 }
             }
             Conn::Minting | Conn::Opening | Conn::Closing(_, true) => StreamStep::Waiting,
-            Conn::Ticket(_, at) if now - at > TICKET_USE_MS => {
+            Conn::Ticket(_, at) if now.saturating_sub(at) > TICKET_USE_MS => {
                 // Too old to present safely: mint another.
                 self.ticket_step(now, wake)
             }
@@ -483,22 +555,25 @@ impl HomeStream {
                 StreamStep::Connect { url }
             }
             Conn::Open { hello } => {
-                if now - self.last_rx > self.idle_ms {
+                if now.saturating_sub(self.last_rx) > self.idle_ms {
                     self.conn = Conn::Closing(Closing::Idle, true);
                     return StreamStep::Close { code: CLOSE_IDLE };
                 }
-                if hello && now - self.last_ping.max(self.last_rx) >= self.ping_ms {
+                if hello && now.saturating_sub(self.last_ping.max(self.last_rx)) >= self.ping_ms {
                     self.last_ping = now;
                     return StreamStep::Send {
                         text: json!({"type": "ping", "t": now}).to_string(),
                     };
                 }
-                let idle = self.last_rx + self.idle_ms + 1;
-                let ping = self.last_ping.max(self.last_rx) + self.ping_ms;
-                let safety = self.last_wake + self.config.safety_poll_ms;
+                let idle = self.last_rx.saturating_add(self.idle_ms).saturating_add(1);
+                let ping = self
+                    .last_ping
+                    .max(self.last_rx)
+                    .saturating_add(self.ping_ms);
+                let safety = self.last_wake.saturating_add(self.config.safety_poll_ms);
                 let stable = self
                     .live_since
-                    .map_or(i64::MAX, |t| t + self.config.stable_ms);
+                    .map_or(i64::MAX, |t| t.saturating_add(self.config.stable_ms));
                 StreamStep::Sleep {
                     until: soonest(Some(if hello {
                         idle.min(ping).min(safety).min(stable)
@@ -514,6 +589,7 @@ impl HomeStream {
     /// The ticket request for the call the host built ([`Engine::stream_begin_call`]): `POST
     /// {base}/stream/ticket` with no body. Answer it with [`HomeStream::on_ticket`].
     pub fn ticket_request(&mut self, call: &[u8], now: i64) -> Result<Request> {
+        let now = self.observe(now);
         require(
             self.conn == Conn::NeedTicket,
             "the stream is not waiting for a ticket call",
@@ -521,6 +597,7 @@ impl HomeStream {
         require(!call.is_empty() && call.len() <= 16_384, "a call is small")?;
         self.conn = Conn::Minting;
         self.mints.push_back(now);
+        self.unstable = self.unstable.saturating_add(1);
         let ticket = self.next_ticket;
         self.next_ticket += 1;
         Ok(Request {
@@ -540,14 +617,19 @@ impl HomeStream {
     /// answered `Unavailable` because the home's head is not fresh: run a pass, which fetches it).
     /// The stream backs off and asks again.
     pub fn ticket_call_failed(&mut self, now: i64) -> Vec<StreamEvent> {
+        let now = self.observe(now);
         if self.conn != Conn::NeedTicket {
             return Vec::new();
         }
+        // A signature may have been asked for: it counts like a mint.
+        self.mints.push_back(now);
+        self.unstable = self.unstable.saturating_add(1);
         self.down(now, None)
     }
 
     /// The home's answer to the ticket request (or `None` when it could not be sent).
     pub fn on_ticket(&mut self, response: Option<&Response>, now: i64) -> Vec<StreamEvent> {
+        let now = self.observe(now);
         if self.conn != Conn::Minting {
             return Vec::new();
         }
@@ -595,6 +677,7 @@ impl HomeStream {
 
     /// The socket opened (101). Frames follow.
     pub fn on_open(&mut self, now: i64) {
+        let now = self.observe(now);
         if self.conn == Conn::Opening {
             self.conn = Conn::Open { hello: false };
             self.expect = 1;
@@ -606,6 +689,7 @@ impl HomeStream {
 
     /// The home refused the upgrade with an HTTP answer.
     pub fn on_refused(&mut self, response: &Response, now: i64) -> Vec<StreamEvent> {
+        let now = self.observe(now);
         if self.conn != Conn::Opening {
             return Vec::new();
         }
@@ -621,6 +705,7 @@ impl HomeStream {
 
     /// One text frame from the home.
     pub fn on_frame(&mut self, text: &str, now: i64) -> Vec<StreamEvent> {
+        let now = self.observe(now);
         let hello_seen = match self.conn {
             Conn::Open { hello } => hello,
             _ => return Vec::new(),
@@ -662,8 +747,8 @@ impl HomeStream {
                         .unwrap_or(d)
                 };
                 self.ping_ms = limit("pingMs", self.config.ping_ms).clamp(1_000, 600_000);
-                self.idle_ms =
-                    limit("idleMs", self.config.idle_ms).clamp(self.ping_ms + 1_000, 1_200_000);
+                self.idle_ms = limit("idleMs", self.config.idle_ms)
+                    .clamp(self.ping_ms.saturating_add(1_000), 1_200_000);
                 self.conn = Conn::Open { hello: true };
                 // The backoff resets only once this connection has stayed up `stable_ms`
                 // (`next`, `on_closed`): a `hello` alone proves nothing.
@@ -770,6 +855,7 @@ impl HomeStream {
     /// The socket closed, with the close code when there was one (`None`: the transport failed,
     /// or the socket never opened).
     pub fn on_closed(&mut self, code: Option<u16>, now: i64) -> Vec<StreamEvent> {
+        let now = self.observe(now);
         let ours = match &self.conn {
             Conn::Closing(c, _) => Some(*c),
             Conn::Open { .. } | Conn::Opening => None,
@@ -779,9 +865,9 @@ impl HomeStream {
         if self
             .live_since
             .take()
-            .is_some_and(|t| now - t >= self.config.stable_ms)
+            .is_some_and(|t| now.saturating_sub(t) >= self.config.stable_ms)
         {
-            self.attempts = 0;
+            self.stable();
         }
         if let Some(c) = ours {
             return match c {
@@ -798,7 +884,8 @@ impl HomeStream {
             Some(1012) => {
                 // A restart: come back after `retryMs`, not counted as a failure.
                 let wait = bye.and_then(|(_, r)| r).unwrap_or(1_000);
-                let at = now + wait + self.jitter(self.config.backoff_base_ms);
+                let jitter = self.jitter(self.config.backoff_base_ms);
+                let at = now.saturating_add(wait).saturating_add(jitter);
                 self.conn = Conn::Backoff(at);
                 vec![StreamEvent::Down { retry_at: at }]
             }
@@ -814,7 +901,8 @@ impl HomeStream {
         // A new history is a new standing: the ticket budget starts again.
         if self.history.is_some_and(|h| h != seq) {
             self.mints.clear();
-            if matches!(self.conn, Conn::Throttled(_)) {
+            self.unstable = 0;
+            if matches!(self.conn, Conn::Throttled(_) | Conn::Suspended(_)) {
                 self.conn = Conn::NeedTicket;
             }
         }
@@ -833,9 +921,18 @@ impl HomeStream {
 
     /// Try again now whatever the stream's state (for example on foreground entry after a long
     /// time, or when the network changed): a blocked or backing-off stream mints a new ticket.
-    /// An open stream is left alone, and the ticket budget still holds.
+    /// An open stream is left alone, and the ticket budget still holds. A suspended stream starts
+    /// again with a fresh budget. Call it on an explicit user action or on foreground entry, never
+    /// from a timer: it is what lets a suspension end before `suspend_ms`.
     pub fn retry_now(&mut self) {
-        if matches!(self.conn, Conn::Backoff(_) | Conn::Blocked(..)) {
+        if matches!(self.conn, Conn::Suspended(_)) {
+            self.unstable = 0;
+            self.mints.clear();
+        }
+        if matches!(
+            self.conn,
+            Conn::Backoff(_) | Conn::Blocked(..) | Conn::Suspended(_)
+        ) {
             self.conn = Conn::NeedTicket;
         }
     }
@@ -893,13 +990,24 @@ impl HomeStream {
     /// Ask for a ticket call, unless the ticket budget of the window is spent: then stay on
     /// polling until the oldest mint leaves the window.
     fn ticket_step(&mut self, now: i64, wake: Option<i64>) -> StreamStep {
+        if self.unstable >= self.config.suspend_after.max(1) {
+            let until = now.saturating_add(self.config.suspend_ms.max(0));
+            self.conn = Conn::Suspended(until);
+            return StreamStep::Sleep {
+                until: Some(wake.map_or(until, |w| w.min(until))),
+            };
+        }
         let window = self.config.mint_window_ms.max(1);
-        while self.mints.front().is_some_and(|t| now - *t >= window) {
+        while self
+            .mints
+            .front()
+            .is_some_and(|t| now.saturating_sub(*t) >= window)
+        {
             self.mints.pop_front();
         }
         let budget = usize::try_from(self.config.mint_budget.max(1)).unwrap_or(usize::MAX);
         if self.mints.len() >= budget {
-            let until = self.mints.front().map_or(now, |t| t + window);
+            let until = self.mints.front().map_or(now, |t| t.saturating_add(window));
             self.conn = Conn::Throttled(until);
             return StreamStep::Sleep {
                 until: Some(wake.map_or(until, |w| w.min(until))),
@@ -911,7 +1019,7 @@ impl HomeStream {
 
     fn wake(&mut self, now: i64) {
         if self.wake_at.is_none() {
-            self.wake_at = Some(now + self.config.coalesce_ms.max(0));
+            self.wake_at = Some(now.saturating_add(self.config.coalesce_ms.max(0)));
         }
     }
 
@@ -929,7 +1037,7 @@ impl HomeStream {
     fn down(&mut self, now: i64, at_least: Option<i64>) -> Vec<StreamEvent> {
         let delay = self.backoff().max(at_least.unwrap_or(0));
         self.attempts = self.attempts.saturating_add(1);
-        let at = now + delay;
+        let at = now.saturating_add(delay);
         self.conn = Conn::Backoff(at);
         vec![StreamEvent::Down { retry_at: at }]
     }
@@ -941,7 +1049,9 @@ impl HomeStream {
         let cap = self.config.backoff_cap_ms.max(base);
         let exp = base.saturating_mul(1_i64 << self.attempts.min(30));
         let full = exp.min(cap);
-        full / 2 + self.jitter(full / 2 + 1)
+        let half = full / 2;
+        let j = self.jitter(half.saturating_add(1));
+        half.saturating_add(j)
     }
 
     /// A value in `0..bound` from the caller-seeded sequence (xorshift64).
