@@ -9,7 +9,7 @@
 mod support;
 use colophon_core::v05::terms::Access;
 use colophon_core::v06::session::codec::{CellId, EpochKeys, EpochSecret, EpochTable, SessionEpochs};
-use colophon_core::v06::session::endpoint::{Clock, Endpoint};
+use colophon_core::v06::session::endpoint::{Clock, Endpoint, EndpointError};
 use colophon_core::v06::session::{Command, Policy};
 use support::*;
 
@@ -69,7 +69,27 @@ fn member_engines_give_endpoints_that_open_each_others_frames() {
         )
         .unwrap()
     };
+    // A view of one account cannot back an endpoint of another.
+    let other = CellId::new(&"c".repeat(64), NS, "now-playing");
+    let wrong = Endpoint::new(
+        other,
+        &ids[0],
+        Policy::default(),
+        None,
+        view.clone(),
+        &mut [9; 32],
+        [9; 16],
+        clock,
+    );
+    assert!(matches!(wrong, Err(EndpointError::WrongAccount)));
     let (mut pa, mut pb) = (make(&ids[0], 7), make(&ids[1], 8));
+    // A view of another account given later changes nothing.
+    let foreign = colophon_core::v06::session::keys::SessionAccount::new(&"c".repeat(64));
+    let before = pa.machine().digest();
+    let step = pa.set_account(foreign, clock, &ka);
+    assert!(step.effects.is_empty());
+    assert_eq!(pa.machine().digest(), before);
+    assert!(pa.entitled(), "the foreign view did not revoke anything");
     for (p, id) in [(&mut pa, &ids[0]), (&mut pb, &ids[1])] {
         let body = p.begin_delegation(NOW - 1_000, NOW + HOUR).unwrap();
         let sig = host.ids[id].sign(&body).to_vec();

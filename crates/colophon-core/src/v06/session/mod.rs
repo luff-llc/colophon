@@ -18,6 +18,15 @@
 //! (revision 17); signatures, sealing and the 128-wide `n` window of each cached key are in
 //! [`codec`], which caches only keys the machine knows ([`Session::knows_key`]).
 //! [`endpoint`] wires the two for the bindings.
+//!
+//! **This module is a protocol engine, not a trust boundary.** Its types let a Rust caller
+//! supply the account view and the epoch keys directly ([`keys::SessionAccount::with_member`],
+//! [`codec::EpochTable::with`]), which tests, tools and the conformance vectors need. A
+//! production embedder takes both from the verified 0.5 history instead
+//! ([`crate::v05::account::Account::session_account`] and
+//! [`crate::v05::account::Account::session_epochs`]); the shipping bindings enforce that, and
+//! also the ordering duties [`endpoint::Endpoint`] leaves to its caller (a view of the current
+//! authority head before each call, `Persist` stored before the frames that reveal it).
 
 pub mod clock;
 pub mod codec;
