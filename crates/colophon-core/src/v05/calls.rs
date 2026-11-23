@@ -35,11 +35,16 @@ use std::collections::{BTreeMap, BTreeSet};
 /// The purpose a `recover`-only (or suspended) controller may call (§12.3 step 5, §13.4).
 pub const HISTORY_READ: &str = "colophon.history.read";
 /// The purposes a home accepts at its own endpoints without configuration (§12.3 step 7).
-pub const HOME_PURPOSES: [&str; 3] = [HISTORY_READ, HOME_READ, HOME_WRITE];
+pub const HOME_PURPOSES: [&str; 4] = [HISTORY_READ, HOME_READ, HOME_WRITE, HOME_STREAM];
 /// The purpose of a call that reads at a home (§14).
 pub const HOME_READ: &str = "colophon.home.read";
 /// The purpose of a call that writes at a home (§14).
 pub const HOME_WRITE: &str = "colophon.home.write";
+/// The purpose of a call that mints a home stream ticket (Colophon 0.6 draft,
+/// `docs/colophon-0.6-stream.md`): accepted only for `POST {base}/stream/ticket`, from the
+/// principals that may read records at the home (§14 `colophon.home.read`), through links only
+/// when every link's terms grant this purpose there.
+pub const HOME_STREAM: &str = "colophon.home.stream";
 
 /// A controller's status from pending transitions (§8.7), supplied by the history verifier.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1217,6 +1222,8 @@ pub fn home_call_purpose(method: &str) -> &'static str {
 pub fn home_purposes(method: &str, path: &str) -> &'static [&'static str] {
     if method == "POST" && path == "/records/batch" {
         &[HOME_READ]
+    } else if method == "POST" && path == "/stream/ticket" {
+        &[HOME_STREAM]
     } else if !is_read(method) {
         &[HOME_WRITE]
     } else if home_path_serves_history(path) {
@@ -1357,14 +1364,24 @@ fn home_request(
             signer,
             purposes: Some(purposes),
             names_writes: false,
-            // Route upkeep is available even to a suspended or recover-only controller.
-            // Member links still need an explicit service grant.
-            route_write: matches!(req.method, "PUT" | "DELETE")
-                && req.path.strip_prefix("/routes/").is_some_and(|id| {
-                    id.len() == 64 && id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-                }),
+            // Route upkeep (listing, registering and deleting its own routes) is available
+            // even to a suspended or recover-only controller: it is how such a key keeps
+            // hearing of pending changes. Member links still need an explicit service grant.
+            route_write: is_route_upkeep(req.method, req.path),
         },
     )
+}
+
+/// Whether a request at a home is notice-route upkeep: `GET /routes`, or `PUT` or `DELETE` of
+/// `/routes/<64 lowercase hex>`.
+pub fn is_route_upkeep(method: &str, path: &str) -> bool {
+    match method {
+        "GET" => path == "/routes",
+        "PUT" | "DELETE" => path.strip_prefix("/routes/").is_some_and(|id| {
+            id.len() == 64 && id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        }),
+        _ => false,
+    }
 }
 
 /// Whether the member `m` may make `writes` under its own author ID (see [`verify_home_write`]).

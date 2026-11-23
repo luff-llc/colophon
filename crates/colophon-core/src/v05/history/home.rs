@@ -2331,12 +2331,16 @@ pub fn admit_pending_batch(
     Ok((next, results, receipts))
 }
 
+/// A pending batch's admission: the next state, each object's result, the receipts to sign and
+/// the public metadata of newly witnessed objects.
+pub type NoticedBatch = (HomeState, Vec<AdmitResult<()>>, Vec<ReceiptToSign>, Vec<Notice>);
+
 /// Admit a pending batch and return the public metadata of newly witnessed objects.
 pub fn admit_pending_batch_notices(
     home: &HomeState,
     objects: &[Vec<u8>],
     now: &str,
-) -> Result<(HomeState, Vec<AdmitResult<()>>, Vec<ReceiptToSign>, Vec<Notice>)> {
+) -> Result<NoticedBatch> {
     require(
         (1..=16).contains(&objects.len()),
         "pending batch must contain 1–16 objects",

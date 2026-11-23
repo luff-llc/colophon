@@ -1,10 +1,12 @@
 // Colophon 0.3 reference relay (spec §8). Stores opaque records per library slot.
-// Uses built-in Node APIs and Bun’s built-in WebSocket server.
+// Uses built-in Node APIs; a home's stream uses Bun's built-in `ws` module, so a relay with home
+// slots runs on Bun only (startRelay refuses another runtime rather than serving no stream).
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { constants as fsc, promises as fsp, writeSync } from 'node:fs';
 import http from 'node:http';
 import https from 'node:https';
 import { HomeKey, HomeModule, HomeSlot, ModuleError } from './home.js';
+import { streamOptions } from './stream.js';
 import {
   ProvisionReplay, ProvisionTable, REPLAY_DIR, TABLE_FILE, clientAddressConfig, tableKind, clientAddressResolver, isJsonType, memberRequest,
   grantLimits, parseProvisionBody, provisionConfig, provisionGate, provisionRoute,
@@ -29,6 +31,8 @@ export const DEFAULT_LIMITS = Object.freeze({
 const SLOT = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const HEX64 = /^[0-9a-f]{64}$/;
 const STREAM_PATH = /^\/v1\/libraries\/([a-z0-9][a-z0-9._-]{0,63})\/stream$/;
+/** The largest WebSocket message a stream takes (a 16,384-byte session frame and its wrapper). */
+const STREAM_MESSAGE_BYTES = 20_480;
 const BATCH_BYTES = 4 * 1024 * 1024; // Encoded JSON/base64 response budget.
 
 export function sha256(bytes) { return createHash('sha256').update(bytes).digest('hex'); }
@@ -264,6 +268,7 @@ class Slot {
     const handle = await fsp.open(file, fsc.O_WRONLY | fsc.O_APPEND | fsc.O_CREAT | fsc.O_NOFOLLOW, 0o600);
     try { await handle.write(JSON.stringify(e) + '\n'); await handle.sync(); } finally { await handle.close(); }
     this.indexEntry(e);
+    this.onEntry?.(this.entries.length - 1); // a home's stream pushes the same entry and cursor
     for (const waiter of [...this.waiters]) {
       if (!waiter.namespaces.length || waiter.namespaces.some((ns) => pathInNamespace(e.path, ns))) waiter.wake();
     }
@@ -484,11 +489,12 @@ async function serveBatch(res, slot, decisions) {
  * Creates the relay. `libraries` maps slot names to `{ tokenSha256 }`, `{ token }` or
  * `{ open: true }` (no bearer token; local testing only).
  */
-export async function createRelay({ dataDir, libraries, limits = {}, home, clock = Date.now, resolve, tickMs = 0, tracing = false, cors, provision, clientAddress: addressConfig, crashAt, hook }) {
+export async function createRelay({ dataDir, libraries, limits = {}, home, clock = Date.now, resolve, tickMs = 0, tracing = false, cors, provision, clientAddress: addressConfig, crashAt, hook, stream: streamOptionsIn = {} }) {
   if (!dataDir) throw new Error('dataDir is required');
   if (cors !== undefined && cors !== null && (typeof cors !== 'object' || Array.isArray(cors))) throw new Error('cors must be an object with origins, an array of origins');
   const origins = corsOrigins(cors?.origins);
   const provisioning = provisionConfig(provision);
+  streamOptions(streamOptionsIn);
   // The address requests count against, for every per-address limit (never for access).
   const clientAddress = clientAddressResolver(clientAddressConfig(addressConfig));
   // Test builds only (tracing needs --test-clock): a marker on stderr, a SIGKILL of this process
@@ -583,7 +589,7 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
         if (isHome) {
           s.home = new HomeSlot({
             slot: s, wasm: homeModule, key: homeKey, base: homeSlots.get(name).base, account: homeSlots.get(name).account,
-            clock, resolve, tracing,
+            clock, resolve, tracing, stream: streamOptions(streamOptionsIn), scheduled: tickMs > 0,
             deps: { HttpError, send, readBody, readBatchBody, serveBatch, clampInt, clientAddress, isJsonType, reach },
             limits: { ...effective, requestsPerMinute: effective.requestsPerMinute ?? 0 },
           });
@@ -660,6 +666,7 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
       const refuse = () => Promise.reject(new Error(`slot ${name} was released`));
       s.released = true;
       s.home.lock = refuse; s.home.replayLock = refuse; s.exclusive = refuse;
+      s.home.stream.closeAll('released');
       slots.delete(name); opening.delete(name);
       await fsp.rm(s.root, { recursive: true, force: true });
       return true;
@@ -896,7 +903,9 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
   }
 
   async function upgrade(req, connect) {
-    const match = STREAM_PATH.exec(req.url);
+    // The ticket is in the query: never log req.url (or this URL) anywhere.
+    const url = new URL(req.url, 'http://relay.invalid');
+    const match = STREAM_PATH.exec(url.pathname);
     if (!match || !homeSlots.has(match[1])) throw new HttpError(404, 'Not found');
     if (closing) throw new HttpError(503, 'Relay is closing');
     if (req.headers['transfer-encoding'] || (req.headers['content-length'] ?? '0') !== '0') {
@@ -905,7 +914,7 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
     const s = await slot(match[1]);
     if (closing || s.closing || s.releasing || s.released) throw notProvisioned();
     enter(s);
-    try { await s.home.stream(req, connect); } finally { leave(s); }
+    try { await s.home.upgrade(req, url, connect); } finally { leave(s); }
   }
 
   function listener(req, res) {
@@ -945,13 +954,13 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
   if ((homeSlots.size > 0 || provisioning.enabled) && tickMs > 0) { timer = setInterval(() => { tickAll(); }, tickMs); timer.unref?.(); }
 
   let closePromise;
-  return { listener, upgrade, limits: effective, slot, tickAll, close: () => {
+  return { listener, upgrade, homes: homeModule !== null, limits: effective, slot, tickAll, close: () => {
     if (closePromise) return closePromise;
     closing = true;
     if (timer) clearInterval(timer);
     for (const s of slots.values()) {
       s.closing = true;
-      s.home?.closeStreams();
+      s.home?.stream.closeAll('restart');
       for (const waiter of [...s.waiters]) waiter.wake();
     }
     const drain = async () => {
@@ -1068,11 +1077,16 @@ function send(res, status, json, headers = {}) {
   res.end(body);
 }
 
-/** Use Bun's built-in ws implementation on the same HTTP/TLS listener. */
+/** A home's stream, on Bun's built-in `ws` module, on the same HTTP/TLS listener. A relay with
+ * no home slot needs none. A relay with home slots on another runtime is refused at start-up:
+ * a home that silently served no stream would leave clients polling without knowing why. */
 async function enableStreams(server, relay) {
-  if (!globalThis.Bun) return;
+  if (!relay.homes) return;
+  if (!globalThis.Bun) {
+    throw new Error('A relay with home slots needs Bun (bun relay/server.js): its stream uses Bun\'s built-in WebSocket server');
+  }
   const { WebSocketServer } = await import('ws');
-  const streams = new WebSocketServer({ noServer: true, clientTracking: false, maxPayload: 1024 });
+  const streams = new WebSocketServer({ noServer: true, clientTracking: false, maxPayload: STREAM_MESSAGE_BYTES });
   server.on('upgrade', (req, socket, head) => {
     socket.on('error', () => socket.destroy());
     if (req.headers.upgrade?.toLowerCase() !== 'websocket') { socket.destroy(); return; }

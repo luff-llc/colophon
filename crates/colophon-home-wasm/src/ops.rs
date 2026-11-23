@@ -22,6 +22,10 @@ use colophon_core::v05::history::home::{
     admit, admit_first_with, admit_pending_batch_notices, admit_predecessor, admit_with, stage_predecessor, FirstUpload, HomeState, ReceiptToSign, Refusal,
 };
 use colophon_core::v05::history::{verify_history, Claim, Objects, Persisted, Principal, State, Stop};
+use colophon_core::v05::home_stream::{
+    self, check_session_frame, check_subscription, parse_route, stream_namespaces, FrameRefusal,
+    RouteVerdict,
+};
 use colophon_core::v05::ids::{key_id, AccountId};
 use colophon_core::v05::records::{OperationHeader, RecordAuthority};
 use colophon_core::v05::replay::{
@@ -88,6 +92,10 @@ fn run(input: &[u8]) -> R<Value> {
         }),
         "access" => access(&req),
         "stream_standing" => stream_standing(&req),
+        "session_frame" => session_frame(&req),
+        "subscription" => subscription(&req),
+        "route_change" => route_change(&req),
+        "principals_current" => principals_current(&req),
         "call_key" => call_key(&req),
         "replay_keep" => replay_keep(&req),
         "replay_recover" => replay_recover(&req),
@@ -393,7 +401,11 @@ enum Class {
     RecordsRead,
     /// `POST /records/batch`, with one call for the raw JSON body.
     BatchRead,
+    /// `PUT` or `DELETE {base}/routes/<route ID>`: notice-route upkeep by the route's owner.
     RouteWrite,
+    /// `POST {base}/stream/ticket` (0.6 draft): a `colophon.home.stream` call mints a stream
+    /// ticket for the principal that signed it.
+    StreamTicket,
     /// Writes, with what they write.
     Write(Vec<HomeWrite>),
     /// `PUT {base}/predecessor/authority/<8 digits>.json` (§14): a predecessor entry published.
@@ -486,6 +498,10 @@ fn access(req: &Value) -> R<Value> {
         ("stream" | "routes", None) => match method {
             "GET" => Class::RecordsRead,
             _ => return not_allowed("GET"),
+        },
+        ("stream", Some("ticket")) => match method {
+            "POST" => Class::StreamTicket,
+            _ => return not_allowed("POST"),
         },
         ("routes", Some(id)) if id.len() == 64 && id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) => match method {
             "PUT" | "DELETE" => Class::RouteWrite,
@@ -672,15 +688,61 @@ fn access(req: &Value) -> R<Value> {
             .map(|path| json!({"path": path, "status": 200}))
             .collect::<Vec<_>>());
     }
-    if section == "stream" {
+    if matches!(class, Class::StreamTicket) {
+        // The ticket carries what the stream is re-checked by on every commit: the principal,
+        // the session it was opened under, the narrowest expiry of the call's chain, and the
+        // namespaces its terms hold `records` entries for (what it may subscribe and send to).
         let grant = account_view.stream_grant(&vc);
+        let nonce = grant.map(|(_, nonce)| nonce);
+        let standing = standing_of(&v.state, &signer, nonce, &base, now_ms);
+        if standing.is_null() {
+            return refuse("refused:outOfScope".into());
+        }
+        let expires = match (grant.and_then(|(e, _)| e), standing["expiresAt"].as_i64()) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
         answer["stream"] = json!({
             "principalId": signer,
-            "expiresAt": grant.and_then(|(expiry, _)| expiry),
-            "sessionNonce": grant.map(|(_, nonce)| nonce),
+            "expiresAt": expires,
+            "sessionNonce": nonce,
+            "namespaces": standing["namespaces"],
         });
     }
     Ok(answer)
+}
+
+/// One stream principal's standing at the committed history (`null`: it may no longer stream):
+/// a controller holding `approve` or `control`, or `sign` listing `base`, not suspended; or a
+/// current member whose session number is still `session_nonce`, with its expiry and the
+/// namespaces its terms hold `records` entries for (0.6 sessions §S1, §S9).
+fn standing_of(state: &State, principal: &str, session_nonce: Option<u64>, base: &str, now: i64) -> Value {
+    let Some((kind, id)) = principal.split_once(':') else {
+        return Value::Null;
+    };
+    let claim = match kind {
+        "controller" => Claim::Controller {
+            roles: &[Role::Approve, Role::Control, Role::Sign],
+            suspended_ok: false,
+        },
+        "member" => Claim::Member,
+        _ => return Value::Null,
+    };
+    match state.current_principal(id, claim, now) {
+        Ok(Principal::Controller(c))
+            if c.has(&Role::Approve)
+                || c.has(&Role::Control)
+                || c.audiences().is_some_and(|a| a.iter().any(|audience| audience == base)) =>
+        {
+            json!({"expiresAt": null, "namespaces": []})
+        }
+        Ok(Principal::Member(m)) if session_nonce == Some(m.end_sessions.len() as u64) => {
+            let namespaces: Vec<String> =
+                stream_namespaces(&m.terms).into_iter().map(|(ns, _)| ns).collect();
+            json!({"expiresAt": m.expires_ms, "namespaces": namespaces})
+        }
+        _ => Value::Null,
+    }
 }
 
 /// Recheck streams against the committed branch without replaying their opening calls.
@@ -694,33 +756,112 @@ fn stream_standing(req: &Value) -> R<Value> {
     else {
         return Ok(json!({"standing": vec![Value::Null; subscribers.len()]}));
     };
-    let standing: Vec<Value> = subscribers.iter().map(|subscriber| {
-        let Some((kind, id)) = subscriber["principalId"].as_str().and_then(|s| s.split_once(':')) else {
-            return Value::Null;
-        };
-        let claim = match kind {
-            "controller" => Claim::Controller {
-                roles: &[Role::Approve, Role::Control, Role::Sign],
-                suspended_ok: false,
-            },
-            "member" => Claim::Member,
-            _ => return Value::Null,
-        };
-        match v.state.current_principal(id, claim, now) {
-            Ok(Principal::Controller(c)) if c.has(&Role::Approve) || c.has(&Role::Control)
-                || c.audiences().is_some_and(|a| a.iter().any(|audience| audience == base)) =>
-            {
-                json!({"expiresAt": null})
-            }
-            Ok(Principal::Member(m))
-                if subscriber["sessionNonce"].as_u64() == Some(m.end_sessions.len() as u64) =>
-            {
-                json!({"expiresAt": m.expires_ms})
-            }
-            _ => Value::Null,
-        }
-    }).collect();
+    let standing: Vec<Value> = subscribers
+        .iter()
+        .map(|subscriber| {
+            let principal = subscriber["principalId"].as_str().unwrap_or_default();
+            standing_of(&v.state, principal, subscriber["sessionNonce"].as_u64(), base, now)
+        })
+        .collect();
     Ok(json!({"standing": standing}))
+}
+
+fn str_list(req: &Value, k: &str) -> R<Vec<String>> {
+    req.get(k)
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("missing {k}"))?
+        .iter()
+        .map(|v| v.as_str().map(str::to_string).ok_or_else(|| format!("{k}: not a string")))
+        .collect()
+}
+
+/// A session frame sent on a stream (0.6 sessions §S3, §S9): `frame` is the envelope exactly as
+/// it would be forwarded, `member` the connection's authenticated member, `entitled` its
+/// namespaces from the last standing check. The outer fields to route by, or a refusal code.
+fn session_frame(req: &Value) -> R<Value> {
+    let frame = str_of(req, "frame")?;
+    let entitled = str_list(req, "entitled")?;
+    match check_session_frame(frame.as_bytes(), str_of(req, "account")?, str_of(req, "member")?, &entitled) {
+        Ok(o) => Ok(json!({"allowed": true, "namespace": o.namespace, "cell": o.cell,
+                           "from": o.from, "to": o.to, "retain": o.retain})),
+        Err(r) => Ok(json!({"allowed": false, "code": r.code(),
+                            "error": match r { FrameRefusal::Malformed(why) => why, _ => "" }})),
+    }
+}
+
+/// A subscription to `(namespace, cell)` on a stream: the same entitlement as a frame.
+fn subscription(req: &Value) -> R<Value> {
+    let entitled = str_list(req, "entitled")?;
+    match check_subscription(str_of(req, "namespace")?, str_of(req, "cell")?, &entitled) {
+        Ok(()) => Ok(json!({"allowed": true})),
+        Err(r) => Ok(json!({"allowed": false, "code": r.code()})),
+    }
+}
+
+/// A notice-route change by `principal`, after its call was verified: the route body (for
+/// `PUT`), ownership and the caps. `owner` is the registering principal of the route at `id`.
+fn route_change(req: &Value) -> R<Value> {
+    let id = str_of(req, "id")?;
+    let deleting = match str_of(req, "method")? {
+        "PUT" => false,
+        "DELETE" => true,
+        _ => return Err("route_change: method is PUT or DELETE".into()),
+    };
+    let route = if deleting {
+        None
+    } else {
+        match parse_route(id, &bytes_of(req, "body")?) {
+            Ok(r) => Some(r),
+            Err(error) => return Ok(json!({"allowed": false, "status": 400, "error": error})),
+        }
+    };
+    let verdict = home_stream::route_change(
+        req.get("owner").and_then(Value::as_str),
+        str_of(req, "principal")?,
+        u64_of(req, "principalRoutes")? as usize,
+        u64_of(req, "totalRoutes")? as usize,
+        deleting,
+    );
+    Ok(match verdict {
+        RouteVerdict::Allow { created } => json!({"allowed": true, "created": created,
+            "route": route.map(|r| json!({"kind": r.kind, "address": r.address, "reaches": r.reaches}))}),
+        RouteVerdict::NotOwner => json!({"allowed": false, "status": 403, "result": "refused:notGranted"}),
+        RouteVerdict::Absent => json!({"allowed": false, "status": 404}),
+        RouteVerdict::PrincipalFull | RouteVerdict::SlotFull => {
+            json!({"allowed": false, "status": 507, "result": "refused:overQuota"})
+        }
+    })
+}
+
+/// Which of `principals` (`controller:<ID>` or `member:<ID>`) are still principals of the
+/// account at the committed history: a controller present and final (suspended or not, any
+/// role), a member current. A home that cannot tell (no verified history, stopped, at a fork)
+/// answers true for all, so nothing is dropped on a guess.
+fn principals_current(req: &Value) -> R<Value> {
+    let now = i64_of(req, "now")?;
+    let principals = str_list(req, "principals")?;
+    let l = load(req)?;
+    let Some(v) = l
+        .home
+        .as_ref()
+        .map(|h| view(h, now))
+        .transpose()?
+        .filter(|v| !v.stopped && v.fork.is_none())
+    else {
+        return Ok(json!({"current": vec![true; principals.len()]}));
+    };
+    let current: Vec<bool> = principals
+        .iter()
+        .map(|p| match p.split_once(':') {
+            Some(("controller", id)) => v
+                .state
+                .current_principal(id, Claim::Controller { roles: &[], suspended_ok: true }, now)
+                .is_ok(),
+            Some(("member", id)) => v.state.current_principal(id, Claim::Member, now).is_ok(),
+            _ => false,
+        })
+        .collect();
+    Ok(json!({"current": current}))
 }
 
 fn signer_text(s: &CallSigner) -> String {
@@ -2026,6 +2167,8 @@ fn waiting(h: &HomeState, objects: &Objects, now_ms: i64) -> Value {
 
 #[cfg(test)]
 mod waiting_tests;
+#[cfg(test)]
+mod stream_tests;
 
 // ---------------------------------------------------------------------------------------------
 // Records, live values, blob chunks.

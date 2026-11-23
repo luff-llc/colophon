@@ -14,6 +14,7 @@
 import { createHash } from 'node:crypto';
 import { constants as fsc, promises as fsp, writeSync } from 'node:fs';
 import path from 'node:path';
+import { HomeStream } from './stream.js';
 
 const b64 = (bytes) => Buffer.from(bytes).toString('base64');
 const unb64 = (text) => Buffer.from(text, 'base64');
@@ -25,8 +26,6 @@ function colophonCall(req) {
 }
 
 const ROUTE_BODY_BYTES = 4096;
-const maxRoutes = 64;
-const ROUTE_KINDS = new Set(['push', 'email', 'sms', 'webhook', 'other']);
 const NOTICE_COMMIT = 'notice-commit.json';
 
 // Forwarding (§13.1), per peer: each request's own time limit, a pass's wall-time budget, how many
@@ -141,7 +140,8 @@ export class HomeSlot {
    * @param {object} o `slot` (the relay's Slot), `wasm` (HomeModule), `key` (HomeKey), `base` (the
    * URL accounts name as this home's endpoint, also the call audience), `account` (the account ID
    * the operator provisioned the slot for), `clock`, `resolve` (maps another home's endpoint to
-   * the URL to reach it), `deps` (the relay's HttpError, send, readBody, clampInt), `limits`.
+   * the URL to reach it), `deps` (the relay's HttpError, send, readBody, clampInt), `limits`,
+   * `stream` (HomeStream options) and `scheduled` (whether the relay's scheduler ticks).
    */
   constructor(o) {
     Object.assign(this, o);
@@ -154,8 +154,10 @@ export class HomeSlot {
     this.forward = { peers: {} };
     this.rate = new RateLimit(o.limits.requestsPerMinute);
     this.said = new Map();
-    this.sockets = new Map();
     this.routes = new Map();
+    this.noticeSeq = 0;
+    this.lastHead = null;
+    this.stream = new HomeStream(this, o.stream ?? {});
   }
 
   file(name) { return path.join(this.slot.root, name); }
@@ -199,9 +201,13 @@ export class HomeSlot {
     this.routes = new Map(await this.readOptionalJson('routes.json') ?? []);
     this.noticeCommit = await this.readOptionalJson(NOTICE_COMMIT);
     await this.flushNotices();
+    this.noticeSeq = await this.lastNoticeSeq();
     // Reconcile storage with the state before serving: a crash between a commit and its files
     // (a missing entry, a head file older than the committed head) heals here, not later.
     await this.materialize(files);
+    this.lastHead = await this.ownHeadMark();
+    // Every change-log entry is pushed to the stream with the cursor `/changes` gives it.
+    this.slot.onEntry = (index) => this.stream.change(index);
     await this.openReplay();
     this.forward = await this.readJson('forward.json', { peers: {} });
     // Serving intervals (§13.1). The module decides from the last lease recorded (the home may
@@ -287,8 +293,14 @@ export class HomeSlot {
       const stat = await fsp.lstat(file).catch((error) => { if (error.code !== 'ENOENT') throw error; });
       if (stat && !stat.isFile()) throw new Error('notices.jsonl must be a regular file');
       const offset = stat?.size ?? 0;
-      const lines = notices.map((notice) =>
-        (JSON.stringify({ account: this.account, ...notice }) + '\n').repeat(Math.max(1, this.routes.size))).join('');
+      // One line per notice, numbered (increasing, never reused; a failed commit may skip a
+      // number), naming the routes registered when it was queued. A sender keeps its own
+      // cursor per route; the stream's `notice` frames carry the same number.
+      const routes = [...this.routes.keys()];
+      const lines = notices.map((notice) => {
+        notice.seq = ++this.noticeSeq;
+        return JSON.stringify({ seq: notice.seq, account: this.account, ...notice, routes }) + '\n';
+      }).join('');
       // A restart finishes the append only if the corresponding checkpoint committed.
       // The offset makes replay safe after a torn or already completed append.
       const journal = { state: sha(state), offset, lines };
@@ -297,8 +309,51 @@ export class HomeSlot {
     }
     await this.writeJson('home-state.json', state);
     this.state = state;
-    this.revalidateStreams();
     await this.flushNotices();
+    // Every authority commit re-checks every open stream (§S9: only current, entitled members)
+    // and the owners of notice routes.
+    this.stream.revalidate();
+    await this.pruneRoutes();
+  }
+
+  /** The number of the last notice queued (0 for none). */
+  async lastNoticeSeq() {
+    let text;
+    try { text = await fsp.readFile(this.file('notices.jsonl'), 'utf8'); } catch (error) { if (error.code === 'ENOENT') return 0; throw error; }
+    const lines = text.split('\n').filter(Boolean);
+    if (!lines.length) return 0;
+    try {
+      const seq = JSON.parse(lines[lines.length - 1]).seq;
+      if (Number.isSafeInteger(seq) && seq > 0) return seq;
+    } catch { /* an older line without a number */ }
+    return lines.length;
+  }
+
+  /** `{seq, digest}` of the head this home last stored, for the stream's hello. */
+  async ownHeadMark() {
+    const head = await this.headEnvelope().catch(() => null);
+    if (!head) return null;
+    try {
+      const { seq, digest } = JSON.parse(unb64(head.body)).authority;
+      return { seq, digest };
+    } catch { return null; }
+  }
+
+  /** Drop the routes of principals that are no longer principals of the account (the module
+   * decides), so a revoked device's routes neither linger nor hold the slot's capacity. */
+  async pruneRoutes() {
+    if (!this.routes.size) return;
+    const owners = [...new Set([...this.routes.values()].map((r) => r.by))];
+    let current;
+    try { ({ current } = this.wasm.call({ op: 'principals_current', state: this.state, now: this.clock(), principals: owners })); }
+    catch (error) { this.note('routes', `route owners could not be checked: ${error.message}`); return; }
+    const gone = new Set(owners.filter((_, i) => !current[i]));
+    if (!gone.size) return;
+    const routes = new Map([...this.routes].filter(([, r]) => !gone.has(r.by)));
+    await this.writeJson('routes.json', [...routes]);
+    const dropped = [...this.routes.keys()].filter((id) => !routes.has(id));
+    this.routes = routes;
+    for (const id of dropped) this.stream.route(id, 'delete');
   }
 
   async flushNotices() {
@@ -320,100 +375,14 @@ export class HomeSlot {
     this.noticeCommit = null;
   }
 
-  publish(frame) {
-    this.pruneExpiredStreams();
-    if (!this.sockets.size) return;
-    const message = JSON.stringify(frame);
-    for (const ws of this.sockets.keys()) {
-      if (ws.readyState !== ws.OPEN || ws.bufferedAmount > 64 * 1024) ws.terminate();
-      else {
-        try { ws.send(message, (error) => { if (error) ws.terminate(); }); }
-        catch { ws.terminate(); }
-      }
-    }
-  }
-
   publishNotices(notices) {
-    for (const { object, kind, deadline } of notices ?? []) this.publish({ type: 'notice', object, kind, deadline });
+    for (const notice of notices ?? []) this.stream.notice(notice);
   }
 
-  closeStreams() {
-    for (const ws of this.sockets.keys()) {
-      this.dropStream(ws);
-      ws.terminate();
-    }
-  }
-
-  dropStream(ws) {
-    clearTimeout(this.sockets.get(ws)?.timer);
-    this.sockets.delete(ws);
-  }
-
-  closeUnauthorizedStream(ws) {
-    this.dropStream(ws);
-    ws.close(1008, 'Stream authorization ended');
-  }
-
-  pruneExpiredStreams(now = this.clock()) {
-    for (const [ws, { expiresAt }] of this.sockets) {
-      if (expiresAt !== null && now > expiresAt) this.closeUnauthorizedStream(ws);
-    }
-  }
-
-  armStreamExpiry(ws, subscriber) {
-    clearTimeout(subscriber.timer);
-    if (subscriber.expiresAt === null) return;
-    // The grant is valid through its expiry instant. Long delays must fit the timer range.
-    const delay = subscriber.expiresAt - this.clock() + 1;
-    if (delay <= 0) {
-      this.closeUnauthorizedStream(ws);
-      return;
-    }
-    subscriber.timer = setTimeout(() => this.armStreamExpiry(ws, subscriber), Math.min(delay, 2 ** 31 - 1));
-    subscriber.timer.unref();
-  }
-
-  revalidateStreams() {
-    const now = this.clock();
-    this.pruneExpiredStreams(now);
-    if (!this.sockets.size) return;
-    const sockets = [...this.sockets];
-    const subscribers = sockets.map(([, { principalId, sessionNonce }]) => ({ principalId, sessionNonce }));
-    let standing = [];
-    try {
-      ({ standing } = this.wasm.call({ op: 'stream_standing', state: this.state, base: this.base, now, subscribers }));
-    } catch (error) {
-      this.note('streams', `stream standing could not be checked: ${error.message}`);
-    }
-    for (const [i, [ws, subscriber]] of sockets.entries()) {
-      const current = standing[i];
-      if (!current) this.closeUnauthorizedStream(ws);
-      else if (current.expiresAt !== null && (subscriber.expiresAt === null || current.expiresAt < subscriber.expiresAt)) {
-        subscriber.expiresAt = current.expiresAt;
-        this.armStreamExpiry(ws, subscriber);
-      }
-    }
-  }
-
-  async stream(req, connect) {
-    const { HttpError } = this.deps;
+  /** A WebSocket upgrade of `GET {base}/stream?ticket=…[&after=<cursor>]` (0.6 draft). */
+  async upgrade(req, url, connect) {
     await this.rateGate(req);
-    await this.lock(async () => {
-      if (this.slot.closing || this.slot.releasing || this.slot.released) throw new HttpError(503, 'Home unavailable');
-      this.pruneExpiredStreams();
-      if (this.sockets.size >= this.limits.maxWaiters) throw new HttpError(429, 'Too many streams', { 'retry-after': '60' });
-      const allowed = await this.access(req, 'stream', null, null, null);
-      await this.complete(allowed.reserve.key, 'completed');
-      if (this.slot.closing) throw new HttpError(503, 'Home unavailable');
-      connect((ws) => {
-        const subscriber = allowed.stream;
-        this.sockets.set(ws, subscriber);
-        ws.on('close', () => this.dropStream(ws));
-        ws.on('error', () => ws.terminate());
-        ws.on('message', () => ws.close(1008, 'Read-only stream'));
-        this.armStreamExpiry(ws, subscriber);
-      });
-    });
+    await this.stream.connect(url, connect);
   }
 
   /** Store the files the module listed. A path the module marks `replace` (a head; an entry
@@ -428,10 +397,11 @@ export class HomeSlot {
       if (replace) await this.slot.replaceRequest(p, body);
       else if (!have) await this.slot.putImmutable(p, body);
       else throw new Error(`Home slot ${this.slot.name}: ${p} on disk differs from the state`);
-      if (p.startsWith('heads/') && this.sockets.size) {
+      if (p === `heads/${this.key.memberId}.json`) {
         const signed = JSON.parse(body);
         const { seq, digest } = JSON.parse(unb64(signed.body)).authority;
-        this.publish({ type: 'head', seq, digest });
+        this.lastHead = { seq, digest };
+        this.stream.head(seq, digest);
       }
     }
   }
@@ -703,7 +673,24 @@ export class HomeSlot {
       });
       return true;
     }
-    if (section === 'stream' && this.relativePath(req) !== '/stream') throw new HttpError(404, 'Not found');
+    if (section === 'stream') {
+      if (rest === undefined) throw new HttpError(426, 'WebSocket upgrade required', { upgrade: 'websocket' });
+      if (rest !== 'ticket' || this.relativePath(req) !== '/stream/ticket') throw new HttpError(404, 'Not found');
+      if (req.method !== 'POST') throw new HttpError(405, 'Method not allowed', { allow: 'POST' });
+      if (req.headers['transfer-encoding'] || (req.headers['content-length'] ?? '0') !== '0') {
+        req.resume();
+        throw new HttpError(400, 'A ticket request takes no body');
+      }
+      // Mint under the lock: the standing the module judged is the committed state's.
+      await this.lock(async () => {
+        const allowed = await this.access(req, section, rest, null, Buffer.alloc(0));
+        try {
+          if (this.slot.closing) throw new HttpError(503, 'Home unavailable');
+          send(res, 200, this.stream.mint(allowed), { 'cache-control': 'no-store' });
+        } finally { await this.complete(allowed.reserve.key, 'completed'); }
+      });
+      return true;
+    }
     const method = req.method;
     const writing = section === 'records' && method === 'PUT';
     const effectPath = writing ? rest : (section === 'predecessor' && method === 'PUT' ? `predecessor/${rest}` : null);
@@ -718,7 +705,6 @@ export class HomeSlot {
     await this.deps.reach?.(`access ${section ?? ''}`); // a test hook (traced builds only)
     const key = allowed.reserve?.key;
     if (!section || section === 'changes') return false;
-    if (section === 'stream') throw new HttpError(426, 'WebSocket upgrade required', { upgrade: 'websocket' });
     if (section === 'head') { await this.serveOwnHead(res); return true; }
     if (section === 'authority') {
       if (method === 'GET') {
@@ -823,32 +809,26 @@ export class HomeSlot {
           send(res, 200, { routes });
           return;
         }
-        const exists = this.routes.has(id);
-        const routes = new Map(this.routes);
-        if (putting) {
-          let route;
-          try { route = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(body)); }
-          catch { throw new HttpError(400, 'Invalid JSON'); }
-          const { kind, address, reaches } = route ?? {};
-          if (!route || Object.keys(route).length !== 3 || !ROUTE_KINDS.has(kind)
-              || typeof address !== 'string' || !address || !address.isWellFormed()
-              || typeof reaches !== 'string' || !reaches || !reaches.isWellFormed()
-              || reaches.trim().toLowerCase() === address.trim().toLowerCase()) {
-            throw new HttpError(400, 'Invalid notice route');
-          }
-          if (sha(`${kind}\0${address}`) !== id) throw new HttpError(400, 'Route ID does not match kind and address');
-          if (!exists && this.routes.size >= maxRoutes) {
-            throw new HttpError(507, 'Too many notice routes', {}, { result: 'refused:overQuota' });
-          }
-          routes.set(id, { kind, address, reaches, by: allowed.signer });
-        } else {
-          if (!exists) throw new HttpError(404, 'Route not found');
-          routes.delete(id);
+        // Ownership, caps and the route's form are the module's (one rule for every home).
+        const principal = allowed.signer;
+        const owner = this.routes.get(id)?.by ?? null;
+        const principalRoutes = [...this.routes.values()].filter((r) => r.by === principal).length;
+        const r = this.wasm.call({
+          op: 'route_change', id, method: req.method, principal, owner, principalRoutes,
+          totalRoutes: this.routes.size, ...(putting ? { body: b64(body) } : {}),
+        });
+        if (!r.allowed) {
+          if (r.status === 400) throw new HttpError(400, r.error ?? 'Invalid notice route');
+          if (r.status === 404) throw new HttpError(404, 'Route not found');
+          throw new HttpError(r.status, 'Refused', {}, { result: r.result });
         }
+        const routes = new Map(this.routes);
+        if (putting) routes.set(id, { ...r.route, by: principal });
+        else routes.delete(id);
         await this.writeJson('routes.json', [...routes]);
         this.routes = routes;
-        const status = putting ? (exists ? 200 : 201) : 204;
-        res.writeHead(status);
+        this.stream.route(id, putting ? 'put' : 'delete', putting ? routes.get(id) : null);
+        res.writeHead(putting ? (r.created ? 201 : 200) : 204);
         res.end();
       } finally { await this.complete(key, 'completed'); }
     });
@@ -874,7 +854,6 @@ export class HomeSlot {
     await this.lock(async () => {
       const check = this.wasm.call({ op: 'check_record', state: this.state, now: this.clock(), path: recordPath, bytes: b64(body) });
       if (!check.allowed) { send(res, 422, { result: check.code }); return; }
-      const cursor = this.slot.entries.length;
       const conditional = req.headers['if-none-match'];
       let status;
       if (conditional === '*') status = await this.slot.putImmutable(recordPath, body);
@@ -884,7 +863,6 @@ export class HomeSlot {
         if (!expected || !/^"[0-9a-f]{64}"$/.test(expected)) throw new HttpError(428, 'Live replacement requires If-Match');
         status = await this.slot.replaceRequest(recordPath, body, expected);
       } else throw new HttpError(428, 'Immutable records require If-None-Match: *');
-      if (this.slot.entries.length !== cursor) this.publish({ type: 'change', cursor: this.slot.entries.length });
       res.writeHead(status, { etag: `"${sha(body)}"`, 'content-length': 0 });
       res.end();
     });
@@ -939,7 +917,6 @@ export class HomeSlot {
 
   async tickOnce() {
     await this.lock(async () => {
-      this.pruneExpiredStreams();
       await this.keepLease();
       await this.settle();
     });

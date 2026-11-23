@@ -1,214 +1,187 @@
+// Notice routes and the home stream's tickets, pushes, resume, limits and hygiene
+// (docs/colophon-0.6-stream.md), on the W2 synthetic account (controllers, one member).
+// Session forwarding is in home-stream-v2.test.js.
 import assert from 'node:assert/strict';
-import { createHash, randomBytes } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import { once } from 'node:events';
-import { existsSync } from 'node:fs';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import http from 'node:http';
+import { readFile, writeFile } from 'node:fs/promises';
+import net from 'node:net';
+import { spawnSync } from 'node:child_process';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { startRelay } from '../relay.js';
 // Synthetic account generated with v05_engine_support and support_relay. All keys are test keys.
 import fixture from './home-stream.fixture.json' with { type: 'json' };
+import { Client, prefix, rawBody, ready, rejectedUpgrade, sha, signBody, stamp, testHome as testHomeOn, wasm } from './stream-support.js';
+import { test } from 'node:test';
 
-const target = process.env.CARGO_TARGET_DIR ?? fileURLToPath(new URL('../../target', import.meta.url));
-const wasm = process.env.COLOPHON_HOME_WASM ?? path.join(target, 'wasm32-unknown-unknown/release/colophon_home_wasm.wasm');
-const ready = existsSync(wasm);
-if (!ready) {
-  if (process.env.CI || process.env.COLOPHON_REQUIRE_RELAY === '1') throw new Error(`Build the home WASM first (${wasm})`);
-  console.error(`SKIPPED: Home stream and notice tests need the module (${wasm})`);
-}
-
-const prefix = '/v1/libraries/home';
-const sha = (bytes) => createHash('sha256').update(bytes).digest('hex');
-const stamp = (ms) => new Date(ms).toISOString().replace('.000Z', 'Z');
+const testHome = (name, run, options) => testHomeOn(fixture, name, run, options);
 const route = '{"address":"private-device-token","kind":"push","reaches":"Phone"}';
 const routeId = sha('push\0private-device-token');
 const routePath = `/routes/${routeId}`;
-const rawBody = (envelope) => Buffer.from(envelope.body, 'base64');
 
-function canonical(value) {
-  if (Array.isArray(value)) return '[' + value.map(canonical).join(',') + ']';
-  if (value && typeof value === 'object') {
-    return '{' + Object.keys(value).sort().map((key) => JSON.stringify(key) + ':' + canonical(value[key])).join(',') + '}';
-  }
-  return JSON.stringify(value);
-}
+// ---------------------------------------------------------------------------------------------
+// Notice routes.
 
-async function signBody(value, key) {
-  const signingKey = await crypto.subtle.importKey('jwk', key, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign']);
-  const bytes = Buffer.from(canonical(value));
-  const signature = Buffer.from(await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, signingKey, bytes));
-  return { body: bytes.toString('base64'), signature: signature.toString('base64') };
-}
-
-function testHome(name, run) {
-  test(name, { skip: ready ? false : 'module not built' }, async () => {
-    const dir = await mkdtemp(path.join(tmpdir(), 'colophon-w2-'));
-    let now = fixture.now;
-    let running;
-    const files = (name) => path.join(dir, 'home', name);
-    const clock = () => now;
-    const advance = (ms = 1000) => { now += ms; };
-    const restart = async () => {
-      await running?.close();
-      running = await startRelay({
-        port: 0, clock, tickMs: 0, dataDir: dir,
-        libraries: { home: { home: true, account: fixture.account, base: fixture.base } },
-        home: { key: fixture.homeKey, wasm },
-      });
-    };
-
-    const call = async (method, relative, body = '', { signer = 'controller', kind = signer === 'member' ? 'member' : 'controller',
-      audience = fixture.base, purpose = method === 'GET' ? 'colophon.home.read' : 'colophon.home.write',
-      asOf = fixture.asOf } = {}) => {
-      const { id, key } = fixture[signer];
-      const point = Buffer.concat([Buffer.from([4]), Buffer.from(key.x, 'base64url'), Buffer.from(key.y, 'base64url')]);
-      const envelope = await signBody({
-        protocol: 'colophon/call/5', account: fixture.account, asOf, audience, purpose,
-        signer: { [kind]: id }, key: point.toString('base64'),
-        args: { method, path: relative, body: sha(body) },
-        requestId: randomBytes(32).toString('base64url'), created: stamp(now),
-      }, key);
-      return `Colophon ${Buffer.from(JSON.stringify(envelope)).toString('base64url')}`;
-    };
-    const host = () => `127.0.0.1:${running.port}`;
-    const request = (relative, method = 'GET', body, authorization, extra) => fetch(`http://${host()}${prefix}${relative}`, {
-      method, body,
-      headers: { ...(body === undefined ? {} : { 'content-type': 'application/json' }), ...(authorization ? { authorization } : {}), ...extra },
-    });
-    const signed = async (relative, method = 'GET', body, options, extra) =>
-      request(relative, method, body, await call(method, relative, body, options), extra);
-    try {
-      await restart();
-      const upload = await request('/authority', 'POST', JSON.stringify({ from: 1, entries: fixture.entries, receipts: [] }));
-      assert.equal(upload.status, 200, await upload.text());
-      await run({ request, call, signed, host, files, restart, advance, slot: () => running.relay.slot('home') });
-    } finally {
-      await running?.close();
-      await rm(dir, { recursive: true, force: true });
-    }
-  });
-}
-
-function rejectedUpgrade(host, authorization) {
-  return new Promise((resolve, reject) => {
-    const request = http.get(`http://${host}${prefix}/stream`, { headers: {
-      connection: 'Upgrade', upgrade: 'websocket', 'sec-websocket-version': '13',
-      'sec-websocket-key': randomBytes(16).toString('base64'), ...(authorization ? { authorization } : {}),
-    } }, (response) => {
-      response.resume();
-      resolve({ status: response.statusCode, headers: response.headers });
-    });
-    request.on('error', reject);
-    request.on('upgrade', (_, socket) => {
-      socket.destroy();
-      reject(new Error('The relay upgraded a refused request'));
-    });
-  });
-}
-
-async function connect(host, authorization) {
-  const { WebSocket } = await import('ws');
-  const ws = new WebSocket(`ws://${host}${prefix}/stream`, { headers: { authorization } });
-  await once(ws, 'open');
-  return ws;
-}
-
-function nextFrame(ws, type) {
-  return new Promise((resolve) => {
-    const receive = (data) => {
-      const frame = JSON.parse(data);
-      if (frame.type !== type) return;
-      ws.off('message', receive);
-      resolve(frame);
-    };
-    ws.on('message', receive);
-  });
-}
-
-testHome('notice route CRUD verifies calls, redacts addresses and persists across restart', async ({ request, signed, restart }) => {
+testHome('notice routes: verified calls, owner-only changes, redacted listing, persistence', async ({ request, signed, restart }) => {
   assert.equal((await request('/routes')).status, 401);
-  const wrong = await signed(`/routes/${'0'.repeat(64)}`, 'PUT', route);
-  assert.equal(wrong.status, 400);
-  const reflecting = route.replace('Phone', ' PRIVATE-DEVICE-TOKEN ');
-  assert.equal((await signed(routePath, 'PUT', reflecting)).status, 400);
+  assert.equal((await signed(`/routes/${'0'.repeat(64)}`, 'PUT', route)).status, 400);
+  // `reaches` may not repeat the address (the core's rule): the list would leak it.
+  assert.equal((await signed(routePath, 'PUT', route.replace('Phone', ' my PRIVATE-DEVICE-TOKEN '))).status, 400);
+  // A webhook must be an https URL to a public name.
+  const hook = { kind: 'webhook', address: 'https://127.0.0.1/hook', reaches: 'Server' };
+  assert.equal((await signed(`/routes/${sha(`webhook\0${hook.address}`)}`, 'PUT', JSON.stringify(hook))).status, 400);
+
+  // A recover-only controller may register its own route.
   const created = await request(routePath, 'PUT', route, `Colophon ${fixture.recoverCall}`);
   assert.equal(created.status, 201, await created.text());
-  const listing = await signed('/routes', 'GET', undefined, { signer: 'member' });
-  assert.equal(listing.status, 200);
-  const recoveryList = await listing.json();
   const recovered = JSON.parse(rawBody(JSON.parse(Buffer.from(fixture.recoverCall, 'base64url'))));
-  assert.deepEqual(recoveryList, { routes: [{ id: routeId, kind: 'push', reaches: 'Phone', by: `controller:${recovered.signer.controller}` }] });
+  const by = `controller:${recovered.signer.controller}`;
+  assert.deepEqual(await (await signed('/routes', 'GET', undefined, { signer: 'member' })).json(),
+    { routes: [{ id: routeId, kind: 'push', reaches: 'Phone', by }] });
 
-  const update = await signed(routePath, 'PUT', route.replace('Phone', 'Tablet'), { signer: 'member' });
-  assert.equal(update.status, 200, await update.text());
+  // Nobody else may replace or delete it: one stolen key cannot silence another device.
+  const replaced = await signed(routePath, 'PUT', route.replace('Phone', 'Tablet'), { signer: 'member' });
+  assert.equal(replaced.status, 403);
+  assert.deepEqual(await replaced.json(), { result: 'refused:notGranted' });
+  assert.equal((await signed(routePath, 'DELETE')).status, 403);
+
+  const mine = { kind: 'email', address: 'me@example.com', reaches: 'Mail' };
+  const minePath = `/routes/${sha(`email\0${mine.address}`)}`;
+  assert.equal((await signed(minePath, 'PUT', JSON.stringify(mine), { signer: 'member' })).status, 201);
+  assert.equal((await signed(minePath, 'PUT', JSON.stringify({ ...mine, reaches: 'Inbox' }), { signer: 'member' })).status, 200);
   await restart();
   const listed = await (await signed('/routes')).text();
-  assert.ok(!listed.includes('private-device-token'));
-  assert.deepEqual(JSON.parse(listed), { routes: [{ id: routeId, kind: 'push', reaches: 'Tablet', by: `member:${fixture.member.id}` }] });
-  assert.equal((await signed(routePath, 'DELETE')).status, 204);
-  assert.equal((await signed(routePath, 'DELETE')).status, 404);
-  assert.deepEqual(await (await signed('/routes')).json(), { routes: [] });
+  assert.ok(!listed.includes('private-device-token') && !listed.includes('me@example.com'));
+  assert.deepEqual(JSON.parse(listed).routes.map((r) => [r.id, r.reaches, r.by]).sort(), [
+    [routeId, 'Phone', by], [minePath.slice(8), 'Inbox', `member:${fixture.member.id}`],
+  ].sort());
+  assert.equal((await signed(minePath, 'DELETE', undefined, { signer: 'member' })).status, 204);
+  assert.equal((await signed(minePath, 'DELETE', undefined, { signer: 'member' })).status, 404);
 });
 
-testHome('notice routes cap new IDs at 64 and allow updates and reuse of freed capacity', async ({ signed }) => {
+testHome('notice routes: a principal holds at most 8; others keep their share', async ({ signed }) => {
   const id = (i) => `/routes/${sha(`push\0device-${i}`)}`;
-  const put = (i, reaches = 'Phone') => signed(id(i), 'PUT', JSON.stringify({
-    kind: 'push', address: `device-${i}`, reaches,
-  }));
-  for (let i = 0; i < 64; i++) {
-    const response = await put(i);
-    assert.equal(response.status, 201, await response.text());
-  }
-  const refused = await put(64);
+  const put = (i, signer = 'controller', reaches = 'Phone') =>
+    signed(id(i), 'PUT', JSON.stringify({ kind: 'push', address: `device-${i}`, reaches }), { signer });
+  for (let i = 0; i < 8; i++) assert.equal((await put(i)).status, 201);
+  const refused = await put(8);
   assert.equal(refused.status, 507);
   assert.deepEqual(await refused.json(), { result: 'refused:overQuota' });
-  assert.equal((await put(0, 'Tablet')).status, 200);
+  assert.equal((await put(0, 'controller', 'Tablet')).status, 200); // a replacement is not new
+  assert.equal((await put(9, 'member')).status, 201); // another principal's share is its own
   assert.equal((await signed(id(1), 'DELETE')).status, 204);
-  assert.equal((await put(64)).status, 201);
+  assert.equal((await put(8)).status, 201);
   const { routes } = await (await signed('/routes')).json();
-  assert.equal(routes.length, 64);
-  assert.equal(routes.find((r) => `/routes/${r.id}` === id(0)).reaches, 'Tablet');
+  assert.equal(routes.length, 9);
 });
 
-testHome('stream rejects missing, invalid, misbound and replayed calls, then pushes record changes', async ({ call, signed, host, slot }) => {
-  const missing = await rejectedUpgrade(host());
-  assert.equal(missing.status, 401);
-  assert.equal(missing.headers['www-authenticate'], 'Colophon');
-  assert.equal((await rejectedUpgrade(host(), 'Colophon bad')).status, 403);
-  assert.equal((await rejectedUpgrade(host(), await call('GET', '/changes'))).status, 403);
-  assert.equal((await rejectedUpgrade(host(), await call('GET', '/stream', 'a body'))).status, 403);
-  assert.equal((await rejectedUpgrade(host(), await call('GET', '/stream', '', { audience: 'https://wrong.example' }))).status, 403);
+// ---------------------------------------------------------------------------------------------
+// Tickets.
 
-  const authorization = await call('GET', '/stream', '', { signer: 'member' });
-  const ws = await connect(host(), authorization);
+testHome('stream tickets: minted by a stream call, single use, short-lived, never logged', async ({ request, call, signed, host, ticket, advance }) => {
+  const logged = [];
+  const saved = { error: console.error, log: console.log, warn: console.warn };
+  for (const k of Object.keys(saved)) console[k] = (...args) => { logged.push(args.map(String).join(' ')); saved[k](...args); };
   try {
-    assert.equal((await rejectedUpgrade(host(), authorization)).status, 403);
-    const record = 'encrypted chunk';
-    const recordPath = `/records/blobs/${sha(record)}`;
-    const cursor = (await slot()).entries.length + 1;
-    const pushed = nextFrame(ws, 'change');
-    const write = await signed(recordPath, 'PUT', record, undefined, { 'if-none-match': '*' });
-    assert.equal(write.status, 201, await write.text());
-    assert.deepEqual(await pushed, { type: 'change', cursor });
+    assert.equal((await request('/stream/ticket', 'POST')).status, 401);
+    // Only the reserved purpose, only for this request.
+    assert.equal((await signed('/stream/ticket', 'POST', undefined, { purpose: 'colophon.home.read' })).status, 403);
+    assert.equal((await request('/stream/ticket', 'POST', undefined, await call('POST', '/stream/ticket', '', { audience: 'https://wrong.example' }))).status, 403);
+    assert.equal((await request('/stream/ticket', 'POST', 'x', await call('POST', '/stream/ticket', 'x'))).status, 400);
+    assert.equal((await signed('/stream/ticket', 'GET')).status, 405);
+    assert.equal((await request('/stream')).status, 426);
+    const replayed = await call('POST', '/stream/ticket');
+    assert.equal((await request('/stream/ticket', 'POST', undefined, replayed)).status, 200);
+    assert.equal((await request('/stream/ticket', 'POST', undefined, replayed)).status, 403);
 
-    const repeated = signed(recordPath, 'PUT', record, undefined, { 'if-none-match': '*' });
-    const nextRecord = 'a different encrypted chunk';
-    const next = nextFrame(ws, 'change');
-    assert.equal((await repeated).status, 200);
-    assert.equal((await signed(`/records/blobs/${sha(nextRecord)}`, 'PUT', nextRecord, undefined, { 'if-none-match': '*' })).status, 201);
-    assert.deepEqual(await next, { type: 'change', cursor: cursor + 1 });
-  } finally {
-    const { sockets } = (await slot()).home;
-    const detached = once(sockets.keys().next().value, 'close');
-    const closed = once(ws, 'close');
-    ws.close();
-    await Promise.all([closed, detached]);
-    assert.equal(sockets.size, 0);
-  }
+    const missing = await rejectedUpgrade(host());
+    assert.deepEqual([missing.status, missing.body], [401, { result: 'refused:ticket' }]);
+    assert.deepEqual((await rejectedUpgrade(host(), `?ticket=${randomBytes(32).toString('base64url')}`)).body, { result: 'refused:ticket' });
+    // A W2-style call on the upgrade is not a ticket.
+    assert.equal((await rejectedUpgrade(host(), '', { authorization: await call('GET', '/stream') })).status, 401);
+
+    const t = await ticket('member');
+    const client = await Client.connect(host(), t);
+    const hello = await client.next('hello');
+    assert.equal(hello.principal, `member:${fixture.member.id}`);
+    assert.equal(hello.n, 1);
+    assert.deepEqual(hello.namespaces, ['notes']);
+    // Single use, whatever happened the first time.
+    assert.equal((await rejectedUpgrade(host(), `?ticket=${t}`)).status, 403);
+    client.ws.terminate();
+
+    const late = await ticket();
+    advance(30_001);
+    assert.equal((await rejectedUpgrade(host(), `?ticket=${late}`)).status, 403);
+    assert.equal((await rejectedUpgrade(host(), `?ticket=${await ticket()}&extra=1`)).status, 400);
+    assert.ok(logged.every((line) => !line.includes(t) && !line.includes(late)), 'a ticket was logged');
+  } finally { Object.assign(console, saved); }
 });
+
+testHome('a ticket whose member lost access before redeeming it is refused', async ({ request, host, ticket, advance }) => {
+  const t = await ticket('member');
+  advance();
+  const entry = await endSessions(stamp(fixture.now + 1000));
+  const response = await request('/authority', 'POST', JSON.stringify({ from: fixture.asOf.seq + 1, entries: [entry], receipts: [] }));
+  assert.equal(response.status, 200, await response.text());
+  const refused = await rejectedUpgrade(host(), `?ticket=${t}`);
+  assert.deepEqual([refused.status, refused.body], [403, { result: 'refused:revoked' }]);
+});
+
+testHome('outstanding tickets are capped per principal', async ({ signed, ticket }) => {
+  for (let i = 0; i < 8; i++) await ticket('member');
+  const refused = await signed('/stream/ticket', 'POST', undefined, { signer: 'member' });
+  assert.equal(refused.status, 429);
+  await ticket('controller');
+});
+
+// ---------------------------------------------------------------------------------------------
+// Pushes and resume.
+
+testHome('change frames carry the /changes entry and cursor, and resume from either', async ({ signed, open, writeBlob, slot }) => {
+  const changes = async (after) => (await signed(`/changes${after ? `?after=${after}` : ''}`)).json();
+  const start = (await changes()).cursor;
+  const ws = await open('member');
+  const first = ws.next('change');
+  await writeBlob('encrypted chunk');
+  const frame = await first;
+  const page = await changes(start);
+  assert.equal(page.entries.length, 1);
+  assert.deepEqual(frame.entry, page.entries[0]);
+  assert.equal(frame.cursor, page.cursor);
+  assert.match(frame.cursor, new RegExp(`^${(await slot()).instance}\\.\\d+$`));
+  ws.ws.terminate();
+
+  // Missed while away: replayed in order after hello, then live.
+  await writeBlob('second chunk');
+  await writeBlob('third chunk');
+  const missed = await changes(frame.cursor);
+  const back = await open('member', { after: frame.cursor });
+  const replay = [await back.next('change'), await back.next('change')];
+  assert.deepEqual(replay.map((f) => f.entry), missed.entries);
+  assert.equal(replay[1].cursor, missed.cursor);
+  assert.equal(back.all('hello')[0].cursor, missed.cursor);
+  // The stream's last cursor continues /changes exactly.
+  await writeBlob('fourth chunk');
+  const live = await back.next('change');
+  assert.deepEqual((await changes(replay[1].cursor)).entries, [live.entry]);
+  // A cursor of another instance cannot be continued: resync from the start, like 410.
+  const gone = await open('member', { after: 'ffffffffffffffff.1' });
+  assert.deepEqual(await gone.next('resync'), { type: 'resync', n: 2, reason: 'gone', after: 'ffffffffffffffff.1' });
+  assert.equal((await signed('/changes?after=ffffffffffffffff.1')).status, 410);
+});
+
+testHome('more missed changes than the stream replays answer resync tooFar', async ({ signed, open, writeBlob }) => {
+  const start = (await (await signed('/changes')).json()).cursor;
+  await writeBlob('one');
+  await writeBlob('two');
+  const ws = await open('member', { after: start });
+  assert.equal((await ws.next('resync')).reason, 'tooFar');
+  await ws.settle();
+  assert.equal(ws.all('change').length, 0);
+}, { stream: { sweepMs: 0, resumeEntries: 1 } });
 
 async function endSessions(issued) {
   return signBody({
@@ -226,102 +199,80 @@ async function revoke(issued) {
 }
 
 for (const makeEntry of [endSessions, revoke]) {
-  testHome(`${makeEntry.name} closes an open member stream before pushing the new head`, async ({ call, request, host, advance, slot }) => {
-    const ws = await connect(host(), await call('GET', '/stream', '', { signer: 'member' }));
-    const controller = await connect(host(), await call('GET', '/stream'));
-    const received = [];
-    ws.on('message', (data) => received.push(JSON.parse(data)));
-    try {
-      const closed = once(ws, 'close');
-      const head = nextFrame(controller, 'head');
-      advance();
-      const entry = await makeEntry(stamp(fixture.now + 1000));
-      const seq = fixture.asOf.seq + 1;
-      const response = await request('/authority', 'POST', JSON.stringify({ from: seq, entries: [entry], receipts: [] }));
-      assert.equal(response.status, 200, await response.text());
-      assert.deepEqual(await head, { type: 'head', seq, digest: sha(rawBody(entry)) });
-      assert.equal((await closed)[0], 1008);
-      assert.deepEqual(received, []);
-      assert.equal((await slot()).home.sockets.size, 1);
-    } finally {
-      ws.terminate();
-      controller.terminate();
-    }
+  testHome(`${makeEntry.name} closes an open member stream (1008) before pushing the new head`, async ({ request, open, advance, slot }) => {
+    const ws = await open('member');
+    const controller = await open('controller');
+    advance();
+    const entry = await makeEntry(stamp(fixture.now + 1000));
+    const seq = fixture.asOf.seq + 1;
+    const response = await request('/authority', 'POST', JSON.stringify({ from: seq, entries: [entry], receipts: [] }));
+    assert.equal(response.status, 200, await response.text());
+    const head = await controller.next('head');
+    assert.deepEqual([head.seq, head.digest, head.home], [seq, sha(rawBody(entry)), JSON.parse(rawBody(await (await request('/head')).json())).by]);
+    assert.equal((await ws.closed).code, 1008);
+    assert.deepEqual(ws.all('head'), []);
+    assert.equal((await slot()).home.stream.conns.size, 1);
   });
 }
 
-testHome('an expired member stream closes instead of receiving further pushes', async ({ call, request, signed, host, advance }) => {
+testHome('an expired member stream closes instead of receiving further pushes', async ({ request, open, writeBlob, advance }) => {
   const grant = JSON.parse(rawBody(fixture.entries[3]));
-  const expires = Date.parse(grant.terms.expires);
-  advance(expires - fixture.now - 1000);
+  advance(Date.parse(grant.terms.expires) - fixture.now - 1000);
   assert.equal((await request('/head')).status, 200);
-  const ws = await connect(host(), await call('GET', '/stream', '', { signer: 'member' }));
-  const controller = await connect(host(), await call('GET', '/stream'));
-  const received = [];
-  ws.on('message', (data) => received.push(JSON.parse(data)));
-  try {
-    const closed = once(ws, 'close');
-    const pushed = nextFrame(controller, 'change');
-    advance(1001);
-    const record = 'another encrypted chunk';
-    const response = await signed(`/records/blobs/${sha(record)}`, 'PUT', record, undefined, { 'if-none-match': '*' });
-    assert.equal(response.status, 201, await response.text());
-    await pushed;
-    assert.equal((await closed)[0], 1008);
-    assert.deepEqual(received, []);
-  } finally {
-    ws.terminate();
-    controller.terminate();
-  }
+  const ws = await open('member');
+  const controller = await open('controller');
+  advance(1001);
+  const pushed = controller.next('change');
+  await writeBlob('another encrypted chunk');
+  await pushed;
+  assert.equal((await ws.closed).code, 1008);
+  assert.deepEqual(ws.all('change'), []);
 });
 
-testHome('a suspend committed on a replacement branch queues and pushes its notice', async ({
-  call, request, host, files, advance, slot,
+testHome('a suspend committed on a replacement branch queues and pushes its numbered notice', async ({
+  request, open, files, advance, slot,
 }) => {
-  const ws = await connect(host(), await call('GET', '/stream'));
+  const ws = await open('controller');
   const seq = fixture.asOf.seq + 1;
   const postEntry = (entry) => request('/authority', 'POST', JSON.stringify({ from: seq, entries: [entry], receipts: [] }));
-  try {
-    const ownHead = await (await request('/head')).json();
-    const { by } = JSON.parse(rawBody(ownHead));
-    const first = await postEntry(await endSessions(stamp(fixture.now)));
-    assert.equal(first.status, 200, await first.text());
-    // The clock did not move while the first entry committed, so no head covers it.
-    advance();
-    const object = sha(rawBody(fixture.suspend));
-    const covering = await signBody({
-      protocol: 'colophon/head/5', account: fixture.account, by,
-      authority: { seq, digest: object }, issued: stamp(fixture.now + 1000),
-    }, fixture.homeKey);
-    // Seed the verifier with the covering head on this single-home fixture.
-    const { home } = await slot();
-    await home.lock(async () => {
-      const bytes = Buffer.from(JSON.stringify(covering)).toString('base64');
-      const head = home.wasm.call({ op: 'admit_one', state: home.state, now: fixture.now + 1000, bytes });
-      assert.equal(head.outcome, 'ok', JSON.stringify(head));
-      await home.commit(head.state);
-      await home.materialize(head.store);
-    });
-
-    const notice = nextFrame(ws, 'notice');
-    const replacement = await postEntry(fixture.suspend);
-    assert.equal(replacement.status, 200, await replacement.text());
-    const deadline = stamp(fixture.now + 3_600_000);
-    assert.deepEqual(await notice, { type: 'notice', object, kind: 'suspend', deadline });
-    assert.deepEqual(JSON.parse(await readFile(files('notices.jsonl'), 'utf8')), {
-      account: fixture.account, object, kind: 'suspend', issued: stamp(fixture.now), deadline,
-    });
-  } finally { ws.terminate(); }
+  const ownHead = await (await request('/head')).json();
+  const { by } = JSON.parse(rawBody(ownHead));
+  const first = await postEntry(await endSessions(stamp(fixture.now)));
+  assert.equal(first.status, 200, await first.text());
+  advance();
+  const object = sha(rawBody(fixture.suspend));
+  const covering = await signBody({
+    protocol: 'colophon/head/5', account: fixture.account, by,
+    authority: { seq, digest: object }, issued: stamp(fixture.now + 1000),
+  }, fixture.homeKey);
+  const { home } = await slot();
+  await home.lock(async () => {
+    const bytes = Buffer.from(JSON.stringify(covering)).toString('base64');
+    const head = home.wasm.call({ op: 'admit_one', state: home.state, now: fixture.now + 1000, bytes });
+    assert.equal(head.outcome, 'ok', JSON.stringify(head));
+    await home.commit(head.state);
+    await home.materialize(head.store);
+  });
+  const notice = ws.next('notice');
+  const replacement = await postEntry(fixture.suspend);
+  assert.equal(replacement.status, 200, await replacement.text());
+  const deadline = stamp(fixture.now + 3_600_000);
+  const { n, ...frame } = await notice;
+  assert.deepEqual(frame, { type: 'notice', notice: 1, object, kind: 'suspend', deadline });
+  assert.deepEqual(JSON.parse(await readFile(files('notices.jsonl'), 'utf8')), {
+    seq: 1, account: fixture.account, object, kind: 'suspend', issued: stamp(fixture.now), deadline, routes: [],
+  });
 });
 
-testHome('admitted transitions, suspends and vetoes queue public metadata and push live notices', async ({
-  call, request, signed, host, files, advance, restart,
+testHome('admitted transitions, suspends and vetoes queue one numbered line each, naming the routes', async ({
+  request, signed, open, files, advance, restart, host, ticket,
 }) => {
   assert.equal((await signed(routePath, 'PUT', route)).status, 201);
   const email = { kind: 'email', address: 'private@example.test', reaches: 'Mail' };
-  assert.equal((await signed(`/routes/${sha(`${email.kind}\0${email.address}`)}`, 'PUT', JSON.stringify(email))).status, 201);
-  const ws = await connect(host(), await call('GET', '/stream'));
-  const suspended = await connect(host(), await call('GET', '/stream', '', { signer: 'secondController' }));
+  const emailId = sha(`${email.kind}\0${email.address}`);
+  assert.equal((await signed(`/routes/${emailId}`, 'PUT', JSON.stringify(email))).status, 201);
+  const ws = await open('controller');
+  const suspended = await open('secondController');
   const pending = (envelope) => request('/pending', 'POST', JSON.stringify({ objects: [envelope] }));
   const expected = [];
   const deadline = stamp(fixture.now + 3_600_000);
@@ -329,42 +280,181 @@ testHome('admitted transitions, suspends and vetoes queue public metadata and pu
     const bytes = rawBody(envelope);
     const object = sha(bytes);
     const issued = JSON.parse(bytes).issued;
-    const frame = nextFrame(ws, 'notice');
+    const frame = ws.next('notice');
     const response = await submit();
     assert.equal(response.status, 200, await response.text());
-    assert.deepEqual(await frame, { type: 'notice', object, kind, deadline });
-    const line = { account: fixture.account, object, kind, issued, deadline };
-    expected.push(line, line);
+    const seq = expected.length + 1;
+    const { n, ...got } = await frame;
+    assert.deepEqual(got, { type: 'notice', notice: seq, object, kind, deadline });
+    expected.push({ seq, account: fixture.account, object, kind, issued, deadline, routes: [routeId, emailId] });
   }
+  await assertNotice('transition', fixture.transition, () => pending(fixture.transition));
+  assert.equal((await pending(fixture.transition)).status, 200);
+
+  advance();
+  const seq = fixture.asOf.seq + 1;
+  await assertNotice('suspend', fixture.suspend, () =>
+    request('/authority', 'POST', JSON.stringify({ from: seq, entries: [fixture.suspend], receipts: [] })));
+  const digest = sha(rawBody(fixture.suspend));
+  const head = await ws.next('head');
+  assert.deepEqual([head.seq, head.digest], [seq, digest]);
+  assert.equal((await suspended.closed).code, 1008);
+  // A suspended controller keeps its route upkeep: it may list routes and change its own.
+  const listing = await signed('/routes', 'GET', undefined, { signer: 'secondController', asOf: { seq, digest } });
+  assert.equal(listing.status, 200, await listing.text());
+  const own = { kind: 'sms', address: '+15551234567', reaches: 'Old phone' };
+  assert.equal((await signed(`/routes/${sha(`sms\0${own.address}`)}`, 'PUT', JSON.stringify(own), { signer: 'secondController', asOf: { seq, digest } })).status, 201);
+  // ...but not another principal's.
+  assert.equal((await signed(routePath, 'DELETE', undefined, { signer: 'secondController', asOf: { seq, digest } })).status, 403);
+  // Nor a stream: a suspended controller polls /pending with colophon.history.read.
+  assert.equal((await signed('/stream/ticket', 'POST', undefined, { signer: 'secondController', asOf: { seq, digest } })).status, 403);
+  const routesNow = [routeId, emailId, sha(`sms\0${own.address}`)];
+  const before = expected.length;
+  await assertNotice('veto', fixture.veto, () => pending(fixture.veto));
+  expected[before].routes = routesNow;
+
+  const queue = await readFile(files('notices.jsonl'), 'utf8');
+  assert.deepEqual(queue.trimEnd().split('\n').map(JSON.parse), expected);
+  // A torn append after the corresponding checkpoint committed is finished on restart.
+  const last = queue.trimEnd().split('\n').slice(-1).join('\n') + '\n';
+  const offset = Buffer.byteLength(queue) - Buffer.byteLength(last);
+  const state = JSON.parse(await readFile(files('home-state.json'), 'utf8'));
+  await writeFile(files('notice-commit.json'), JSON.stringify({ state: sha(state), offset, lines: last }));
+  await writeFile(files('notices.jsonl'), Buffer.from(queue).subarray(0, offset + 3));
+  await restart();
+  assert.equal(await readFile(files('notices.jsonl'), 'utf8'), queue);
+  // The numbering continues after a restart, and the hello says where it is.
+  const again = await Client.connect(host(), await ticket());
+  assert.equal((await again.next('hello')).notice, 3);
+  again.ws.terminate();
+});
+
+testHome('route changes are pushed, and routes of a principal that lost access are dropped', async ({ request, signed, open, advance }) => {
+  const ws = await open('controller');
+  assert.equal((await signed(routePath, 'PUT', route, { signer: 'member' })).status, 201);
+  const put = await ws.next('route');
+  assert.deepEqual(put, { type: 'route', n: put.n, id: routeId, change: 'put', kind: 'push', reaches: 'Phone', by: `member:${fixture.member.id}` });
+  advance();
+  const entry = await revoke(stamp(fixture.now + 1000));
+  const response = await request('/authority', 'POST', JSON.stringify({ from: fixture.asOf.seq + 1, entries: [entry], receipts: [] }));
+  assert.equal(response.status, 200, await response.text());
+  const dropped = await ws.next('route');
+  assert.deepEqual([dropped.id, dropped.change], [routeId, 'delete']);
+  assert.deepEqual((await (await signed('/routes', 'GET', undefined, { asOf: { seq: fixture.asOf.seq + 1, digest: sha(rawBody(entry)) } })).json()).routes, []);
+});
+
+// ---------------------------------------------------------------------------------------------
+// Frames from clients, limits and hygiene.
+
+testHome('unknown, binary and malformed client frames are refused without closing', async ({ open }) => {
+  const ws = await open('member');
+  ws.send({ type: 'teleport', id: 'x1' });
+  assert.deepEqual(await ws.next('error'), { type: 'error', n: 2, code: 'unknownType', ref: 'x1' });
+  ws.send('not json');
+  assert.equal((await ws.next('error')).code, 'badFrame');
+  ws.ws.send(Buffer.from([1, 2, 3]), { binary: true });
+  assert.equal((await ws.next('error')).code, 'binary');
+  ws.send({ type: 'session', frame: { body: Buffer.from('{}').toString('base64'), signature: 'x' } });
+  assert.equal((await ws.next('error')).code, 'badFrame');
+  await ws.settle();
+  assert.equal(ws.ws.readyState, ws.ws.OPEN);
+  const frames = ws.frames.map((f) => f.n);
+  assert.deepEqual(frames, frames.map((_, i) => i + 1), 'n counts every frame without a gap');
+});
+
+testHome('a controller stream takes pushes but neither subscribes to nor sends session frames', async ({ open }) => {
+  const ws = await open('controller');
+  ws.send({ type: 'subscribe', namespace: 'notes', cell: 'now-playing', id: 'c1' });
+  assert.equal((await ws.next('error')).code, 'notEntitled');
+  ws.send({ type: 'session', id: 'c2', frame: { body: 'e30=', signature: 'x' } });
+  assert.deepEqual([(await ws.next('error')).code, ws.all('subscribed').length], ['notEntitled', 0]);
+});
+
+testHome('an oversize session frame is refused; an oversize message closes 1009', async ({ open, slot }) => {
+  const ws = await open('member');
+  const body = Buffer.from(JSON.stringify({ protocol: 'colophon/session/6', ciphertext: 'A'.repeat(17_000) })).toString('base64');
+  ws.send({ type: 'session', frame: { body: body.slice(0, 17_500), signature: 'x' } });
+  assert.equal((await ws.next('error')).code, 'tooLarge');
+  ws.send({ type: 'ping', pad: 'x'.repeat(21_000) });
+  assert.equal((await ws.closed).code, 1009);
+  assert.equal((await slot()).home.stream.conns.size, 0);
+});
+
+testHome('inbound frames over the rate are dropped and counted, not queued', async ({ open, slot }) => {
+  const ws = await open('member');
+  for (let i = 0; i < 6; i++) ws.send({ type: 'ping', t: i });
+  const warned = await ws.next('error');
+  assert.equal(warned.code, 'rateLimited');
+  assert.ok(warned.dropped >= 1);
+  assert.ok(ws.all('pong').length <= 2);
+  assert.ok((await slot()).home.stream.counters.dropped >= 4);
+}, { stream: { sweepMs: 0, framesPerSecond: 1, frameBurst: 2 } });
+
+testHome('connections are capped per principal and per account', async ({ open, host, ticket }) => {
+  await open('member');
+  await open('member');
+  const third = await rejectedUpgrade(host(), `?ticket=${await ticket('member')}`);
+  assert.equal(third.status, 429);
+  await open('controller');
+  const fourth = await rejectedUpgrade(host(), `?ticket=${await ticket('secondController')}`);
+  assert.equal(fourth.status, 429);
+}, { stream: { sweepMs: 0, streamsPerPrincipal: 2, streamsPerAccount: 3 } });
+
+/** A WebSocket handshake by hand, with a socket that never answers a ping or reads. */
+async function rawStream(host, ticket) {
+  const [hostname, port] = host.split(':');
+  const socket = net.connect(Number(port), hostname);
+  await once(socket, 'connect');
+  socket.write(`GET ${prefix}/stream?ticket=${ticket} HTTP/1.1\r\nHost: ${host}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n`
+    + `Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: ${randomBytes(16).toString('base64')}\r\n\r\n`);
+  const [first] = await once(socket, 'data');
+  assert.match(first.toString('latin1'), /^HTTP\/1.1 101/);
+  const closed = new Promise((resolve) => socket.on('close', resolve));
+  return { socket, closed, first };
+}
+
+testHome('a client that answers no ping is closed after the idle timeout; one that does stays', async ({ host, ticket, open, slot }) => {
+  const alive = await open('controller');
+  const { closed, socket } = await rawStream(host(), await ticket('member'));
+  const chunks = [];
+  socket.on('data', (d) => chunks.push(d));
+  await closed;
+  // The close frame: opcode 8, code 4008.
+  const all = Buffer.concat(chunks);
+  const at = all.indexOf(Buffer.from([0x88]));
+  assert.ok(at >= 0, 'no close frame');
+  assert.equal(all.readUInt16BE(at + 2), 4008);
+  assert.equal((await slot()).home.stream.counters.idle, 1);
+  assert.equal(alive.ws.readyState, alive.ws.OPEN);
+}, { stream: { sweepMs: 0, pingMs: 50, idleMs: 300 } });
+
+testHome('shutdown tells clients to resume (bye, 1012)', async ({ open, relay }) => {
+  const ws = await open('member');
+  const closing = relay().close();
+  const bye = await ws.next('bye');
+  assert.deepEqual([bye.reason, bye.resume, bye.retryMs], ['restart', true, 1000]);
+  assert.equal((await ws.closed).code, 1012);
+  await closing;
+});
+
+testHome('stream settings are checked', async ({ dir }) => {
+  const { startRelay } = await import('../relay.js');
+  await assert.rejects(startRelay({ port: 0, dataDir: `${dir}-x`, tickMs: 0, stream: { nope: 1 },
+    libraries: { home: { home: true, account: fixture.account, base: fixture.base } } }), /stream\.nope/);
+});
+
+// Node is not a supported runtime for a home: start-up fails loudly instead of serving no stream.
+const node = spawnSync('node', ['--version']).status === 0;
+test('a relay with home slots refuses to start on Node', { skip: ready && node ? false : 'needs the module and node' }, async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'colophon-stream-node-'));
   try {
-    await assertNotice('transition', fixture.transition, () => pending(fixture.transition));
-    assert.equal((await pending(fixture.transition)).status, 200);
-
-    advance();
-    const head = nextFrame(ws, 'head');
-    const closed = once(suspended, 'close');
-    const seq = fixture.asOf.seq + 1;
-    await assertNotice('suspend', fixture.suspend, () =>
-      request('/authority', 'POST', JSON.stringify({ from: seq, entries: [fixture.suspend], receipts: [] })));
-    const digest = sha(rawBody(fixture.suspend));
-    assert.deepEqual(await head, { type: 'head', seq, digest });
-    assert.equal((await closed)[0], 1008);
-    // A suspended controller may still maintain its route.
-    assert.equal((await signed(routePath, 'PUT', route, { signer: 'secondController', asOf: { seq, digest } })).status, 200);
-    await assertNotice('veto', fixture.veto, () => pending(fixture.veto));
-
-    const queue = await readFile(files('notices.jsonl'), 'utf8');
-    assert.deepEqual(queue.trimEnd().split('\n').map(JSON.parse), expected);
-    // Simulate a torn append after the corresponding checkpoint was committed.
-    const last = queue.trimEnd().split('\n').slice(-2).join('\n') + '\n';
-    const offset = Buffer.byteLength(queue) - Buffer.byteLength(last);
-    const state = JSON.parse(await readFile(files('home-state.json'), 'utf8'));
-    await writeFile(files('notice-commit.json'), JSON.stringify({ state: sha(state), offset, lines: last }));
-    await writeFile(files('notices.jsonl'), Buffer.from(queue).subarray(0, offset + 3));
-    await restart();
-    assert.equal(await readFile(files('notices.jsonl'), 'utf8'), queue);
-  } finally {
-    ws.terminate();
-    suspended.terminate();
-  }
+    const relay = fileURLToPath(new URL('../relay.js', import.meta.url));
+    const script = `import { startRelay } from ${JSON.stringify(relay)};
+      await startRelay({ port: 0, tickMs: 0, dataDir: ${JSON.stringify(dir)},
+        libraries: { home: { home: true, account: ${JSON.stringify(fixture.account)}, base: ${JSON.stringify(fixture.base)} } },
+        home: { key: ${JSON.stringify(fixture.homeKey)}, wasm: ${JSON.stringify(wasm)} } });`;
+    const r = spawnSync('node', ['--input-type=module', '-e', script], { encoding: 'utf8', timeout: 30_000 });
+    assert.notEqual(r.status, 0);
+    assert.match(r.stderr, /needs Bun/);
+  } finally { await rm(dir, { recursive: true, force: true }); }
 });
