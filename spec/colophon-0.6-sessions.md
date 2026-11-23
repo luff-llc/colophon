@@ -1,6 +1,6 @@
 # Colophon 0.6: sessions
 
-**Status:** unfrozen draft, revision 13, 2026-11-23. Revision 2 adopted the findings of the
+**Status:** unfrozen draft, revision 14, 2026-11-23. Revision 2 adopted the findings of the
 reference machine (`docs/colophon-0.6-sessions-findings.md`, F1–F20); revision 3 added `via` to passed claims (F12, F21); revision 4 answers the first
 independent design review (R1–R9 in the findings document): evidence instead of hearsay,
 no silent loss of state, key bootstrap and freshness, bounded state; revision 5 adopts what
@@ -50,9 +50,9 @@ guarantee. **Safety** (G1–G3, G6–G9, G11, G12) holds whatever the network do
 timely from a time T when, from T on:
 
 1. its membership does not change;
-2. in every interval of `holderTimeoutMs` − `beatMs` (10 s by default), every member
-   accepts at least one holder frame from each member that is acting as holder throughout
-   that interval; and
+2. in every closed interval of length `holderTimeoutMs` − `beatMs` (10 s by default),
+   every other member accepts at least one holder frame from each member that is acting as
+   holder throughout that interval; and
 3. every `hello`, `state`, `take`, `pass`, `yielded`, `ack` and `bye` is accepted by each
    member it concerns within that same length of time after it is first sent, counting the
    resends this document requires.
@@ -89,6 +89,8 @@ core, as live rules are in 0.5 §20) together with its **policy**:
 
 **Entitlement comes from the host.** The session core is told, by the host, which members
 are entitled at the accepted authority head, and is told again whenever that head changes.
+When a newly accepted history removes a member, the host MUST tell the core before it
+delivers any frame received after that history was accepted; G8 depends on this order.
 Until it has been told, it treats nobody as entitled: it accepts no frame as coming from a
 writer and passes to no one.
 
@@ -424,8 +426,10 @@ guarantees and hold from the moment the group is timely (§S0); the rest hold al
   old claim, and a member that becomes holder by that `pass` starts with exactly its
   snapshot.
 - **G4.** While a holder is live, members of one group eventually hold the same accepted
-  claim and, for that claim, the same ordered state. With no live holder, members may hold
-  different dead claims until the next take or renewal.
+  claim, and every ordered message the holder sends under that claim is eventually applied
+  by every member, in order (so their states are equal whenever the holder stops sending).
+  With no live holder, members may hold different dead claims until the next take or
+  renewal.
 - **G5.** A writer with no holder reachable becomes holder within `askTimeoutMs` of asking,
   or `holderTimeoutMs` of the holder's last frame, whichever its trigger was, measured on
   its own clock, plus the delay with which its host delivers timer expiries. A host MUST
