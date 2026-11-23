@@ -678,8 +678,28 @@ fn run(b: Bounds, fixes: Fixes) -> Report {
 }
 
 /// `small` is `(commands, duplications, link changes, in-flight cap)`.
+/// `COLOPHON_EXPLORE_WITHOUT=F5,F6` explores with those fixes off (for findings work).
+fn fixes_under_test() -> Fixes {
+    let mut f = Fixes::ALL;
+    let off = std::env::var("COLOPHON_EXPLORE_WITHOUT").unwrap_or_default();
+    for name in off.split(',') {
+        match name.trim() {
+            "F1" => f.rank1_from_holder = false,
+            "F2" => f.seen_unsynced = false,
+            "F5" => f.bye_resend = false,
+            "F6" => f.answer_lesser = false,
+            "F7" => f.renew_wider = false,
+            "F8" => f.liveness_holder_frames = false,
+            "F9" => f.ask_resend = false,
+            "F10" => f.renew_needs_contact = false,
+            _ => {}
+        }
+    }
+    f
+}
+
 fn check(members: usize, kinds: &'static str, small: (u8, u8, u8, usize), depth: u32) {
-    let r = run(bounds(members, kinds, small, depth), Fixes::ALL);
+    let r = run(bounds(members, kinds, small, depth), fixes_under_test());
     assert!(r.violation.is_none(), "{:?}", r.violation.map(|v| v.0));
     assert!(!r.truncated, "state bound reached before exhausting the space");
 }

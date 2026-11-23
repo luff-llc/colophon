@@ -719,7 +719,10 @@ fn playback_run(seed: u64, fixes: Fixes) -> Result<Stats, (String, Vec<String>)>
         if !sim.m[2].s.sends_as_holder() {
             return Err("G5: 2c asked with the holder cut off and does not hold in time".into());
         }
-        sim.run(135_000, vec![(130_000, Act::Heal(1))])?;
+        // One beat after the gate the two holders have exchanged frames even if some were
+        // lost: allow askTimeoutMs plus two beats.
+        let settle = 130_000 + sim.policy.ask_timeout_ms + 2 * sim.policy.beat_ms + 1_000;
+        sim.run(settle, vec![(130_000, Act::Heal(1))])?;
         if sim.m[1].s.is_holder() || sim.m[1].playing.is_some() {
             return Err("S6: the returning lapsed holder did not yield and pause".into());
         }
@@ -727,8 +730,8 @@ fn playback_run(seed: u64, fixes: Fixes) -> Result<Stats, (String, Vec<String>)>
             return Err("S6: 2c lost the role to the returning lapsed holder".into());
         }
         // Holder lapse trigger.
-        sim.run(140_000, vec![(138_000, Act::Take(0))])?;
-        let cut = 140_000;
+        sim.run(settle + 2_000, vec![(settle + 1_000, Act::Take(0))])?;
+        let cut = settle + 2_000;
         let deadline = cut + sim.policy.holder_timeout_ms + 2 * TICK_MS;
         sim.run(deadline, vec![(cut, Act::Isolate(2))])?;
         if !sim.m[0].s.sends_as_holder() {
@@ -805,7 +808,9 @@ fn carrier_independence() {
 #[ignore]
 fn fix_ablation() {
     let all = Fixes::ALL;
-    let cases: [(&str, Fixes); 10] = [
+    let group = Fixes { bye_resend: false, answer_lesser: false, renew_wider: false, liveness_holder_frames: false, ..all };
+    let cases: [(&str, Fixes); 11] = [
+        ("F5+F6+F7+F8 together", group),
         ("literal draft", Fixes::LITERAL),
         ("F1 rank1_from_holder", Fixes { rank1_from_holder: false, ..all }),
         ("F2 seen_unsynced", Fixes { seen_unsynced: false, ..all }),
