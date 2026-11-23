@@ -1,6 +1,6 @@
 # Colophon 0.6: sessions
 
-**Status:** unfrozen draft, revision 9, 2026-11-23. Revision 2 adopted the findings of the
+**Status:** unfrozen draft, revision 10, 2026-11-23. Revision 2 adopted the findings of the
 reference machine (`docs/colophon-0.6-sessions-findings.md`, F1–F20); revision 3 added `via` to passed claims (F12, F21); revision 4 answers the first
 independent design review (R1–R9 in the findings document): evidence instead of hearsay,
 no silent loss of state, key bootstrap and freshness, bounded state; revision 5 adopts what
@@ -8,7 +8,9 @@ the rebuilt harness found wrong in revision 4 (R1c–R4a); revision 6 adopted R1
 two layers: carriers make every connected group of members fully reachable (§S9
 bridging), and the session rules above them assume that and are simpler for it. Revision 8 states
 what a bridge checks and how loss beyond the first hop is repaired (B1–B4); revision 9
-makes the freshness exchange retry (B5). Additive to `colophon-0.5.md`; nothing here changes a
+made the freshness exchange retry (B5). Revision 10 answers the third design review: it
+states the timing assumption that convergence needs, makes every frame a broadcast, and
+limits 0.6 conformance to the home carrier. Additive to `colophon-0.5.md`; nothing here changes a
 0.5 object, verdict or path. A 0.5 host that ignores this document stays conformant with 0.5.
 
 The words MUST, SHOULD and MAY are used as in 0.5 §0. "0.5 §N" refers to `colophon-0.5.md`.
@@ -39,6 +41,16 @@ eventually delivered to every member, possibly late, duplicated and out of order
 groups nothing is delivered. Groups split and merge at any time. The session rules are
 written for this model: they never need to reason about who can reach whom inside a group,
 because bridging makes reachability inside it complete.
+
+**Timing.** A network that may delay frames without limit can keep any protocol of this
+kind from settling: an adversary that always delivers a holder's frames just too late
+makes members renew over each other for ever. So this document separates two kinds of
+guarantee. **Safety** (G1–G3, G6–G9, G11, G12) holds whatever the network does.
+**Convergence** (G4, G5, G10) holds from the moment the group is **timely**: its membership
+has stopped changing and every frame sent to all reaches every member within `beatMs`
+(so that a live holder is never silent to anyone for `holderTimeoutMs`), counting a frame
+that is lost as one that a later frame replaces. Before that moment claims may change;
+they never go backwards and nothing is dropped silently.
 
 **What is and is not promised.** Under this model no protocol can both let a member take
 over in bounded time and guarantee that a holder whose frames are merely late keeps the
@@ -103,7 +115,8 @@ from then on.
  "delegation":{…},"ciphertext":"<base64>"}
 ```
 
-- `to` is optional: absent means every member in the session.
+- `to` is optional and is advice to receivers, not a route: every frame is carried to
+  every member of the group, and a member that `to` does not name ignores the frame.
 - `n` is a counter per session key, starting at 1. A receiver keeps, per key, the highest
   `n` it has accepted and which of the 128 values below it were accepted. It drops a frame
   whose `n` it has accepted, or whose `n` is more than 128 below the highest. Gaps and
@@ -138,7 +151,10 @@ the `fresh` values of the hellos the sender is answering (at most 8). A member a
 after at most four hellos. Until a member has accepted, from a given key, a
 `hello` whose `echo` contains the `fresh` of one of the member's own hellos sent since it
 started, it accepts only `hello` frames from that key and takes from them only the
-delegation, `fresh` and `echo`. That echoing frame's `n` opens the window: frames with a
+delegation, `fresh` and `echo`. A member honours an echo
+only of a `fresh` value it sent within the last 60 s (it need remember no more than its 32
+most recent), so the exchange needs a round trip within 60 s. That echoing frame's `n`
+opens the window: frames with a
 lower `n` from that key are dropped. A member that drops a frame because the window for
 its key is not open sends that key's member a `hello`, at most once per `askTimeoutMs`, so
 a lost `hello` or a lost answer does not leave the two unable to hear each other.
@@ -208,7 +224,8 @@ whose holder has gone quiet therefore still reaches everyone in the group, who t
 
 **Ask and pass.** A writer that wants the role sends `ask` to the holder. The holder's
 application decides. A holder passes only to a member whose `ask` it accepted under its
-current claim and has not answered, and that is still entitled and has not said `bye`. To
+current claim and has not answered, and that is still entitled at the holder's accepted authority head and has not said
+`bye`. To
 pass, the application first stops whatever the role controls; the holder persists `next` as
 its accepted claim; then
 the holder sends `pass` with `next = {term: current+1, rank: 1, holder: asker, via: self}`, the final
@@ -334,19 +351,23 @@ may be lost, duplicated, delayed and reordered; a frame that arrives is unmodifi
 
 **Home carrier.** A home that offers it accepts frames on its stream from a member it would
 serve `/changes` to for the namespace, and forwards each to every other connected member of
-the same account that is entitled to the namespace and subscribed to the cell (or only to
-`to`). It MUST NOT store a frame, except that it keeps the latest `retain: true` frame per
+the same account that is entitled to the namespace and subscribed to the cell, whether or not the frame carries `to`. It MUST NOT store a frame, except that it keeps the latest `retain: true` frame per
 `(cell, from)` in memory for at most the cell's `retainMs` (or 60 s when it does not know
 the cell) and gives it to a member when that member subscribes. It checks only the outer
 fields, the size limit and its own caps. It learns the account, namespace, cell, sender,
-recipient and sizes, and nothing else. A home MAY refuse or drop any frame; members cannot
-tell that from loss.
+recipient and sizes, and nothing else. A home MAY refuse or drop a frame under its caps; to
+members that is loss, and a home that drops without limit keeps its group from being
+timely (§S0).
 
 The holder SHOULD mark its `state` and `beat` frames `retain`, so that a member opening the
 application learns of the session from the carrier without waiting for the holder.
 
 **Direct carriers** (device to device) are defined by their own documents and MUST carry
 frames unchanged.
+
+**0.6 conformance covers one carrier, the home.** Members connected to the same home are
+one group, and nothing below is needed. Bridging is specified here so that the session
+rules do not change when direct carriers arrive, and is not part of 0.6 conformance.
 
 **Bridging.** Every member bridges. A member with more than one carrier, or a carrier that
 reaches only some members, forwards every frame it sees for the first time, unchanged, on
@@ -358,7 +379,10 @@ origin, which governs only what the bridge itself acts on. It remembers forwarde
 n)` values in the same 128-wide window shape as §S3, kept separately from its acceptance
 window, and does not forward a frame older than that window. A frame lost beyond the first
 hop is not sent again under the same `n`: the session rules repair loss with new frames
-(`hello`, `state`, resends), which are bridged like any other. A frame addressed with `to` is forwarded the same way and ignored by
+(`hello`, `state`, resends), which are bridged like any other. A bridge keeps forwarding
+windows for at most 4 session keys per member, and SHOULD limit what it forwards per
+origin member (by default 50 frames and 262,144 bytes per second), dropping the excess: a
+member that floods is thereby limited to its own neighbourhood. A frame addressed with `to` is forwarded the same way and ignored by
 members it does not name. Frames are signed by their origin, so a bridged frame is verified
 exactly as a direct one, and the freshness exchange of §S3 works across bridges because
 hellos are bridged too. Bridging is what makes a group fully reachable; with only the home
@@ -375,7 +399,8 @@ after the session key exists.
 ## S11. Guarantees
 
 For members that follow this document, under a network that may lose, duplicate, delay and
-reorder frames and partition members for any time:
+reorder frames and partition members for any time. G4, G5 and G10 are convergence
+guarantees and hold from the moment the group is timely (§S0); the rest hold always.
 
 - **G1.** A member's accepted claim never decreases.
 - **G2.** A member never sends a holder frame under a claim less than its accepted claim,
@@ -393,8 +418,8 @@ reorder frames and partition members for any time:
 - **G7.** No frame is ever a record, and a carrier never holds a readable payload.
 - **G8.** A member dropped by an accepted history is ignored by every member that has
   accepted that history.
-- **G9.** The state reached depends only on the set and per-receiver order of frames
-  delivered, not on which carrier delivered them.
+- **G9.** A member's state depends only on the order of its own inputs (frames delivered,
+  timer expiries and application commands), not on which carrier delivered a frame.
 - **G10.** With no application command and no change in which members can reach which, the
   set of claims in use stops changing: there is no endless renewing or taking.
 - **G11.** The state of a holder displaced by a take, and a pass that arrives after its
