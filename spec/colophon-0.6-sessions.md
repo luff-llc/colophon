@@ -1,6 +1,6 @@
 # Colophon 0.6: sessions
 
-**Status:** unfrozen draft, revision 10, 2026-11-23. Revision 2 adopted the findings of the
+**Status:** unfrozen draft, revision 11, 2026-11-23. Revision 2 adopted the findings of the
 reference machine (`docs/colophon-0.6-sessions-findings.md`, F1–F20); revision 3 added `via` to passed claims (F12, F21); revision 4 answers the first
 independent design review (R1–R9 in the findings document): evidence instead of hearsay,
 no silent loss of state, key bootstrap and freshness, bounded state; revision 5 adopts what
@@ -413,8 +413,9 @@ guarantees and hold from the moment the group is timely (§S0); the rest hold al
   different dead claims until the next take or renewal.
 - **G5.** A writer with no holder reachable becomes holder within `askTimeoutMs` of asking,
   or `holderTimeoutMs` of the holder's last frame, whichever its trigger was.
-- **G6.** Once a frame carrying a claim, sent by that claim's holder, reaches a member, that
-  member does not act as holder under any lesser claim.
+- **G6.** Once a member accepts a frame carrying a claim, sent by that claim's holder (the
+  frame names that member or no one, and passes §S3, freshness included), that member does
+  not act as holder under any lesser claim.
 - **G7.** No frame is ever a record, and a carrier never holds a readable payload.
 - **G8.** A member dropped by an accepted history is ignored by every member that has
   accepted that history.
