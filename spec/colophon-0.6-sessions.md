@@ -1,6 +1,7 @@
 # Colophon 0.6: sessions
 
-**Status:** unfrozen draft, 2026-11-22. Additive to `colophon-0.5.md`; nothing here changes a
+**Status:** unfrozen draft, revision 2, 2026-11-22. Revision 2 adopts the findings of the
+reference machine (`docs/colophon-0.6-sessions-findings.md`, F1–F20). Additive to `colophon-0.5.md`; nothing here changes a
 0.5 object, verdict or path. A 0.5 host that ignores this document stays conformant with 0.5.
 
 The words MUST, SHOULD and MAY are used as in 0.5 §0. "0.5 §N" refers to `colophon-0.5.md`.
@@ -40,6 +41,7 @@ core, as live rules are in 0.5 §20) together with its **policy**:
 | `retainMs` | 60,000 | Longest time a carrier keeps a retained frame (§S9). |
 | `tail` | 256 | Ordered messages the holder keeps for resume. |
 | `maxPayload` | 8,192 | Largest application payload, bytes. |
+| `fold` | `latest` | How ordered messages become state: `latest` (state is the last payload) or `append` (state is the list of payloads). |
 | `take` | `free` | `free`: any eligible member may take. Other values are reserved; a host that meets one MUST NOT take in that cell. |
 
 **Who may join.** A current member whose terms hold a `records` entry for the namespace
@@ -77,8 +79,10 @@ from then on.
 ```
 
 - `to` is optional: absent means every member in the session.
-- `n` is a counter per session key, starting at 1. A receiver drops a frame whose `n` is not
-  greater than the highest it has accepted from that key. Gaps are allowed.
+- `n` is a counter per session key, starting at 1. A receiver keeps, per key, the highest
+  `n` it has accepted and which of the 128 values below it were accepted. It drops a frame
+  whose `n` it has accepted, or whose `n` is more than 128 below the highest. Gaps and
+  reordering inside that window are allowed.
 - `retain` is optional and only `true` (§S9).
 - `ciphertext` is AES-256-GCM under the namespace epoch key `epoch` (0.5 §11.1), with AAD the
   canonical JSON of `{account, cell, epoch, from, key, n, namespace, protocol, retain, to}`
@@ -95,7 +99,7 @@ The plaintext is `{"kind": …, …}`. Kinds and their fields:
 
 | Kind | Sender | Fields | Meaning |
 | --- | --- | --- | --- |
-| `hello` | any | `sessionKey` (the §S2 envelope), `seen` (`{term, rank, holder, seq}` or `null`), `lapsed` (bool) | Join or rejoin. Sent on every link-up. |
+| `hello` | any | `sessionKey` (the §S2 envelope), `seen` (`{term, rank, holder, seq}` or `null`), `lapsed` (bool) | Join, rejoin or ask to be brought up to date. Sent on every link-up. `seen.seq` is `null` when the sender holds no state for that claim. `lapsed` is informational; receivers ignore it. |
 | `state` | holder | `claim`, `seq`, `snapshot` | Full state for one member (`to` set) or all. |
 | `beat` | holder | `claim`, `seq` | Liveness when the holder has nothing else to send. |
 | `msg` | holder | `claim`, `seq`, `origin`, `id`, `payload` | One ordered message. |
@@ -105,9 +109,9 @@ The plaintext is `{"kind": …, …}`. Kinds and their fields:
 | `ask` | writer | `claim` (the claim the asker believes current) | Ask the holder for the role. |
 | `pass` | holder | `claim` (current), `next` (`{term, rank:1, holder}`), `seq`, `snapshot` | Hand the role over. |
 | `decline` | holder | `claim` | The holder will not pass now. |
-| `take` | writer | `claim` (`{term, rank:0, holder}`), `basis` (`{term, seq}`) | Assume the role. |
+| `take` | writer | `claim` (`{term, rank:0, holder}`) | Assume the role. |
 | `ping` / `pong` | any | `t` (sender ms); `pong` adds `echo`, `hold` | Round-trip and clock offset (§S7). |
-| `bye` | any | `claim` if the sender is holder | Leaving. A holder's `bye` releases the role. |
+| `bye` | any | `claim` if the sender is or was the holder of it, `leaving` (bool) | A holder's `bye` releases the role. `leaving: true` also ends the sender's membership of the session. |
 
 `payload` and `snapshot` are application bytes (base64), opaque to this document, at most
 `maxPayload`. `id` is 16 random bytes, base64url. An unknown `kind` is dropped.
@@ -124,43 +128,67 @@ A member accepts a claim it meets in any frame when all of these hold:
 
 1. The frame passed §S3 and its sender is entitled (§S1).
 2. For rank 0, the frame is from `claim.holder` itself.
-3. For rank 1, the member has seen the matching `pass`: a `pass` frame from the holder of
-   the member's previous accepted claim whose `next` equals this claim, or a `state`, `beat`
-   or `msg` from `next.holder` carrying it after such a `pass` was seen. A member that has
-   not seen the `pass` treats a rank-1 claim as rank 0 for ordering until it does.
+3. For rank 1, the frame is from `claim.holder`, or is a `pass` from `pass.claim.holder`
+   with `next` equal to this claim.
 4. It is greater than the member's accepted claim.
+
+Rule 3 does not defend against a member that breaks this document (it could take at any
+term); among members that follow it, a member claims rank 1 only after receiving a pass.
 
 **Yielding.** A member that is holder and accepts a greater claim of another member stops
 acting as holder at once: it sends no further `state`, `beat`, `msg`, `refuse`, `pass` or
 `decline` under its old claim, and reports the change to the application.
 
-**Stale holders.** A holder that receives a frame carrying a lesser claim from another
-member answers with `state` to that member.
+**Correcting lesser claims.** Any member that receives a holder frame or `take` under a
+claim less than its accepted claim answers the sender: a holder with `state`; a member that
+released that greater claim with its `bye` again; any other member with `hello`. So a claim
+whose holder has gone quiet still reaches everyone who can be reached.
 
 ## S5. Passing and taking
 
 **Ask and pass.** A writer that wants the role sends `ask` to the holder. The holder's
 application decides. To pass, the application first stops whatever the role controls, then
 the holder sends `pass` with `next = {term: current+1, rank: 1, holder: asker}`, the final
-`seq` and the final `snapshot`, to all members, and from that moment is not holder. It
-resends the same `pass` when it next hears the asker speak under an older claim. The asker
-becomes holder on receiving the `pass`; its state is exactly `snapshot`; its `seq` restarts
-at 0 for the new term.
+`seq` and the final `snapshot`, to all members, and from that moment is not holder: it
+accepts `next` itself, with `snapshot` as its state. It resends the same `pass`, unchanged,
+when it next hears the asker speak under an older claim. The asker becomes holder on
+receiving the `pass`; its state is exactly `snapshot`; its `seq` restarts at 0 for the new
+term. A holder made by a pass that later meets a different `pass` naming its own claim
+(two holders, partitioned from each other, each passed to it) renews (below), so that one
+state prevails.
+
+An asker that has heard holder frames from the holder but neither `pass` nor `decline`
+within `askTimeoutMs` of its `ask` sends `ask` again.
 
 **Take.** A writer may send `take` with `{term: T+1, rank: 0, holder: self}` where `T` is
 the term of its accepted claim (0 if none) when one of these holds:
 
 - there is no holder;
 - the holder is lapsed to it (§S6);
-- it sent `ask` and has heard nothing from the holder for `askTimeoutMs` since.
+- it sent `ask` and has accepted no holder frame from the holder for `askTimeoutMs` since.
 
 It becomes holder at once, with the state it last held for the cell (application-defined
-projection included, §S7), `seq` 0, and sends `state` to all.
+projection included, §S7) or a state the application supplies with the take, `seq` 0, and
+sends `state` to all.
 
-**Renewing.** A holder that learns, from any `hello.seen`, of a term not less than its own
-whose holder is not itself and is not present, raises its own claim to that term + 1,
-rank 0, and sends `state`. Terms therefore never go backwards for any pair of members that
-have exchanged frames.
+**Release.** A holder gives the role up without a successor by sending `bye` with its claim
+and `leaving: false`. It stays in the session.
+
+**Renewing.** A holder raises its own claim to the greater term + 1, rank 0, and sends
+`state`, when it learns of a claim not less than its own that nobody is holding:
+
+- from a `hello.seen` naming another member that has sent no holder frame or `take` for
+  `holderTimeoutMs`;
+- from a `hello.seen` naming itself under a greater claim (a pass to it that it never
+  received);
+- from a `bye` (a released claim has no holder);
+- from a `hello` sent by the named holder itself (a `hello` cannot say whether its sender
+  still holds; a sender that does hold then yields to the resulting `state`).
+
+A holder judges "has sent nothing for `holderTimeoutMs`" only once its own link has worked
+for `holderTimeoutMs`; before that it treats every member as holding. Terms therefore never
+go backwards for any pair of members that have exchanged frames, and a member that has just
+returned cannot renew over a live holder.
 
 **Declining.** A holder MAY answer `ask` with `decline`. An asker that receives `decline`
 MUST NOT take on the timeout rule for that ask.
@@ -168,13 +196,18 @@ MUST NOT take on the timeout rule for that ask.
 ## S6. Liveness and lapsing
 
 - The holder sends a frame to all at least every `beatMs`.
-- To a listener, the holder is **lapsed** when the listener has a working link and has
-  accepted nothing from the holder for `holderTimeoutMs`.
+- To a listener, the holder is **lapsed** when the listener has accepted no holder frame
+  under the accepted claim for `holderTimeoutMs`, counted from the later of the last such
+  frame and the listener's last link-up. `ping`, `pong`, `presence` and `submit` do not
+  count. A listener whose holder lapses sends `hello` to all.
 - A holder is **out of contact** when it has had no working link for `holderTimeoutMs`. An
   out-of-contact holder keeps acting locally (rule 1 of §S0) but, on its next link-up, MUST
   send `hello` with `lapsed: true` and MUST NOT send holder frames for `askTimeoutMs`. If
   within that time it accepts a claim of another member that is not lapsed to it, it yields
   (§S4). Otherwise it takes at its accepted term + 1.
+- A member that restarts as the holder of its persisted claim follows the same rule. The
+  core persists only the claim, so the application supplies the cell's state when it joins
+  or takes; without one the cell restarts empty.
 
 This is the stated limit of the design: two members with no path between them can both act
 as holder until a path exists. From the first frame exchanged, exactly one remains.
@@ -198,9 +231,10 @@ Clocks are the host's monotonic milliseconds; they need not be wall time.
   The position of a message is `(claim, seq)`.
 - A member applies `msg` frames of its accepted claim in `seq` order, holding those that
   arrive early and discarding those of a lesser claim.
-- A member that detects a gap, joins, or changes claim without a snapshot sends `hello`. The
-  holder answers that member with the missing `msg` frames when `seen` names its current
-  claim and it still holds them (`tail`), else with `state`.
+- A member that detects a gap, joins, or changes claim without a snapshot sends `hello`, at
+  most once per second for gaps. The holder answers that member with the missing `msg`
+  frames when `seen` names its current claim with a non-null `seq` and it still holds them
+  (`tail`), else with `state`.
 - A writer's `submit` is answered by the holder with a `msg` whose `origin` is the
   submitter and whose `id` is the submit's, or with `refuse`. The holder drops a `submit`
   whose `id` it has ordered in the current term.
@@ -241,15 +275,18 @@ For members that follow this document, under a network that may lose, duplicate,
 reorder frames and partition members for any time:
 
 - **G1.** A member's accepted claim never decreases.
-- **G2.** A member never sends a holder frame under a claim less than its accepted claim.
-- **G3.** After a `pass` is sent, the passing member sends no holder frame under the old
-  claim, and the new holder's initial state equals the pass snapshot.
-- **G4.** If frames between two members are eventually delivered both ways, they
-  eventually hold the same accepted claim and, for that claim, the same ordered state.
+- **G2.** A member never sends a holder frame under a claim less than its accepted claim,
+  other than a resend of a `pass` it already sent.
+- **G3.** After a `pass` is sent, the passing member sends no other holder frame under the
+  old claim, and the new holder's initial state equals the pass snapshot.
+- **G4.** While a holder is live, if frames between two members are eventually delivered
+  both ways, they eventually hold the same accepted claim and, for that claim, the same
+  ordered state. With no live holder, members may hold different dead claims until the next
+  take or renewal.
 - **G5.** A writer with no holder reachable becomes holder within `askTimeoutMs` of asking,
   or `holderTimeoutMs` of the holder's last frame, whichever its trigger was.
-- **G6.** Two members both acting as holder have, since each one's claim began, exchanged no
-  frame; once a frame from the greater claim's holder reaches the other, the other stops.
+- **G6.** Once a frame carrying a claim, sent by that claim's holder, reaches a member, that
+  member does not act as holder under any lesser claim.
 - **G7.** No frame is ever a record, and a carrier never holds a readable payload.
 - **G8.** A member dropped by an accepted history is ignored by every member that has
   accepted that history.
@@ -261,19 +298,20 @@ checked by the reference explorer and simulator.
 
 ## S12. Cell: `listening.podcasts/now-playing`
 
-Policy: defaults. The snapshot, and the payload of each `msg`, is the **anchor**:
+Policy: defaults (`fold` `latest`). The snapshot, and the payload of each `msg`, is the **anchor**:
 
 ```json
-{"episode":"<id>","show":"<id>","positionMs":1234567,"rate":1.25,"playing":true,"at":98765432}
+{"episode":"<id>","show":"<id>","positionMs":1234567,"ratePermille":1250,"playing":true,"at":98765432}
 ```
 
 `at` is the holder's clock (§S7) when `positionMs` was true. A member's projected position
-is `positionMs + rate × (now + offset − at)` while `playing` (`offset` as in §S7, zero for
+is `positionMs + floor(ratePermille × (now + offset − at) / 1000)` while `playing` (`offset` as in §S7, zero for
 the holder itself), else `positionMs`. The holder
 publishes an anchor on play, pause, seek, rate change and episode change, and at least every
 60 s while playing. Presence payload: `{"label":"Mike's iPhone","playing":false}`.
 
-A device that plays audio for this account SHOULD hold this cell. A device that yields MUST
+A device that plays audio for this account SHOULD hold this cell, and SHOULD keep its last
+anchor so that it can supply it when it joins or takes after a restart. A device that yields MUST
 pause. A device that passes MUST pause before sending `pass` and put its stopped position in
 the snapshot with `playing: false`; the new holder starts from that position exactly. A
 device that takes starts from its projected position. Only the holder writes passive
