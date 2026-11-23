@@ -1133,12 +1133,17 @@ actor SessionWorker {
             }
             if let (digest, json) = signedChange { try loadJournal(); journal.signedChanges[digest] = json; try saveJournal() }
             // 6. This session reaches the homes from now on (the exchange and the sync loop), without a relaunch.
-            for home in homes where !homeConfigurations.contains(where: { Self.base($0.endpoint.absoluteString) == Self.base(home.endpoint.absoluteString) }) {
-                appointedHomes.append(home)
-            }
+            configureHomes(homes)
             return (outcome, try await reconcile())
         }
     }
+
+    func configureHomes(_ homes: [HomeConfiguration]) {
+        for home in homes where !homeConfigurations.contains(where: { Self.base($0.endpoint.absoluteString) == Self.base(home.endpoint.absoluteString) }) {
+            appointedHomes.append(home)
+        }
+    }
+
     /// The `change` of a stored transition (its body's), or nil.
     private func pendingChange(_ digest: String) -> [String: Any]? {
         guard let bytes = try? storage().read("transitions/\(digest).json"),

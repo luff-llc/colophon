@@ -23,6 +23,8 @@ import Observation
     public private(set) var notices: SessionNotices = .empty
     /// Homes the account names.
     public private(set) var homes: [Home] = []
+    /// Whether this session has any home transports configured.
+    public var hasConfiguredHomes: Bool { homesConfigured }
     /// What the host must do and say beyond `notices` (§17.5): the sole-device warning, delivery routes per home, the
     /// outcome of each submission, dead transitions, the poll interval.
     public private(set) var duties: HostDuties = .none
@@ -529,6 +531,20 @@ import Observation
     }
 
     // MARK: Exchange with the homes
+
+    /// Attaches transports to this live session for homes the account names.
+    public func configureHomes(_ homes: [HomeConfiguration]) async {
+        guard !homes.isEmpty else { return }
+        let lease = context, generation = lockGeneration
+        await worker.configureHomes(homes)
+        guard lease == context, generation == lockGeneration else { return }
+        homesConfigured = true
+        if syncState == .disabled, !phase.isStopped { syncState = .idle }
+        if !suspended, !syncPaused {
+            startSyncLoop()
+            Task { [syncSignal] in await syncSignal.fire() }
+        }
+    }
 
     /// Runs one exchange pass with every home now and refreshes when something arrived. Returns false when it failed.
     @discardableResult public func syncNow() async -> Bool {
