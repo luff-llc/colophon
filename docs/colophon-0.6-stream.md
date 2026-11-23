@@ -46,7 +46,7 @@ and suspended controllers cannot stream. They poll `GET {base}/pending` with
 
 | Answer | When |
 | --- | --- |
-| 200 `{"ticket","expires","path":"/stream"}`, `Cache-Control: no-store` | Minted |
+| 200 `{"ticket","expires","path":"/stream"}`, `Cache-Control: no-store` | Minted. `expires` is an ISO 8601 date on the home's clock (the reference home's format), unlike `hello.expiresAt`, which is milliseconds. |
 | 400 | A body was sent |
 | 401 `WWW-Authenticate: Colophon` | No call |
 | 403 `{"result"}` | The call is refused (§12.3), including a wrong purpose, audience or binding |
@@ -54,6 +54,11 @@ and suspended controllers cannot stream. They poll `GET {base}/pending` with
 | 429 `{"result":"refused:window"}` | Replay share (§12.4), rate, or more than 8 outstanding tickets for this principal (256 per account) |
 | 404 | The home is not appointed |
 | 503 | Stopped, or shutting down |
+
+The ticket call is an ordinary call. It therefore needs fresh heads from the account's homes
+(0.5 §12.3 step 4): a device mints only after it has read the home's head recently, normally in
+an exchange pass. A client must not present a ticket anywhere but `{base}/stream`, and must keep
+tickets out of logs: until it is presented, a ticket is a bearer credential.
 
 A ticket is 32 random bytes as unpadded base64url (43 characters). It is opaque and bound in
 the home's memory to the account, the principal (`controller:<ID>` or `member:<ID>`), the
@@ -102,7 +107,7 @@ slow consumer) closes the connection rather than skip a number. So a client that
 
 | `type` | Fields | Meaning |
 | --- | --- | --- |
-| `hello` | `protocol` (`colophon/home-stream/6`), `account`, `home` (the home's member ID), `instance`, `cursor`, `head` (`{seq, digest}` or `null`), `notice` (last notice number, 0 for none), `principal`, `expiresAt` (ms or `null`), `namespaces`, `limits` | First frame. `cursor` is the change-log position after the replay that follows (§4). `limits`: `frameBytes`, `messageBytes`, `subscriptions`, `framesPerSecond`, `bytesPerSecond`, `retainMs`, `pingMs`, `idleMs`, `resumeEntries`. |
+| `hello` | `protocol` (`colophon/home-stream/6`), `account`, `home` (the home's member ID), `instance`, `cursor`, `head` (`{seq, digest}` or `null`), `notice` (last notice number, 0 for none), `principal`, `expiresAt` (ms or `null`), `namespaces`, `limits` | First frame. `cursor` is the change-log position after the replay that follows (§4). `limits`: `frameBytes`, `messageBytes`, `subscriptions`, `framesPerSecond`, `bytesPerSecond`, `retainMs`, `pingMs` (how often the home sends a WebSocket-level ping), `idleMs` (the home closes with 4008 after this long with no pong and no message), `resumeEntries`. Without `after` the home sends no replay, and `cursor` is the live position. |
 | `change` | `cursor`, `entry` | One change-log entry, exactly as `GET {base}/changes` lists it (`{"path","size","sha256"}` or `{"path","deleted":true}`), and the cursor `/changes` gives after it (`<instance>.<position>`). |
 | `head` | `home`, `seq`, `digest` | The home stored a new head of its own over authority entry `seq` with that digest. |
 | `notice` | `notice`, `object`, `kind`, `deadline` | The home queued a notice (§6). `notice` is its number. |
@@ -149,6 +154,16 @@ When the cursor cannot be continued, the home sends `resync` instead of the repl
 - `tooFar`: more than `limits.resumeEntries` (1,024) entries were missed. The client catches up
   with `GET {base}/changes?after=<its cursor>` until it reaches the cursor of a `change` frame
   it holds.
+
+The stream's cursors and `GET {base}/changes` cursors are interchangeable, whatever `namespace`
+filters the `/changes` request named: the position is in the whole change log (a filtered page's
+cursor is the position after the last entry it scanned, not the last it returned). The stream
+itself sends `change` frames for every namespace, so a client that reads only some namespaces
+also gets frames for the others. A connection opened without `after` gets no replay.
+
+Browser WebSocket APIs do not expose WebSocket-level pings. A client that needs to see liveness
+SHOULD send a `ping` frame after `pingMs` without a message and treat `idleMs` of silence as a
+dead connection.
 
 Live frames keep flowing after `resync`. The cursor format is the same either way, so a client
 may also ignore the stream's replay and poll `/changes` from its own cursor; both orders give
@@ -289,7 +304,7 @@ reach the idle timeout. A client MAY also send `ping` frames.
 | Code | Meaning | Client should |
 | --- | --- | --- |
 | 1000 | Normal | |
-| 1001 | The slot was released (`bye` `released`) | Not resume at this home |
+| 1001 | The slot was released (`bye` `released`) | Not resume at this home, when the `bye` (`resume: false`) came first. RFC 6455 1001 is also "going away", which proxies and load balancers send when they restart: a bare 1001 is a drop, and the client resumes |
 | 1008 | Stream authorization ended: revoked, suspended, sessions ended, expired, or lost the role | Not reconnect until its standing changes |
 | 1009 | Message too big | Fix the sender |
 | 1011 | Internal error | Reconnect with backoff |

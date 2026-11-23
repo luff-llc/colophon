@@ -64,3 +64,19 @@ The entire encoded JSON response, including base64 and framing, MUST fit within
 prefix it has assembled and sets `truncated` to `true`. An individual 413
 item counts as a returned path. When `truncated` is `true`, the client MUST
 use a fresh call bound to the new request body to ask for the unreturned suffix.
+A truncated answer holds at least one item: the first item either fits or is
+returned as 413. A client treats an empty truncated answer as malformed.
+
+## Clients and older homes
+
+A home does not advertise batch reads: `GET {base}` names no feature. A 0.5.2
+home answers `POST {base}/records/batch` with 405. Earlier 0.5 homes have no
+such route, and an unappointed 0.6 home answers 404. A client therefore treats
+any 4xx other than 429 as "this home does not serve batches" for the rest of
+its session, and reads singly. It treats a 429, a 5xx or a malformed answer as
+a failure of that batch alone. In every case it reads the batch's records
+singly in the same pass.
+
+The reference relay also serves `POST {base}/records/batch` on 0.3 token slots
+(not homes) with the bearer token alone and no call.
+Each item is a 200, 404 or 413. That route is outside this proposal.

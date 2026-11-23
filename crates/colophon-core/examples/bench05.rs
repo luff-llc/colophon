@@ -405,6 +405,12 @@ fn child(root: &Path, case: &str, run: usize) {
             log,
             requests: vec![],
             account: account.into(),
+            batch: true,
+            batch_budget: 4 * 1024 * 1024,
+            require_calls: false,
+            stream: true,
+            tickets: BTreeMap::new(),
+            minted: 0,
         })
     } else {
         None
