@@ -441,8 +441,8 @@ pub struct SlotPlan {
 }
 
 /// The assertion the host must make for one new PRF route (§7.2): restricted to this
-/// credential, evaluating this salt, over this fresh core challenge. Never a body digest, and
-/// never registration.
+/// credential, evaluating this salt over the expected challenge. See §7.2 for when a
+/// transition possession challenge can be used in place of a fresh random challenge.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PrfRequest {
     /// The controller whose credential must be used.
@@ -462,7 +462,7 @@ pub struct PrfRequest {
 pub struct PrfInput {
     /// The exact `prf.eval.first` input: fresh random bytes.
     pub salt: [u8; 32],
-    /// The exact WebAuthn challenge: fresh random bytes, never a body digest.
+    /// Fresh random bytes or the exact challenge of the accompanying transition possession proof.
     pub challenge: [u8; 32],
 }
 
@@ -622,9 +622,10 @@ impl SlotBuild {
     }
 
     /// [`SlotBuild::begin`] with the salt and challenge of each new PRF route supplied by the
-    /// host, in controller order, instead of drawn from the entropy seed. Each must be fresh
-    /// random bytes; the challenge is never a body digest. `entropy_seed` then supplies only
-    /// the ephemeral keys, part secrets and nonces of [`SlotBuild::finish`].
+    /// host, in controller order, instead of drawn from the entropy seed. Use fresh random
+    /// salts and challenges, or reuse a transition possession challenge for the controller
+    /// just added by that transition (§7.2). `entropy_seed` then supplies only the ephemeral
+    /// keys, part secrets and nonces of [`SlotBuild::finish`].
     pub fn begin_with(
         plan: &SlotPlan,
         target: &SlotTarget,

@@ -75,6 +75,7 @@ nothing and consumes the action; prepare again with fresh entropy. An action fin
 | `begin_keyring` | `add_controllers: list<ControllerSpec>`, `add_slots_json: list<string>` (at most 1 MiB in all), `policy_json`, `signers` | 0 |
 | `begin_add_controller` | `controller: ControllerSpec`, `mode: AddMode`, `signers`, `rule: RuleKind` | 0 |
 | `begin_add_slot` | `signer`, `plan: SlotPlan` | 32 |
+| `begin_add_slot_with_signers` | `entry_signers`, `plan: SlotPlan`, optional `prf_salt` and `prf_challenge` (supply both to reuse a transition possession assertion) | 32 |
 | `begin_rotate_vault` | `signer`, `has_plans: bool`, `plans: list<SlotPlan>` | 64 (new seed, entropy) |
 | `begin_remove_controller` | `remove`, `keep`, `signers`, `rule`, `rotate: bool` | 64 if `rotate`, else 0 |
 | `begin_transition` | `change_json`, `signers`, `rule` (a change with a `grant` is `refused:outOfScope`) | 0 |

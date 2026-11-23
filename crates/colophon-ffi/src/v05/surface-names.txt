@@ -26,6 +26,7 @@ AccountEngine.apply_live
 AccountEngine.apply_paths
 AccountEngine.begin_add_controller
 AccountEngine.begin_add_slot
+AccountEngine.begin_add_slot_with_signers
 AccountEngine.begin_approve
 AccountEngine.begin_blob
 AccountEngine.begin_call

@@ -42,6 +42,71 @@ struct FolderMediumTests {
         try medium.write([MediumWrite(path: "authority/00000001.json", bytes: Data([1]))])
     }
 
+    @Test func aDirectoryPrefixOnlyListsThatSubtree() throws {
+        let root = try folder(); defer { try? FileManager.default.removeItem(at: root) }
+        let medium: any RecordMedium = FolderMedium(folder: root, coordinated: false)
+        try medium.write([MediumWrite(path: "authority/one.json", bytes: Data([1]))])
+        let unrelated = root.appendingPathComponent("authority/.two.json.icloud")
+        try Data().write(to: unrelated)
+        #expect(try medium.listing(prefix: "requests/").isEmpty)
+        try medium.write([
+            MediumWrite(path: "requests/z.json", bytes: Data([2])),
+            MediumWrite(path: "requests/nested/b.json", bytes: Data([3])),
+            MediumWrite(path: "requests/a.json", bytes: Data([4]))
+        ])
+        let scoped = try medium.listing(prefix: "requests/")
+        #expect(scoped.map(\.path) == ["requests/a.json", "requests/nested/b.json", "requests/z.json"])
+        #expect(try medium.listing(prefix: "requests") == scoped)
+        #expect(try medium.listing(prefix: "requests/nested/").map(\.path) == ["requests/nested/b.json"])
+        #expect(throws: StorageError.unavailable("iCloud download pending: .two.json.icloud")) { try medium.listing() }
+
+        try FileManager.default.removeItem(at: unrelated)
+        #expect(try medium.listing(prefix: "") == medium.listing())
+        #expect(try medium.listing(prefix: "requests/a") == Array(scoped.prefix(1)))
+        #expect(try medium.listing(prefix: "requests/a.json/").isEmpty)
+    }
+
+    @Test func aMaximumLengthNameDoesNotRequireARepresentablePlaceholderName() throws {
+        let root = try folder(); defer { try? FileManager.default.removeItem(at: root) }
+        let medium = FolderMedium(folder: root, coordinated: false)
+        let path = "requests/" + String(repeating: "a", count: 255)
+        let bytes = Data([1])
+        try medium.write([MediumWrite(path: path, bytes: bytes)])
+        #expect(try medium.read(path) == bytes)
+        #expect(try medium.listing(prefix: path).map(\.path) == [path])
+    }
+
+    @Test func aDirectoryPrefixRespectsTheStoredCase() throws {
+        let root = try folder(); defer { try? FileManager.default.removeItem(at: root) }
+        let medium = FolderMedium(folder: root, coordinated: false)
+        try medium.write([MediumWrite(path: "Requests/a.json", bytes: Data([1]))])
+        #expect(try medium.listing(prefix: "requests/").isEmpty)
+        #expect(try medium.listing(prefix: "Requests/").map(\.path) == ["Requests/a.json"])
+    }
+
+    @Test func aScopedListingRefusesSymlinksAndChecksPlaceholdersOnTheRequestedPath() throws {
+        let root = try folder(); defer { try? FileManager.default.removeItem(at: root) }
+        let medium = FolderMedium(folder: root, coordinated: false)
+        let requests = root.appendingPathComponent("requests")
+        try FileManager.default.createSymbolicLink(at: requests, withDestinationURL: root)
+        #expect(throws: StorageError.invalidPath("requests")) { try medium.listing(prefix: "requests/nested/") }
+        try FileManager.default.removeItem(at: requests)
+        try Data().write(to: root.appendingPathComponent(".requests.icloud"))
+        #expect(throws: StorageError.unavailable("iCloud download pending: .requests.icloud")) {
+            try medium.listing(prefix: "requests/nested/")
+        }
+    }
+
+    @Test func aScopedListingRefusesAnOverlongEmptyDirectory() throws {
+        let root = try folder(); defer { try? FileManager.default.removeItem(at: root) }
+        let medium = FolderMedium(folder: root, coordinated: false)
+        let component = String(repeating: "a", count: 255)
+        let path = "requests/\(component)/\(component)"
+        try FileManager.default.createDirectory(at: root.appendingPathComponent(path), withIntermediateDirectories: true)
+        #expect(throws: StorageError.invalidPath(path)) { try medium.listing(prefix: "requests/") }
+        #expect(throws: StorageError.invalidPath(path)) { try medium.listing() }
+    }
+
     @Test func pathsThatEscapeOrHideAreRefusedAndSymlinksAreNeverFollowed() throws {
         let root = try folder(); defer { try? FileManager.default.removeItem(at: root) }
         let medium = FolderMedium(folder: root, coordinated: false)
@@ -58,11 +123,16 @@ struct FolderMediumTests {
 
     @Test func anICloudPlaceholderIsUnavailableNeverAbsent() throws {
         let root = try folder(); defer { try? FileManager.default.removeItem(at: root) }
-        let medium = FolderMedium(folder: root, coordinated: false)
-        try FileManager.default.createDirectory(at: root.appendingPathComponent("authority"), withIntermediateDirectories: true)
-        try Data().write(to: root.appendingPathComponent("authority/.00000002.json.icloud"))
+        let library = root.appendingPathComponent("library")
+        let medium = FolderMedium(folder: library, coordinated: false)
+        #expect(try medium.listing().isEmpty)
+        try FileManager.default.createDirectory(at: library.appendingPathComponent("authority"), withIntermediateDirectories: true)
+        try Data().write(to: library.appendingPathComponent("authority/.00000002.json.icloud"))
         #expect(throws: StorageError.unavailable("iCloud download pending: .00000002.json.icloud")) { _ = try medium.listing() }
-        #expect(throws: StorageError.self) { _ = try medium.read("authority/00000002.json") }
+        #expect(throws: StorageError.unavailable("iCloud download pending: .00000002.json.icloud")) { _ = try medium.read("authority/00000002.json") }
+        #expect(throws: StorageError.unavailable("iCloud download pending: .00000002.json.icloud")) {
+            try medium.write([MediumWrite(path: "authority/00000002.json", bytes: Data([2]))])
+        }
     }
 
     @Test(.enabled(if: FileCoordinationProbe.available, FileCoordinationProbe.reason))

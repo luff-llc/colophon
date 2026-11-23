@@ -21,7 +21,7 @@ use crate::v05::members::Request;
 use crate::v05::pairing::ConfirmedPairing;
 use crate::v05::records::{EpochKeys, HeldRecord, Level};
 use crate::v05::slots::{
-    plan_rotation, PrfRequest, PrfResult, Slot, SlotBuild, SlotPlan, SlotTarget,
+    plan_rotation, PrfInput, PrfRequest, PrfResult, Slot, SlotBuild, SlotPlan, SlotTarget,
 };
 use crate::v05::vault::VaultSeed;
 use crate::v05::write::authority::{
@@ -245,8 +245,10 @@ struct PrfStage {
 }
 /// What to do with the built slots.
 enum Plan {
-    /// A self-slot `keyring` entry: slots appended, signed by `signer`.
-    AddSlot { signer: String },
+    /// A `keyring` entry that appends slots to the current vault.
+    AddSlot {
+        entry_signers: Vec<String>,
+    },
     /// A vault entry from a new seed.
     VaultEntry {
         new_seed: VaultSeed,
@@ -815,15 +817,32 @@ impl Account {
         plan: SlotPlan,
         entropy: [u8; 32],
     ) -> Result<PendingAction> {
+        self.begin_add_slot_with_signers(&[signer.to_string()], plan, None, entropy)
+    }
+
+    /// Build a slot for the current vault. The entry signers must meet the keyring add rule
+    /// or be the sole slot holder (§8.4). For a single PRF route, the host may supply the
+    /// salt and challenge from the controller's transition possession ceremony after
+    /// activation (§7.2).
+    pub fn begin_add_slot_with_signers(
+        &self,
+        entry_signers: &[String],
+        plan: SlotPlan,
+        possession: Option<PrfInput>,
+        entropy: [u8; 32],
+    ) -> Result<PendingAction> {
         self.require_writable()?;
         let seed = self.current_seed()?;
         let target = SlotTarget::verified(self.d.auth.state(), seed)?;
-        let build = SlotBuild::begin(&plan, &target, entropy)?;
+        let build = match possession {
+            Some(input) => SlotBuild::begin_with(&plan, &target, &[input], entropy)?,
+            None => SlotBuild::begin(&plan, &target, entropy)?,
+        };
         self.start_prf(
             "slot",
             vec![build],
             Plan::AddSlot {
-                signer: signer.to_string(),
+                entry_signers: entry_signers.to_vec(),
             },
         )
     }
@@ -1031,7 +1050,7 @@ impl Account {
             slots.push(slot);
         }
         let mut out = match plan {
-            Plan::AddSlot { signer } => {
+            Plan::AddSlot { entry_signers } => {
                 let new = self.raw_keyring_edit(|m| {
                     let list = m
                         .get_mut("slots")
@@ -1047,7 +1066,7 @@ impl Account {
                     self.now_ms,
                     Kind::Keyring { keyring: new },
                     self.now_ms,
-                    &[signer],
+                    &entry_signers,
                 )?;
                 self.batch_action("slot", batch)
             }

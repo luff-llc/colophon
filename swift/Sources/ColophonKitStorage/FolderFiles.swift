@@ -94,6 +94,21 @@ final class DirectoryHandle: @unchecked Sendable {
 
     struct Entry { let name: String; let isDirectory: Bool; let isSymlink: Bool; let isRegular: Bool; let info: stat }
 
+    func info(_ name: String) throws -> stat? {
+        var info = stat()
+        guard fstatat(fd, name, &info, AT_SYMLINK_NOFOLLOW) == 0 else {
+            if errno == ENOENT { return nil }
+            throw FolderFiles.failure(errno, name)
+        }
+        return info
+    }
+
+    func openPath() -> String? {
+        var buffer = [UInt8](repeating: 0, count: Int(MAXPATHLEN))
+        guard fcntl(fd, F_GETPATH, &buffer) == 0 else { return nil }
+        return String(decoding: buffer.prefix(while: { $0 != 0 }), as: UTF8.self)
+    }
+
     /// The entries of this directory (not `.` or `..`), with `lstat` information taken relative to the handle.
     func entries() throws -> [Entry] {
         let copy = dup(fd)
@@ -112,11 +127,7 @@ final class DirectoryHandle: @unchecked Sendable {
                 $0.withMemoryRebound(to: CChar.self, capacity: Int(MAXPATHLEN)) { String(cString: $0) }
             }
             if name == "." || name == ".." { continue }
-            var info = stat()
-            guard fstatat(fd, name, &info, AT_SYMLINK_NOFOLLOW) == 0 else {
-                if errno == ENOENT { continue }
-                throw FolderFiles.failure(errno, name)
-            }
+            guard let info = try info(name) else { continue }
             let kind = info.st_mode & S_IFMT
             out.append(Entry(name: name, isDirectory: kind == S_IFDIR, isSymlink: kind == S_IFLNK, isRegular: kind == S_IFREG, info: info))
         }

@@ -142,6 +142,7 @@ class PasskeyController(private val passkey: PasskeyProvider, private val author
     private val descriptor = Json.obj(passkey.descriptor().toString(Charsets.UTF_8)) ?: throw IllegalArgumentException("not a passkey descriptor")
     private val signing = Base64.getDecoder().decode(descriptor.string("signing") ?: throw IllegalArgumentException("no signing point"))
     override val form: SignForm get() = SignForm.WEBAUTHN
+    override val supportsPrf: Boolean get() = true
     override suspend fun publicKeys(): PublicKeys = PublicKeys(signing.copyOf(), ByteArray(0))
     override suspend fun keyDescriptor(): KeyDescriptorView = KeyDescriptorView(
         SignForm.WEBAUTHN, signing.copyOf(), null, descriptor.string("rp"),
