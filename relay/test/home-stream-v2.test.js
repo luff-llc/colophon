@@ -111,11 +111,17 @@ test('every wire-vector frame passes the home module as the relay forwards it', 
 });
 
 /** A wire-vector frame moved to the fixture's account, the `notes` namespace and sender `from`:
- * a real codec frame's shape and bytes (delegation included), with only routed values changed.
- * The home does not verify it, and no receiver here opens it. */
+ * a real codec frame's shape and bytes, with only routed values changed. Its delegation body is
+ * moved the same way, so it names `from` and still names the frame's session key. The home
+ * verifies no signature, and no receiver here opens the frame. */
 function codecFrame(index, from) {
-  const value = { ...JSON.parse(vectors.frames[index].frame), account: fixture.account, namespace: 'notes', from: fixture[from].id };
+  const moved = { account: fixture.account, namespace: 'notes' };
+  const value = { ...JSON.parse(vectors.frames[index].frame), ...moved, from: fixture[from].id };
   delete value.to;
+  if (value.delegation) {
+    const body = { ...JSON.parse(Buffer.from(value.delegation.body, 'base64')), ...moved, member: fixture[from].id };
+    value.delegation = { ...value.delegation, body: Buffer.from(canonical(body)).toString('base64') };
+  }
   const text = canonical(value);
   assert.equal(JSON.stringify(JSON.parse(text)), text);
   return text;
@@ -149,6 +155,47 @@ testHome('a codec frame reaches receivers byte for byte, live and retained', asy
   assert.deepEqual([(await a.next('error')).code], ['badFrame']);
   await settle(a, b);
   assert.equal(b.all('session').length, 2);
+}, { stream: { framesPerSecond: 1000, frameBurst: 1000 } });
+
+testHome('deeply nested client messages are refused before parsing and the relay keeps serving', async ({ open, slot }) => {
+  const [a, b] = [await open('a'), await open('b')];
+  await subscribe(b);
+  const deep = (n) => '['.repeat(n) + ']'.repeat(n);
+  // A session frame whose delegation nests thousands deep, within the message size limit.
+  const live = JSON.parse(codecFrame(0, 'a'));
+  const text = canonical(live).replace(/"delegation":\{[^}]*\}/, `"delegation":{"body":${deep(8_000)}}`);
+  assert.ok(text.length < 20_480);
+  a.send(`{"type":"session","id":"deep","frame":${text}}`);
+  assert.equal((await a.next('error')).code, 'badFrame');
+  // Non-session messages too, whatever the type.
+  for (const type of ['subscribe', 'unsubscribe', 'ping', 'teleport']) {
+    a.send(`{"type":"${type}","namespace":${deep(8_000)},"cell":"now-playing","t":1}`);
+    assert.equal((await a.next('error')).code, 'badFrame', type);
+  }
+  // Brackets inside strings are not nesting.
+  a.send({ type: 'ping', t: 7, pad: '[{'.repeat(4_000) });
+  assert.equal((await a.next('pong', (f) => f.t === 7)).t, 7);
+  // The relay still serves: the connection and other members are unaffected.
+  a.send(`{"type":"session","frame":${codecFrame(0, 'a')}}`);
+  await b.next('session');
+  assert.equal(a.ws.readyState, a.ws.OPEN);
+  assert.ok((await slot()).home.stream.conns.size >= 2);
+}, { stream: { framesPerSecond: 1000, frameBurst: 1000, bytesPerSecond: 1 << 30, byteBurst: 1 << 30 } });
+
+testHome('session byte budgets count UTF-8 bytes; no multi-byte frame passes the codec grammar', async ({ open, slot }) => {
+  const [a, b] = [await open('a'), await open('b')];
+  await subscribe(b);
+  // Every field of a codec frame is ASCII by its grammar, so multi-byte text is refused.
+  const multi = { ...JSON.parse(codecFrame(0, 'a')), cell: 'now-plaÿing' };
+  a.send({ type: 'session', id: 'mb', frame: JSON.parse(canonical(multi)) });
+  assert.equal((await a.next('error')).code, 'badFrame');
+  // An accepted frame is charged and retained at its byte length.
+  const kept = codecFrame(vectors.frames.findIndex((v) => v.retain), 'a');
+  a.send(`{"type":"session","frame":${kept}}`);
+  await b.next('session');
+  const { stream } = (await slot()).home;
+  const [entry] = [...stream.retained.values()];
+  assert.equal(entry.size, Buffer.byteLength(kept));
 }, { stream: { framesPerSecond: 1000, frameBurst: 1000 } });
 
 testHome('an addressed frame reaches every other subscriber but not the unentitled or unsubscribed', async ({ open }) => {

@@ -195,33 +195,45 @@ as a JSON value, not as a string. The home module (`session_frame`, from
 forward it, in order:
 
 1. the encoded frame is at most **16,384 bytes** (`tooLarge`);
-2. the frame is well formed (`badFrame`):
+2. the frame passes the session codec's own parser, the one a receiver applies before anything
+   cryptographic (`WireFrame::parse`, and `Delegation::parse_carried` for a carried delegation;
+   wire doc §3.1) (`badFrame`):
    - strict JSON (0.5 §2.3: no duplicate names, no lone surrogates, nesting at most 64), an
      object, and byte-identical to its canonical encoding (0.5 §2.1);
-   - no top-level field outside the set above, as a receiver refuses unknown fields;
-   - `protocol` is `colophon/session/6`; `account` a string; `namespace` and `cell` by their
-     grammars; `from` and an optional `to` member IDs; an optional `retain` that is only `true`;
-   - `key`, `ciphertext` and `signature` are present as strings, `n` and `epoch` as integers
-     from 1 to 2^53 − 1, and `delegation`, when present, is an object;
+   - exactly the fields above, as a receiver refuses unknown and missing fields;
+   - `protocol` is `colophon/session/6`; `account` 64 lowercase hex; `namespace` and `cell` by
+     their grammars; `from`, `key` and an optional `to` key IDs; `n` and `epoch` integers from 1
+     to 2^53 − 1; an optional `retain` that is only `true`;
+   - `ciphertext` canonical base64 of at least the 16-byte tag; `signature` canonical base64 of
+     64 bytes;
+   - `delegation`, when present, a raw envelope of at most 2,048 bytes whose body is a
+     well-formed `colophon/session-key/6` body (sessions §S2) naming `from` and `key`;
 3. `account` is the home's account (`account`);
 4. `from` is the connection's authenticated member (`from`);
 5. the member is entitled to `namespace` (`notEntitled`).
 
-`key`, `n`, `epoch`, `ciphertext`, `signature` and `delegation` are opaque beyond their JSON
-type. The home does not decode base64, check a key ID, verify the signature or the delegation,
-or track `n`; a receiver does all of that (sessions §S3). The home keeps nothing of them beyond
-the forwarded frame (and a retained frame, §5.3). Any other shape, including a raw-signed
-`{"body","signature"}` envelope, is `badFrame`.
+The home applies the receiver's parser and nothing after it: it verifies no signature (the
+frame's or the delegation's), checks no delegation window or standing, decrypts nothing and
+tracks no `n`; a receiver does all of that (sessions §S3). So it forwards and retains only frames
+a receiver can parse, and keeps nothing of them beyond the forwarded frame (and a retained frame,
+§5.3). Any other shape, including a raw-signed `{"body","signature"}` envelope, is `badFrame`.
 
-**Delivered byte for byte.** A receiver's codec refuses non-canonical bytes, so the home
-forwards only a frame whose serialisation it checked as canonical, and delivers that same
-serialisation: the `frame` value of every `session` message it sends (live, or retained on
-subscribe) is the checked text exactly. A codec frame holds only strings, `true`, integers up to
-2^53 − 1 and the delegation object of two strings, so a carrier that parses the client's
-message and serialises the frame again (the reference relay does, with `JSON.parse` and
-`JSON.stringify`) reproduces the sender's bytes; a client message with duplicate names, which
-such a parser collapses, cannot yield a frame other than the one checked. A receiver hands the
-`frame` value's text, or its canonical encoding (the same bytes), to its codec.
+Before parsing, the reference relay refuses with `badFrame` any client message, of any type,
+that nests objects and arrays more than 65 deep (a frame's 64 plus the message), so no client
+structure can exhaust the parser's or the serialiser's stack. A message that makes the host code
+or the module fail also answers `badFrame`. The session budgets (the fan-out caps below) and the retained
+frames' sizes count UTF-8 bytes of the checked frame; every field a frame can carry is ASCII by
+its grammar.
+
+**What a receiver gets.** A receiver's codec refuses non-canonical bytes. The home checks the
+frame in the form it will forward: the reference relay parses the client's message and
+serialises `frame` again, so a client's syntax (spacing, escapes, duplicate names, which the
+message parser collapses) is normalised before the check, and the result is refused unless it is
+canonical. What the home delivers, live or retained on subscribe, is that checked text exactly:
+the `frame` value of each `session` message. For a conforming sender this is byte-identical to
+what it sent, because a codec frame holds only ASCII strings, `true`, integers up to 2^53 − 1 and
+the delegation envelope of two strings, which parsing and serialising again reproduce. A receiver
+hands the `frame` value's text, or its canonical encoding (the same bytes), to its codec.
 
 The home then sends `{"type":"session","frame":…}` to every connection that is open, belongs to
 a member other than `from` (never back to the sender, nor to the sender's other connections), is
