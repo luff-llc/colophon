@@ -19,6 +19,7 @@ pub mod protocol;
 pub mod records;
 pub mod slots;
 pub mod v05;
+pub mod v06;
 pub mod vault;
 pub mod verification;
 

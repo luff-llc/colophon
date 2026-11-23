@@ -1,0 +1,642 @@
+{
+  "description": "keyed frames: a's join hello reaches b, which has no window for a's key and answers echoing a's fresh; that answer opens a's window for b's key, and a answers echoing b's fresh, which opens b's window; a frame below a window's floor is then dropped (§S3 freshness, R4).",
+  "final": [
+    {
+      "digest": "161d8bf1fd174e9276ef7121daad1d28b1669633bc5247feaceb73e7d4917598",
+      "member": "a",
+      "view": {
+        "accepted": {
+          "holder": "a",
+          "rank": 0,
+          "term": 1
+        },
+        "gated": false,
+        "holder": "a",
+        "holding": true,
+        "seq": 0,
+        "state": "QQ==",
+        "synced": true
+      }
+    },
+    {
+      "digest": "51cad8f00519a409478ca9dc683f87a898681da00d91cc514bfccf1ef409caf4",
+      "member": "b",
+      "view": {
+        "accepted": {
+          "holder": "a",
+          "rank": 0,
+          "term": 1
+        },
+        "gated": false,
+        "holder": "a",
+        "holding": false,
+        "seq": 0,
+        "state": "QQ==",
+        "synced": true
+      }
+    }
+  ],
+  "fixes": {
+    "answerLesser": true,
+    "appendBound": true,
+    "askResend": true,
+    "byeResend": true,
+    "evidence": false,
+    "evidenceKeepsWant": false,
+    "evidencePush": false,
+    "evidenceRefresh": false,
+    "freshnessProbe": true,
+    "helloCorrection": true,
+    "livenessHolderFrames": true,
+    "passAck": true,
+    "persistRelease": true,
+    "rank1FromHolder": true,
+    "renewGuard": true,
+    "renewNeedsContact": true,
+    "renewWider": true,
+    "reopenChallenge": true,
+    "seenUnsynced": true,
+    "senderChecks": true,
+    "stateReports": true,
+    "submitRetry": true,
+    "windowCap": true,
+    "writerClaims": true,
+    "yieldedAck": true
+  },
+  "format": "colophon/session-vectors/6",
+  "members": [
+    {
+      "canWrite": true,
+      "freshSeed": "e00961cc04e55c4533144d93fda113d9",
+      "id": "a",
+      "persisted": null
+    },
+    {
+      "canWrite": true,
+      "freshSeed": "04f5d0e8d9ed2af7d1bb4641b2e4bd62",
+      "id": "b",
+      "persisted": null
+    }
+  ],
+  "name": "freshness",
+  "policy": {
+    "askTimeoutMs": 1500,
+    "beatMs": 5000,
+    "fold": "latest",
+    "holderTimeoutMs": 15000,
+    "maxPayload": 8192,
+    "presenceTimeoutMs": 15000,
+    "retainMs": 60000,
+    "tail": 256,
+    "take": "free"
+  },
+  "steps": [
+    {
+      "at": 0,
+      "input": {
+        "input": "entitled",
+        "writers": [
+          "a",
+          "b"
+        ]
+      },
+      "member": "a",
+      "outputs": []
+    },
+    {
+      "at": 0,
+      "input": {
+        "command": {
+          "command": "join",
+          "state": null
+        },
+        "input": "app"
+      },
+      "member": "a",
+      "outputs": [
+        {
+          "frame": {
+            "body": {
+              "echo": [],
+              "fresh": "3iYwu-vxUSNjsUs1onEEHQ",
+              "kind": "hello",
+              "lapsed": false,
+              "seen": null
+            },
+            "from": "a"
+          },
+          "output": "send"
+        }
+      ]
+    },
+    {
+      "at": 0,
+      "input": {
+        "input": "entitled",
+        "writers": [
+          "a",
+          "b"
+        ]
+      },
+      "member": "b",
+      "outputs": []
+    },
+    {
+      "at": 0,
+      "input": {
+        "command": {
+          "command": "join",
+          "state": null
+        },
+        "input": "app"
+      },
+      "member": "b",
+      "outputs": [
+        {
+          "frame": {
+            "body": {
+              "echo": [],
+              "fresh": "yvv8YHYqxK3F14fS_5oLOQ",
+              "kind": "hello",
+              "lapsed": false,
+              "seen": null
+            },
+            "from": "b"
+          },
+          "output": "send"
+        }
+      ]
+    },
+    {
+      "at": 0,
+      "input": {
+        "frame": {
+          "body": {
+            "echo": [],
+            "fresh": "3iYwu-vxUSNjsUs1onEEHQ",
+            "kind": "hello",
+            "lapsed": false,
+            "seen": null
+          },
+          "from": "a"
+        },
+        "input": "frame",
+        "key": "k-a",
+        "n": 1,
+        "writer": true
+      },
+      "member": "b",
+      "outputs": [
+        {
+          "frame": {
+            "body": {
+              "echo": [
+                "3iYwu-vxUSNjsUs1onEEHQ"
+              ],
+              "fresh": "Xgm07g9q9uILg5FzBHjLqw",
+              "kind": "hello",
+              "lapsed": false,
+              "seen": null
+            },
+            "from": "b",
+            "to": "a"
+          },
+          "output": "send"
+        }
+      ]
+    },
+    {
+      "at": 0,
+      "input": {
+        "frame": {
+          "body": {
+            "echo": [],
+            "fresh": "yvv8YHYqxK3F14fS_5oLOQ",
+            "kind": "hello",
+            "lapsed": false,
+            "seen": null
+          },
+          "from": "b"
+        },
+        "input": "frame",
+        "key": "k-b",
+        "n": 1,
+        "writer": true
+      },
+      "member": "a",
+      "outputs": [
+        {
+          "frame": {
+            "body": {
+              "echo": [
+                "yvv8YHYqxK3F14fS_5oLOQ"
+              ],
+              "fresh": "VhQ6eFVYrIVzFNPyMhaiyQ",
+              "kind": "hello",
+              "lapsed": false,
+              "seen": null
+            },
+            "from": "a",
+            "to": "b"
+          },
+          "output": "send"
+        }
+      ]
+    },
+    {
+      "at": 0,
+      "input": {
+        "frame": {
+          "body": {
+            "echo": [
+              "3iYwu-vxUSNjsUs1onEEHQ"
+            ],
+            "fresh": "Xgm07g9q9uILg5FzBHjLqw",
+            "kind": "hello",
+            "lapsed": false,
+            "seen": null
+          },
+          "from": "b",
+          "to": "a"
+        },
+        "input": "frame",
+        "key": "k-b",
+        "n": 2,
+        "writer": true
+      },
+      "member": "a",
+      "outputs": [
+        {
+          "frame": {
+            "body": {
+              "echo": [
+                "Xgm07g9q9uILg5FzBHjLqw"
+              ],
+              "fresh": "3uTtRWpMR1C_XKJOCGfq1Q",
+              "kind": "hello",
+              "lapsed": false,
+              "seen": null
+            },
+            "from": "a",
+            "to": "b"
+          },
+          "output": "send"
+        }
+      ]
+    },
+    {
+      "at": 0,
+      "input": {
+        "frame": {
+          "body": {
+            "echo": [
+              "yvv8YHYqxK3F14fS_5oLOQ"
+            ],
+            "fresh": "VhQ6eFVYrIVzFNPyMhaiyQ",
+            "kind": "hello",
+            "lapsed": false,
+            "seen": null
+          },
+          "from": "a",
+          "to": "b"
+        },
+        "input": "frame",
+        "key": "k-a",
+        "n": 2,
+        "writer": true
+      },
+      "member": "b",
+      "outputs": [
+        {
+          "frame": {
+            "body": {
+              "echo": [
+                "VhQ6eFVYrIVzFNPyMhaiyQ"
+              ],
+              "fresh": "bOP71a0cAPH4gM1x4zdVsA",
+              "kind": "hello",
+              "lapsed": false,
+              "seen": null
+            },
+            "from": "b",
+            "to": "a"
+          },
+          "output": "send"
+        }
+      ]
+    },
+    {
+      "at": 0,
+      "input": {
+        "frame": {
+          "body": {
+            "echo": [
+              "Xgm07g9q9uILg5FzBHjLqw"
+            ],
+            "fresh": "3uTtRWpMR1C_XKJOCGfq1Q",
+            "kind": "hello",
+            "lapsed": false,
+            "seen": null
+          },
+          "from": "a",
+          "to": "b"
+        },
+        "input": "frame",
+        "key": "k-a",
+        "n": 3,
+        "writer": true
+      },
+      "member": "b",
+      "outputs": []
+    },
+    {
+      "at": 0,
+      "input": {
+        "frame": {
+          "body": {
+            "echo": [
+              "VhQ6eFVYrIVzFNPyMhaiyQ"
+            ],
+            "fresh": "bOP71a0cAPH4gM1x4zdVsA",
+            "kind": "hello",
+            "lapsed": false,
+            "seen": null
+          },
+          "from": "b",
+          "to": "a"
+        },
+        "input": "frame",
+        "key": "k-b",
+        "n": 3,
+        "writer": true
+      },
+      "member": "a",
+      "outputs": []
+    },
+    {
+      "at": 10,
+      "input": {
+        "command": {
+          "command": "take",
+          "state": "QQ=="
+        },
+        "input": "app"
+      },
+      "member": "a",
+      "outputs": [
+        {
+          "claim": {
+            "holder": "a",
+            "rank": 0,
+            "term": 1
+          },
+          "output": "persist"
+        },
+        {
+          "frame": {
+            "body": {
+              "claim": {
+                "holder": "a",
+                "rank": 0,
+                "term": 1
+              },
+              "kind": "take"
+            },
+            "from": "a"
+          },
+          "output": "send"
+        },
+        {
+          "frame": {
+            "body": {
+              "claim": {
+                "holder": "a",
+                "rank": 0,
+                "term": 1
+              },
+              "kind": "state",
+              "seq": 0,
+              "snapshot": "QQ=="
+            },
+            "from": "a",
+            "retain": true
+          },
+          "output": "send"
+        },
+        {
+          "event": {
+            "claim": {
+              "holder": "a",
+              "rank": 0,
+              "term": 1
+            },
+            "event": "becameHolder",
+            "snapshot": "QQ==",
+            "via": "take"
+          },
+          "output": "event"
+        }
+      ]
+    },
+    {
+      "at": 20,
+      "input": {
+        "frame": {
+          "body": {
+            "claim": {
+              "holder": "a",
+              "rank": 0,
+              "term": 1
+            },
+            "kind": "take"
+          },
+          "from": "a"
+        },
+        "input": "frame",
+        "key": "k-a",
+        "n": 4,
+        "writer": true
+      },
+      "member": "b",
+      "outputs": [
+        {
+          "claim": {
+            "holder": "a",
+            "rank": 0,
+            "term": 1
+          },
+          "output": "persist"
+        },
+        {
+          "event": {
+            "claim": {
+              "holder": "a",
+              "rank": 0,
+              "term": 1
+            },
+            "event": "holderChanged"
+          },
+          "output": "event"
+        },
+        {
+          "frame": {
+            "body": {
+              "echo": [
+                "VhQ6eFVYrIVzFNPyMhaiyQ",
+                "3uTtRWpMR1C_XKJOCGfq1Q"
+              ],
+              "fresh": "5btSaoab7BElhy8cUxtYJw",
+              "kind": "hello",
+              "lapsed": false,
+              "seen": {
+                "holder": "a",
+                "rank": 0,
+                "seq": null,
+                "term": 1
+              }
+            },
+            "from": "b",
+            "to": "a"
+          },
+          "output": "send"
+        }
+      ]
+    },
+    {
+      "at": 20,
+      "input": {
+        "frame": {
+          "body": {
+            "claim": {
+              "holder": "a",
+              "rank": 0,
+              "term": 1
+            },
+            "kind": "state",
+            "seq": 0,
+            "snapshot": "QQ=="
+          },
+          "from": "a",
+          "retain": true
+        },
+        "input": "frame",
+        "key": "k-a",
+        "n": 5,
+        "writer": true
+      },
+      "member": "b",
+      "outputs": [
+        {
+          "event": {
+            "claim": {
+              "holder": "a",
+              "rank": 0,
+              "term": 1
+            },
+            "event": "snapshot",
+            "seq": 0,
+            "snapshot": "QQ=="
+          },
+          "output": "event"
+        }
+      ]
+    },
+    {
+      "at": 20,
+      "input": {
+        "frame": {
+          "body": {
+            "echo": [
+              "VhQ6eFVYrIVzFNPyMhaiyQ",
+              "3uTtRWpMR1C_XKJOCGfq1Q"
+            ],
+            "fresh": "5btSaoab7BElhy8cUxtYJw",
+            "kind": "hello",
+            "lapsed": false,
+            "seen": {
+              "holder": "a",
+              "rank": 0,
+              "seq": null,
+              "term": 1
+            }
+          },
+          "from": "b",
+          "to": "a"
+        },
+        "input": "frame",
+        "key": "k-b",
+        "n": 4,
+        "writer": true
+      },
+      "member": "a",
+      "outputs": [
+        {
+          "frame": {
+            "body": {
+              "claim": {
+                "holder": "a",
+                "rank": 0,
+                "term": 1
+              },
+              "kind": "state",
+              "seq": 0,
+              "snapshot": "QQ=="
+            },
+            "from": "a",
+            "retain": true,
+            "to": "b"
+          },
+          "output": "send"
+        }
+      ]
+    },
+    {
+      "at": 20,
+      "input": {
+        "frame": {
+          "body": {
+            "claim": {
+              "holder": "a",
+              "rank": 0,
+              "term": 1
+            },
+            "kind": "state",
+            "seq": 0,
+            "snapshot": "QQ=="
+          },
+          "from": "a",
+          "retain": true,
+          "to": "b"
+        },
+        "input": "frame",
+        "key": "k-a",
+        "n": 6,
+        "writer": true
+      },
+      "member": "b",
+      "outputs": []
+    },
+    {
+      "at": 30,
+      "input": {
+        "frame": {
+          "body": {
+            "claim": {
+              "holder": "a",
+              "rank": 0,
+              "term": 1
+            },
+            "kind": "take"
+          },
+          "from": "a"
+        },
+        "input": "frame",
+        "key": "k-a",
+        "n": 1,
+        "writer": true
+      },
+      "member": "b",
+      "outputs": []
+    }
+  ]
+}

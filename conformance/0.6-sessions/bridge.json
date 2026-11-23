@@ -1,0 +1,263 @@
+{
+  "description": "§S9 bridging on a four-member chain: first-seen forwarding on every other link, nothing back, nothing twice, nothing more than 128 below the window's highest n; to-addressed frames are bridged too.",
+  "format": "colophon/bridge-vectors/6",
+  "links": [
+    {
+      "from": "m0",
+      "id": 0,
+      "to": "m1"
+    },
+    {
+      "from": "m1",
+      "id": 1,
+      "to": "m0"
+    },
+    {
+      "from": "m1",
+      "id": 2,
+      "to": "m2"
+    },
+    {
+      "from": "m2",
+      "id": 3,
+      "to": "m1"
+    },
+    {
+      "from": "m2",
+      "id": 4,
+      "to": "m3"
+    },
+    {
+      "from": "m3",
+      "id": 5,
+      "to": "m2"
+    }
+  ],
+  "members": [
+    "m0",
+    "m1",
+    "m2",
+    "m3"
+  ],
+  "steps": [
+    {
+      "member": "m0",
+      "send": {
+        "frame": {
+          "body": {
+            "kind": "ping",
+            "t": 1
+          },
+          "from": "m0"
+        },
+        "key": "k-m0",
+        "n": 1
+      },
+      "transmit": [
+        0
+      ]
+    },
+    {
+      "deliver": true,
+      "forward": [
+        2
+      ],
+      "member": "m1",
+      "receive": {
+        "link": 1,
+        "wire": {
+          "frame": {
+            "body": {
+              "kind": "ping",
+              "t": 1
+            },
+            "from": "m0"
+          },
+          "key": "k-m0",
+          "n": 1
+        }
+      }
+    },
+    {
+      "deliver": true,
+      "forward": [
+        4
+      ],
+      "member": "m2",
+      "receive": {
+        "link": 3,
+        "wire": {
+          "frame": {
+            "body": {
+              "kind": "ping",
+              "t": 1
+            },
+            "from": "m0"
+          },
+          "key": "k-m0",
+          "n": 1
+        }
+      }
+    },
+    {
+      "deliver": true,
+      "forward": [],
+      "member": "m3",
+      "receive": {
+        "link": 5,
+        "wire": {
+          "frame": {
+            "body": {
+              "kind": "ping",
+              "t": 1
+            },
+            "from": "m0"
+          },
+          "key": "k-m0",
+          "n": 1
+        }
+      }
+    },
+    {
+      "member": "m0",
+      "send": {
+        "frame": {
+          "body": {
+            "kind": "ping",
+            "t": 2
+          },
+          "from": "m0",
+          "to": "m3"
+        },
+        "key": "k-m0",
+        "n": 2
+      },
+      "transmit": [
+        0
+      ]
+    },
+    {
+      "deliver": true,
+      "forward": [
+        2
+      ],
+      "member": "m1",
+      "receive": {
+        "link": 1,
+        "wire": {
+          "frame": {
+            "body": {
+              "kind": "ping",
+              "t": 2
+            },
+            "from": "m0",
+            "to": "m3"
+          },
+          "key": "k-m0",
+          "n": 2
+        }
+      }
+    },
+    {
+      "deliver": true,
+      "forward": [
+        4
+      ],
+      "member": "m2",
+      "receive": {
+        "link": 3,
+        "wire": {
+          "frame": {
+            "body": {
+              "kind": "ping",
+              "t": 2
+            },
+            "from": "m0",
+            "to": "m3"
+          },
+          "key": "k-m0",
+          "n": 2
+        }
+      }
+    },
+    {
+      "deliver": true,
+      "forward": [],
+      "member": "m3",
+      "receive": {
+        "link": 5,
+        "wire": {
+          "frame": {
+            "body": {
+              "kind": "ping",
+              "t": 2
+            },
+            "from": "m0",
+            "to": "m3"
+          },
+          "key": "k-m0",
+          "n": 2
+        }
+      }
+    },
+    {
+      "deliver": false,
+      "forward": [],
+      "member": "m2",
+      "receive": {
+        "link": 3,
+        "wire": {
+          "frame": {
+            "body": {
+              "kind": "ping",
+              "t": 1
+            },
+            "from": "m0"
+          },
+          "key": "k-m0",
+          "n": 1
+        }
+      }
+    },
+    {
+      "deliver": true,
+      "forward": [
+        4
+      ],
+      "member": "m2",
+      "receive": {
+        "link": 3,
+        "wire": {
+          "frame": {
+            "body": {
+              "kind": "ping",
+              "t": 3
+            },
+            "from": "m0"
+          },
+          "key": "k-m0",
+          "n": 200
+        }
+      }
+    },
+    {
+      "deliver": false,
+      "forward": [],
+      "member": "m2",
+      "receive": {
+        "link": 3,
+        "wire": {
+          "frame": {
+            "body": {
+              "kind": "ping",
+              "t": 4
+            },
+            "from": "m0"
+          },
+          "key": "k-m0",
+          "n": 71
+        }
+      }
+    }
+  ]
+}
