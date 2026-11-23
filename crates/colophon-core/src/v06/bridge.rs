@@ -1,15 +1,16 @@
-//! §S9 bridging (revision 7), as a small sans-IO component of the carrier layer.
+//! §S9 bridging (revision 8), as a small sans-IO component of the carrier layer.
 //!
-//! A member with more than one carrier or peer forwards every frame it accepts for the first
-//! time, unchanged, on each of its other links; never back where it came from and never a
-//! frame it has already accepted. The memory of "already accepted" is the §S3 window per
-//! sender key: the highest `n` seen and which of the 128 values below it were seen. A frame
-//! addressed with `to` is bridged the same way; the session layer ignores it unless it names
-//! this member. Frames are signed by their origin, so this layer never changes them.
+//! Every member bridges. A frame that passes the §S3 outer checks up to and including the
+//! frame signature under an accepted session key (the caller says so with `verified`) is
+//! forwarded the first time this member sees its `(key, n)`, unchanged, on each of its other
+//! links; never back where it came from and never twice. The forwarding memory is a 128-wide
+//! window per key, kept apart from the delivery window, and a frame older than it is not
+//! forwarded. Forwarding does not wait for this member's own freshness exchange with the
+//! origin: freshness (in `super::session`) governs only what this member acts on.
 //!
-//! The bridge decides only delivery and forwarding. Signature checks, the freshness
-//! handshake and sealing are the codec's; the session machine (`super::session`) sees each
-//! frame at most once per bridge incarnation.
+//! A frame lost beyond the first hop is not sent again under the same `n`; the session layer
+//! repairs loss with new frames. A frame addressed with `to` is bridged the same way; the
+//! session layer ignores it unless it names this member.
 use super::session::{Frame, MemberId};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -81,7 +82,10 @@ pub struct Received {
 pub struct Bridge {
     me: MemberId,
     links: BTreeSet<LinkId>,
+    /// Delivery window per key: what was handed to the session layer.
     windows: BTreeMap<String, Window>,
+    /// Forwarding window per key (§S9, revision 8), separate from the delivery window.
+    forwarded: BTreeMap<String, Window>,
     /// Whether to bridge at all (off: deliver only; for revision 6 comparisons).
     bridging: bool,
 }
@@ -93,6 +97,7 @@ impl Bridge {
             me: me.to_owned(),
             links: BTreeSet::new(),
             windows: BTreeMap::new(),
+            forwarded: BTreeMap::new(),
             bridging: true,
         }
     }
@@ -114,35 +119,47 @@ impl Bridge {
     /// The process restarted: every window is lost (a new session key also starts).
     pub fn restart(&mut self) {
         self.windows.clear();
+        self.forwarded.clear();
+    }
+    /// Forget a key whose delegation expired or whose member is no longer accepted.
+    pub fn forget_key(&mut self, key: &str) {
+        self.windows.remove(key);
+        self.forwarded.remove(key);
+    }
+    /// The number of keys with a forwarding window.
+    pub fn forwarding_keys(&self) -> usize {
+        self.forwarded.len()
     }
     /// This member sends a frame of its own: transmit on every link. Its own window records
     /// it, so a copy that comes back is dropped.
     pub fn send(&mut self, wire: Wire) -> Vec<(LinkId, Wire)> {
         self.windows.entry(wire.key.clone()).or_default().admit(wire.n);
+        self.forwarded.entry(wire.key.clone()).or_default().admit(wire.n);
         self.links.iter().map(|l| (*l, wire.clone())).collect()
     }
-    /// A frame arrived on `link`.
+    /// A frame arrived on `link`. `verified`: it passed the §S3 outer checks through the
+    /// frame signature under an accepted session key; otherwise it is dropped.
     pub fn receive(&mut self, link: LinkId, wire: Wire) -> Received {
-        if wire.frame.from == self.me {
+        self.receive_checked(link, wire, true)
+    }
+    /// As [`Bridge::receive`], saying whether the frame verified.
+    pub fn receive_checked(&mut self, link: LinkId, wire: Wire, verified: bool) -> Received {
+        if wire.frame.from == self.me || !verified {
             return Received::default();
         }
-        match self.windows.entry(wire.key.clone()).or_default().admit(wire.n) {
-            Seen::New => {
-                let forward = if self.bridging {
-                    self.links
-                        .iter()
-                        .filter(|l| **l != link)
-                        .map(|l| (*l, wire.clone()))
-                        .collect()
-                } else {
-                    Vec::new()
-                };
-                Received {
-                    deliver: Some(wire),
-                    forward,
-                }
-            }
-            Seen::Duplicate | Seen::TooOld => Received::default(),
-        }
+        let forward = match self.forwarded.entry(wire.key.clone()).or_default().admit(wire.n) {
+            Seen::New if self.bridging => self
+                .links
+                .iter()
+                .filter(|l| **l != link)
+                .map(|l| (*l, wire.clone()))
+                .collect(),
+            _ => Vec::new(),
+        };
+        let deliver = match self.windows.entry(wire.key.clone()).or_default().admit(wire.n) {
+            Seen::New => Some(wire),
+            Seen::Duplicate | Seen::TooOld => None,
+        };
+        Received { deliver, forward }
     }
 }

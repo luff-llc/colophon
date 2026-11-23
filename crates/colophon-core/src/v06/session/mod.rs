@@ -174,6 +174,8 @@ pub struct Session {
     fresh_count: u64,
     own_fresh: VecDeque<Id>,
     windows: BTreeMap<(MemberId, String), u64>,
+    /// When a freshness probe was last sent to each member (finding B5).
+    probed: BTreeMap<MemberId, u64>,
     /// Keys with windows per member, oldest first (revision 7 cap).
     window_order: BTreeMap<MemberId, VecDeque<String>>,
     answered: BTreeMap<MemberId, Id>,
@@ -242,6 +244,7 @@ impl Session {
             own_fresh: VecDeque::new(),
             windows: BTreeMap::new(),
             window_order: BTreeMap::new(),
+            probed: BTreeMap::new(),
             answered: BTreeMap::new(),
             to_echo: VecDeque::new(),
         }
@@ -447,6 +450,9 @@ impl Session {
         self.own_fresh.hash(h);
         self.windows.hash(h);
         self.window_order.hash(h);
+        for (k, t) in &self.probed {
+            (k, age(*t)).hash(h);
+        }
         self.answered.hash(h);
         self.to_echo.hash(h);
     }
@@ -650,6 +656,16 @@ impl Session {
             }
             _ => false,
         }
+    }
+    /// §S1 (revision 8): with `append`, a payload is at most `maxPayload` − 4 bytes, so it
+    /// fits a snapshot with its framing; otherwise at most `maxPayload`.
+    fn payload_fits(&self, payload: &Bytes) -> bool {
+        let max = if self.fixes.append_bound && self.policy.fold == Fold::Append {
+            self.policy.max_payload.saturating_sub(4)
+        } else {
+            self.policy.max_payload
+        };
+        payload.len() as u64 <= max
     }
     fn may_take(&self) -> bool {
         self.joined && self.can_write && self.policy.take == TakeRule::Free
@@ -990,13 +1006,25 @@ impl Session {
         }
         let Body::Hello { fresh, echo, .. } = &f.body else {
             // Non-hello: only through an open window, at or above its floor.
-            return match (key, n) {
-                (Some(k), Some(n)) => self
-                    .windows
-                    .get(&(f.from.clone(), k))
-                    .is_some_and(|floor| n >= *floor),
-                _ => true,
+            let Some((k, n)) = key.zip(n) else {
+                return true;
             };
+            let window = self.windows.get(&(f.from.clone(), k)).copied();
+            if window.is_none() && self.fixes.freshness_probe {
+                // Finding B5: without an open window this member drops the sender's frames
+                // and, if its own hello was lost, would never speak to it again. Probe with a
+                // hello, at most once per askTimeoutMs per sender.
+                let due = self
+                    .probed
+                    .get(&f.from)
+                    .is_none_or(|t| now.saturating_sub(*t) >= self.policy.ask_timeout_ms);
+                if due {
+                    self.probed.insert(f.from.clone(), now);
+                    let to = f.from.clone();
+                    self.send_hello_echo(out, Some(&to), false, Vec::new(), now);
+                }
+            }
+            return window.is_some_and(|floor| n >= floor);
         };
         let (Some(k), Some(n)) = (key, n) else {
             return true;
@@ -1056,6 +1084,11 @@ impl Session {
         }
         if !f.body.in_range(self.policy.max_payload) {
             return;
+        }
+        if let Body::Msg { payload, .. } | Body::Submit { payload, .. } = &f.body {
+            if !self.payload_fits(payload) {
+                return;
+            }
         }
         if !self.freshness(&f, key, n, now, out) {
             return;
@@ -1965,7 +1998,7 @@ impl Session {
                     Self::reject(out, "publish", "not-holder");
                     return;
                 }
-                if payload.len() as u64 > self.policy.max_payload {
+                if !self.payload_fits(&payload) {
                     Self::reject(out, "publish", "too-large");
                     return;
                 }
@@ -1979,7 +2012,7 @@ impl Session {
                     Self::reject(out, "submit", "not-allowed");
                     return;
                 }
-                if payload.len() as u64 > self.policy.max_payload {
+                if !self.payload_fits(&payload) {
                     Self::reject(out, "submit", "too-large");
                     return;
                 }

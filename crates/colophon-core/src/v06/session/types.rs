@@ -591,6 +591,10 @@ pub struct Fixes {
     pub window_cap: bool,
     /// Revision 7: an `append` state is at most `maxPayload` bytes once encoded.
     pub append_bound: bool,
+    /// Finding B5 (beyond revision 8): a member that drops a frame for want of a freshness
+    /// window sends that sender a `hello`, at most once per `askTimeoutMs`, so a lost
+    /// handshake is retried.
+    pub freshness_probe: bool,
 }
 impl Fixes {
     /// The revision 1 draft as written.
@@ -616,6 +620,7 @@ impl Fixes {
         sender_checks: false,
         window_cap: false,
         append_bound: false,
+        freshness_probe: false,
     };
     /// The revision 3 draft: revisions 2 and 3 fixes, none of revision 4.
     pub const REV3: Fixes = Fixes {
@@ -640,6 +645,7 @@ impl Fixes {
         sender_checks: false,
         window_cap: false,
         append_bound: false,
+        freshness_probe: false,
     };
     /// Revision 4 as written.
     pub const REV4: Fixes = Fixes {
@@ -678,9 +684,10 @@ impl Fixes {
         sender_checks: false,
         window_cap: false,
         append_bound: false,
+        freshness_probe: false,
     };
-    /// Revision 7: carriers bridge (`crate::v06::bridge`), so the session rules assume a
-    /// fully reachable group; no evidence forwarding, no `hello.heard`.
+    /// Revision 8, plus finding B5: carriers bridge (`crate::v06::bridge`), so the session
+    /// rules assume a fully reachable group; no evidence forwarding, no `hello.heard`.
     pub const ALL: Fixes = Fixes {
         evidence: false,
         evidence_push: false,
@@ -690,10 +697,14 @@ impl Fixes {
         sender_checks: true,
         window_cap: true,
         append_bound: true,
+        freshness_probe: true,
         ..Fixes::REV6
     };
-    /// Revision 7 (the same as `ALL`).
-    pub const REV7: Fixes = Fixes::ALL;
+    /// Revision 7 (and 8, whose changes are in the bridge and the `append` payload bound).
+    pub const REV7: Fixes = Fixes {
+        freshness_probe: false,
+        ..Fixes::ALL
+    };
 }
 impl Default for Fixes {
     fn default() -> Self {
