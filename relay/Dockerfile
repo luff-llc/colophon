@@ -31,7 +31,8 @@ COPY --from=module --chown=65532:65532 /out/data /data
 USER 65532:65532
 WORKDIR /data
 ENV PORT=8080 COLOPHON_DATA=/data NODE_ENV=production
-VOLUME /data
+# No VOLUME instruction: Railway refuses a Dockerfile that has one, and every guide mounts /data
+# by name. Without a mount, what the home keeps is lost with the container.
 EXPOSE 8080
 STOPSIGNAL SIGTERM
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
