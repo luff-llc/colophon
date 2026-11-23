@@ -96,6 +96,14 @@ pattern = 'version = "{version}"'
 [remotes.origin]
 public = true
 
+[content]
+# Intentional binary files the content check cannot read as text.
+allow_paths = ["conformance/**/*.cbor", "**/gradle-wrapper.jar"]
+
+# Commands run with a cleared environment; this is their PATH (cargo and bun included).
+[run]
+path = "~/.cargo/bin:~/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
 # Machine-specific values come from the environment (EDITION_VAR_<NAME>).
 [vars]
 # Path to colophon-home.sh, the home deployment kit, on this machine. It is printed by
