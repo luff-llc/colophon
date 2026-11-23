@@ -304,6 +304,8 @@ export class HomeSlot {
     const r = this.wasm.call({ op: 'head_request', state: this.state, now });
     await this.commit(r.state);
     this.note('head', r.sign || !r.due ? '' : `home ${this.key.memberId}: a head is due and cannot be signed now: ${r.why}`);
+    // When no head is due, the module says from when one could be over this same state.
+    this.headWake = !r.sign && !r.due && typeof r.wakeAt === 'number' ? r.wakeAt : null;
     if (!r.sign) return r.due ? 'due' : 'fresh';
     const signature = b64(await this.key.sign(unb64(r.sign.body)));
     const f = this.wasm.call({ op: 'finish_head', state: this.state, now, seq: r.sign.seq, digest: r.sign.digest, issued: r.sign.issued, signature });
@@ -318,8 +320,20 @@ export class HomeSlot {
    * over the history before an entry that is due at T, which would leave the head over that entry
    * unsignable until the clock passes T (heads have strictly increasing `issued`, §13.3). */
   async settle() {
-    if (!this.status().appointed) return 'fresh';
     const now = this.clock();
+    // Quiet: the module said nothing can come due over this state before `until` (no recording
+    // entry, no head), so nothing is asked of it. A changed state or a clock that went back
+    // asks again; so does reaching `until`.
+    if (this.isQuiet(now)) return 'fresh';
+    this.quiet = null;
+    const asked = this.state;
+    const st = this.status();
+    if (!st.appointed) {
+      // An unappointed slot's answers change only with its state.
+      this.quiet = { state: asked, now, until: Infinity, status: st };
+      return 'fresh';
+    }
+    let recordWake = null;
     // record_due is a pure function of (state, now): an unchanged pair would give the same
     // answer, so it is not asked again (it verifies the whole history each time).
     if (!(this.lastDue && this.lastDue.state === this.state && this.lastDue.now === now)) {
@@ -335,8 +349,23 @@ export class HomeSlot {
       // a GET is answered 503, a peer is sent none) and the next pass asks again.
       if (r.settled === false) return 'due';
       this.lastDue = { state: this.state, now };
+      if (typeof r.wakeAt === 'number' && this.state === asked) recordWake = r.wakeAt;
     }
-    return this.ensureHead();
+    const outcome = await this.ensureHead();
+    // Quiet only when this pass changed nothing and both answers gave a time: an entry recorded,
+    // a receipt or a head signed may make something else due at once (a `final` over the new
+    // head), so the next pass asks again.
+    if (outcome === 'fresh' && this.state === asked && recordWake !== null && this.headWake !== null) {
+      this.quiet = { state: asked, now, until: Math.min(recordWake, this.headWake), status: st };
+    }
+    return outcome;
+  }
+
+  /** Whether the last settle's quiet still holds at clock `now`: same state, and `now` in
+   * [the reading it was given at, the earliest time anything can come due). */
+  isQuiet(now = this.clock()) {
+    const q = this.quiet;
+    return Boolean(q && q.state === this.state && now >= q.now && now < q.until);
   }
 
   /** Serve this home's own head (`GET {base}/head`, `records/heads/<this home>.json`). §13.3:
@@ -706,7 +735,8 @@ export class HomeSlot {
     if (this.startingPasses) return;
     this.startingPasses = true;
     let st;
-    try { st = await this.lock(async () => this.status()); } catch (error) {
+    // While quiet, the status settle read for this same state is still the module's answer.
+    try { st = await this.lock(async () => (this.isQuiet() ? this.quiet.status : this.status())); } catch (error) {
       this.note('forward', `forwarding could not start: ${error.message}`);
       return;
     } finally { this.startingPasses = false; }
@@ -715,6 +745,10 @@ export class HomeSlot {
     for (const peer of st.peers ?? []) {
       const endpoint = (peer.endpoints ?? [])[0];
       if (!endpoint || this.passes.has(peer.id)) continue; // its last pass is still running
+      // The last pass to this peer found nothing to send (no new or backlogged object, no entry,
+      // its head already taken) and the state has not changed since, nor can anything come
+      // due before the quiet ends: another pass would send nothing and save the same rows.
+      if (this.forwardIdle?.get(peer.id) === this.state && this.isQuiet()) continue;
       const base = (resolve?.[endpoint.replace(/\/$/, '')] ?? endpoint).replace(/\/$/, '');
       const row = (this.forward.peers[peer.id] ??= { after: 0, retry: [], head: '' });
       row.retry ??= [];
@@ -781,8 +815,13 @@ export class HomeSlot {
   async forwardTo(base, row, peerId) {
     const save = () => this.saveForward();
     const deadline = Date.now() + PASS_MS;
+    (this.forwardIdle ??= new Map()).delete(peerId);
+    let seen;
     // (1) New objects, at most a page per pass.
-    const page = await this.lock(async () => this.wasm.call({ op: 'pending_page', state: this.state, now: this.clock(), after: row.after, limit: NEW_PER_PASS }));
+    const page = await this.lock(async () => {
+      seen = this.state;
+      return this.wasm.call({ op: 'pending_page', state: this.state, now: this.clock(), after: row.after, limit: NEW_PER_PASS });
+    });
     const urgent = (o) => (o.kind === 'transition' || o.kind === 'veto' ? 0 : 1);
     const fresh = [...page.objects].sort((x, y) => urgent(x) - urgent(y) || x.seq - y.seq);
     // The cursor moves past the page only together with the page's misses, so no saved state
@@ -796,7 +835,7 @@ export class HomeSlot {
     if (page.objects.length) { row.after = page.objects[page.objects.length - 1].seq; row.retry.push(...missed); }
     await save();
     // (2) Entries and the head.
-    if (Date.now() < deadline) await this.forwardEntries(base, row, peerId, deadline);
+    const sent = Date.now() < deadline ? await this.forwardEntries(base, row, peerId, deadline) : true;
     // (3) The backlog.
     const todo = [...new Set(row.retry)];
     const now = todo.slice(0, RETRY_PER_PASS);
@@ -810,6 +849,10 @@ export class HomeSlot {
     }
     row.retry = [...rest, ...again];
     await save();
+    // Nothing was there to send, over a state nothing changed during the pass.
+    if (!page.objects.length && !missed.length && !todo.length && !row.retry.length && sent === false && this.state === seen) {
+      this.forwardIdle.set(peerId, seen);
+    }
   }
 
   /** §13.1: the entries of this home's history after the peer's latest head (a recording entry
@@ -821,7 +864,7 @@ export class HomeSlot {
    * it again at once); an immediate entry a non-primary peer refused (421) for want of this
    * home's head is offered again right after the head. */
   async forwardEntries(base, row, peerId, deadline) {
-    if (Date.now() >= deadline) return;
+    if (Date.now() >= deadline) return true;
     const { fwd, head } = await this.lock(async () => {
       // Settling can append entries. Capture the head first, then the entries from that
       // same state, so an append during the network request cannot advance this head.
@@ -857,10 +900,12 @@ export class HomeSlot {
       if (r.status === 200) { row.head = sha(text); await this.saveForward(); this.note(`head ${peerId}`, ''); }
       else this.note(`head ${peerId}`, `home ${peerId} refused this home's head: ${r.status} ${(await r.text()).slice(0, 200)}`);
     };
+    // Nothing to send at all: no entry the peer lacks, and the peer took this very head.
+    if (!fwd.entries.length && head && sha(JSON.stringify(head)) === row.head) return false;
     if (fwd.exchange) {
       await putHead();
       await sendEntries(false);
-      return;
+      return true;
     }
     const status = await sendEntries(false);
     // A rejected or throttled upload cannot be followed by a head covering missing entries.
@@ -869,5 +914,6 @@ export class HomeSlot {
       await putHead();
       if (status === 421) await sendEntries(true);
     }
+    return true;
   }
 }

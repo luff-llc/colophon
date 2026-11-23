@@ -386,6 +386,19 @@ peer did not take (a transient refusal such as `unavailable`, or any status or r
 does not read as delivered or permanently refused) is offered again every pass while this home
 still lists it.
 
+**Idle passes are skipped.** A pass that records nothing, asks for no receipt and signs no head
+is also told by the module when the same state could next give something else (`wakeAt` from
+`record_due` and from `head_request`): the earliest due time of a held transition, the time a
+held candidate is judged again, a head ahead of the clock that becomes usable for a `final`, and
+half of `headMaxAge` after the latest head (or this home's own expiry). Until the earlier of the
+two, while the state is unchanged and the clock has not gone back, a pass makes no module call
+for the slot (the status it read is reused for forwarding), and a peer whose last pass found
+nothing to send (no new or backlogged object, no entry, its head already taken) gets no pass. The
+first pass at or after that time runs as before, so time-driven work is done no later than it was
+every tick. Where the module gives no bound (a held veto, a transition due but not recorded, a
+fork, a stop, a succession, a refused recording) every pass asks again, as before. The serving
+lease is still renewed on its own schedule.
+
 **Forks** (§8.6). A non-primary home stores a valid entry at a seq it holds when a primary head
 covers it, and keeps a current home's head over another digest at a held seq as fork evidence (at
 most four per home); holding two candidates it stops at the fork: it serves both, signs no head,
