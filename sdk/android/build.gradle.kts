@@ -4,7 +4,7 @@ plugins {
 }
 
 group = "org.luff.colophon"
-version = "0.5.2"
+version = "0.6.0-dev"
 
 android {
     namespace = "org.luff.colophon"
