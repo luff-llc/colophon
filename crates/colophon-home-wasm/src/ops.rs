@@ -37,6 +37,7 @@ use colophon_core::v05::write::calls::{
     finish_genesis_receipt, finish_head, finish_receipt, prepare_genesis_receipt, prepare_head,
     prepare_receipt, HeadSpec,
 };
+use colophon_core::v05::write::authority::VerifiedObjects;
 use colophon_core::v05::write::succession::prepare_succession_vetoed;
 use colophon_core::v05::write::{format_date, SignatureResult};
 use serde::{Deserialize, Serialize};
@@ -1607,17 +1608,34 @@ fn head_request(req: &Value) -> R<Value> {
         .iter()
         .any(|m| m.request.member_id() == l.slot.home && m.expires_ms.is_none_or(|e| now_ms <= e));
     let half = (st.keyring().policy.head_max_age() as i64) * 500;
-    let due = match v
+    let latest = v
         .persisted
         .objects()
-        .and_then(|o| own_latest_head(o, &l.slot.home))
-    {
+        .and_then(|o| own_latest_head(o, &l.slot.home));
+    let due = match &latest {
         None => true,
-        Some((s, d, issued)) => (s, &d) != (seq, &digest) || now_ms - issued >= half,
+        Some((s, d, issued)) => (*s, d) != (seq, &digest) || now_ms - issued >= half,
     };
     if !is_home || !due {
+        // `wakeAt`: the earliest clock reading at which a head could be due over this same
+        // state: half the head's maximum age after the latest one's `issued` (§13.3), or the
+        // instant after this home's own appointment expires. Never, for a home that is not
+        // current: it does not become one by the clock.
+        let wake = match (is_home, &latest) {
+            (true, Some((_, _, issued))) => {
+                let expiry = st
+                    .current_homes()
+                    .iter()
+                    .find(|m| m.request.member_id() == l.slot.home)
+                    .and_then(|m| m.expires_ms)
+                    .map_or(i64::MAX, |e| e.saturating_add(1));
+                issued.saturating_add(half).min(expiry)
+            }
+            _ => i64::MAX,
+        };
         let why = if is_home { "fresh" } else { "not a current home" };
-        return Ok(json!({"sign": null, "due": false, "why": why, "state": req["state"]}));
+        return Ok(json!({"sign": null, "due": false, "why": why, "state": req["state"],
+                         "wakeAt": wake.min(NEVER_MS)}));
     }
     // §13.3: heads have strictly increasing `issued`, and `issued` is the home's clock. A clock
     // that has not passed this home's latest head (an entry in the same millisecond, a clock
@@ -2119,8 +2137,26 @@ fn record_due(req: &Value) -> R<Value> {
         }
     }
     sign.extend(genesis_receipt_request(&h, &l.slot.home, now_ms)?);
+    // `wakeAt`: when this call recorded nothing and asks for nothing, the earliest clock reading
+    // at which the same state could give something else (`VerifiedObjects::next_due_ms`, the
+    // rules by which the clock alone makes an entry due). Until then, and while the state is
+    // unchanged, the scheduler need not ask again. Null when no bound is given: ask next pass.
+    let mut wake = Value::Null;
     if recorded == 0 && note.is_null() {
-        note = waiting(&h, &objects, now_ms);
+        let verified = VerifiedObjects::new(&objects, now_ms);
+        note = waiting_over(&h, &objects, &verified, now_ms);
+        if result == "ok" && sign.is_empty() && notify.is_empty() {
+            wake = verified.next_due_ms().map_or(Value::Null, |t| json!(t.min(NEVER_MS)));
+        }
+    }
+    // Nothing recorded and nothing refused: no admission ran that changed the state (only an
+    // admitted entry or a refusal does), so the state is the one given and there is nothing new
+    // to store. It is returned as given rather than encoded again.
+    if recorded == 0 && result == "ok" {
+        return Ok(json!({
+            "state": req["state"], "store": [], "sign": sign, "notify": notify,
+            "result": result, "note": note, "settled": settled, "wakeAt": wake,
+        }));
     }
     let after = held(&h)?;
     l.home = Some(h);
@@ -2132,8 +2168,13 @@ fn record_due(req: &Value) -> R<Value> {
         "result": result,
         "note": note,
         "settled": settled,
+        "wakeAt": wake,
     }))
 }
+
+/// A `wakeAt` that never comes: nothing waits on the clock. The largest time a JSON number
+/// carries exactly in JavaScript (2^53 - 1 ms), so the host compares it like any other.
+const NEVER_MS: i64 = 9_007_199_254_740_991;
 
 /// The receipt this home owes the successor genesis now, if any (§13.5, §15.1 step 2: a home
 /// current at the window's entry receipts the genesis once, within the window), as a signing
@@ -2148,6 +2189,12 @@ fn genesis_receipt_request(h: &HomeState, home: &str, now_ms: i64) -> R<Option<V
         .map(|p| json!({"object": p.object(), "body": b64(p.step().body())})))
 }
 
+/// [`waiting_over`], verifying the objects itself (for the tests).
+#[cfg(test)]
+fn waiting(h: &HomeState, objects: &Objects, now_ms: i64) -> Value {
+    waiting_over(h, objects, &VerifiedObjects::new(objects, now_ms), now_ms)
+}
+
 /// Why nothing was recorded: what each held transition, veto and activation is waiting for.
 ///
 /// Every entry is built over one verification of the held objects (`view` replays the home's
@@ -2155,9 +2202,8 @@ fn genesis_receipt_request(h: &HomeState, home: &str, now_ms: i64) -> R<Option<V
 /// can be recorded of it, and `pending` keeps settled objects for ever, so trying them made
 /// this note cost O(everything held × history) on every pass. At an unresolved fork there is
 /// no verified head to say what is recorded, so every held object is tried as before.
-fn waiting(h: &HomeState, objects: &Objects, now_ms: i64) -> Value {
-    use colophon_core::v05::write::authority::VerifiedObjects;
-    let verified = VerifiedObjects::new(objects, now_ms);
+/// `verified` is `objects` verified at `now_ms`, shared with the caller's other questions.
+fn waiting_over(h: &HomeState, objects: &Objects, verified: &VerifiedObjects<'_>, now_ms: i64) -> Value {
     let settled = |transition: &str| verified.state().is_ok_and(|s| s.is_recorded(transition));
     let mut why: Vec<String> = objects
         .pending
