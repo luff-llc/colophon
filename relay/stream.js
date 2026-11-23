@@ -30,17 +30,23 @@ export const STREAM_DEFAULTS = Object.freeze({
   retainedPerSlot: 1024,
   pingMs: 20_000,
   idleMs: 60_000, // no pong or message for this long closes 4008
-  sweepMs: 5_000, // standing re-check, expiry and retained sweep while streams are open; 0: off
+  sweepMs: 5_000, // standing re-check, expiry and retained sweep while streams are open (1 to MAX_SWEEP_MS)
 });
 
+/** The longest interval between standing sweeps. The sweep cannot be turned off: while any
+ * stream is open, time-driven changes (an expiry, a removal falling due, a stop) must evict
+ * within this bound even when nothing else commits. */
+export const MAX_SWEEP_MS = 5_000;
+
 /** Check `stream` settings (config file `stream`, createRelay's `stream`): known keys only, each a
- * non-negative integer (`sweepMs` 0 turns the sweep off; others must be positive). */
+ * positive integer; `sweepMs` at most MAX_SWEEP_MS. */
 export function streamOptions(options) {
   if (options === undefined || options === null) return {};
   if (typeof options !== 'object' || Array.isArray(options)) throw new Error('stream must be an object of settings');
   for (const [key, value] of Object.entries(options)) {
     if (!(key in STREAM_DEFAULTS)) throw new Error(`stream.${key} is not a stream setting`);
-    if (!Number.isSafeInteger(value) || value < (key === 'sweepMs' ? 0 : 1)) throw new Error(`stream.${key} must be a positive integer`);
+    if (!Number.isSafeInteger(value) || value < 1) throw new Error(`stream.${key} must be a positive integer`);
+    if (key === 'sweepMs' && value > MAX_SWEEP_MS) throw new Error(`stream.sweepMs must be at most ${MAX_SWEEP_MS}`);
   }
   return { ...options };
 }
@@ -118,16 +124,30 @@ export class HomeStream {
   // -------------------------------------------------------------------------------------------
   // Connections.
 
-  /** The upgrade: check the ticket, standing and caps, then hand the socket to `connect`. */
-  async connect(url, connect) {
+  /** Burn every ticket the upgrade presents, before anything else can refuse it: a ticket that
+   * reached a URL (and so perhaps a log) is never usable afterwards. The grant of the first
+   * valid one, or null; `present` says whether any ticket parameter was there at all. */
+  take(url) {
+    const tickets = url.searchParams.getAll('ticket');
+    let grant = null;
+    for (const t of tickets) {
+      const g = this.redeem(t);
+      grant ??= g;
+    }
+    return { grant, present: tickets.length > 0, count: tickets.length };
+  }
+
+  /** The upgrade, after `take`: check the query, the ticket, standing and caps, then hand the
+   * socket to `connect`. */
+  async connect(url, taken, connect) {
     const { HttpError } = this.home.deps;
-    const ticket = url.searchParams.get('ticket');
-    if (!ticket) throw new HttpError(401, 'A stream ticket is required', {}, { result: 'refused:ticket' });
+    if (!taken.present) throw new HttpError(401, 'A stream ticket is required', {}, { result: 'refused:ticket' });
     const after = url.searchParams.get('after');
     for (const name of url.searchParams.keys()) {
       if (name !== 'ticket' && name !== 'after') throw new HttpError(400, 'Unknown stream parameter');
     }
-    const grant = this.redeem(ticket);
+    if (taken.count !== 1 || url.searchParams.getAll('after').length > 1) throw new HttpError(400, 'One ticket and at most one cursor');
+    const { grant } = taken;
     if (!grant) throw new HttpError(403, 'Forbidden', {}, { result: 'refused:ticket' });
     await this.home.lock(async () => {
       const { slot } = this.home;
@@ -436,11 +456,9 @@ export class HomeStream {
     if (this.timers) return;
     const ping = setInterval(() => this.pingAll(), this.o.pingMs);
     ping.unref?.();
-    let sweep = null;
-    if (this.o.sweepMs > 0) {
-      sweep = setInterval(() => { this.sweep().catch((error) => this.home.note('streams', `stream sweep failed: ${error.message}`)); }, this.o.sweepMs);
-      sweep.unref?.();
-    }
+    const every = Math.min(Math.max(1, this.o.sweepMs), MAX_SWEEP_MS);
+    const sweep = setInterval(() => { this.sweep().catch((error) => this.home.note('streams', `stream sweep failed: ${error.message}`)); }, every);
+    sweep.unref?.();
     this.timers = { ping, sweep };
   }
 
@@ -473,8 +491,9 @@ export class HomeStream {
     const clock = this.clock();
     for (const [key, t] of this.tickets) if (clock > t.until) this.tickets.delete(key);
     if (!this.conns.size) return;
-    if (!this.home.scheduled) await this.home.lock(() => this.home.settleForRead());
-    this.revalidate();
+    // Standing is re-checked whatever settling does: a failure there must not keep a stream open.
+    try { if (!this.home.scheduled) await this.home.lock(() => this.home.settleForRead()); }
+    finally { this.revalidate(); }
   }
 
   /** Close every connection: `restart` (shutdown: clients resume elsewhere or later) or

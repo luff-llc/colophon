@@ -541,27 +541,39 @@ A host registers delivery routes with each home (§17.5). Use `Authorization: Co
 with the slot's base URL as the audience. Bind the call to the method, the path relative to
 that base, and the lowercase SHA-256 digest of the request body (empty bytes for GET and DELETE).
 The `kind` is one of `push`, `email`, `sms`, `webhook` or `other`. The `address` is the delivery
-destination and `reaches` describes the device or service reached. The route ID is the lowercase
-hex SHA-256 of the UTF-8 bytes of `kind`, one zero byte, and the UTF-8 bytes of `address`.
+destination and `reaches` describes the device or service reached.
 
 | Request | Purpose | Result |
 | --- | --- | --- |
-| `PUT {base}/routes/<route ID>` with JSON `{"kind","address","reaches"}` | `colophon.home.write` | 201 on creation or 200 on replacement |
+| `POST {base}/routes` with JSON `{"kind","address","reaches"}` | `colophon.home.write` | 201 `{"id"}` on creation, 200 `{"id"}` when it replaces the caller's route for that kind and address |
 | `DELETE {base}/routes/<route ID>` | `colophon.home.write` | 204 on removal or 404 when absent |
 | `GET {base}/routes` | `colophon.home.read` | 200 with `{"routes":[{"id","kind","reaches","by"}]}` |
+
+**Route IDs reveal no address.** An ID is the HMAC-SHA256, under the slot's secret route key,
+of the principal, `kind` and `address`. The key is 32 random bytes kept in `routes.json` and
+never served. A reader of the list cannot test guessed numbers or emails against the IDs, and
+the same address registered by two principals gives two unrelated IDs. A `routes.json` in the
+unshipped W2 layout is re-keyed on load.
 
 Route upkeep (listing, and changing one's own routes) is open to every current controller,
 including recover-only and suspended ones. A current member can use its own key, and member
 links need explicit service grants. `by` identifies the registering principal as
-`controller:<ID>` or `member:<ID>`. **A principal changes and deletes only its own routes**:
-another principal's route answers 403 `{"result":"refused:notGranted"}`. Each principal holds at
-most 8 routes, and the slot at most 64; a new route past either cap answers 507
-`{"result":"refused:overQuota"}`. The home module decides ownership, caps and the route's form.
-It checks the address per kind; a `webhook` must be `https://` to a public DNS name, with no IP
-literal, port, user information or local-only name. It also requires that `reaches` does not
-contain the address. The route list omits delivery addresses. PUT takes an `application/json`
-body up to 4 KiB. The home stages, fsyncs and renames the route file before acknowledging a
-change. Routes of a principal that is no longer one are dropped on the next authority commit.
+`controller:<ID>` or `member:<ID>`. **A principal deletes only its own routes**: another
+principal's route answers 403 `{"result":"refused:notGranted"}`. Each principal holds at most 8
+routes, and the slot at most 64; a new route past either cap answers 507
+`{"result":"refused:overQuota"}`. The home module derives the ID and decides ownership, caps and
+the route's form. It checks the address per kind; a `webhook` must be `https://` to a public DNS
+name, with no IP literal, port, user information or local-only name. It also requires that
+`reaches` does not contain the address. The route list omits delivery addresses. POST takes an
+`application/json` body up to 4 KiB. The home stages, fsyncs and renames the route file before
+acknowledging a change. Routes of a principal that is no longer one are dropped on the next
+authority commit.
+
+**Delivery senders** (none is built in) MUST, for a webhook, resolve the host at delivery time
+and refuse loopback, private, link-local, unique-local, CGNAT, multicast and other non-global
+addresses. They MUST pin the checked address for the request, verify TLS for the host name,
+and follow no redirect. See
+[docs/colophon-0.6-stream.md §6](../docs/colophon-0.6-stream.md#6-notices-and-routes).
 
 When the home admits a suspend or agrees to receipt a new transition or veto, it fsyncs
 `notices.jsonl` before responding. It writes **one line per notice**:
@@ -617,7 +629,8 @@ Limits: WebSocket messages up to 20,480 bytes (larger closes 1009). The inbound 
 per connection at 50 frames/s and 256 KiB/s; excess frames are dropped and counted, with an
 `error rateLimited`. A connection with more than 1 MiB unsent is closed with 4013. The home pings
 every 20 s, and a connection silent for 60 s is closed with 4008. Every authority commit, and a
-sweep every 5 s, re-judges each connection; one whose access ended is closed with 1008. Shutdown
+sweep that runs while any connection is open (every `sweepMs`, at most 5 s, and never off),
+re-judges each connection; one whose access ended is closed with 1008. Shutdown
 sends `bye` and closes with 1012 (resume). A released slot closes with 1001. All of these are
 settings under `stream` in the config file (`ticketMs`, `streamsPerPrincipal`,
 `streamsPerAccount`, `framesPerSecond`, `bufferedBytes`, `retainMs`, `pingMs`, `idleMs`,

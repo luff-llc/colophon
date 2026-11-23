@@ -104,44 +104,39 @@ fn subscriptions_follow_entitlement() {
 }
 
 #[test]
-fn route_changes_check_body_ownership_and_caps() {
-    let address = "private-device-token";
-    let id = colophon_core::v05::home_stream::route_id("push", address);
-    let body = STANDARD
-        .encode(json!({"kind": "push", "address": address, "reaches": "Phone"}).to_string());
-    let change = |owner: Value, principal_routes: u64, total: u64, method: &str| {
-        call(
-            json!({"op": "route_change", "id": id, "method": method, "body": body,
-            "principal": "member:a", "owner": owner, "principalRoutes": principal_routes,
-            "totalRoutes": total}),
-        )
+fn route_changes_derive_keyed_ids_and_check_ownership_and_caps() {
+    let address = "+15551234567";
+    let key = "07".repeat(32);
+    let body = STANDARD.encode(json!({"kind": "sms", "address": address, "reaches": "Phone"}).to_string());
+    let post = |routes: Value| {
+        call(json!({"op": "route_change", "method": "POST", "body": body, "key": key,
+            "principal": "member:a", "routes": routes}))
     };
-    let created = change(Value::Null, 0, 0, "PUT");
-    assert_eq!(
-        (created["allowed"].as_bool(), created["created"].as_bool()),
-        (Some(true), Some(true))
-    );
+    let created = post(json!([]));
+    assert_eq!((created["allowed"].as_bool(), created["created"].as_bool()), (Some(true), Some(true)));
     assert_eq!(created["route"]["address"], address);
-    let replaced = change(json!("member:a"), 1, 1, "PUT");
-    assert_eq!(replaced["created"], false);
-    let foreign = change(json!("controller:c"), 0, 1, "DELETE");
-    assert_eq!(
-        (foreign["status"].as_u64(), foreign["result"].as_str()),
-        (Some(403), Some("refused:notGranted"))
-    );
-    assert_eq!(change(Value::Null, 0, 0, "DELETE")["status"], 404);
-    let full = change(Value::Null, 8, 8, "PUT");
-    assert_eq!(
-        (full["status"].as_u64(), full["result"].as_str()),
-        (Some(507), Some("refused:overQuota"))
-    );
-    assert_eq!(change(Value::Null, 0, 64, "PUT")["status"], 507);
-    let wrong = call(
-        json!({"op": "route_change", "id": "0".repeat(64), "method": "PUT", "body": body,
-        "principal": "member:a", "owner": null, "principalRoutes": 0, "totalRoutes": 0}),
-    );
-    assert_eq!(
-        (wrong["status"].as_u64(), wrong["error"].as_str()),
-        (Some(400), Some("Route ID does not match kind and address"))
-    );
+    let id = created["id"].as_str().unwrap().to_string();
+    let expected = colophon_core::v05::home_stream::route_id(&[7u8; 32], "member:a", "sms", address);
+    assert_eq!(id, expected);
+    assert_ne!(id, colophon_core::v05::encoding::digest(format!("sms\0{address}").as_bytes()));
+    let replaced = post(json!([{"id": id, "by": "member:a"}]));
+    assert_eq!((replaced["created"].as_bool(), replaced["id"].as_str()), (Some(false), Some(id.as_str())));
+    let delete = |principal: &str, routes: Value| {
+        call(json!({"op": "route_change", "method": "DELETE", "id": id, "key": key,
+            "principal": principal, "routes": routes}))
+    };
+    let foreign = delete("controller:c", json!([{"id": id, "by": "member:a"}]));
+    assert_eq!((foreign["status"].as_u64(), foreign["result"].as_str()), (Some(403), Some("refused:notGranted")));
+    assert_eq!(delete("member:a", json!([]))["status"], 404);
+    assert_eq!(delete("member:a", json!([{"id": id, "by": "member:a"}]))["allowed"], true);
+    let mine: Vec<Value> = (0..8).map(|i| json!({"id": format!("{i:064}"), "by": "member:a"})).collect();
+    let full = post(json!(mine));
+    assert_eq!((full["status"].as_u64(), full["result"].as_str()), (Some(507), Some("refused:overQuota")));
+    let slot: Vec<Value> = (0..64).map(|i| json!({"id": format!("{i:064}"), "by": format!("member:{i}")})).collect();
+    assert_eq!(post(json!(slot))["status"], 507);
+    let bad = call(json!({"op": "route_change", "method": "POST", "key": key, "principal": "member:a", "routes": [],
+        "body": STANDARD.encode(r#"{"kind":"sms","address":"5551234567","reaches":"Phone"}"#)}));
+    assert_eq!(bad["status"], 400);
+    let rekeyed = call(json!({"op": "route_id", "key": key, "principal": "member:a", "kind": "sms", "address": address}));
+    assert_eq!(rekeyed["id"], expected);
 }

@@ -42,7 +42,7 @@ export async function signBody(value, key) {
 
 /** A test with a fresh relay holding `fixture`'s account (its history uploaded). `stream` and
  * `limits` go to the relay. `run` gets helpers. */
-export function testHome(fixture, name, run, { stream = { sweepMs: 0 }, limits } = {}) {
+export function testHome(fixture, name, run, { stream = {}, limits } = {}) {
   test(name, { skip: ready ? false : 'module not built' }, async () => {
     const dir = await mkdtemp(path.join(tmpdir(), 'colophon-stream-'));
     let now = fixture.now;
@@ -130,6 +130,19 @@ export function rejectedUpgrade(host, query = '', headers = {}) {
       socket.destroy();
       reject(new Error('The relay upgraded a refused request'));
     });
+  });
+}
+
+/** Ask for an upgrade by hand: `{status: 101}` when it upgraded (the socket is closed), else the
+ * refusal's status. */
+export function tryUpgrade(host, query) {
+  return new Promise((resolve, reject) => {
+    const request = http.get(`http://${host}${prefix}/stream${query}`, { headers: {
+      connection: 'Upgrade', upgrade: 'websocket', 'sec-websocket-version': '13',
+      'sec-websocket-key': randomBytes(16).toString('base64'),
+    } }, (response) => { response.resume(); resolve({ status: response.statusCode }); });
+    request.on('error', reject);
+    request.on('upgrade', (_, socket) => { socket.destroy(); resolve({ status: 101 }); });
   });
 }
 

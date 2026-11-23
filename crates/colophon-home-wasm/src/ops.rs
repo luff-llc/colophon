@@ -95,6 +95,7 @@ fn run(input: &[u8]) -> R<Value> {
         "session_frame" => session_frame(&req),
         "subscription" => subscription(&req),
         "route_change" => route_change(&req),
+        "route_id" => route_id_op(&req),
         "principals_current" => principals_current(&req),
         "call_key" => call_key(&req),
         "replay_keep" => replay_keep(&req),
@@ -401,7 +402,8 @@ enum Class {
     RecordsRead,
     /// `POST /records/batch`, with one call for the raw JSON body.
     BatchRead,
-    /// `PUT` or `DELETE {base}/routes/<route ID>`: notice-route upkeep by the route's owner.
+    /// `POST {base}/routes` or `DELETE {base}/routes/<route ID>`: notice-route upkeep by the
+    /// route's owner.
     RouteWrite,
     /// `POST {base}/stream/ticket` (0.6 draft): a `colophon.home.stream` call mints a stream
     /// ticket for the principal that signed it.
@@ -495,17 +497,22 @@ fn access(req: &Value) -> R<Value> {
             "GET" => Class::RecordsRead,
             _ => return not_allowed("GET"),
         },
-        ("stream" | "routes", None) => match method {
+        ("stream", None) => match method {
             "GET" => Class::RecordsRead,
             _ => return not_allowed("GET"),
+        },
+        ("routes", None) => match method {
+            "GET" => Class::RecordsRead,
+            "POST" => Class::RouteWrite,
+            _ => return not_allowed("GET, POST"),
         },
         ("stream", Some("ticket")) => match method {
             "POST" => Class::StreamTicket,
             _ => return not_allowed("POST"),
         },
-        ("routes", Some(id)) if id.len() == 64 && id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) => match method {
-            "PUT" | "DELETE" => Class::RouteWrite,
-            _ => return not_allowed("PUT, DELETE"),
+        ("routes", Some(id)) if home_stream::is_route_id(id) => match method {
+            "DELETE" => Class::RouteWrite,
+            _ => return not_allowed("DELETE"),
         },
         // §14: a successor's home serves its Swift predecessor's history (a history path,
         // §13.4) and takes it by `PUT`, with a call (below).
@@ -806,32 +813,38 @@ fn subscription(req: &Value) -> R<Value> {
     }
 }
 
-/// A notice-route change by `principal`, after its call was verified: the route body (for
-/// `PUT`), ownership and the caps. `owner` is the registering principal of the route at `id`.
+/// A notice-route change by `principal`, after its call was verified. `key` is the slot's
+/// secret route key (hex, [`home_stream::ROUTE_KEY_BYTES`] bytes, made by the host from its
+/// randomness), `routes` the held routes as `{"id","by"}` (no addresses). `POST` registers or
+/// replaces the principal's route for the body's kind and address, under the keyed ID the module
+/// derives ([`home_stream::route_id`]); `DELETE` removes the route `id`. Ownership and the caps
+/// follow [`home_stream::route_change`].
 fn route_change(req: &Value) -> R<Value> {
-    let id = str_of(req, "id")?;
-    let deleting = match str_of(req, "method")? {
-        "PUT" => false,
-        "DELETE" => true,
-        _ => return Err("route_change: method is PUT or DELETE".into()),
-    };
-    let route = if deleting {
-        None
-    } else {
-        match parse_route(id, &bytes_of(req, "body")?) {
-            Ok(r) => Some(r),
+    let key = hex_bytes(str_of(req, "key")?).ok_or("route_change: key is 32 bytes of hex")?;
+    if key.len() != home_stream::ROUTE_KEY_BYTES {
+        return Err("route_change: key is 32 bytes of hex".into());
+    }
+    let principal = str_of(req, "principal")?;
+    let held: Vec<(String, String)> = req
+        .get("routes")
+        .and_then(Value::as_array)
+        .ok_or("missing routes")?
+        .iter()
+        .map(|r| (r["id"].as_str().unwrap_or_default().to_string(), r["by"].as_str().unwrap_or_default().to_string()))
+        .collect();
+    let (id, route, deleting) = match str_of(req, "method")? {
+        "POST" => match parse_route(&bytes_of(req, "body")?) {
+            Ok(r) => (home_stream::route_id(&key, principal, &r.kind, &r.address), Some(r), false),
             Err(error) => return Ok(json!({"allowed": false, "status": 400, "error": error})),
-        }
+        },
+        "DELETE" => (str_of(req, "id")?.to_string(), None, true),
+        _ => return Err("route_change: method is POST or DELETE".into()),
     };
-    let verdict = home_stream::route_change(
-        req.get("owner").and_then(Value::as_str),
-        str_of(req, "principal")?,
-        u64_of(req, "principalRoutes")? as usize,
-        u64_of(req, "totalRoutes")? as usize,
-        deleting,
-    );
+    let owner = held.iter().find(|(i, _)| i == &id).map(|(_, by)| by.as_str());
+    let mine = held.iter().filter(|(_, by)| by == principal).count();
+    let verdict = home_stream::route_change(owner, principal, mine, held.len(), deleting);
     Ok(match verdict {
-        RouteVerdict::Allow { created } => json!({"allowed": true, "created": created,
+        RouteVerdict::Allow { created } => json!({"allowed": true, "created": created, "id": id,
             "route": route.map(|r| json!({"kind": r.kind, "address": r.address, "reaches": r.reaches}))}),
         RouteVerdict::NotOwner => json!({"allowed": false, "status": 403, "result": "refused:notGranted"}),
         RouteVerdict::Absent => json!({"allowed": false, "status": 404}),
@@ -839,6 +852,24 @@ fn route_change(req: &Value) -> R<Value> {
             json!({"allowed": false, "status": 507, "result": "refused:overQuota"})
         }
     })
+}
+
+/// The keyed ID of a held route (`key`, `principal`, `kind`, `address`): how a host re-keys
+/// routes it held under an older ID scheme.
+fn route_id_op(req: &Value) -> R<Value> {
+    let key = hex_bytes(str_of(req, "key")?).filter(|k| k.len() == home_stream::ROUTE_KEY_BYTES)
+        .ok_or("route_id: key is 32 bytes of hex")?;
+    Ok(json!({"id": home_stream::route_id(&key, str_of(req, "principal")?, str_of(req, "kind")?, str_of(req, "address")?)}))
+}
+
+fn hex_bytes(text: &str) -> Option<Vec<u8>> {
+    if text.len() % 2 != 0 {
+        return None;
+    }
+    (0..text.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(text.get(i..i + 2)?, 16).ok())
+        .collect()
 }
 
 /// Which of `principals` (`controller:<ID>` or `member:<ID>`) are still principals of the

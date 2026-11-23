@@ -10,7 +10,7 @@ import { readdir, readFile } from 'node:fs/promises';
 import net from 'node:net';
 import path from 'node:path';
 import fixture from './home-stream-v2.fixture.json' with { type: 'json' };
-import { prefix, signBody, stamp, testHome as testHomeOn } from './stream-support.js';
+import { Client, prefix, sha, signBody, stamp, testHome as testHomeOn, tryUpgrade } from './stream-support.js';
 
 const testHome = (name, run, options) => testHomeOn(fixture, name, run, options);
 const CELL = 'now-playing';
@@ -77,7 +77,7 @@ testHome('frames reach every other subscribed, entitled member; `to` reaches one
   await subscribe(a);
   b.send({ type: 'session', frame: back });
   assert.deepEqual((await a.next('session')).frame, back);
-}, { stream: { sweepMs: 0, framesPerSecond: 1000, frameBurst: 1000 } });
+}, { stream: { framesPerSecond: 1000, frameBurst: 1000 } });
 
 testHome('spoofed senders and unentitled members cannot send', async ({ open }) => {
   const [a, b, c] = [await open('a'), await open('b'), await open('c')];
@@ -122,7 +122,7 @@ testHome('the latest retained frame per (cell, from) is given on subscribe, and 
   await subscribe(d);
   await settle(d);
   assert.equal(d.all('session').length, 1);
-}, { stream: { sweepMs: 0, retainMs: 300 } });
+}, { stream: { retainMs: 300 } });
 
 async function endSessions(member, seq, previous, issued) {
   return signBody({
@@ -181,7 +181,7 @@ testHome('a member that cannot keep up is cut off (4013) instead of buffered', a
   assert.equal(a.ws.readyState, a.ws.OPEN, 'the sender is unaffected');
   socket.destroy();
   await closed;
-}, { stream: { sweepMs: 0, bufferedBytes: 65_536, framesPerSecond: 10_000, frameBurst: 10_000, bytesPerSecond: 1 << 30, byteBurst: 1 << 30 } });
+}, { stream: { bufferedBytes: 65_536, framesPerSecond: 10_000, frameBurst: 10_000, bytesPerSecond: 1 << 30, byteBurst: 1 << 30 } });
 
 testHome('nothing of a session frame is written under the data directory', async ({ open, dir, restart }) => {
   const [a, b] = [await open('a'), await open('b')];
@@ -210,4 +210,101 @@ testHome('nothing of a session frame is written under the data directory', async
   await subscribe(d);
   await settle(d);
   assert.deepEqual(d.all('session'), []);
+});
+
+// ---------------------------------------------------------------------------------------------
+// Tickets: redemption races, link keys, caps; eviction of a stopped home; the retained cap.
+
+testHome('two simultaneous redemptions of one ticket: exactly one connects', async ({ host, ticket }) => {
+  const t = await ticket('a');
+  const results = await Promise.all([tryUpgrade(host(), `?ticket=${t}`), tryUpgrade(host(), `?ticket=${t}`)]);
+  assert.deepEqual(results.map((r) => r.status).sort(), [101, 403]);
+});
+
+testHome('the per-account ticket cap refuses further minting', async ({ signed, ticket }) => {
+  await ticket('a');
+  await ticket('b');
+  const refused = await signed('/stream/ticket', 'POST', undefined, { signer: 'c' });
+  assert.equal(refused.status, 429);
+}, { stream: { ticketsPerSlot: 2 } });
+
+testHome('a full retained table forwards a frame without keeping it', async ({ open }) => {
+  const [a, b] = [await open('a'), await open('b')];
+  a.send({ type: 'session', frame: frame('a', { cell: 'first', retain: true }) });
+  a.send({ type: 'session', frame: frame('a', { cell: 'second', retain: true }) });
+  await settle(a);
+  await subscribe(b, 'notes', 'first');
+  await subscribe(b, 'notes', 'second');
+  await settle(b);
+  const cells = b.all('session').map((f) => JSON.parse(Buffer.from(f.frame.body, 'base64')).cell);
+  assert.deepEqual(cells, ['first']);
+}, { stream: { retainedPerSlot: 1 } });
+
+/** A link from member `e` to a fresh in-memory key, and a ticket call signed by that key. */
+async function linkKey(now, { session = 0, lifeMs = 600_000 } = {}) {
+  const pair = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign']);
+  const jwk = await crypto.subtle.exportKey('jwk', pair.privateKey);
+  const point = Buffer.concat([Buffer.from([4]), Buffer.from(jwk.x, 'base64url'), Buffer.from(jwk.y, 'base64url')]).toString('base64');
+  const link = await signBody({
+    protocol: 'colophon/link/5', account: fixture.account, from: fixture.e.id, to: { signing: point }, session,
+    terms: { services: [{ audience: fixture.base, purposes: ['colophon.home.stream'] }] },
+    notBefore: stamp(now), expires: stamp(now + lifeMs), created: stamp(now),
+  }, fixture.e.key);
+  const encodedLink = Buffer.from(JSON.stringify(link)).toString('base64');
+  return {
+    expires: now + lifeMs,
+    call: async (at, asOf = fixture.asOf) => {
+      const envelope = await signBody({
+        protocol: 'colophon/call/5', account: fixture.account, asOf, audience: fixture.base,
+        purpose: 'colophon.home.stream', signer: { member: fixture.e.id }, key: point, links: [encodedLink],
+        args: { method: 'POST', path: '/stream/ticket', body: sha('') },
+        requestId: randomBytes(32).toString('base64url'), created: stamp(at),
+      }, jwk);
+      return `Colophon ${Buffer.from(JSON.stringify(envelope)).toString('base64url')}`;
+    },
+  };
+}
+
+testHome('a link key mints tickets; its stream ends with the link', async ({ request, host, now, advance }) => {
+  const link = await linkKey(now(), { lifeMs: 600_000 });
+  const minted = await request('/stream/ticket', 'POST', undefined, await link.call(now()));
+  assert.equal(minted.status, 200, await minted.clone().text());
+  const ws = await Client.connect(host(), (await minted.json()).ticket);
+  const hello = await ws.next('hello');
+  assert.deepEqual([hello.principal, hello.expiresAt], [`member:${fixture.e.id}`, Math.floor(link.expires / 1000) * 1000]);
+  advance(600_001);
+  // The sweep (at most every sweepMs) re-judges the stream at the clock and closes it.
+  assert.equal((await ws.closed).code, 1008);
+}, { stream: { sweepMs: 50 } });
+
+testHome('ending the member\'s sessions closes its link-key stream and refuses the old link', async ({ request, host, now, advance }) => {
+  const link = await linkKey(now());
+  const minted = await request('/stream/ticket', 'POST', undefined, await link.call(now()));
+  assert.equal(minted.status, 200, await minted.clone().text());
+  const ws = await Client.connect(host(), (await minted.json()).ticket);
+  await ws.next('hello');
+  advance();
+  const entry = await endSessions('e', fixture.asOf.seq + 1, fixture.asOf.digest, stamp(now()));
+  const response = await request('/authority', 'POST', JSON.stringify({ from: fixture.asOf.seq + 1, entries: [entry], receipts: [] }));
+  assert.equal(response.status, 200, await response.text());
+  assert.equal((await ws.closed).code, 1008);
+  advance();
+  const asOf = { seq: fixture.asOf.seq + 1, digest: sha(Buffer.from(entry.body, 'base64')) };
+  const again = await request('/stream/ticket', 'POST', undefined, await link.call(now(), asOf));
+  assert.equal(again.status, 403);
+  assert.deepEqual(await again.json(), { result: 'refused:ended' });
+});
+
+testHome('a home that stops closes every stream', async ({ request, open, advance, now }) => {
+  const [a, b] = [await open('a'), await open('b')];
+  advance();
+  // An entry the verifier finds of a newer format stops a 0.5 home (relay README "A stopped home").
+  const entry = await signBody({
+    protocol: 'colophon/authority/5', kind: 'endSessions', seq: fixture.asOf.seq + 1,
+    previous: fixture.asOf.digest, issued: stamp(now()), by: fixture.a.id, member: fixture.a.id, future: true,
+  }, fixture.a.key);
+  const response = await request('/authority', 'POST', JSON.stringify({ from: fixture.asOf.seq + 1, entries: [entry], receipts: [] }));
+  assert.equal(response.status, 422, await response.clone().text());
+  assert.deepEqual(await response.json(), { result: 'newerFormat' });
+  assert.deepEqual([(await a.closed).code, (await b.closed).code], [1008, 1008]);
 });

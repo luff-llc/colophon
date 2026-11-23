@@ -1416,14 +1416,14 @@ fn home_request_with(
     )
 }
 
-/// Whether a request at a home is notice-route upkeep: `GET /routes`, or `PUT` or `DELETE` of
-/// `/routes/<64 lowercase hex>`.
+/// Whether a request at a home is notice-route upkeep: `GET /routes`, `POST /routes` (register
+/// or replace one's own route), or `DELETE /routes/<64 lowercase hex>`.
 pub fn is_route_upkeep(method: &str, path: &str) -> bool {
     match method {
-        "GET" => path == "/routes",
-        "PUT" | "DELETE" => path.strip_prefix("/routes/").is_some_and(|id| {
-            id.len() == 64 && id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        }),
+        "GET" | "POST" => path == "/routes",
+        "DELETE" => path
+            .strip_prefix("/routes/")
+            .is_some_and(super::home_stream::is_route_id),
         _ => false,
     }
 }

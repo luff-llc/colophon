@@ -118,7 +118,7 @@ function answerOptions(req, res, listed) {
   if (preflight) {
     if (listed) {
       headers['access-control-allow-methods'] = /^\/v1\/libraries\/[^/]+\/routes\/[0-9a-f]{64}$/.test(req.url)
-        ? 'GET, PUT, DELETE, OPTIONS' : CORS_METHODS;
+        ? 'DELETE, OPTIONS' : CORS_METHODS;
       headers['access-control-allow-headers'] = CORS_HEADERS;
       headers['access-control-max-age'] = CORS_MAX_AGE;
     }
@@ -938,11 +938,8 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
     const match = STREAM_PATH.exec(url.pathname);
     if (!match || !homeSlots.has(match[1])) throw new HttpError(404, 'Not found');
     if (closing) throw new HttpError(503, 'Relay is closing');
-    if (req.headers['transfer-encoding'] || (req.headers['content-length'] ?? '0') !== '0') {
-      throw new HttpError(400, 'A stream request takes no body');
-    }
-    const s = await slot(match[1]);
-    if (closing || s.closing || s.releasing || s.released) throw notProvisioned();
+    const s = await slot(match[1]); // the home burns the ticket before any other refusal
+    if (closing || s.closing || s.releasing || s.released) { s.home.stream.take(url); throw notProvisioned(); }
     enter(s);
     try { await s.home.upgrade(req, url, connect); } finally { leave(s); }
   }

@@ -9,7 +9,7 @@
 //! inside the frame. Notice routes are host configuration, not account objects: who may change
 //! one, how many a principal may hold, and what an address may look like are decided here so
 //! that every home applies one rule.
-use super::encoding::{digest, strict_parse};
+use super::encoding::{hex, strict_parse};
 use super::records::is_member_id;
 use super::terms::{valid_namespace, Access, Terms};
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
@@ -203,13 +203,34 @@ pub struct Route {
     pub reaches: String,
 }
 
-/// The route ID: lowercase hex SHA-256 of `kind`, one zero byte, and `address`.
-pub fn route_id(kind: &str, address: &str) -> String {
-    let mut bytes = Vec::with_capacity(kind.len() + 1 + address.len());
+/// The length of a slot's route key, bytes.
+pub const ROUTE_KEY_BYTES: usize = 32;
+
+/// A route's ID: lowercase hex HMAC-SHA256 under the slot's secret route key (random, held by
+/// the home and never served) of `principal`, a zero byte, `kind`, a zero byte and `address`.
+/// The ID is listed and named in notice lines, so it must not reveal the address: without the
+/// key, nobody can test a guessed phone number or email against it. The principal is part of
+/// the input so that registering an address answers the same for every principal whoever else
+/// registered it (no cross-principal oracle), and one principal re-registering an address
+/// replaces its own route.
+pub fn route_id(key: &[u8], principal: &str, kind: &str, address: &str) -> String {
+    let mut bytes = Vec::with_capacity(principal.len() + kind.len() + address.len() + 2);
+    bytes.extend_from_slice(principal.as_bytes());
+    bytes.push(0);
     bytes.extend_from_slice(kind.as_bytes());
     bytes.push(0);
     bytes.extend_from_slice(address.as_bytes());
-    digest(&bytes)
+    // HKDF-Extract(salt = key, ikm) is HMAC-SHA256(key, ikm) (RFC 5869 §2.2).
+    let (mac, _) = hkdf::Hkdf::<sha2::Sha256>::extract(Some(key), &bytes);
+    hex(&mac)
+}
+
+/// Whether `id` has the form of a route ID (64 lowercase hex).
+pub fn is_route_id(id: &str) -> bool {
+    id.len() == 64
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 fn no_controls(s: &str) -> bool {
@@ -281,11 +302,10 @@ pub fn valid_route_address(kind: &str, address: &str) -> bool {
     }
 }
 
-/// Parse and check a route body for route ID `id`: exactly `{"kind","address","reaches"}`, a
-/// known kind, an address well formed for it, a `reaches` label of 1–128 bytes with no control
-/// characters that does not repeat the address (the list shows `reaches` and must never leak an
-/// address), and an ID that is [`route_id`] of the kind and address.
-pub fn parse_route(id: &str, body: &[u8]) -> Result<Route, &'static str> {
+/// Parse and check a route body: exactly `{"kind","address","reaches"}`, a known kind, an
+/// address well formed for it, and a `reaches` label of 1–128 bytes with no control characters
+/// that does not repeat the address (the list shows `reaches` and must never leak an address).
+pub fn parse_route(body: &[u8]) -> Result<Route, &'static str> {
     let v = strict_parse(body).map_err(|_| "Invalid JSON")?;
     let Value::Object(o) = &v else {
         return Err("Invalid notice route");
@@ -306,9 +326,6 @@ pub fn parse_route(id: &str, body: &[u8]) -> Result<Route, &'static str> {
         || folded(reaches).contains(&folded(address))
     {
         return Err("Invalid notice route");
-    }
-    if route_id(kind, address) != id {
-        return Err("Route ID does not match kind and address");
     }
     Ok(Route {
         kind: kind.to_string(),
@@ -518,20 +535,32 @@ mod tests {
     }
 
     #[test]
-    fn route_bodies_bind_the_id_and_never_repeat_the_address() {
-        let id = route_id("push", "private-device-token");
-        let ok = br#"{"address":"private-device-token","kind":"push","reaches":"Phone"}"#;
-        assert_eq!(parse_route(&id, ok).unwrap().reaches, "Phone");
-        assert_eq!(
-            parse_route(&"0".repeat(64), ok),
-            Err("Route ID does not match kind and address")
+    fn route_ids_are_keyed_and_per_principal() {
+        let key = [7u8; ROUTE_KEY_BYTES];
+        let id = route_id(&key, "member:a", "sms", "+15551234567");
+        assert!(is_route_id(&id));
+        assert_eq!(id, route_id(&key, "member:a", "sms", "+15551234567"));
+        // Not the unkeyed digest a listing reader could compute from a guessed number.
+        assert_ne!(id, crate::v05::encoding::digest(b"sms\0+15551234567"));
+        assert_ne!(
+            id,
+            route_id(&[8u8; ROUTE_KEY_BYTES], "member:a", "sms", "+15551234567")
         );
+        assert_ne!(id, route_id(&key, "member:b", "sms", "+15551234567"));
+        assert_ne!(id, route_id(&key, "member:a", "sms", "+15551234568"));
+        assert!(!is_route_id(&"A".repeat(64)));
+    }
+
+    #[test]
+    fn route_bodies_never_repeat_the_address() {
+        let ok = br#"{"address":"private-device-token","kind":"push","reaches":"Phone"}"#;
+        assert_eq!(parse_route(ok).unwrap().reaches, "Phone");
         let reflecting =
             br#"{"address":"private-device-token","kind":"push","reaches":" my PRIVATE-DEVICE-TOKEN "}"#;
-        assert_eq!(parse_route(&id, reflecting), Err("Invalid notice route"));
+        assert_eq!(parse_route(reflecting), Err("Invalid notice route"));
         let extra = br#"{"address":"private-device-token","kind":"push","reaches":"Phone","x":1}"#;
-        assert_eq!(parse_route(&id, extra), Err("Invalid notice route"));
-        assert_eq!(parse_route(&id, b"nope"), Err("Invalid JSON"));
+        assert_eq!(parse_route(extra), Err("Invalid notice route"));
+        assert_eq!(parse_route(b"nope"), Err("Invalid JSON"));
     }
 
     #[test]
@@ -608,14 +637,15 @@ mod purpose_tests {
     fn route_upkeep_is_listing_and_changing_routes() {
         let id = "a".repeat(64);
         assert!(is_route_upkeep("GET", "/routes"));
-        assert!(is_route_upkeep("PUT", &format!("/routes/{id}")));
+        assert!(is_route_upkeep("POST", "/routes"));
         assert!(is_route_upkeep("DELETE", &format!("/routes/{id}")));
+        assert!(!is_route_upkeep("PUT", &format!("/routes/{id}")));
         assert!(!is_route_upkeep("GET", &format!("/routes/{id}")));
         assert!(!is_route_upkeep(
-            "PUT",
+            "DELETE",
             &format!("/routes/{}", "A".repeat(64))
         ));
-        assert!(!is_route_upkeep("PUT", "/routes"));
+        assert!(!is_route_upkeep("POST", "/routes/x"));
         assert!(!is_route_upkeep("GET", "/routes?x"));
     }
 }

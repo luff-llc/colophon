@@ -1,11 +1,13 @@
 //! Writes `relay/test/home-stream-v2.fixture.json`, the synthetic account the relay's home
-//! stream v2 tests use (`relay/test/home-stream-v2.test.js`): one home and four members whose
+//! stream v2 tests use (`relay/test/home-stream-v2.test.js`): one home and five members whose
 //! private keys the fixture carries (test keys; they protect nothing):
 //!
 //! - `a`: `records` read on `notes`;
 //! - `b`: `records` write on `notes`;
 //! - `c`: `records` read on `books` only (not entitled to `notes`);
-//! - `d`: `records` read on `notes` (a third entitled member, for `to` addressing).
+//! - `d`: `records` read on `notes` (a third entitled member, for `to` addressing);
+//! - `e`: `records` read on `notes`, `depth` 1 and a `services` grant of `colophon.home.stream`
+//!   at the base (it streams through a link key).
 //!
 //! The fixture is checked in. Regenerate it only when the account format changes:
 //! `COLOPHON_WRITE_STREAM_FIXTURE=1 cargo test -p colophon-home-wasm --test v06_stream_fixture
@@ -73,19 +75,24 @@ fn build() -> Value {
             "d",
             0x64u8,
             json!([{"namespace": "notes", "access": "read"}]),
+        ),        (
+            "e",
+            0x65u8,
+            json!([{"namespace": "notes", "access": "read"}]),
         ),
     ];
     let mut out = serde_json::Map::new();
     for (name, n, records) in &members {
         let keys = HomeKeys::new(*n);
         let agreement = HomeKeys::new(n + 0x10);
-        admit_keyed(
-            &mut f,
-            &keys,
-            &agreement,
-            name,
-            json!({"records": records, "expires": expires}),
-        );
+        // e may delegate: a link key it signs can mint stream tickets (a locked member key).
+        let terms = if *name == "e" {
+            json!({"records": records, "expires": expires, "depth": 1,
+                   "services": [{"audience": BASE, "purposes": ["colophon.home.stream"]}]})
+        } else {
+            json!({"records": records, "expires": expires})
+        };
+        admit_keyed(&mut f, &keys, &agreement, name, terms);
         let jwk: Value = serde_json::from_str(&keys.jwk()).unwrap();
         out.insert(name.to_string(), json!({"id": keys.id, "key": jwk}));
     }
@@ -137,7 +144,7 @@ fn write_stream_fixture() {
         .collect();
     assert_eq!(
         kinds.iter().filter(|k| *k == "grant").count(),
-        4,
+        5,
         "{kinds:?}"
     );
     if std::env::var("COLOPHON_WRITE_STREAM_FIXTURE").as_deref() == Ok("1") {

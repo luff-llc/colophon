@@ -11,7 +11,7 @@
 // Storage follows state: every mutation commits the module's new state, then stores the files the
 // module lists, under one lock; at start-up the files are reconciled with the state before
 // anything is served.
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { constants as fsc, promises as fsp, writeSync } from 'node:fs';
 import path from 'node:path';
 import { HomeStream } from './stream.js';
@@ -198,7 +198,7 @@ export class HomeSlot {
     }
     await this.slot.open();
     if (fresh) await this.writeJson('home-state.json', this.state);
-    this.routes = new Map(await this.readOptionalJson('routes.json') ?? []);
+    await this.loadRoutes();
     this.noticeCommit = await this.readOptionalJson(NOTICE_COMMIT);
     await this.flushNotices();
     this.noticeSeq = await this.lastNoticeSeq();
@@ -339,6 +339,33 @@ export class HomeSlot {
     } catch { return null; }
   }
 
+  /** Routes and the slot's secret route key (route IDs are keyed by it, so a listed ID reveals
+   * no address). `routes.json` is `{"key","routes":[[id, route]…]}`. A file of the unshipped W2
+   * layout (a bare list, IDs an unkeyed digest of the address) is re-keyed on load. */
+  async loadRoutes() {
+    const held = await this.readOptionalJson('routes.json');
+    if (held && !Array.isArray(held)) {
+      if (typeof held.key !== 'string' || !/^[0-9a-f]{64}$/.test(held.key) || !Array.isArray(held.routes)) {
+        throw new Error('routes.json is damaged');
+      }
+      this.routeKey = held.key;
+      this.routes = new Map(held.routes);
+      return;
+    }
+    this.routeKey = randomBytes(32).toString('hex');
+    this.routes = new Map();
+    if (!held) return;
+    for (const [, r] of held) {
+      const { id } = this.wasm.call({ op: 'route_id', key: this.routeKey, principal: r.by, kind: r.kind, address: r.address });
+      this.routes.set(id, r);
+    }
+    await this.saveRoutes(this.routes);
+  }
+
+  async saveRoutes(routes) {
+    await this.writeJson('routes.json', { key: this.routeKey, routes: [...routes] });
+  }
+
   /** Drop the routes of principals that are no longer principals of the account (the module
    * decides), so a revoked device's routes neither linger nor hold the slot's capacity. */
   async pruneRoutes() {
@@ -350,7 +377,7 @@ export class HomeSlot {
     const gone = new Set(owners.filter((_, i) => !current[i]));
     if (!gone.size) return;
     const routes = new Map([...this.routes].filter(([, r]) => !gone.has(r.by)));
-    await this.writeJson('routes.json', [...routes]);
+    await this.saveRoutes(routes);
     const dropped = [...this.routes.keys()].filter((id) => !routes.has(id));
     this.routes = routes;
     for (const id of dropped) this.stream.route(id, 'delete');
@@ -381,8 +408,15 @@ export class HomeSlot {
 
   /** A WebSocket upgrade of `GET {base}/stream?ticket=…[&after=<cursor>]` (0.6 draft). */
   async upgrade(req, url, connect) {
+    // The ticket is burnt first: no later refusal (a body, the rate, a bad parameter) leaves a
+    // presented ticket usable.
+    const taken = this.stream.take(url);
+    const { HttpError } = this.deps;
+    if (req.headers['transfer-encoding'] || (req.headers['content-length'] ?? '0') !== '0') {
+      throw new HttpError(400, 'A stream request takes no body');
+    }
     await this.rateGate(req);
-    await this.stream.connect(url, connect);
+    await this.stream.connect(url, taken, connect);
   }
 
   /** Store the files the module listed. A path the module marks `replace` (a head; an entry
@@ -790,13 +824,13 @@ export class HomeSlot {
 
   async handleRoutes(req, res, id) {
     const { HttpError, send, readBody, isJsonType } = this.deps;
-    const putting = req.method === 'PUT' && typeof id === 'string' && /^[0-9a-f]{64}$/.test(id);
+    const posting = req.method === 'POST' && id === undefined;
     let body;
     if ((req.method === 'GET' || req.method === 'DELETE')
         && (req.headers['transfer-encoding'] || (req.headers['content-length'] ?? '0') !== '0')) {
       throw new HttpError(400, 'This request takes no body');
     }
-    if (putting) {
+    if (posting) {
       if (!isJsonType(req.headers['content-type'])) throw new HttpError(415, 'Content-Type must be application/json');
       body = await readBody(req, ROUTE_BODY_BYTES);
     }
@@ -809,13 +843,12 @@ export class HomeSlot {
           send(res, 200, { routes });
           return;
         }
-        // Ownership, caps and the route's form are the module's (one rule for every home).
+        // The keyed ID, ownership, caps and the route's form are the module's.
         const principal = allowed.signer;
-        const owner = this.routes.get(id)?.by ?? null;
-        const principalRoutes = [...this.routes.values()].filter((r) => r.by === principal).length;
         const r = this.wasm.call({
-          op: 'route_change', id, method: req.method, principal, owner, principalRoutes,
-          totalRoutes: this.routes.size, ...(putting ? { body: b64(body) } : {}),
+          op: 'route_change', method: req.method, key: this.routeKey, principal,
+          routes: Array.from(this.routes, ([id, { by }]) => ({ id, by })),
+          ...(posting ? { body: b64(body) } : { id }),
         });
         if (!r.allowed) {
           if (r.status === 400) throw new HttpError(400, r.error ?? 'Invalid notice route');
@@ -823,13 +856,13 @@ export class HomeSlot {
           throw new HttpError(r.status, 'Refused', {}, { result: r.result });
         }
         const routes = new Map(this.routes);
-        if (putting) routes.set(id, { ...r.route, by: principal });
-        else routes.delete(id);
-        await this.writeJson('routes.json', [...routes]);
+        if (posting) routes.set(r.id, { ...r.route, by: principal });
+        else routes.delete(r.id);
+        await this.saveRoutes(routes);
         this.routes = routes;
-        this.stream.route(id, putting ? 'put' : 'delete', putting ? routes.get(id) : null);
-        res.writeHead(putting ? (r.created ? 201 : 200) : 204);
-        res.end();
+        this.stream.route(r.id, posting ? 'put' : 'delete', posting ? routes.get(r.id) : null);
+        if (posting) send(res, r.created ? 201 : 200, { id: r.id });
+        else { res.writeHead(204); res.end(); }
       } finally { await this.complete(key, 'completed'); }
     });
   }

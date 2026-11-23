@@ -216,16 +216,29 @@ IDs of the routes registered at that moment. A delivery sender keeps its own cur
 (W2 repeated each line once per route with no route ID; that is replaced.) Payloads stay
 unsigned, as 0.5 §17.5 says.
 
-**Routes** (`PUT`/`DELETE {base}/routes/<id>`, `GET {base}/routes`):
+**Routes** (`POST {base}/routes`, `DELETE {base}/routes/<id>`, `GET {base}/routes`):
 
+- **Registering.** `POST {base}/routes` with `{"kind","address","reaches"}` registers the
+  route, or replaces the caller's own route for that kind and address. The answer is 201
+  `{"id"}` for a new route or 200 `{"id"}` for a replacement. A client keeps the ID to delete the
+  route later and finds it again in `GET {base}/routes`.
+- **IDs reveal no address.** A route ID is HMAC-SHA256 under the slot's **route key** of
+  `principal`, a zero byte, `kind`, a zero byte and `address`, in lowercase hex
+  (`colophon_core::v05::home_stream::route_id`). The route key is 32 random bytes the host
+  generates (the home module takes randomness as input). It is kept with the routes and never
+  served. IDs are listed and named in notice lines. Without the key, nobody who can list routes
+  can test a guessed phone number, email or webhook URL against an ID. Because the principal is
+  part of the input, registering an address answers the same whoever else registered it, so
+  there is no cross-principal oracle. (W2 used the unkeyed SHA-256 of `kind` and `address`,
+  which a reader of the list could invert by dictionary. A route file in that layout is
+  re-keyed when the home opens it.)
 - A principal changes and deletes **only routes it registered**. Another principal's route
   answers 403 `{"result":"refused:notGranted"}`, so one stolen key cannot silence another
   device's routes.
 - **Caps:** 8 routes per principal and 64 per slot; past either, 507
   `{"result":"refused:overQuota"}`. Replacing one's own route is not a new route.
 - **Form**, decided by `colophon_core::v05::home_stream::parse_route`. The body is exactly
-  `{"kind","address","reaches"}`. The ID is SHA-256 of `kind`, a zero byte and `address`. The
-  address is checked per kind: `push` is printable ASCII up to 4,096 bytes; `email` is
+  `{"kind","address","reaches"}`. The address is checked per kind: `push` is printable ASCII up to 4,096 bytes; `email` is
   `local@domain` with a DNS domain; `sms` is E.164; `webhook` is `https://` to a public DNS name
   with no user information, port, fragment, IP literal or local-only name (`localhost`,
   `.local`, `.internal`, `.home.arpa`, `.lan`); `other` is up to 1,024 bytes with no control
@@ -238,6 +251,21 @@ unsigned, as 0.5 §17.5 says.
   member) are dropped on the next authority commit. Each change is pushed as a `route` frame.
 - Not enforced: 0.5 §17.5's deferred idea of requiring two routes on different devices or
   services.
+
+**Delivering to a webhook** (no sender exists yet; this binds any that is added). The checks
+above are syntactic, but a public name can resolve, or later rebind, to private infrastructure.
+A sender MUST:
+
+1. resolve the host at delivery time, and refuse every resolved address in a loopback,
+   private, link-local, unique-local, carrier-grade NAT, multicast, unspecified, documentation
+   or other non-global range (for IPv4 at least `0.0.0.0/8`, `10.0.0.0/8`, `100.64.0.0/10`,
+   `127.0.0.0/8`, `169.254.0.0/16`, `172.16.0.0/12`, `192.168.0.0/16`, `224.0.0.0/4` and
+   `240.0.0.0/4`; for IPv6 at least `::/128`, `::1/128`, `fc00::/7`, `fe80::/10`, `ff00::/8`,
+   and IPv4-mapped forms of the IPv4 ranges);
+2. connect to the address it checked, pinned for that request (no second resolution), with TLS
+   verified for the route's host name;
+3. follow no redirect: a 3xx answer is a failed delivery;
+4. bound the request in time and bytes, and send nothing but the notice payload.
 
 ## 7. Limits and hygiene
 
@@ -270,8 +298,10 @@ reach the idle timeout. A client MAY also send `ping` frames.
 | 4013 | Slow consumer | Reconnect and resume; the replay or `resync` covers the gap |
 
 **Revocation.** Every authority commit re-judges every open connection at the committed
-history. So does a sweep every 5 s while connections are open, and each connection's expiry
-timer. A connection whose principal is no longer current is closed with 1008. That covers a
+history. So does a **sweep**, which runs while any connection is open and cannot be turned off.
+Its interval is at most 5 s (`sweepMs`, from 1 to 5,000; a larger or zero setting refuses
+start-up). Each connection's expiry timer also re-judges it. A failed settle on the sweep still
+re-judges standing. A connection whose principal is no longer current is closed with 1008. That covers a
 revoked or suspended principal, ended sessions, a different session number, expiry of the member
 or the link, and a controller that lost `approve`/`control`/`sign`. A connection whose
 namespaces narrowed loses those subscriptions. A home that runs no scheduler (`tickMs` 0) also
