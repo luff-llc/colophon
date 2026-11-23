@@ -1,10 +1,10 @@
 # Colophon 0.6 sessions: findings from the reference machine
 
-**Date:** 2026-11-22, updated 2026-11-23. **Against:** `spec/colophon-0.6-sessions.md`, revisions 1–8 (revision 8: `d80435c`). **Code:** `crates/colophon-core/src/v06/session/`.
+**Date:** 2026-11-22, updated 2026-11-23. **Against:** `spec/colophon-0.6-sessions.md`, revisions 1–10 (revision 10: `996f537`). **Code:** `crates/colophon-core/src/v06/session/`.
 
 The reference machine implements the draft, and also the departures listed here. Each
 departure that changes behaviour has a switch in `Fixes`. `Fixes::default()` (= `ALL`) is the
-reference reading (revision 8 plus B5; `Fixes::REV7` down to `REV3` are earlier drafts as written), and `Fixes::LITERAL` is the revision 1 draft, so every counterexample below
+reference reading (revision 10; `Fixes::REV7` down to `REV3` are earlier drafts as written), and `Fixes::LITERAL` is the revision 1 draft, so every counterexample below
 can be reproduced. Evidence comes from three sources:
 
 - **Explorer:** `tests/v06_session_explore.rs`, an exhaustive BFS to depth 8 with fair
@@ -12,6 +12,8 @@ can be reproduced. Evidence comes from three sources:
 - **Simulator ablation:** `tests/v06_session_sim.rs` `fix_ablation` (`--ignored`), run over
   1,000 seeds. For each fix it reports the seeds that fail with that fix off, in the random
   workload and in the §S12 playback script.
+- **Carriers:** `tests/v06_session_carriers.rs`, sessions over a modelled home carrier and
+  bridged direct links in virtual time, with real freshness and adversarial delay (§U).
 - **Vectors:** `conformance/0.6-sessions/`.
 
 Each finding is labelled as one of:
@@ -513,7 +515,7 @@ The second independent review judged revision 6 unsound. In summary, it found:
 
 | Review item | Resolution | Evidence |
 | --- | --- | --- |
-| Four-member chain, holders at both ends, endless renewal | **Bridging (§S9)**, with the session rules written for a fully reachable group. | `v06_session_bridged`: reproduced. Under revision 6 without bridging, every fair schedule fails G10 with 15 claim changes in the last 80 s. Revision 7 with bridging settles on one holder and one state for chains of 3, 4 and 5, a five-member ring and a five-member star, under all three schedules, over 200 s. |
+| Four-member chain, holders at both ends, endless renewal | **Bridging (§S9)**, with the session rules written for a fully reachable group. | `v06_session_bridged` (replaced in revision 10 by `v06_session_carriers`): reproduced. Under revision 6 without bridging, every fair schedule fails G10 with 15 claim changes in the last 80 s. Revision 7 with bridging settles on one holder and one state for chains of 3, 4 and 5, a five-member ring and a five-member star, under all three schedules, over 200 s. |
 | `append` snapshot can exceed `maxPayload` | `Fold::apply_bounded`: the oldest payloads are dropped until the encoded state fits. | `append_state_fits_a_frame`: revision 6 produces a 68-byte state against a 64-byte limit and the joiner cannot sync; revision 7 does not. Vector `append-bound`. |
 | Windowless evidence replay | Removed, together with evidence (revision 7). | — |
 | `ack`/`yielded` sender | `yielded` is accepted only from its claim's holder, `ack` only from the accepted holder. | `third_writer_cannot_clear_or_inject_reports`: revision 6 accepted the injected `yielded`. |
@@ -525,7 +527,7 @@ The second independent review judged revision 6 unsound. In summary, it found:
 
 - **B1. Resending the same `n` does not cross a bridge.** A bridge that already accepted a frame drops the resend and does not forward it again, so a copy lost beyond the first hop is repaired only by a new frame with a new `n` (`same_n_resend_does_not_cross_a_bridge`). The session layer's beats, answers and resends provide such frames. The spec should say that retransmission means new frames.
 - **B2. Bridging and freshness interact** (not modelled). Under §S3 a member accepts non-`hello` frames only from keys with an open window, so a bridge forwards a member's frames only after its own freshness exchange with that member. Until then those frames do not cross the bridge and are not forwarded later; later frames repair this. With the four-key cap, a frame of an evicted key could be accepted and flooded once more. Both effects are bounded, but the test bridge here windows every key without a handshake.
-- **B3. Outside the model, the rules give no protection.** On an unbridged four-member chain, revision 7 leaves the two end holders in place indefinitely: G4 fails while G10 holds (`rev7_without_bridging_is_outside_the_model`). Revision 7 states this assumption; a deployment must bridge.
+- **B3. Outside the model, the rules give no protection.** On an unbridged four-member chain, revision 7 leaves the two end holders in place indefinitely: G4 fails while G10 holds (shown by the revision 7 harness, since replaced). Revision 7 states this assumption; a deployment must bridge.
 - **B4. `append` and a payload of exactly `maxPayload`.** Such a payload does not fit even alone once its 4-byte frame is added, so the state becomes empty. Proposal: limit `append` payloads to `maxPayload − 4`.
 
 **Ablation under revision 7** (500 seeds; seeds failing, random / playback):
@@ -565,13 +567,13 @@ The simulator's network is complete, so the hello-correction and renewal rules o
 
 Revision 8 settles the four open points from revision 7:
 
-- **B1.** §S9 now states that the session layer repairs loss with new frames. `far_hop_loss_is_repaired_by_new_frames` loses half of all frames on the far hops of chains of 3 and 4, and the group still settles under all three schedules.
+- **B1.** §S9 now states that the session layer repairs loss with new frames. (Revision 10 harness: `chains_with_bridging` loses 30 % of all frames on chains of 3–5, a ring and a star for 150 s, and the group settles.)
 - **B2.** Every member bridges. A frame that passed the §S3 checks through its signature is forwarded without waiting for the bridge's own freshness exchange with its origin. The forwarding window is kept apart from the delivery window. `v06::bridge` implements both, and `v06_bridge` checks them:
   - (a) `forwards_without_own_window`: the frame is forwarded, while the bridge's own session layer does not act on it.
   - (b) `handshake_across_bridges_under_loss`: the fresh/echo exchange completes across 1, 2 and 3 bridges at 20 % loss per hop, on 100 seeds each.
   - (c) `replays_are_bounded`: a replay within the window is never forwarded again. After a restart each replayed frame is forwarded at most once. Replayed newest first, only the 129 frames within the window of the first one are forwarded.
-  - (d) `key_cycling_cannot_force_refloods`: the session's four-key cap does not touch the bridge's forwarding memory. Each (key, n) is forwarded at most once per bridge incarnation, and the memory is one 128-wide window per accepted key until the key is forgotten.
-- **B3.** §S9 says every member bridges, so the unbridged case is outside the model. `rev7_without_bridging_is_outside_the_model` documents it.
+  - (d) Revision 8: the session's four-key cap did not touch the bridge's forwarding memory. Revision 10 caps that memory too (`key_cycling_is_bounded`, §U).
+- **B3.** §S9 says every member bridges, so the unbridged case is outside the model. (The revision 10 harness keeps only the revision 6 regression of this, `chains_with_bridging`.)
 - **B4.** An `append` payload is at most maxPayload − 4 bytes. Both `publish` and `submit` refuse a larger one, and receivers drop it (`append_state_fits_a_frame`, vector `append-bound`).
 
 ### B5. The freshness exchange is never retried (spec gap; fixed, switch `freshness_probe`)
@@ -585,6 +587,105 @@ Revision 8 settles the four open points from revision 7:
 **Fix.** A member that drops a frame for want of a window sends that sender a `hello`, at most once per askTimeoutMs per sender. `Fixes::ALL` includes it; `Fixes::REV7` is revision 8 without it.
 
 **Proposed spec text (§S3 freshness).** "A member that drops a frame because it has no window for the sender's key sends that sender a `hello`, at most once per `askTimeoutMs`."
+
+## U. Third independent design review and revision 10
+
+The third review found that the convergence guarantees cannot hold under unbounded delay
+(an adversary that delivers holder frames only once they are obsolete makes two holders
+renew over each other forever), that addressed frames do not reach a member behind a bridge
+when the home routes by `to`, that the freshness memory had no time bound, that bridges
+had unbounded per-member memory and no rate limit, that G9 ignored timer order, and that a
+pass did not check the asker's entitlement. It also found that the harness did not run
+bridged sessions through the real freshness exchange or in time that spans timeouts, did
+not model the home carrier, and assumed fair retransmission in bridge tests.
+
+**Revision 10** answers with a timing assumption (§S0: convergence only once the group is
+timely), every frame a broadcast with `to` as advice, a 60 s freshness memory, the home
+carrier as the 0.6 conformance profile (bridging specified, not conformance), bridge caps
+and rate limits, G9 over all inputs, and an entitlement check at pass.
+
+**Machine.** `Input::Frame` has no `forwarded` field; the revision 4–6 evidence path is
+reachable only through the hidden `Input::LegacyEvidence` and only under those presets.
+`Input::Entitled { writers }` gives the writers at the accepted authority head; a pass to
+any other member is rejected (`not-entitled`) and that member's pending ask is dropped.
+A member honours an echo only of a `fresh` it sent within 60 s, remembering at most its 32
+most recent. The bridge keeps forwarding and delivery windows for at most 4 keys per
+origin, rate-limits forwarding per origin (token bucket of one second at 50 frames/s and
+262,144 bytes/s; delivery to its own session layer is never limited), and every map is
+bounded by members × 4 keys. `Fixes::ALL` is revision 10.
+
+**Harness.** `v06_session_carriers.rs` replaces `v06_session_bridged.rs`. Every member has
+a `fresh` seed and every frame reaches the machine with its key and `n`, so the §S3
+exchange decides what is accepted. Each frame has its own delay, members tick every
+250 ms, and runs last 200–400 s, so deliveries span beat, ask and holder timeouts.
+
+| Item | Test | Result |
+| --- | --- | --- |
+| (a) bridged sessions, real freshness, time | `chains_with_bridging` | chains of 3, 4, 5, ring of 5, star of 5, delay up to 100 ms or 5 s, with and without 30 % loss for 150 s: G4, G10, G11 hold. Revision 6 unbridged chain of 4: G10 fails (15 claim changes in the last 80 s). |
+| (b) home carrier, 2–5 members | `home_timely_converges` | 1,760 runs (2–5 members, 1–3 groups each holding, merge, delay up to 0/1/2.5/5 s, 0 or 10 % loss, 20 seeds): all converge (G4, G10, G11). |
+| (c-i) D ≤ beatMs | `uniform_delay_within_beat_converges`, `home_timely_converges` | every run converges. |
+| (c-ii) renew forever | `renew_forever_trace`, `adversarial_delay_sweep` | reproduced: terms rise by one every 15 s for 200 s (12 renewals), with no safety violation; once delivery is timely again, one holder and every displaced state reported. |
+| (c) largest D | `adversarial_delay_sweep` | the adaptive adversary (holder frames to a rival holder withheld until obsolete or D) converges for D ≤ 15,000 ms and renews forever from 15,500 ms. A constant delay of any size up to 60 s, and batching every 30 s, converge. |
+| (d) hybrid topology | `hybrid_topology_needs_broadcast` | with to-only routing, B never opens a window for A and never follows; with broadcast and bridging it does (10 seeds each). |
+| (e) merges of 3 and 4 groups | `multi_group_merges` | 3 groups of 3, 4 of 4, 3 of 5, 4 of 6, 20 seeds each: one holder, every displaced state reported. |
+| (f) freshness slow path | `freshness_slow_path` | round trip 10 s and 50 s open, 70 s does not; five members at 10, 30, 50 s all open (32 entries suffice); no safety violation. |
+| (g) bridge delivery assumptions | `v06_bridge` | stated per test; fair new-`n` retransmission is assumed only by the two flood tests, and named as a session-layer assumption. `key_cycling_is_bounded`, `forwarding_is_rate_limited_per_origin` added. |
+| Entitlement at pass | vector `pass-not-entitled` | rejected with `not-entitled`. |
+
+**Simulator under revision 10** (2,000 seeds each): random workload and playback pass (playback: 1,807 exact passes, worst take error 100 ms against a largest bound of 302 ms). Ablation, seeds failing random / playback: revision 1 606 / 645, revision 3 24 / 48, revision 4 4 / 23, revision 5 0 / 70, revision 6 0 / 0; without F1 206 / 0, F2 502 / 108, F9 0 / 167, F10 0 / 77, R2 34 / 48, the `ack` 5 / 29; R2c, R5, hello correction and sender checks 0 / 0.
+
+**Explorer under revision 10:** all 21 tests pass with the state counts of revision 7 (largest profile 311,415 states).
+
+### U1. G6 says "reaches"; freshness means "accepted" (wording)
+
+**Trace.** `home_timely_converges`, 2 members, 2 groups, merge at 20 s. Member `11` holds
+`1.0.11` and receives `22`'s link-up `hello` under `1.0.22` before it has any window for
+`22`'s key. §S3 has it answer the `fresh` and act on nothing else, so `11` still acts as
+holder after a frame from a greater claim's holder has reached it. The same happens for a
+frame whose `to` names another member, which §S9 now carries to everyone. When the echo
+returns, `11` yields.
+
+**Reading.** The harness checks G6 for frames the member accepts. **Proposed text:** "Once a
+frame carrying a claim, sent by that claim's holder, is accepted by a member (it names that
+member or no one, and passes §S3), that member does not act as holder under any lesser
+claim."
+
+### U2. The bound is holderTimeoutMs, not beatMs (observation)
+
+§S0 asks for delivery within `beatMs`. Against the review's adversary the group still
+converges up to `holderTimeoutMs` (15 s) and fails just beyond it, which fits the reason
+§S0 gives (a live holder is never silent for holderTimeoutMs). The §S0 condition is
+therefore sufficient with a factor of three to spare. Under the delay models tried (uniform
+up to 5 s, constant, batched, adaptive), no convergence failure was found for D ≤ beatMs.
+
+### U3. Explorer and simulator routing
+
+The explorer and simulator deliver an addressed frame only to the member it names. That is
+an exact reduction of the broadcast rule: the machine drops a frame that names another
+member before any other check, with no outputs and no state change. The vectors deliver
+every frame to every member, as the home carrier does.
+
+### What each guarantee is checked by
+
+| | Checked by | Network assumption | Not checked |
+| --- | --- | --- | --- |
+| G1 | every input in the explorer, simulator and carriers harness; restarts in the simulator; every output prefix in `crash_prefixes` | any (loss, duplication, reordering, partitions; adversarial delay in carriers) | more than 3 members exhaustively |
+| G2 | as G1 (`check_step`, including the pass-resend exemption) | any | as G1 |
+| G3 | as G1 (ghost of passes and snapshots) | any | as G1 |
+| G4 | explorer completions (FIFO, LIFO, rotate) at depth 8; simulator at the end (lossless, healed); carriers after a timely phase | timely: delivery within beatMs once stable (carriers); healed and lossless (simulator); fair schedules (explorer) | non-timely networks (shown to fail, as allowed); more than 6 members |
+| G5 | explorer (strict, askTimeoutMs plus a tick); simulator ask and take timings | timely | carriers harness (asks not scripted there) |
+| G6 | every accepted frame in explorer, simulator and carriers (U1) | any | — |
+| G7 | by construction: frames are not records; the bridge stores no payload beyond its windows | — | the encrypted carrier itself (out of this layer) |
+| G8 | host-level (the machine takes `writer` per frame and `Entitled`); vector `pass-not-entitled` | — | authority-history replay (host layer) |
+| G9 | the machine is a pure function of its inputs (`handle(input, now)`); vectors replay exact outputs; explorer hashing | — | other implementations beyond the vectors |
+| G10 | explorer completions; carriers final window (no claim change for 60–80 s) | timely (carriers); fair schedules (explorer) | the simulator (its network is complete and healed at the end; checked only as G4) |
+| G11 | ledger of owed reports in explorer completions, simulator and carriers (`owed` must empty) | displaced member keeps running, eventual delivery | members that crash (excluded by G11) |
+| G12 | `crash_prefixes` (every output prefix, 2 and 3 members); simulator restarts | any | crashes in the carriers harness |
+
+Not checked anywhere: the simulator does not run the real freshness exchange (its frames
+carry no key; the carriers harness and `v06_bridge` do); clock drift and stalls are only in
+the simulator; bridging over the home and direct links together appears only in the hybrid
+topology test.
 
 ## Where the machine and the spec differed (resolved 2026-11-23)
 

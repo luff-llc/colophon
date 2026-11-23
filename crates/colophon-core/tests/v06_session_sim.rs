@@ -930,7 +930,7 @@ fn carrier_independence() {
 fn fix_ablation() {
     let all = Fixes::ALL;
     let cases: [(&str, Fixes); 16] = [
-        ("no fix removed (revision 7)", all),
+        ("no fix removed (revision 10)", all),
         ("revision 1 draft (LITERAL)", Fixes::LITERAL),
         ("revision 3 draft (REV3)", Fixes::REV3),
         ("revision 4 (REV4)", Fixes::REV4),
