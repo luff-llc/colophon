@@ -803,3 +803,88 @@ optionals. `AccountDenial.reason` and `AccountError.Denied.reason` are `AccountD
 `AccountError.BadSignature.check` is the failed WebAuthn check (`SignatureCheck`) beside the code.
 `Controller.key` is the key descriptor. `account_map_swift_role(role)` is the core's role-to-kind map
 for the migration.
+
+## 10. The 0.6 home stream and sessions (stage 1)
+
+The proposed 0.6 home stream client (`docs/colophon-0.6-stream.md`, host contract in
+[colophon-0.6-sync-stream.md](colophon-0.6-sync-stream.md) §2) and the 0.6 session endpoint
+(`spec/colophon-0.6-sessions.md`, wire in [colophon-0.6-sessions-wire.md](colophon-0.6-sessions-wire.md))
+are part of this surface: `api/stream.rs` and `api/sessions.rs`, in both crates, held to
+`surface-names.txt` like the rest. Both are the core's sans-IO state machines behind a handle: the host owns
+the WebSocket, the HTTP client, the carriers and the clocks; the binding converts values and adds no policy.
+Every policy (ticket budget and window, breaker, daily cap, backoff and jitter, safety poll, frame numbering,
+every session rule) is the core's. Errors are `AccountError`, as everywhere else.
+
+| Object or call | What it is |
+| --- | --- |
+| `HomeStream` | one stream client per home: `next(now)` returns a `StreamStep` (`Wake`, `NeedTicketCall`, `Connect`, `Send`, `Close`, `Waiting`, `Sleep`); `ticket_request`, `ticket_call_failed`, `on_ticket`, `on_open`, `on_refused`, `on_frame`, `on_closed`, `on_history`, `retry_now` take what happened and return `StreamEvent`s; `status`, `polling`, `cursor`, `config`, `attempts`, `unstable_mints`; `subscribe`, `unsubscribe`, `session_frame` build client frames |
+| `AccountEngine.stream_client(home, config, cursor)` | the client at the home's endpoint, with the account's safety-poll floor and the verified seq applied (`HomeStream.new` takes a base directly) |
+| `AccountEngine.stream_begin_call(home, key, entropy)` | the `colophon.home.stream` call that mints a ticket: an `AccountAction` signed and finished like any other; `artifact` goes to `ticket_request` |
+| `stream_default_config`, `stream_redact_url` | the documented `StreamConfig`; a URL with its ticket redacted |
+| `SessionEndpoint` | one member of one cell: `new` (policy, persisted claim, view, 32 + 16 random bytes), `begin_delegation` / `finish_delegation`, `set_account`, `command`, `tick`, `link_up`, `link_down`, `receive`; each returns a `SessionStep`. Read-only: `next_deadline`, `me`, `key_id`, `last_n`, `entitled`, `can_write`, `joined`, `holder`, `is_holder`, `claim_json`, `view_json`, `digest` |
+| `AccountEngine.session_account(at_ms)` | the `SessionAccountView` of the verified history at `at_ms` |
+| `AccountEngine.session_epochs(namespace)` | a `SessionEpochs`: a copy, held in Rust and wiped on drop, of the epoch keys the engine unlocked for the namespace |
+| `session_default_policy`, `session_validate_policy`, `session_clock_sample` | the §S1 default policy (JSON); the policy check the endpoint applies; the §S7 sample |
+| `SessionMachine`, `SessionWireReceiver`, `SessionAccountView.supplied`, `SessionEpochs.with_keys` | conformance only (below) |
+
+**What crosses.** A `StreamStep.url` of a `Connect` carries the ticket, a bearer credential: the host opens the
+socket with it and logs `log_url` (the core's `redact_url`). No record or object here implements `Debug`;
+no error carries a ticket, a call, a frame or a payload. Session commands, events, claims, the policy and the
+persisted claim cross as the JSON the conformance vectors use, tagged by `command`, `event`, `input` and
+`output`; every such argument is decoded strictly (a known variant, no unknown or missing field, canonical
+base64: it must read back to exactly the JSON given), and anything else is `Malformed` and changes nothing. A
+`SessionEffect` is `Send` (broadcast `bytes` to every member; `to` is advice), `Persist` (store
+`persisted_json` before carrying out any later effect; pass it back to `new` after a restart), `Event`
+(`event` names the tag of `event_json`) or `Unsent` (a stable reason: `noDelegation`, `delegationWindow`,
+`noEpoch`, `notEntitled`, `notWriter`, `retired`, `oversize`, `key:<reason>`, ...). A dropped frame is
+`SessionStep.dropped` with the §S3 code the wire vectors use. A policy out of bounds is `session:policy`; a
+member that is not entitled is `denied:notGranted`; a bad delegation signature is `session:delegation`.
+
+**Keys.** The member key never enters: `begin_delegation` returns the exact `colophon/session-key/6` body,
+the host signs it as it signs a `Raw` `AccountSigningStep` (P-256, `r||s`), and `finish_delegation` verifies
+it under the member's key in the view before using it. Epoch keys never leave Rust: the endpoint reads them
+from a `SessionEpochs` the engine copied (take a new one after an unlock or a rekey, as with `set_account`).
+The one inward path, `SessionEpochs.with_keys`, takes supplied bytes for the conformance vectors and tests
+(wiped once read); an application has no reason to call it. The session key's randomness and the `fresh`
+seed are host randomness, new on every process start, and are wiped.
+
+**Host loops.** Stream: §2 of the sync-stream document, with these names; after every exchange pass call
+`on_history(head_seq())`; while `polling()` is true keep the existing poll timer. Session: after every pass
+that accepted a new authority head, `set_account(session_account(now), session_epochs(namespace), clock)`
+before delivering any frame received after it; `tick` at `next_deadline` (within 250 ms) and on no other
+schedule; `link_up` and `link_down` when the carriers change; carry out each step's effects in order.
+
+**Open: the home carrier and the session codec disagree on the frame's form.** The home stream forwards a
+session frame as a 0.5 raw envelope, `{"body":"<base64>","signature":"<base64>"}` whose body is the frame's
+JSON (stream §5.2, `home_stream::check_session_frame`); the session codec seals one canonical object with
+`signature` and `delegation` as fields (wire §3). A sealed frame therefore cannot cross the home stream
+unchanged: `HomeStream.session_frame` accepts it (it judges only that the envelope is a JSON object), and a
+home refuses it as `badFrame`. The binding does not adapt between the two forms; until the protocol settles
+one, `SessionEndpoint` runs over carriers that deliver its bytes unchanged.
+
+**Threads and ownership.** Every object is `Send + Sync` and serializes its calls (a second thread waits),
+which gives the one-call-at-a-time rule of the wire document. Nothing here calls back into the host, so no
+call can re-enter. A `HomeStream` holds no engine and a `SessionEndpoint` holds no engine either: the view
+and the keys are passed per call, so the host decides when they change. Drop the endpoint to end the session;
+its session key is wiped.
+
+**Conformance.** `conformance/0.6-sessions/*.json` replays through `SessionMachine` (`new` from a vector's
+`members[]` entry with the file's `policy`, `fixes` and `freshSeed`; `handle(input, at)` returns the outputs
+as JSON; a `restart` rebuilds it from `persisted_json`; compare `view_json` and `digest` at the end), the
+`offset.json` cases through `session_clock_sample`, and `wire/vectors.json` through `SessionWireReceiver`
+(`open` returns the canonical plaintext, the writer flag, `n` and the epoch, or the drop code; `set_account`
+returns what a view removed; `keys` and `window_high` show that a drop changed nothing), with the view from
+`SessionAccountView.supplied` and the keys from `SessionEpochs.with_keys`, and the session key and the
+delegation body through a `SessionEndpoint` made from the file's scalar. Not exposed, so not replayed by a
+host: the wire file's intermediate values (frame key, HKDF info, nonce, AAD, signed body), `offset.json`'s
+best-of-8 sequence, and `bridge.json` (§S9 bridging, not part of 0.6 conformance). `SessionMachine` and
+`SessionWireReceiver` are not for applications: the machine seals nothing, and the receiver does not bound
+the keys it keeps (the endpoint keeps only the keys its machine knows).
+
+**What was run.** `colophon-ffi/tests/v06_bindings.rs` (and the same sources natively through the web build,
+`colophon-wasm/tests/v06_bindings.rs`): the stream transcripts of the core's own tests (ticket, open,
+frames, a coalesced wake, pass-through frames, a drop, the seeded backoff and Retry-After, resume and
+`resync`, a frame gap, refusals, access ended, released, the ticket budget, typed misuse), every machine
+vector, the offset cases and the wire file, and the strict decoding. `v05_journeys` signs a real
+`colophon.home.stream` call through `stream_begin_call` and runs an endpoint on the engine's view and keys.
+The WebSocket transports of Swift, Kotlin and JavaScript are the next stage and were not run.
