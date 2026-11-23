@@ -83,6 +83,7 @@ import ColophonSavedKit
         let outcome = try await first.session.appointHomes([appointable(relay)], adding: (key: passkey, label: "Passkey", roles: [.control, .recover]))
         first.session.stopSync()
         #expect(outcome == .done, "no home before: final at once")
+        #expect(passkey.assertCount == 1)
         #expect(first.session.homes.count == 1 && !first.session.notices.noHome, "\(first.session.homes)")
         #expect(first.session.syncState != .disabled, "the running session syncs with the appointed home")
         let passkeyID = try await KeyCustody.keyID(of: passkey)
@@ -129,6 +130,7 @@ import ColophonSavedKit
         }
         first.session.stopSync()
         #expect(transitions(first.medium) == 1, "one transition signed before the stop")
+        #expect(passkey.assertCount == 1)
 
         let again = first.relaunch()
         await again.restore()
@@ -136,6 +138,7 @@ import ColophonSavedKit
         let outcome = try await again.appointHomes([home], adding: (key: passkey, label: "Passkey", roles: [.control, .recover]))
         again.stopSync()
         #expect(outcome == .done)
+        #expect(passkey.assertCount == (step == .slotted ? 1 : 2), "resume needs one fresh PRF get only if the slot was absent")
         #expect(transitions(first.medium) == 1, "nothing was appointed or added twice")
         #expect(again.homes.count == 1)
         let passkeyID = try await KeyCustody.keyID(of: passkey)

@@ -11,6 +11,7 @@
 //! engine, and the second device receives the seed by pairing and seed transfer.
 #![allow(clippy::unwrap_used, clippy::too_many_arguments)]
 mod v05_support;
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use serde_json::{json, Value};
 use std::sync::Arc;
 use v05_support::*;
@@ -153,6 +154,112 @@ fn create_params(host: &Host, ids: &[&str; 3], policy: Option<String>) -> Create
         rekey_signers: vec![d.to_string()],
     }
 }
+
+#[test]
+fn a_control_owner_publishes_a_slot_from_the_passkeys_possession_assertion() {
+    let mut host = Host::new();
+    let owner_id = host.identity(10);
+    let passkey_id = host.passkey();
+    let signers = vec![owner_id.clone()];
+    let creation = AccountCreation::begin(
+        CreateParams {
+            label: "Test account".into(),
+            namespaces: vec!["notes".into()],
+            controllers: vec![host.raw_controller(
+                &owner_id,
+                "Owner",
+                &["approve", "control", "recover"],
+            )],
+            slots: vec![SlotPlan {
+                controllers: signers.clone(),
+                label: "Owner".into(),
+            }],
+            threshold: None,
+            recover_threshold: None,
+            add_threshold: None,
+            count_by_holders: false,
+            policy_json: String::new(),
+            signers: signers.clone(),
+            rekey_signers: signers.clone(),
+        },
+        ident(&format!("controller:{owner_id}")),
+        T0,
+        host.fresh(96),
+    )
+    .unwrap();
+    drive_creation(&creation, &host);
+    let created = creation.take_result().unwrap();
+    let mut stores = created.stores;
+    let src = MemSource::new();
+    src.store(&stores);
+    let owner = open_engine(&src, &format!("controller:{owner_id}"), &created.account);
+    unlock_slot(&owner, &host, &owner_id);
+    let passkey = host.passkey_controller("Passkey", &["control", "recover"]);
+    let transition = owner
+        .begin_add_controller(
+            passkey,
+            AddMode::Transition,
+            signers.clone(),
+            RuleKind::Control,
+            vec![],
+        )
+        .unwrap();
+    let steps = transition.steps().unwrap();
+    assert_eq!(steps[1].role, StepRole::Possession);
+    assert_eq!(steps[1].signer, passkey_id);
+    let salt = host.fresh(32);
+    let challenge = URL_SAFE_NO_PAD
+        .decode(steps[1].challenge.as_ref().unwrap())
+        .unwrap();
+    let signatures = host.sign(&steps);
+    let answer = PrfAnswer {
+        authenticator_data: signatures[1].authenticator_data.clone().unwrap(),
+        client_data: signatures[1].client_data.clone().unwrap(),
+        signature: signatures[1].signature.clone(),
+        output: host.prf(&salt),
+    };
+    let written = owner.finish(transition, signatures).unwrap();
+    src.store(&written.stores);
+    stores.extend(written.stores);
+    let due = owner.record_due().unwrap();
+    assert_eq!(due.len(), 1);
+    src.store(&due[0].stores);
+    stores.extend(due.into_iter().flat_map(|written| written.stores));
+
+    let plan = SlotPlan {
+        controllers: vec![passkey_id.clone()],
+        label: "Passkey".into(),
+    };
+    let slot = owner
+        .begin_add_slot_with_signers(
+            signers,
+            plan,
+            Some(salt.clone()),
+            Some(challenge.clone()),
+            host.fresh(32),
+        )
+        .unwrap();
+    let requests = slot.prf_requests().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].salt, salt);
+    assert_eq!(requests[0].challenge, challenge);
+    owner.provide_prf(slot.clone(), vec![answer]).unwrap();
+    let steps = slot.steps().unwrap();
+    assert_eq!(steps.len(), 1);
+    assert_eq!(steps[0].signer, owner_id);
+    assert_eq!(steps[0].form, SignForm::Raw);
+    let written = owner.finish(slot, host.sign(&steps)).unwrap();
+    src.store(&written.stores);
+    stores.extend(written.stores);
+    let (objects, _) = objects_of(&stores);
+    let report = account_verify_history(authority_objects(&objects), NOW).unwrap();
+    assert_eq!(report.code, "ok");
+    let reopened = open_engine(&src, &format!("controller:{passkey_id}"), &created.account);
+    assert!(!reopened.is_unlocked().unwrap());
+    unlock_slot(&reopened, &host, &passkey_id);
+    assert!(reopened.is_unlocked().unwrap());
+}
+
 #[test]
 fn journey_one_create_approve_write_pair_and_sync_two_engines() {
     let mut host = Host::new();

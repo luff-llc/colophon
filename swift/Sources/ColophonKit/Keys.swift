@@ -11,6 +11,8 @@ import Security
 public protocol AsyncKeyProvider: Sendable {
     /// Select raw ES256 or WebAuthn get assertions.
     var form: KeyForm { get }
+    /// Whether a WebAuthn get can also evaluate a PRF salt on this provider.
+    var supportsPRF: Bool { get }
     /// Restrict get to this provider's credential and optionally evaluate the exact salt.
     func assert(challenge: String, prfSalt: Data?) async throws -> KeyAssertion?
     /// Evaluate an existing route; nil explicitly means unsupported or missing output.
@@ -49,6 +51,7 @@ extension AsyncKeyProvider {
 extension AsyncKeyProvider {
     /// Raw providers need no WebAuthn ceremony.
     public var form: KeyForm { .raw }
+    public var supportsPRF: Bool { false }
     /// Unsupported assertions are explicit; callers must not derive a fallback secret.
     public func assert(challenge: String, prfSalt: Data?) async throws -> KeyAssertion? { nil }
     /// Exact WebAuthn results.first for an existing slot; nil means unsupported.

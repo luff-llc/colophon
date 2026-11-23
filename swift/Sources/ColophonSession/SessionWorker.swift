@@ -1077,6 +1077,13 @@ actor SessionWorker {
                     }
                 }
                 // 2-3. One change, signed by the owner with the new key's possession proof, persisted.
+                let possessionPRF: TransitionPossessionPRF?
+                if !add.isEmpty, let addedID, let adding, adding.spec.key.form == .webauthn, adding.key.supportsPRF {
+                    possessionPRF = try TransitionPossessionPRF(controller: addedID)
+                    custody = KeyCustody(providers: custody.providers, possessionPRF: possessionPRF)
+                } else {
+                    possessionPRF = nil
+                }
                 if !appoint.isEmpty || !add.isEmpty {
                     var change: [String: Any] = [:]
                     if !appoint.isEmpty { change["homes"] = ["appoint": appoint] }
@@ -1101,11 +1108,23 @@ actor SessionWorker {
                 guard homesDone, controllerDone else {
                     return .pending(transitions: Set(inFlight).sorted())
                 }
-                // 5. The new controller's own slot (exactly it as holder), signed by it, so it unlocks alone.
+                // 5. Give the new controller a slot it can unlock alone.
                 if let adding, let addedID,
                    !(try await owner.run { try $0.slots() }).contains(where: { $0.controllers.map(\.id) == [addedID] }) {
+                    let entrySigner = try await owner.run { engine in
+                        guard try engine.policy().addThreshold == 1,
+                              let held = try engine.controllers().first(where: { $0.id == ownerID }),
+                              held.form == .raw, held.roles.contains(.control), !held.provisional, !held.suspended
+                        else { return addedID }
+                        return ownerID
+                    }
+                    let input = await possessionPRF?.input()
+                    let plan = SlotPlan(controllers: [addedID], label: adding.spec.label)
                     let written = try await owner.execute(custody: custody) { engine in
-                        try withEntropy(32) { try engine.beginAddSlot(signer: addedID, plan: SlotPlan(controllers: [addedID], label: adding.spec.label), entropy: $0) }
+                        try withEntropy(32) {
+                            try engine.beginAddSlotWithSigners(entrySigners: [entrySigner], plan: plan,
+                                                              prfSalt: input?.salt, prfChallenge: input?.challenge, entropy: $0)
+                        }
                     }
                     try await persist(written, on: owner)
                 }

@@ -1135,6 +1135,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_colophon_ffi_checksum_method_accountengine_begin_add_slot(
     ): Int
+    external fun uniffi_colophon_ffi_checksum_method_accountengine_begin_add_slot_with_signers(
+    ): Int
     external fun uniffi_colophon_ffi_checksum_method_accountengine_begin_approve(
     ): Int
     external fun uniffi_colophon_ffi_checksum_method_accountengine_begin_blob(
@@ -1840,6 +1842,8 @@ internal object UniffiLib {
     external fun uniffi_colophon_ffi_fn_method_accountengine_begin_add_controller(`ptr`: Long,`controller`: RustBuffer.ByValue,`mode`: RustBuffer.ByValue,`signers`: RustBuffer.ByValue,`rule`: RustBuffer.ByValue,`entropy`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
     external fun uniffi_colophon_ffi_fn_method_accountengine_begin_add_slot(`ptr`: Long,`signer`: RustBuffer.ByValue,`plan`: RustBuffer.ByValue,`entropy`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun uniffi_colophon_ffi_fn_method_accountengine_begin_add_slot_with_signers(`ptr`: Long,`entrySigners`: RustBuffer.ByValue,`plan`: RustBuffer.ByValue,`prfSalt`: RustBuffer.ByValue,`prfChallenge`: RustBuffer.ByValue,`entropy`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
     external fun uniffi_colophon_ffi_fn_method_accountengine_begin_approve(`ptr`: Long,`request`: RustBuffer.ByValue,`termsJson`: RustBuffer.ByValue,`signers`: RustBuffer.ByValue,`pairing`: Long,`entropy`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
@@ -2846,6 +2850,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_colophon_ffi_checksum_method_accountengine_begin_add_slot() and 0xFFFF) != 16458) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_colophon_ffi_checksum_method_accountengine_begin_add_slot_with_signers() and 0xFFFF) != 62323) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_colophon_ffi_checksum_method_accountengine_begin_approve() and 0xFFFF) != 12821) {
@@ -5307,6 +5314,13 @@ public interface AccountEngineInterface {
     fun `beginAddSlot`(`signer`: kotlin.String, `plan`: SlotPlan, `entropy`: kotlin.ByteArray): AccountAction
     
     /**
+     * A slot signed by the specified keyring entry signers (§8.4). To reuse a transition
+     * possession assertion for one PRF route, supply both its salt and decoded challenge.
+     * Omit both for fresh core-generated inputs. 32 bytes of entropy.
+     */
+    fun `beginAddSlotWithSigners`(`entrySigners`: List<kotlin.String>, `plan`: SlotPlan, `prfSalt`: kotlin.ByteArray?, `prfChallenge`: kotlin.ByteArray?, `entropy`: kotlin.ByteArray): AccountAction
+    
+    /**
      * Approve a request (a `grant`), spending `pairing`: confirmed on this device, for this
      * account and exactly the request's `member.signing` (§9.1). Another account or key, or a
      * pairing confirmed on the joining device, is `refused:outOfScope`; an expired one
@@ -6110,6 +6124,30 @@ open class AccountEngine: Disposable, AutoCloseable, AccountEngineInterface
         
         FfiConverterString.lower(`signer`),
         FfiConverterTypeSlotPlan.lower(`plan`),
+        FfiConverterByteArray.lower(`entropy`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * A slot signed by the specified keyring entry signers (§8.4). To reuse a transition
+     * possession assertion for one PRF route, supply both its salt and decoded challenge.
+     * Omit both for fresh core-generated inputs. 32 bytes of entropy.
+     */
+    @Throws(AccountException::class)override fun `beginAddSlotWithSigners`(`entrySigners`: List<kotlin.String>, `plan`: SlotPlan, `prfSalt`: kotlin.ByteArray?, `prfChallenge`: kotlin.ByteArray?, `entropy`: kotlin.ByteArray): AccountAction {
+            return FfiConverterTypeAccountAction.lift(
+    callWithHandle {
+    uniffiRustCallWithError(AccountException) { _status ->
+    UniffiLib.uniffi_colophon_ffi_fn_method_accountengine_begin_add_slot_with_signers(
+        it,
+        
+        FfiConverterSequenceString.lower(`entrySigners`),
+        FfiConverterTypeSlotPlan.lower(`plan`),
+        FfiConverterOptionalByteArray.lower(`prfSalt`),
+        FfiConverterOptionalByteArray.lower(`prfChallenge`),
         FfiConverterByteArray.lower(`entropy`),_status)
 }
     }

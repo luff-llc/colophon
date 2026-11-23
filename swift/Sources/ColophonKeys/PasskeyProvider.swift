@@ -8,6 +8,7 @@ public struct PasskeyProvider: AsyncKeyProvider {
     public var descriptor: KeyDescriptor { base.descriptor }
     /// WebAuthn assertions retain their original DER and signed bytes.
     public var form: KeyForm { .webauthn }
+    public var supportsPRF: Bool { base.ceremonies.supportsPRF(kind: .passkey) }
 
     /// Uses a registered credential with injectable platform ceremonies.
     public init(descriptor: KeyDescriptor, ceremonies: any WebAuthnCeremonies = SystemWebAuthnCeremonies()) {
