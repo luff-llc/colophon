@@ -1,10 +1,10 @@
 # Colophon 0.6 sessions: findings from the reference machine
 
-**Date:** 2026-11-22, updated 2026-11-23. **Against:** `spec/colophon-0.6-sessions.md`, revisions 1–5 (revision 5: `7c07150`). **Code:** `crates/colophon-core/src/v06/session/`.
+**Date:** 2026-11-22, updated 2026-11-23. **Against:** `spec/colophon-0.6-sessions.md`, revisions 1–7 (revision 7: `63375bf`). **Code:** `crates/colophon-core/src/v06/session/`.
 
 The reference machine implements the draft, and also the departures listed here. Each
 departure that changes behaviour has a switch in `Fixes`. `Fixes::default()` (= `ALL`) is the
-reference reading (revision 5 plus R1f; `Fixes::REV5`, `REV4` and `REV3` are those drafts as written), and `Fixes::LITERAL` is the revision 1 draft, so every counterexample below
+reference reading (revision 7; `Fixes::REV6` down to `REV3` are earlier drafts as written), and `Fixes::LITERAL` is the revision 1 draft, so every counterexample below
 can be reproduced. Evidence comes from three sources:
 
 - **Explorer:** `tests/v06_session_explore.rs`, an exhaustive BFS to depth 8 with fair
@@ -356,7 +356,20 @@ Proposed wording: "…and a member that becomes holder by that `pass` starts wit
   core folds messages itself. `Reducer::Latest` is the §S12 rule; `Reducer::Append` is for
   logs and tests. A cell's fold should be part of its declaration in §S1. (Spec gap.)
 
-## R. First independent design review (`docs/colophon-0.6-sessions-review-1.md`) and revision 4
+## R. First independent design review and revision 4
+
+The first independent review judged revision 3 unsound. In summary, it found:
+
+- a renewal livelock on a three-member chain whose ends cannot hear each other;
+- state silently lost when a take raced a delayed pass, or when a released holder restarted;
+- a pass revealed before its claim was persisted;
+- no safe way to bootstrap a session key, and a nonce scheme open to reuse;
+- submits with neither delivery guarantee;
+- unbounded growth and integer overflow;
+- passes that answered no ask;
+- evidence that exercised only a complete graph with one fair schedule.
+
+The table below maps each item to its resolution.
 
 **Machine:** revision 4 is `Fixes::REV4`. The reference reading is `Fixes::ALL`, which is revision 4 plus five fixes, R1c, R1e, R2d and R2e, that the explorer and the simulator showed revision 4 needs. Each fix has its own switch. **Harness changes (H1–H5):**
 
@@ -478,6 +491,75 @@ It decides R2d, R2f and R1d differently, and the machine now follows those decis
 **Ablation (500 seeds; seeds failing, random/playback).** Revision 5 as written: 0/23, first failure seed 18 (R1g). Revision 4: 4/6. Revision 3: 10/11. Without the `ack`: 1/6. Without R2: 12/12. With every fix: 0/0.
 
 **Results under revision 5.** Explorer 16/16, with G4, G5 (revision 5 bound), G10, G11 (strict) and G12. Sim: 2,000 random and 2,000 playback seeds pass. Vectors: 21 scenarios plus `offset.json`. The vectors include `ack`, `stale-evidence`, `want-kept-after-evidence`, and windowless `evidence-forward`.
+
+## S. Second independent design review and revision 7
+
+The second independent review judged revision 6 unsound. In summary, it found:
+
+- one-hop evidence cannot carry a claim along a chain of four members, so the two ends renew over each other forever (G4, G10);
+- an `append` state can outgrow the frame limit;
+- windowless evidence can be replayed to keep a dead holder alive;
+- `ack` and `yielded` were not checked against their sender;
+- freshness windows grew without bound;
+- the clock assumption was unstated;
+- the evidence covered only three members, one chain and crash points 0–3.
+
+**Revision 7** splits the design into two layers:
+
+- **Carriers bridge (§S9).** Inside a connected group every frame sent to all reaches every member. This is `crate::v06::bridge`.
+- **The session rules assume that group.** Evidence forwarding, `hello.heard`, windowless evidence and the kept-want rules are gone. Correcting lesser claims with `hello`, and renewing on a quiet claim after the holder's own link has worked holderTimeoutMs, are back.
+
+`Fixes::ALL` is revision 7. `Fixes::REV6`, `REV5`, `REV4` and `REV3` are kept as regression presets.
+
+| Review item | Resolution | Evidence |
+| --- | --- | --- |
+| Four-member chain, holders at both ends, endless renewal | **Bridging (§S9)**, with the session rules written for a fully reachable group. | `v06_session_bridged`: reproduced. Under revision 6 without bridging, every fair schedule fails G10 with 15 claim changes in the last 80 s. Revision 7 with bridging settles on one holder and one state for chains of 3, 4 and 5, a five-member ring and a five-member star, under all three schedules, over 200 s. |
+| `append` snapshot can exceed `maxPayload` | `Fold::apply_bounded`: the oldest payloads are dropped until the encoded state fits. | `append_state_fits_a_frame`: revision 6 produces a 68-byte state against a 64-byte limit and the joiner cannot sync; revision 7 does not. Vector `append-bound`. |
+| Windowless evidence replay | Removed, together with evidence (revision 7). | — |
+| `ack`/`yielded` sender | `yielded` is accepted only from its claim's holder, `ack` only from the accepted holder. | `third_writer_cannot_clear_or_inject_reports`: revision 6 accepted the injected `yielded`. |
+| Unbounded freshness windows | At most 4 keys per member, oldest dropped; `Session::forget_member` drops them all. | `freshness_windows_are_bounded`. |
+| Clock assumption | §S0: within 500 ppm, and a stall delays only the stalled member's own timeouts. | The simulator draws drift of ±500 ppm. About one random seed in five stalls one member's clock for up to 30 s. 2,000 random and 2,000 playback seeds pass. Take accuracy is not checked for stalled members. |
+| Three identities, one chain, crash points 0–3 | Bridge tests on 2–6 members. Session-on-bridge runs with 3–5 members. Explorer: bridged chain, groups that split and merge, and every output prefix for G12. | `v06_bridge`; `v06_session_bridged`; `crash_prefixes`, `groups_split_merge`. |
+
+### Observations on revision 7
+
+- **B1. Resending the same `n` does not cross a bridge.** A bridge that already accepted a frame drops the resend and does not forward it again, so a copy lost beyond the first hop is repaired only by a new frame with a new `n` (`same_n_resend_does_not_cross_a_bridge`). The session layer's beats, answers and resends provide such frames. The spec should say that retransmission means new frames.
+- **B2. Bridging and freshness interact** (not modelled). Under §S3 a member accepts non-`hello` frames only from keys with an open window, so a bridge forwards a member's frames only after its own freshness exchange with that member. Until then those frames do not cross the bridge and are not forwarded later; later frames repair this. With the four-key cap, a frame of an evicted key could be accepted and flooded once more. Both effects are bounded, but the test bridge here windows every key without a handshake.
+- **B3. Outside the model, the rules give no protection.** On an unbridged four-member chain, revision 7 leaves the two end holders in place indefinitely: G4 fails while G10 holds (`rev7_without_bridging_is_outside_the_model`). Revision 7 states this assumption; a deployment must bridge.
+- **B4. `append` and a payload of exactly `maxPayload`.** Such a payload does not fit even alone once its 4-byte frame is added, so the state becomes empty. Proposal: limit `append` payloads to `maxPayload − 4`.
+
+**Ablation under revision 7** (500 seeds; seeds failing, random / playback):
+
+| Preset or fix turned off | Random | Playback |
+| --- | --- | --- |
+| None (revision 7) | 0 | 0 |
+| Revision 6 | 0 | 0 |
+| Revision 5 | 0 | 20 |
+| Revision 4 | 1 | 4 |
+| Revision 3 | 7 | 11 |
+| Revision 1 | 154 | 152 |
+| Without F1 | 44 | 0 |
+| Without F2 | 120 | 31 |
+| Without F9 | 0 | 37 |
+| Without F10 | 0 | 16 |
+| Without R2 | 9 | 19 |
+| Without the `ack` | 0 | 7 |
+
+The simulator's network is complete, so the hello-correction and renewal rules of revision 7 are exercised by `v06_session_bridged` and the explorer rather than by the simulator.
+
+**Explorer state counts under revision 7** (18 explorer tests, plus the three new targeted tests):
+
+| Profile | States |
+| --- | --- |
+| Two members, handoff | 128,648 |
+| Two members, membership | 311,415 |
+| Three members, handoff | 85,237 |
+| Three members, membership | 176,120 |
+| Groups split and merge | 80,836 |
+| Bridged chain, handoff | 23,098 |
+| Bridged chain, two holders | 624 |
+| Two holders passing to one asker | 128,486 |
+| Crash prefixes, every prefix | 26,247 + 5,694 |
 
 ## Where the machine and the spec differed (resolved 2026-11-23)
 
