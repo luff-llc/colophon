@@ -151,23 +151,35 @@ A rollback therefore never delays anything past its configured duration.
   least `Retry-After`. A restart (`bye` `restart`, close 1012) waits `retryMs` plus up to 1 s of
   jitter and does not count as a failure. With seed 1 the schedule is 542, 1,328, 2,846, 4,376, 11,182, 28,271,
   49,933, 30,709, 31,293 and 33,062 ms.
-- **Ticket budget.** Every reconnect signs a call, which may use a hardware key or prompt the
-  user. At most `mint_budget` tickets (8) are minted in any `mint_window_ms` (10 minutes). Past
-  that the stream is `Throttled(until)` and stays on polling until the oldest mint leaves the
-  window, or until `on_history` reports a new seq. A home that sends `hello` and closes at once,
-  forever, gets 8 signatures per 10 minutes (48 an hour), not one a second.
-- **Circuit breaker.** The rolling budget alone reopens every window. The client therefore also
-  counts tickets minted, or signed for (`ticket_call_failed`), since the last stable connection,
-  meaning one that stayed live for `stable_ms`. After `suspend_after` (16, two spent windows)
-  the stream is `Suspended(until)` and mints nothing. It resumes when any of these happens:
-  - the verified history changes (`on_history`);
-  - the host calls `retry_now`, which it must do only on an explicit user action or on
-    foreground entry, never from a timer;
-  - `suspend_ms` (6 hours) passes.
+- **Ticket signing is bounded in three layers.** Every reconnect signs a call, which may use a
+  hardware key or prompt the user, and the home decides when a connection drops. Polling
+  continues under every layer.
+  1. **Rolling 10-minute window:** at most `mint_budget` (8) tickets in any `mint_window_ms`.
+     Past it the stream is `Throttled(until)` until the oldest mint leaves the window.
+  2. **Circuit breaker with decay:** each ticket signed (or attempted, `ticket_call_failed`)
+     adds one to a count. Each whole `stable_ms` (60 s) of continuous uptime removes one, never
+     below zero, so a connection held for 60 s and then dropped earns one credit, not a reset.
+     At `suspend_after` (16) the stream is `Suspended(until)`. It mints nothing until the
+     history changes, `retry_now` is called, or `suspend_ms` (6 hours) passes.
+  3. **Daily budget:** at most `max_mints_per_day` (96) tickets in any rolling 24 hours,
+     whatever the connections did. Past it the stream is `Suspended` until enough of those
+     mints are a day old, or the history changes. `retry_now` clears the breaker's count and
+     allows `retry_allowance` (8) more, counted in the same day. A host that calls it from a
+     timer by mistake therefore still signs at most 104 a day. Call it only on an explicit user
+     action or on foreground entry.
 
-  Polling continues throughout, and a stable connection resets the count. A home that sends
-  `hello` and closes at once, for 24 hours, gets 64 signatures in total. A flaky network that
-  holds one connection in four never suspends.
+  **Worst case:** 96 signatures a day from a hostile home, or 104 if the host calls `retry_now`.
+  These are the measured totals over 7 days:
+
+  | Home | Signatures |
+  | --- | --- |
+  | `hello` then close, forever | 64 a day |
+  | Holds one connection in four for 60 s | 85 on day 1, 575 in 7 days |
+  | Holds one connection in four for 20 minutes | 96 a day, 672 in 7 days |
+
+  A flaky network where two connections in three hold for half an hour signs about 72 a day
+  and never suspends. Changes to the verified history reset all three layers, and a hostile
+  home cannot cause one.
 - **Do not reconnect until the history changes** (`Blocked`; the client resumes after
   `on_history` reports a different seq, or after `retry_now`):
 
