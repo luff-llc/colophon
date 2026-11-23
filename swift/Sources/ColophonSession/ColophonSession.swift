@@ -535,12 +535,10 @@ import Observation
     /// Attaches transports to this live session for homes the account names.
     public func configureHomes(_ homes: [HomeConfiguration]) async {
         guard !homes.isEmpty else { return }
-        let lease = context, generation = lockGeneration
         await worker.configureHomes(homes)
-        guard lease == context, generation == lockGeneration else { return }
         homesConfigured = true
         if syncState == .disabled, !phase.isStopped { syncState = .idle }
-        if !suspended, !syncPaused {
+        if !suspended, !syncPaused, !phase.isStopped {
             startSyncLoop()
             Task { [syncSignal] in await syncSignal.fire() }
         }
@@ -769,6 +767,7 @@ import Observation
         let changed = Set(snapshot.namespaceRevisions.keys.filter { namespaceRevisions[$0] != snapshot.namespaceRevisions[$0] })
         let lost = !snapshot.usable
         phase = snapshot.phase; revision = snapshot.revision; namespaceRevisions = snapshot.namespaceRevisions
+        if snapshot.phase.isStopped { syncState = .disabled }
         libraryID = snapshot.libraryID ?? libraryID; memberID = snapshot.memberID ?? memberID
         members = snapshot.members; requests = snapshot.requests; notices = snapshot.notices; homes = snapshot.homes
         var duties = snapshot.duties; duties.submissions = submissions.values.sorted { $0.object < $1.object }; self.duties = duties

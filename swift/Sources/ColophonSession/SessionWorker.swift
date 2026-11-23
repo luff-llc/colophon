@@ -1576,7 +1576,7 @@ actor SessionWorker {
         try? await persist(report, on: engine)
     }
 
-    static func base(_ text: String) -> String { text.hasSuffix("/") ? String(text.dropLast()) : text }
+    static func base(_ text: String) -> String { text.trimmingCharacters(in: CharacterSet(charactersIn: "/")) }
     static func hex<D: Sequence>(_ digest: D) -> String where D.Element == UInt8 { digest.map { String(format: "%02x", $0) }.joined() }
 
     /// The call a `NeedCall` asked for, built by the engine for exactly the request it will send (audience the home's
