@@ -5,12 +5,12 @@
 #
 #   docker build -f relay/Dockerfile -t colophon-home .        (from the repository root)
 #
-# Multi-arch: neither stage has an architecture-specific step. The module is WebAssembly, so the
-# build stage runs on the builder's own platform under buildx (BUILDPLATFORM) and its output is
-# the same for every target.
+# Multi-arch: neither stage has an architecture-specific step, and both base images are published
+# for amd64 and arm64. The build stage names no platform, so it also builds with the legacy
+# builder (no BuildKit), which sets no BUILDPLATFORM. Built on amd64 and on arm64.
 
 # --- Stage 1: the home module (wasm32), with the toolchain the release uses. ---
-FROM --platform=${BUILDPLATFORM:-linux/amd64} rust:1.99.1-slim-bookworm@sha256:f2c004e3d2d8b547e8cf7ffbc29205385f4e71d23e53e4e383065db5e9f822cd AS module
+FROM rust:1.99.1-slim-bookworm@sha256:f2c004e3d2d8b547e8cf7ffbc29205385f4e71d23e53e4e383065db5e9f822cd AS module
 RUN rustup target add wasm32-unknown-unknown
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
