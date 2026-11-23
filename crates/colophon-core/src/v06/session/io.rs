@@ -22,8 +22,9 @@ pub enum Input {
         n: Option<u64>,
     },
     /// The members entitled to write in the namespace at the accepted authority head (§S1,
-    /// §S5: a pass goes only to an entitled asker). Until the host gives it, no pass is
-    /// refused for entitlement.
+    /// §S5: a pass goes only to an entitled asker), given again whenever that head changes.
+    /// Until the host gives it nobody is entitled (revision 12): no frame is accepted as
+    /// coming from a writer, no pass is made, and a `join` waits for it.
     Entitled {
         /// Their member IDs.
         writers: Vec<MemberId>,
@@ -41,7 +42,8 @@ pub enum Input {
         /// Whether the receiver had a window for the origin's key.
         windowed: bool,
     },
-    /// Time passed; the host calls this at least every few hundred ms.
+    /// A timer expired: the host gives this at [`crate::v06::session::Session::next_deadline`],
+    /// within 250 ms of it (§S11 G5), or more often.
     Tick,
     /// Some carrier works again.
     LinkUp,

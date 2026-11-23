@@ -1,7 +1,7 @@
 # 0.6 session vectors
 
 Transcripts of the reference session machine (`colophon_core::v06::session`, spec
-`spec/colophon-0.6-sessions.md` revision 10, §S3–§S9), for replay by the Swift, Kotlin and JS bindings.
+`spec/colophon-0.6-sessions.md` revision 12, §S3–§S9), for replay by the Swift, Kotlin and JS bindings.
 They are generated and checked by `crates/colophon-core/tests/v06_session_vectors.rs`
 (`COLOPHON_REGEN_VECTORS=1` rewrites them). The draft is unfrozen: these files change with it.
 
@@ -39,11 +39,15 @@ compare the returned outputs, in order, with `outputs`. A `restart` step replace
 machine with a new one built from what the member persisted (the last `persist` output:
 `{claim, released}`). At the end compare each member's `view` and `digest`.
 
-- `at` is that member's own monotonic clock in ms; members' clocks are unrelated.
+- `at` is that member's own monotonic clock in ms; members' clocks are unrelated. A `tick`
+  is a timer expiry; a host schedules it from `next_deadline()` (not recorded here).
 - `input` is tagged by `input`: `frame` (`frame`, `writer`, and, in keyed scenarios, the
   sender's `key` and the frame's `n` for the §S3 freshness gate), `entitled {writers}` (the
-  writers entitled at the accepted authority head, from the host; a `pass` to any other
-  member is rejected with `not-entitled`), `tick`, `linkUp`, `linkDown`,
+  writers entitled at the accepted authority head, from the host; until a machine has had
+  one, nobody is entitled: a `join` waits for it, no frame is accepted as a writer's and no
+  `pass` is made; a `pass` to a member outside it is rejected with `not-entitled`; every
+  machine, including one rebuilt by a `restart` step, is given one before its `join` takes
+  effect), `tick`, `linkUp`, `linkDown`,
   `app` (`command`, tagged by `command`: `join {state|null}`, `leave`, `ask`, `pass {to, snapshot}`,
   `decline {to}`, `take {state|null}`, `release`, `publish {id, payload}`,
   `submit {id, payload}`, `presence {payload}`, `ping {to}`). A `legacyEvidence` input exists

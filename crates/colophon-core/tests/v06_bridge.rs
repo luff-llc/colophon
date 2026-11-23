@@ -330,7 +330,7 @@ fn forwards_without_own_window() {
     };
     let r = b.receive(0, beat.clone());
     assert_eq!(r.forward.iter().map(|(l, _)| *l).collect::<Vec<_>>(), vec![1]);
-    let mut s = Session::new("mb", true, Policy::default(), None).with_fresh_seed([3; 16]);
+    let mut s = Session::new("mb", true, Policy::default(), None).with_fresh_seed([3; 16]).with_entitled(["ma", "mb"]);
     s.handle(Input::App { command: Command::Join { state: None } }, 0);
     let w = r.deliver.unwrap();
     let outs = s.handle(Input::Frame { frame: w.frame, writer: true, key: Some(w.key), n: Some(w.n) }, 10);
@@ -456,7 +456,7 @@ fn handshake_chain(n: usize, seed: u64, fixes: colophon_core::v06::session::Fixe
     let mut s: Vec<Session> = ids
         .iter()
         .enumerate()
-        .map(|(i, id)| Session::with_fixes(id, true, Policy::default(), None, fixes).with_fresh_seed([i as u8 + 1; 16]))
+        .map(|(i, id)| Session::with_fixes(id, true, Policy::default(), None, fixes).with_fresh_seed([i as u8 + 1; 16]).with_entitled(ids.clone()))
         .collect();
     let mut b: Vec<Bridge> = ids.iter().map(|id| Bridge::new(id)).collect();
     // link 2i: i -> i+1, 2i+1: i+1 -> i

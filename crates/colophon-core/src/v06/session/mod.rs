@@ -177,8 +177,11 @@ pub struct Session {
     fresh_seed: Option<[u8; 16]>,
     fresh_count: u64,
     own_fresh: VecDeque<(Id, u64)>,
-    /// The writers entitled at the accepted authority head, once the host said (§S5).
+    /// The writers entitled at the accepted authority head, once the host said (§S1). Until
+    /// then nobody is entitled (revision 12: fail closed).
     entitled: Option<BTreeSet<MemberId>>,
+    /// A `join` given before the host supplied the entitled set; it takes effect then.
+    pending_join: Option<Option<Bytes>>,
     windows: BTreeMap<(MemberId, String), u64>,
     /// When a freshness probe was last sent to each member (finding B5).
     probed: BTreeMap<MemberId, u64>,
@@ -250,6 +253,7 @@ impl Session {
             fresh_count: 0,
             own_fresh: VecDeque::new(),
             entitled: None,
+            pending_join: None,
             windows: BTreeMap::new(),
             window_order: BTreeMap::new(),
             probed: BTreeMap::new(),
@@ -269,10 +273,77 @@ impl Session {
     pub fn windows_for(&self, member: &str) -> usize {
         self.windows.keys().filter(|(m, _)| m == member).count()
     }
+    /// Whether the host's entitled set names `member` (false until the host supplies it).
+    fn is_entitled(&self, member: &str) -> bool {
+        self.entitled.as_ref().is_some_and(|e| e.contains(member))
+    }
+
+    /// The earliest time (this member's clock, ms) at which a [`Input::Tick`] may do
+    /// something, or `None` when no timer is pending. A host schedules one tick for it
+    /// (§S11 G5: within 250 ms of the due time) instead of polling; a time already past
+    /// means "now". Every other input may change it, so the host asks again after each one.
+    pub fn next_deadline(&self) -> Option<u64> {
+        if !self.joined {
+            return None;
+        }
+        let p = &self.policy;
+        let mut d: Option<u64> = None;
+        let mut at = |t: u64| d = Some(d.map_or(t, |x| x.min(t)));
+        for (_, t) in self.presence.values() {
+            at(t.saturating_add(p.presence_timeout_ms));
+        }
+        if self.fixes.submit_retry && self.holder().is_some_and(|h| h != self.me) {
+            for s in self.submits.values() {
+                at(s.last.saturating_add(p.ask_timeout_ms));
+            }
+        }
+        if let Some(until) = self.gate {
+            if self.is_holder() {
+                at(until);
+            }
+        }
+        if self.sends_as_holder() {
+            at(self.last_sent_all.map_or(0, |t| t.saturating_add(p.beat_ms)));
+            return d;
+        }
+        if self.link_up && self.holder().is_some_and(|h| h != self.me) && !self.lapse_reported {
+            at(self.last_heard_holder.max(self.link_since).saturating_add(p.holder_timeout_ms));
+        }
+        if let Some(w) = &self.want {
+            if !self.is_holder() && self.may_take() && self.term_left() {
+                if self.no_holder() || (self.lapse_reported && self.lapsed_since_ok()) {
+                    at(0);
+                }
+                if let Some(a) = w.asked_at {
+                    if !w.declined {
+                        at(a.saturating_add(p.ask_timeout_ms));
+                    }
+                }
+                if w.evidence_only && self.fixes.evidence_refresh {
+                    if let Some(t) = self.lapse_since {
+                        at(t.saturating_add(p.ask_timeout_ms));
+                    }
+                }
+            }
+        }
+        d
+    }
+    /// Revisions 4–6 hold a kept want back for askTimeoutMs after the lapse hello.
+    fn lapsed_since_ok(&self) -> bool {
+        !self.want.as_ref().is_some_and(|w| w.evidence_only && self.fixes.evidence_refresh)
+    }
+
     /// Whether a frame from `member` under carrier `key` and number `n` would pass the §S3
     /// window check now (an open window at or below `n`). For harnesses.
     pub fn window_admits(&self, member: &str, key: &str, n: u64) -> bool {
         self.windows.get(&(member.to_string(), key.to_string())).is_some_and(|floor| n >= *floor)
+    }
+
+    /// As an [`Input::Entitled`] given before anything else: the host's entitled set at
+    /// start-up. For harnesses and hosts that know the set when they build the machine.
+    pub fn with_entitled<I: IntoIterator<Item = S>, S: Into<MemberId>>(mut self, writers: I) -> Self {
+        self.entitled = Some(writers.into_iter().map(Into::into).collect());
+        self
     }
 
     /// Seed the `fresh` values of this process's hellos (16 random bytes from the host, new
@@ -464,6 +535,7 @@ impl Session {
             (id, now.saturating_sub(*t).min(FRESH_MEMORY_MS + 1)).hash(h);
         }
         self.entitled.hash(h);
+        self.pending_join.hash(h);
         self.windows.hash(h);
         self.window_order.hash(h);
         for (k, t) in &self.probed {
@@ -491,6 +563,10 @@ impl Session {
                 let set: BTreeSet<MemberId> = writers.into_iter().collect();
                 self.asks.retain(|a| set.contains(a));
                 self.entitled = Some(set);
+                // §S1 (revision 12): a join waits for the entitled set.
+                if let Some(state) = self.pending_join.take() {
+                    self.on_command(Command::Join { state }, now, &mut out);
+                }
             }
             Input::LegacyEvidence {
                 frame,
@@ -1116,7 +1192,9 @@ impl Session {
         if f.to.as_ref().is_some_and(|t| *t != self.me) {
             return;
         }
-        if f.body.needs_writer() && !writer {
+        // §S1 (revision 12): a frame comes from a writer only if the host says so and the
+        // sender is in the entitled set; with no set yet, from nobody.
+        if f.body.needs_writer() && !(writer && self.is_entitled(&f.from)) {
             return;
         }
         if !f.body.in_range(self.policy.max_payload) {
@@ -1891,6 +1969,10 @@ impl Session {
                 if self.joined {
                     return;
                 }
+                if self.entitled.is_none() {
+                    self.pending_join = Some(state);
+                    return;
+                }
                 if let Some(st) = state {
                     // §S6: the application's state, which a restarted holder retakes with.
                     self.state = st;
@@ -1983,7 +2065,7 @@ impl Session {
                 }
                 // §S5 (revision 10): still entitled at the accepted authority head (checked
                 // first: losing the entitlement also drops the member's pending ask).
-                if self.entitled.as_ref().is_some_and(|e| !e.contains(&to)) {
+                if !self.is_entitled(&to) {
                     Self::reject(out, "pass", "not-entitled");
                     return;
                 }

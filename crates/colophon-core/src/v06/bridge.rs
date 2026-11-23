@@ -195,19 +195,22 @@ impl Bridge {
     /// Take one frame of `size` bytes from `origin`'s budget at `now` (ms).
     fn within_limit(&mut self, origin: &str, size: u64, now: u64) -> bool {
         let (fps, bps) = self.limits;
+        // Budgets in thousandths of a frame and of a byte; a full bucket holds one second's
+        // worth. Saturating throughout: caller time and limits are not trusted to be small.
+        let (fcap, bcap) = (fps.saturating_mul(1000), bps.saturating_mul(1000));
         let b = self.buckets.entry(origin.to_owned()).or_insert(Bucket {
-            frames: fps * 1000,
-            bytes: bps * 1000,
+            frames: fcap,
+            bytes: bcap,
             at: now,
         });
         let dt = now.saturating_sub(b.at);
-        b.at = now;
-        // A full bucket holds one second's worth.
-        b.frames = (b.frames + dt * fps).min(fps * 1000);
-        b.bytes = (b.bytes + dt * bps).min(bps * 1000);
-        if b.frames >= 1000 && b.bytes >= size * 1000 {
+        b.at = b.at.max(now);
+        b.frames = b.frames.saturating_add(dt.saturating_mul(fps)).min(fcap);
+        b.bytes = b.bytes.saturating_add(dt.saturating_mul(bps)).min(bcap);
+        let cost = size.saturating_mul(1000);
+        if b.frames >= 1000 && b.bytes >= cost {
             b.frames -= 1000;
-            b.bytes -= size * 1000;
+            b.bytes -= cost;
             true
         } else {
             false

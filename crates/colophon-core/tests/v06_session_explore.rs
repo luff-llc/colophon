@@ -193,7 +193,7 @@ fn id_of(i: usize, k: u8) -> Id {
 impl World {
     fn new(b: &Bounds, fixes: Fixes) -> Self {
         let m = (0..b.members)
-            .map(|i| Session::with_fixes(IDS[i], true, policy(), None, fixes))
+            .map(|i| Session::with_fixes(IDS[i], true, policy(), None, fixes).with_entitled(IDS))
             .collect();
         let mut w = World {
             now: 0,
@@ -379,7 +379,7 @@ impl World {
     }
 
     fn restart(&mut self, i: usize, b: &Bounds) -> Result<(), String> {
-        self.m[i] = Session::with_fixes(IDS[i], true, policy(), self.persisted[i].clone(), self.fixes);
+        self.m[i] = Session::with_fixes(IDS[i], true, policy(), self.persisted[i].clone(), self.fixes).with_entitled(IDS);
         self.heard_direct[i] = vec![false; self.m.len()];
         self.ghost.check_restart(&self.m[i])?;
         // A member that restarts lost what it held: it cannot report it (G11 is about
@@ -1225,7 +1225,7 @@ impl Router {
         let n = ids.len();
         Router {
             ids: ids.to_vec(),
-            m: ids.iter().map(|i| Session::with_fixes(i, true, policy.clone(), None, fixes)).collect(),
+            m: ids.iter().map(|i| Session::with_fixes(i, true, policy.clone(), None, fixes).with_entitled(ids.iter().copied())).collect(),
             reach: (0..n).map(|i| (0..n).map(|j| i != j).collect()).collect(),
             net: Vec::new(),
             events: Vec::new(),
@@ -1299,7 +1299,7 @@ impl Router {
     }
     fn restart(&mut self, id: &str, now: u64) {
         let i = self.i(id);
-        self.m[i] = Session::with_fixes(id, true, self.policy.clone(), self.persisted[i].clone(), self.fixes);
+        self.m[i] = Session::with_fixes(id, true, self.policy.clone(), self.persisted[i].clone(), self.fixes).with_entitled(self.ids.iter().copied());
         self.step(i, Input::App { command: Command::Join { state: None } }, now);
     }
     /// Whether member `i`'s application was told `snapshot`.
@@ -1598,7 +1598,7 @@ fn append_state_fits_a_frame() {
 /// accepted.
 #[test]
 fn freshness_windows_are_bounded() {
-    let mut s = Session::new("a", true, Policy::default(), None).with_fresh_seed([7; 16]);
+    let mut s = Session::new("a", true, Policy::default(), None).with_fresh_seed([7; 16]).with_entitled(["a", "b"]);
     let outs = s.handle(Input::App { command: Command::Join { state: None } }, 0);
     let mine = outs
         .iter()

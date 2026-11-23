@@ -91,6 +91,18 @@
     {
       "at": 0,
       "input": {
+        "input": "entitled",
+        "writers": [
+          "a",
+          "b"
+        ]
+      },
+      "member": "a",
+      "outputs": []
+    },
+    {
+      "at": 0,
+      "input": {
         "command": {
           "command": "join",
           "state": null
@@ -113,6 +125,18 @@
           "output": "send"
         }
       ]
+    },
+    {
+      "at": 0,
+      "input": {
+        "input": "entitled",
+        "writers": [
+          "a",
+          "b"
+        ]
+      },
+      "member": "b",
+      "outputs": []
     },
     {
       "at": 0,
@@ -539,6 +563,18 @@
     {
       "member": "a",
       "restart": true
+    },
+    {
+      "at": 300,
+      "input": {
+        "input": "entitled",
+        "writers": [
+          "a",
+          "b"
+        ]
+      },
+      "member": "a",
+      "outputs": []
     },
     {
       "at": 300,

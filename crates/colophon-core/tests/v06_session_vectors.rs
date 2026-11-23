@@ -145,8 +145,14 @@ impl Script {
     fn lose_all(&mut self) {
         self.pending.clear();
     }
+    /// The host supplies the entitled set (every member here) to `member` (§S1).
+    fn entitle(&mut self, member: &str, at: u64) {
+        let writers = self.ids();
+        self.step(member, at, Input::Entitled { writers });
+    }
     fn join_all(&mut self, at: u64) {
         for id in self.ids() {
+            self.entitle(&id, at);
             self.cmd(&id, at, Command::Join { state: None });
         }
     }
@@ -227,6 +233,33 @@ fn scenarios() -> Vec<Script> {
     let outs = s.cmd("a", 1_020, Command::Pass { to: "b".into(), snapshot: b("s1") });
     assert!(outs.iter().any(|o| matches!(o, Output::Event { event: Event::Rejected { reason, .. } } if reason == "not-entitled")));
     s.deliver(1_030);
+    assert!(s.session("a").is_holder() && !s.session("b").is_holder());
+    v.push(s);
+
+    let mut s = started("entitlement-after-restart", "b asks; the authority head then drops b, and a restarts before its host has the new entitled set. Until the host supplies it nobody is entitled: a's join waits, b's frames are not accepted as a writer's and no pass is made. Then the set (without b) arrives, a joins, retakes after askTimeoutMs, and its pass to b is refused (§S1, revision 12).", p(), &["a", "b"]);
+    s.cmd("b", 1_000, Command::Ask);
+    s.deliver(1_010);
+    let persisted = s.session("a").persisted();
+    s.s.insert("a".into(), Session::new("a", true, p(), persisted));
+    s.steps.push(json!({"member": "a", "restart": true}));
+    let outs = s.cmd("a", 1_100, Command::Join { state: Some(b("s0")) });
+    assert!(outs.is_empty() && !s.session("a").joined());
+    let outs = s.cmd("a", 1_110, Command::Pass { to: "b".into(), snapshot: b("s1") });
+    assert!(outs.iter().any(|o| matches!(o, Output::Event { event: Event::Rejected { reason, .. } } if reason == "not-joined")));
+    s.cmd("b", 1_120, Command::Ask);
+    s.deliver(1_130);
+    assert!(s.session("a").next_deadline().is_none());
+    s.step("a", 1_200, Input::Entitled { writers: vec!["a".into()] });
+    assert!(s.session("a").joined());
+    s.deliver(1_210);
+    s.tick("a", 2_700);
+    s.deliver(2_710);
+    assert!(s.session("a").is_holder());
+    s.cmd("b", 2_800, Command::Ask);
+    s.deliver(2_810);
+    let outs = s.cmd("a", 2_900, Command::Pass { to: "b".into(), snapshot: b("s1") });
+    assert!(outs.iter().any(|o| matches!(o, Output::Event { event: Event::Rejected { reason, .. } } if reason == "not-entitled")));
+    s.deliver(2_910);
     assert!(s.session("a").is_holder() && !s.session("b").is_holder());
     v.push(s);
 
@@ -342,6 +375,7 @@ fn scenarios() -> Vec<Script> {
     let persisted = s.session("a").persisted();
     s.s.insert("a".into(), Session::new("a", true, append(), persisted));
     s.steps.push(json!({"member": "a", "restart": true}));
+    s.entitle("a", 200);
     s.cmd("a", 200, Command::Join { state: Some(ap(&["s0", "+1"])) });
     s.deliver(210);
     s.tick("a", 2_000);
@@ -359,6 +393,7 @@ fn scenarios() -> Vec<Script> {
     assert!(persisted.as_ref().is_some_and(|p| p.released));
     s.s.insert("a".into(), Session::new("a", true, p(), persisted));
     s.steps.push(json!({"member": "a", "restart": true}));
+    s.entitle("a", 300);
     s.cmd("a", 300, Command::Join { state: None });
     s.tick("a", 2_000);
     assert!(s.session("b").is_holder() && !s.session("a").is_holder());
@@ -393,6 +428,7 @@ fn scenarios() -> Vec<Script> {
     v.push(s);
 
     let mut s = Script::new("append-bound", "fold append with maxPayload 64: a 64-byte payload is refused (at most maxPayload − 4 bytes, revision 8); after a 20-byte and a 60-byte payload the state keeps only what fits in 64 bytes once encoded (the 60-byte one with its 4-byte frame); a joiner gets that state (§S1 fold, revisions 7 and 8).", Policy { fold: Fold::Append, max_payload: 64, ..Policy::default() }, &["a", "b"]);
+    s.entitle("a", 0);
     s.cmd("a", 0, Command::Join { state: None });
     s.cmd("a", 10, Command::Take { state: None });
     s.cmd("a", 20, Command::Publish { id: id("small"), payload: Bytes(vec![1; 20]) });
@@ -401,6 +437,7 @@ fn scenarios() -> Vec<Script> {
     assert_eq!(s.session("a").state().len(), 64);
     s.lose_all();
     assert!(s.session("a").state().len() <= 64);
+    s.entitle("b", 40);
     s.cmd("b", 40, Command::Join { state: None });
     s.deliver(50);
     assert!(s.session("b").synced());

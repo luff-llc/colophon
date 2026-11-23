@@ -185,7 +185,7 @@ impl Sim {
         let m = (0..members)
             .map(|i| Member {
                 id: IDS[i].to_owned(),
-                s: Session::new(IDS[i], true, policy.clone(), None),
+                s: Session::new(IDS[i], true, policy.clone(), None).with_entitled(IDS),
                 off: rng.range(1_000_000, 1_000_000_000) as i64,
                 drift: rng.range(0, 1000) as i64 - 500,
                 stall: None,
@@ -557,7 +557,7 @@ impl Sim {
                 let p = self.m[i].persisted.clone();
                 let before = self.m[i].s.accepted().cloned();
                 self.m[i].s =
-                    Session::with_fixes(&self.m[i].id.clone(), true, self.policy.clone(), p, self.fixes);
+                    Session::with_fixes(&self.m[i].id.clone(), true, self.policy.clone(), p, self.fixes).with_entitled(IDS);
                 if before.as_ref() > self.m[i].s.accepted() {
                     return Err("G1: claim lost across restart".into());
                 }
@@ -729,7 +729,7 @@ fn random_run_with(seed: u64, fixes: Fixes) -> Result<Stats, (String, Vec<String
     }
     sim.fixes = fixes;
     for (k, m) in sim.m.iter_mut().enumerate() {
-        m.s = Session::with_fixes(IDS[k], true, Policy::default(), None, fixes);
+        m.s = Session::with_fixes(IDS[k], true, Policy::default(), None, fixes).with_entitled(IDS);
     }
     let duration = 240_000;
     let mut script = Vec::new();
@@ -814,7 +814,7 @@ fn random_seeds_hold_the_guarantees() {
 
 /// §S12 scripted, over seeds for clocks and links: an ask is passed and the new holder starts
 /// exactly at the stopped position; with that holder cut off, another member asks and holds
-/// within `askTimeoutMs` (plus a tick and slack), starting within the take bound of where the
+/// within `askTimeoutMs` plus 250 ms of timer dispatch (G5, revision 12), starting within the take bound of where the
 /// cut-off holder really is; the cut-off holder returns lapsed, yields and pauses; then with
 /// the holder cut off for good, a member that wants the role holds within `holderTimeoutMs`
 /// of the holder's last frame (G5, both triggers).
@@ -825,7 +825,7 @@ fn playback_run(seed: u64, fixes: Fixes) -> Result<Stats, (String, Vec<String>)>
     sim.pass_rate = 1000;
     sim.fixes = fixes;
     for (k, m) in sim.m.iter_mut().enumerate() {
-        m.s = Session::with_fixes(IDS[k], true, Policy::default(), None, fixes);
+        m.s = Session::with_fixes(IDS[k], true, Policy::default(), None, fixes).with_entitled(IDS);
     }
     let r = (|| -> Result<(), String> {
         sim.start()?;
@@ -835,7 +835,11 @@ fn playback_run(seed: u64, fixes: Fixes) -> Result<Stats, (String, Vec<String>)>
             return Err(format!("1b asked and is not holder (holder {:?})", sim.holder_index()));
         }
         sim.run(100_000, vec![(90_000, Act::Isolate(1))])?;
-        let deadline = 100_000 + sim.policy.ask_timeout_ms + TICK_MS + 150;
+        // G5 (revision 12): askTimeoutMs on the asker's own clock (±500 ppm of virtual time)
+        // plus at most 250 ms of timer dispatch (this simulator ticks every 100 ms, up to
+        // 100 ms late).
+        let on_clock = |ms: u64| ms + (ms * 500).div_ceil(1_000_000);
+        let deadline = 100_000 + on_clock(sim.policy.ask_timeout_ms) + 250;
         sim.run(deadline, vec![(100_000, Act::Ask(2))])?;
         if !sim.m[2].s.sends_as_holder() {
             return Err("G5: 2c asked with the holder cut off and does not hold in time".into());
@@ -853,7 +857,9 @@ fn playback_run(seed: u64, fixes: Fixes) -> Result<Stats, (String, Vec<String>)>
         // Holder lapse trigger.
         sim.run(settle + 2_000, vec![(settle + 1_000, Act::Take(0))])?;
         let cut = settle + 2_000;
-        let deadline = cut + sim.policy.holder_timeout_ms + 2 * TICK_MS;
+        // The holder's last frame reaches 0a no later than the cut (frames in flight to or
+        // from an isolated member are dropped).
+        let deadline = cut + on_clock(sim.policy.holder_timeout_ms) + 250;
         sim.run(deadline, vec![(cut, Act::Isolate(2))])?;
         if !sim.m[0].s.sends_as_holder() {
             return Err("G5: 0a wants the role with the holder lapsed and does not hold in time".into());
@@ -897,7 +903,7 @@ fn carrier_independence() {
         let script = vec![(20_000, Act::Ask(1)), (50_000, Act::Seek(1)), (70_000, Act::Isolate(0)), (75_000, Act::Heal(0))];
         sim.start().and_then(|_| sim.run(100_000, script)).unwrap();
         for m in &sim.m {
-            let mut fresh = Session::new(&m.id, true, Policy::default(), None);
+            let mut fresh = Session::new(&m.id, true, Policy::default(), None).with_entitled(IDS);
             for (t, input) in &m.log {
                 fresh.handle(input.clone(), *t);
             }
