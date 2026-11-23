@@ -419,7 +419,7 @@ Policy: defaults (`fold` `latest`). The snapshot, and the payload of each `msg`,
 is `positionMs + floor(ratePermille × (now + offset − at) / 1000)` while `playing` (`offset` as in §S7, zero for
 the holder itself), else `positionMs`. The holder
 publishes an anchor on play, pause, seek, rate change and episode change, and at least every
-60 s while playing. Presence payload: `{"label":"Mike's iPhone","playing":false}`.
+60 s while playing. Presence payload: `{"label":"Kitchen iPad","playing":false}`.
 
 A device that plays audio for this account SHOULD hold this cell, and SHOULD keep its last
 anchor so that it can supply it when it joins or takes after a restart. A device that yields MUST
