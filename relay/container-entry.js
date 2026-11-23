@@ -20,6 +20,7 @@
 //   bun container-entry.js              prepare and run the relay
 //   bun container-entry.js identity <key file>   print {"member": "<home ID>"} for a key (used at start)
 import { spawnSync } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { closeSync, constants as fsc, fsyncSync, lchownSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, utimesSync, writeSync, chmodSync, existsSync } from 'node:fs';
 import { hostname } from 'node:os';
 import path from 'node:path';
@@ -245,16 +246,20 @@ export function prepare(dataRoot, env) {
  */
 export function acquireContainerLock(dataRoot, { staleMs = 30_000, beatMs = 5_000, now = Date.now, onLost, host = hostname(), pid = process.pid } = {}) {
   const file = path.join(dataRoot, '.container.lock');
-  const owner = JSON.stringify({ host, pid, at: new Date(now()).toISOString() }) + '\n';
+  // Each lock file carries a random ID: a file system may give a new file a removed one's inode
+  // number at once (Linux does), so the inode cannot say whose lock a file is.
+  const id = randomBytes(16).toString('hex');
+  const owner = JSON.stringify({ host, pid, at: new Date(now()).toISOString(), id }) + '\n';
+  const idOf = (f) => { try { return JSON.parse(readFileSync(f, 'utf8'))?.id ?? null; } catch { return null; } };
   const ownStaleMs = Math.min(staleMs, 2 * beatMs + 1_000);
   const take = () => {
     const fd = openSync(file, fsc.O_WRONLY | fsc.O_CREAT | fsc.O_EXCL | fsc.O_NOFOLLOW, 0o600);
     try { writeSync(fd, owner); fsyncSync(fd); } finally { closeSync(fd); }
-    return statSync(file).ino;
+    return true;
   };
-  let ino;
-  for (let attempt = 0; attempt < 3 && ino === undefined; attempt++) {
-    try { ino = take(); break; } catch (e) { if (e.code !== 'EEXIST') throw e; }
+  let taken = false;
+  for (let attempt = 0; attempt < 3 && !taken; attempt++) {
+    try { taken = take(); break; } catch (e) { if (e.code !== 'EEXIST') throw e; }
     let st;
     try { st = statSync(file); } catch (e) { if (e.code === 'ENOENT') continue; throw e; }
     const age = now() - st.mtimeMs;
@@ -273,8 +278,8 @@ export function acquireContainerLock(dataRoot, { staleMs = 30_000, beatMs = 5_00
     // above, not one another starter made meanwhile; if not, put it back and refuse.
     const aside = `${file}.stale.${process.pid}`;
     try { renameSync(file, aside); } catch (e) { if (e.code === 'ENOENT') continue; throw e; }
-    const moved = statSync(aside);
-    if (moved.ino !== st.ino) {
+    // `held.id` is the stale lock's (undefined for one that was torn or written before IDs).
+    if (idOf(aside) !== (held.id ?? null)) {
       try { linkSync(aside, file); } catch { /* the new owner's lock is back or replaced */ }
       unlinkSync(aside);
       const err = new Error(`another container took this volume while this one was starting (${file})`);
@@ -283,9 +288,9 @@ export function acquireContainerLock(dataRoot, { staleMs = 30_000, beatMs = 5_00
     }
     unlinkSync(aside);
   }
-  if (ino === undefined) throw new Error(`could not take ${file}`);
+  if (!taken) throw new Error(`could not take ${file}`);
   let lost = false;
-  const mine = () => { try { return statSync(file).ino === ino; } catch { return false; } };
+  const mine = () => idOf(file) === id;
   const timer = setInterval(() => {
     if (!mine()) { lost = true; clearInterval(timer); (onLost ?? (() => { console.error(`colophon-home: ${file} was taken by another container; stopping at once`); process.exit(70); }))(); return; }
     const t = new Date(now());
