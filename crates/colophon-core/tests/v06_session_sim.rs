@@ -117,6 +117,8 @@ struct Member {
     s: Session,
     off: i64,
     drift: i64,
+    /// A clock stall (§S0): from global `start` for `len` ms this member's clock stands still.
+    stall: Option<(u64, u64)>,
     up: bool,
     persisted: Option<Persisted>,
     /// §S3 (revision 2): per sender key, the highest `n` and the accepted ones within 128.
@@ -185,7 +187,8 @@ impl Sim {
                 id: IDS[i].to_owned(),
                 s: Session::new(IDS[i], true, policy.clone(), None),
                 off: rng.range(1_000_000, 1_000_000_000) as i64,
-                drift: rng.range(0, 400) as i64 - 200,
+                drift: rng.range(0, 1000) as i64 - 500,
+                stall: None,
                 up: true,
                 persisted: None,
                 high: BTreeMap::new(),
@@ -220,7 +223,16 @@ impl Sim {
     }
 
     fn clock(&self, i: usize) -> u64 {
-        let g = self.g as i64;
+        let g = match self.m[i].stall {
+            Some((start, len)) if self.g >= start => {
+                if self.g < start + len {
+                    start
+                } else {
+                    self.g - len
+                }
+            }
+            _ => self.g,
+        } as i64;
         (self.m[i].off + g + g * self.m[i].drift / 1_000_000) as u64
     }
     fn push(&mut self, at: u64, ev: Ev) {
@@ -473,6 +485,10 @@ impl Sim {
         }
         let oldest = self.m[i].pongs.get(from).and_then(|q| q.front().copied()).unwrap_or(0);
         let age = self.g.saturating_sub(oldest) as i64;
+        if self.m[i].stall.is_some() || self.m[h].stall.is_some() {
+            // A stalled clock makes no promise about positions (§S0), only about safety.
+            return;
+        }
         let drift = (self.m[i].drift - self.m[h].drift).abs();
         let bound_clock = o.error as i64 + drift * age / 1_000_000 + 3;
         let bound = RATE * bound_clock / 1000 + 2;
@@ -705,6 +721,11 @@ fn random_run_with(seed: u64, fixes: Fixes) -> Result<Stats, (String, Vec<String
     }
     let n_filter = rng.chance(500);
     let mut sim = Sim::new(seed, members, carriers, n_filter);
+    // §S0: some seeds stall one member's clock for up to 30 s.
+    if rng.chance(200) {
+        let i = rng.below(members as u64) as usize;
+        sim.m[i].stall = Some((rng.range(5_000, 200_000), rng.range(1_000, 30_000)));
+    }
     sim.fixes = fixes;
     for (k, m) in sim.m.iter_mut().enumerate() {
         m.s = Session::with_fixes(IDS[k], true, Policy::default(), None, fixes);
@@ -907,31 +928,25 @@ fn carrier_independence() {
 #[ignore]
 fn fix_ablation() {
     let all = Fixes::ALL;
-    let group = Fixes { bye_resend: false, answer_lesser: false, renew_wider: false, liveness_holder_frames: false, ..all };
-    let cases: [(&str, Fixes); 22] = [
-        ("no fix removed", all),
-        ("F10 renew_needs_contact", Fixes { renew_needs_contact: false, ..all }),
-        ("F5+F6+F7+F8 together", group),
+    let cases: [(&str, Fixes); 16] = [
+        ("no fix removed (revision 7)", all),
         ("revision 1 draft (LITERAL)", Fixes::LITERAL),
         ("revision 3 draft (REV3)", Fixes::REV3),
-        ("revision 4 as written (REV4)", Fixes::REV4),
+        ("revision 4 (REV4)", Fixes::REV4),
+        ("revision 5 (REV5)", Fixes::REV5),
+        ("revision 6 (REV6)", Fixes::REV6),
         ("F1 rank1_from_holder", Fixes { rank1_from_holder: false, ..all }),
         ("F2 seen_unsynced", Fixes { seen_unsynced: false, ..all }),
-        ("F5 bye_resend", Fixes { bye_resend: false, ..all }),
-        ("F6 answer_lesser", Fixes { answer_lesser: false, ..all }),
-        ("F7 renew_wider", Fixes { renew_wider: false, ..all }),
-        ("F8 liveness_holder_frames", Fixes { liveness_holder_frames: false, ..all }),
         ("F9 ask_resend", Fixes { ask_resend: false, ..all }),
-        ("R1 evidence", Fixes { evidence: false, ..all }),
+        ("F10 renew_needs_contact", Fixes { renew_needs_contact: false, ..all }),
         ("R2 state_reports", Fixes { state_reports: false, ..all }),
         ("R2c persist_release", Fixes { persist_release: false, ..all }),
         ("R5 submit_retry", Fixes { submit_retry: false, ..all }),
-        ("R1c evidence_push", Fixes { evidence_push: false, ..all }),
         ("R2d/R2f yielded_ack", Fixes { yielded_ack: false, ..all }),
-        ("R1d evidence_keeps_want", Fixes { evidence_keeps_want: false, ..all }),
-        ("revision 5 as written (REV5)", Fixes::REV5),
-        ("R1e renew_guard", Fixes { renew_guard: false, ..all }),
+        ("rev7 hello_correction", Fixes { hello_correction: false, ..all }),
+        ("rev7 sender_checks", Fixes { sender_checks: false, ..all }),
     ];
+
 
     for (name, fixes) in cases {
         for (kind, run) in [("random", random_run_with as fn(u64, Fixes) -> _), ("playback", playback_run)] {

@@ -38,12 +38,14 @@
   ],
   "fixes": {
     "answerLesser": true,
+    "appendBound": true,
     "askResend": true,
     "byeResend": true,
-    "evidence": true,
-    "evidenceKeepsWant": true,
-    "evidencePush": true,
-    "evidenceRefresh": true,
+    "evidence": false,
+    "evidenceKeepsWant": false,
+    "evidencePush": false,
+    "evidenceRefresh": false,
+    "helloCorrection": true,
     "livenessHolderFrames": true,
     "persistRelease": true,
     "rank1FromHolder": true,
@@ -51,8 +53,10 @@
     "renewNeedsContact": true,
     "renewWider": true,
     "seenUnsynced": true,
+    "senderChecks": true,
     "stateReports": true,
     "submitRetry": true,
+    "windowCap": true,
     "yieldedAck": true
   },
   "format": "colophon/session-vectors/6",
@@ -99,7 +103,6 @@
             "body": {
               "echo": [],
               "fresh": "3iYwu-vxUSNjsUs1onEEHQ",
-              "heard": "unknown",
               "kind": "hello",
               "lapsed": false,
               "seen": null
@@ -126,7 +129,6 @@
             "body": {
               "echo": [],
               "fresh": "yvv8YHYqxK3F14fS_5oLOQ",
-              "heard": "unknown",
               "kind": "hello",
               "lapsed": false,
               "seen": null
@@ -144,7 +146,6 @@
           "body": {
             "echo": [],
             "fresh": "3iYwu-vxUSNjsUs1onEEHQ",
-            "heard": "unknown",
             "kind": "hello",
             "lapsed": false,
             "seen": null
@@ -165,7 +166,6 @@
                 "3iYwu-vxUSNjsUs1onEEHQ"
               ],
               "fresh": "Xgm07g9q9uILg5FzBHjLqw",
-              "heard": "unknown",
               "kind": "hello",
               "lapsed": false,
               "seen": null
@@ -184,7 +184,6 @@
           "body": {
             "echo": [],
             "fresh": "yvv8YHYqxK3F14fS_5oLOQ",
-            "heard": "unknown",
             "kind": "hello",
             "lapsed": false,
             "seen": null
@@ -205,7 +204,6 @@
                 "yvv8YHYqxK3F14fS_5oLOQ"
               ],
               "fresh": "VhQ6eFVYrIVzFNPyMhaiyQ",
-              "heard": "unknown",
               "kind": "hello",
               "lapsed": false,
               "seen": null
@@ -226,7 +224,6 @@
               "3iYwu-vxUSNjsUs1onEEHQ"
             ],
             "fresh": "Xgm07g9q9uILg5FzBHjLqw",
-            "heard": "unknown",
             "kind": "hello",
             "lapsed": false,
             "seen": null
@@ -248,7 +245,6 @@
                 "Xgm07g9q9uILg5FzBHjLqw"
               ],
               "fresh": "3uTtRWpMR1C_XKJOCGfq1Q",
-              "heard": "unknown",
               "kind": "hello",
               "lapsed": false,
               "seen": null
@@ -269,7 +265,6 @@
               "yvv8YHYqxK3F14fS_5oLOQ"
             ],
             "fresh": "VhQ6eFVYrIVzFNPyMhaiyQ",
-            "heard": "unknown",
             "kind": "hello",
             "lapsed": false,
             "seen": null
@@ -291,7 +286,6 @@
                 "VhQ6eFVYrIVzFNPyMhaiyQ"
               ],
               "fresh": "bOP71a0cAPH4gM1x4zdVsA",
-              "heard": "unknown",
               "kind": "hello",
               "lapsed": false,
               "seen": null
@@ -312,7 +306,6 @@
               "Xgm07g9q9uILg5FzBHjLqw"
             ],
             "fresh": "3uTtRWpMR1C_XKJOCGfq1Q",
-            "heard": "unknown",
             "kind": "hello",
             "lapsed": false,
             "seen": null
@@ -337,7 +330,6 @@
               "VhQ6eFVYrIVzFNPyMhaiyQ"
             ],
             "fresh": "bOP71a0cAPH4gM1x4zdVsA",
-            "heard": "unknown",
             "kind": "hello",
             "lapsed": false,
             "seen": null
@@ -466,7 +458,6 @@
                 "3uTtRWpMR1C_XKJOCGfq1Q"
               ],
               "fresh": "5btSaoab7BElhy8cUxtYJw",
-              "heard": "live",
               "kind": "hello",
               "lapsed": false,
               "seen": {
@@ -532,7 +523,6 @@
               "3uTtRWpMR1C_XKJOCGfq1Q"
             ],
             "fresh": "5btSaoab7BElhy8cUxtYJw",
-            "heard": "live",
             "kind": "hello",
             "lapsed": false,
             "seen": {

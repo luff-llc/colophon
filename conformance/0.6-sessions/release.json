@@ -38,12 +38,14 @@
   ],
   "fixes": {
     "answerLesser": true,
+    "appendBound": true,
     "askResend": true,
     "byeResend": true,
-    "evidence": true,
-    "evidenceKeepsWant": true,
-    "evidencePush": true,
-    "evidenceRefresh": true,
+    "evidence": false,
+    "evidenceKeepsWant": false,
+    "evidencePush": false,
+    "evidenceRefresh": false,
+    "helloCorrection": true,
     "livenessHolderFrames": true,
     "persistRelease": true,
     "rank1FromHolder": true,
@@ -51,8 +53,10 @@
     "renewNeedsContact": true,
     "renewWider": true,
     "seenUnsynced": true,
+    "senderChecks": true,
     "stateReports": true,
     "submitRetry": true,
+    "windowCap": true,
     "yieldedAck": true
   },
   "format": "colophon/session-vectors/6",
@@ -99,7 +103,6 @@
             "body": {
               "echo": [],
               "fresh": "AAAAAAAAAAAAAAAAAAAAAA",
-              "heard": "unknown",
               "kind": "hello",
               "lapsed": false,
               "seen": null
@@ -126,7 +129,6 @@
             "body": {
               "echo": [],
               "fresh": "AAAAAAAAAAAAAAAAAAAAAA",
-              "heard": "unknown",
               "kind": "hello",
               "lapsed": false,
               "seen": null
@@ -144,7 +146,6 @@
           "body": {
             "echo": [],
             "fresh": "AAAAAAAAAAAAAAAAAAAAAA",
-            "heard": "unknown",
             "kind": "hello",
             "lapsed": false,
             "seen": null
@@ -164,7 +165,6 @@
           "body": {
             "echo": [],
             "fresh": "AAAAAAAAAAAAAAAAAAAAAA",
-            "heard": "unknown",
             "kind": "hello",
             "lapsed": false,
             "seen": null
@@ -285,7 +285,6 @@
             "body": {
               "echo": [],
               "fresh": "AAAAAAAAAAAAAAAAAAAAAA",
-              "heard": "live",
               "kind": "hello",
               "lapsed": false,
               "seen": {
@@ -346,7 +345,6 @@
           "body": {
             "echo": [],
             "fresh": "AAAAAAAAAAAAAAAAAAAAAA",
-            "heard": "live",
             "kind": "hello",
             "lapsed": false,
             "seen": {
@@ -557,7 +555,6 @@
             "body": {
               "echo": [],
               "fresh": "AAAAAAAAAAAAAAAAAAAAAA",
-              "heard": "live",
               "kind": "hello",
               "lapsed": false,
               "seen": {

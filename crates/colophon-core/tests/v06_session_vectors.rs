@@ -79,6 +79,7 @@ impl Script {
         }
         self
     }
+    #[allow(dead_code)]
     fn cut(&mut self, a: &str, b: &str) {
         self.cut.push((a.into(), b.into()));
         self.cut.push((b.into(), a.into()));
@@ -381,93 +382,32 @@ fn scenarios() -> Vec<Script> {
     assert_eq!((o.rtt, o.offset, o.error), (81, -4, 41));
     v.push(s);
 
-    // Revision 5: stale evidence and the kept want.
-    let mut s = Script::new("stale-evidence", "b has no claim yet; a replayed old state of a claim 3.0.x that once existed arrives as evidence from a key b has no window for: b accepts the claim only (no state, no seq), then x is lapsed to b after holderTimeoutMs and b takes at 4.0.b (§S3 evidence without a window).", p(), &["a", "b"]);
-    s.cmd("b", 100, Command::Join { state: Some(b("MINE")) });
-    s.lose_all();
-    let stale = Frame { from: "x".into(), to: None, retain: true, body: Body::State { claim: Claim::new(3, 0, "x"), seq: 9, snapshot: b("OLD") } };
-    s.step("b", 200, Input::Frame { frame: stale, writer: true, key: None, n: None, forwarded: Some(Forwarded { via: "a".into(), windowed: false }) });
-    assert_eq!(s.session("b").accepted(), Some(&Claim::new(3, 0, "x")));
-    assert_eq!(s.session("b").state(), &b("MINE"));
-    s.cmd("b", 300, Command::Take { state: None });
-    s.tick("b", 15_100);
-    assert!(!s.session("b").is_holder());
-    s.tick("b", 15_200);
-    s.lose_all();
-    assert_eq!(s.session("b").accepted(), Some(&Claim::new(4, 0, "b")));
-    v.push(s);
-
-    let mut s = Script::new("want-kept-after-evidence", "z released and retook 2.0.z while x missed it; z is then cut off. x asks z, takes 2.0.x on the ask timeout; w, which heard z within holderTimeoutMs, forwards z's state as evidence; x yields but keeps wanting: it asks z again and takes only once z is lapsed to it, holderTimeoutMs after the evidence, and askTimeoutMs after its lapse hello brought no fresh evidence, at 3.0.x (§S5 R1d, R1f, G5).", p(), &["w", "x", "z"]);
-    s.join_all(0);
-    s.deliver(0);
-    s.cmd("z", 10, Command::Take { state: Some(b("Z")) });
-    s.deliver(20);
-    s.cmd("z", 30, Command::Release);
-    s.cmd("z", 40, Command::Ask);
-    s.deliver_if(50, |to, _| to == "x");
-    assert_eq!(s.session("w").accepted(), Some(&Claim::new(2, 0, "z")));
-    assert_eq!(s.session("x").accepted(), Some(&Claim::new(1, 0, "z")));
-    s.tick("z", 1_000);
-    s.deliver_if(1_010, |to, _| to == "x");
-    s.cut("z", "w");
-    s.cut("z", "x");
-    s.cmd("x", 2_000, Command::Ask);
-    s.deliver(2_010);
-    s.tick("x", 3_600);
-    s.deliver(3_610);
-    assert_eq!(s.session("x").accepted(), Some(&Claim::new(2, 0, "z")));
-    s.tick("x", 5_200);
-    assert!(!s.session("x").is_holder(), "no take on the ask timeout after evidence");
-    // Lapsed (holderTimeoutMs after the evidence): x says so to all and waits askTimeoutMs
-    // for fresh evidence (R1f); w's evidence of z is itself stale, so none comes.
-    s.tick("x", 18_700);
-    s.deliver(18_710);
-    assert!(!s.session("x").is_holder());
-    s.tick("x", 20_300);
-    s.deliver(20_310);
-    assert_eq!(s.session("x").accepted(), Some(&Claim::new(3, 0, "x")));
-    assert_eq!(s.session("w").accepted(), Some(&Claim::new(3, 0, "x")));
-    v.push(s);
-
-    // Revision 4 behaviours.
-    let mut s = Script::new("evidence-forward", "the chain a↔b↔c with a↮c: a holds 1.0.a, c holds 1.0.c and b follows c; b forwards c's frames to a unchanged as evidence; a has never heard c, so it has no window for c's key and takes only the claim (its state stays A): a accepts 1.0.c and yields (§S4 correcting lesser claims, §S3 evidence without a window).", p(), &["a", "b", "c"]);
-    s.cut("a", "c");
-    s.join_all(0);
-    s.deliver(0);
-    s.cmd("a", 10, Command::Take { state: Some(b("A")) });
-    s.cmd("c", 10, Command::Take { state: Some(b("C")) });
-    s.deliver(20);
-    s.tick("c", 5_020);
-    s.deliver(5_030);
-    s.tick("a", 5_040);
-    s.deliver(5_050);
-    assert_eq!(s.session("a").accepted(), Some(&Claim::new(1, 0, "c")));
-    assert!(!s.session("a").is_holder());
-    assert_eq!(s.session("a").state(), &b("A"));
-    v.push(s);
-
-    let mut s = started("heard-renew", "c, cut off from a, sees a lapsed and takes 2.0.c; b follows it, but the evidence b relays to a is lost, and c then falls silent. When a's beat reaches b while b has no fresh evidence: right after b restarts, b's hello says heard:unknown and a keeps its claim; once b's link has worked for holderTimeoutMs without hearing c, b says heard:lapsed and a renews over c to 3.0.a (§S4, §S5 renewing, R1).", p(), &["a", "b", "c"]);
-    s.cut("a", "c");
+    // Revision 7.
+    let mut s = started("renew-quiet-claim", "c, cut off from a, sees a lapsed and takes 2.0.c; only b hears it, and c then falls silent. a's beat reaches b, which names 2.0.c in its hello; a has heard no holder frame from c for holderTimeoutMs, and its own link has worked that long, so a renews over c to 3.0.a and b follows (§S4 correcting lesser claims, §S5 renewing, revision 7).", p(), &["a", "b", "c"]);
     s.cmd("c", 100, Command::Take { state: Some(b("C")) });
     s.tick("c", 16_000);
-    // b's evidence for a (c's frames, relayed) is lost.
     s.deliver_if(16_010, |to, _| to == "a");
     assert_eq!(s.session("b").accepted(), Some(&Claim::new(2, 0, "c")));
-    // c falls silent; b restarts.
-    let persisted = s.session("b").persisted();
-    s.s.insert("b".into(), Session::new("b", true, p(), persisted));
-    s.steps.push(json!({"member": "b", "restart": true}));
-    s.cmd("b", 20_000, Command::Join { state: None });
-    s.deliver_if(20_010, |_, f| f.from == "c");
-    s.tick("a", 20_100);
-    s.deliver_if(20_110, |_, f| f.from == "c");
-    assert_eq!(s.session("a").accepted(), Some(&Claim::new(1, 0, "a")));
-    s.tick("a", 36_000);
-    s.deliver_if(36_010, |_, f| f.from == "c");
+    s.tick("a", 20_000);
+    s.deliver_if(20_010, |to, f| to == "c" || f.from == "c");
     assert_eq!(s.session("a").accepted(), Some(&Claim::new(3, 0, "a")));
     assert_eq!(s.session("b").accepted(), Some(&Claim::new(3, 0, "a")));
     v.push(s);
 
+    let mut s = Script::new("append-bound", "fold append with maxPayload 64: after a 20-byte and then a 64-byte payload the state keeps only what fits in 64 bytes once encoded (each payload costs 4 bytes of framing, so the 64-byte payload alone does not fit and the state is empty); a joiner gets that state (§S1 fold, revision 7).", Policy { fold: Fold::Append, max_payload: 64, ..Policy::default() }, &["a", "b"]);
+    s.cmd("a", 0, Command::Join { state: None });
+    s.cmd("a", 10, Command::Take { state: None });
+    s.cmd("a", 20, Command::Publish { id: id("small"), payload: Bytes(vec![1; 20]) });
+    s.cmd("a", 30, Command::Publish { id: id("big"), payload: Bytes(vec![2; 64]) });
+    s.lose_all();
+    assert!(s.session("a").state().len() <= 64);
+    s.cmd("b", 40, Command::Join { state: None });
+    s.deliver(50);
+    assert!(s.session("b").synced());
+    assert_eq!(s.session("b").state(), s.session("a").state());
+    v.push(s);
+
+    // Revision 4 behaviours.
     let mut s = started("late-pass", "b asks; a's pass (SA) is delayed past b's ask timeout; b takes with SB; the pass arrives: b reports it (late pass, with SA) and renews with SB; a, holding the pass's claim, follows (§S5, R2a, G11).", p(), &["a", "b"]);
     s.cmd("b", 100, Command::Ask);
     s.deliver(110);
@@ -497,6 +437,65 @@ fn scenarios() -> Vec<Script> {
     v.push(s);
 
     v
+}
+
+/// §S9 bridging on the chain m0–m1–m2–m3: m0 sends a frame; each bridge forwards what it
+/// accepts for the first time on its other links; a duplicate and a too-old frame are not
+/// forwarded; a `to`-addressed frame is bridged too.
+fn bridge_cases() -> Value {
+    use colophon_core::v06::bridge::{Bridge, Wire};
+    let n = 4;
+    let mut bridges: Vec<Bridge> = (0..n).map(|i| Bridge::new(&format!("m{i}"))).collect();
+    // Link ids: 2i is i -> i+1, 2i+1 is i+1 -> i; a member names a link by the direction
+    // leaving it.
+    let mut links = Vec::new();
+    for i in 0..n - 1 {
+        bridges[i].add_link((2 * i) as u32);
+        bridges[i + 1].add_link((2 * i + 1) as u32);
+        links.push(json!({"id": 2 * i, "from": format!("m{i}"), "to": format!("m{}", i + 1)}));
+        links.push(json!({"id": 2 * i + 1, "from": format!("m{}", i + 1), "to": format!("m{i}")}));
+    }
+    let peer = |link: u32| -> (usize, u32) {
+        let i = (link / 2) as usize;
+        if link % 2 == 0 {
+            (i + 1, link + 1)
+        } else {
+            (i, link - 1)
+        }
+    };
+    let wire_json = |w: &Wire| json!({"key": w.key, "n": w.n, "frame": w.frame});
+    let mut steps = Vec::new();
+    let flood = |bridges: &mut Vec<Bridge>, steps: &mut Vec<Value>, w: Wire, origin: usize| {
+        let mut queue: Vec<(u32, Wire)> = bridges[origin].send(w.clone());
+        steps.push(json!({"member": format!("m{origin}"), "send": wire_json(&w), "transmit": queue.iter().map(|(l, _)| *l).collect::<Vec<_>>()}));
+        while !queue.is_empty() {
+            let (l, w) = queue.remove(0);
+            let (to, back) = peer(l);
+            let r = bridges[to].receive(back, w.clone());
+            steps.push(json!({
+                "member": format!("m{to}"), "receive": {"link": back, "wire": wire_json(&w)},
+                "deliver": r.deliver.is_some(),
+                "forward": r.forward.iter().map(|(l, _)| *l).collect::<Vec<_>>(),
+            }));
+            queue.extend(r.forward);
+        }
+    };
+    let frame = |to: Option<&str>, t: u64| Frame { from: "m0".into(), to: to.map(str::to_owned), retain: false, body: Body::Ping { t } };
+    flood(&mut bridges, &mut steps, Wire { key: "k-m0".into(), n: 1, frame: frame(None, 1) }, 0);
+    flood(&mut bridges, &mut steps, Wire { key: "k-m0".into(), n: 2, frame: frame(Some("m3"), 2) }, 0);
+    // At m2 from m1: a duplicate of n = 1, a new n = 200, then n = 71 (more than 128 below).
+    for (nn, t) in [(1u64, 1u64), (200, 3), (71, 4)] {
+        let w = Wire { key: "k-m0".into(), n: nn, frame: frame(None, t) };
+        let r = bridges[2].receive(3, w.clone());
+        steps.push(json!({"member": "m2", "receive": {"link": 3, "wire": wire_json(&w)}, "deliver": r.deliver.is_some(), "forward": r.forward.iter().map(|(l, _)| *l).collect::<Vec<_>>()}));
+    }
+    json!({
+        "format": "colophon/bridge-vectors/6",
+        "description": "§S9 bridging on a four-member chain: first-seen forwarding on every other link, nothing back, nothing twice, nothing more than 128 below the window's highest n; to-addressed frames are bridged too.",
+        "members": (0..n).map(|i| format!("m{i}")).collect::<Vec<_>>(),
+        "links": links,
+        "steps": steps,
+    })
 }
 
 /// §S7 cases: `{now, t, echo, hold}` → `{rtt, offset, error}`, then best-of-8 selection.
@@ -604,6 +603,7 @@ fn vectors_match_and_replay() {
         names.push(sc.name);
     }
     check_file("offset", &offset_cases());
+    check_file("bridge", &bridge_cases());
     // Replay from the files, as a binding would.
     for n in &names {
         let text = std::fs::read_to_string(dir().join(format!("{n}.json"))).unwrap();

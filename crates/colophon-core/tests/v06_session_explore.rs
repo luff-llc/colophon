@@ -61,8 +61,12 @@ fn policy() -> Policy {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Topo {
     Mesh,
-    /// a↔b↔c, a↮c.
+    /// a↔b↔c, a↮c, without bridging (revisions 3–6).
     Chain,
+    /// a↔b↔c, a↮c, with §S9 bridging at b (revision 7): one group, so every frame b
+    /// accepts also reaches the far end. Modelled as the transitive closure; the delivery
+    /// order is still arbitrary.
+    BridgedChain,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -85,6 +89,7 @@ struct Bounds {
     links: u8,
     restarts: u8,
     crashes: u8,
+    cuts: u8,
     cap: usize,
     max_states: usize,
     depth: u32,
@@ -118,6 +123,9 @@ enum Action {
     Tick,
     Link(usize, bool),
     Cmd(usize, Cmd),
+    /// Split member `i` from its group (true) or merge it back (false); its own link
+    /// stays up (groups split and merge, §S0).
+    Cut(usize, bool),
     /// The step, cut after this many of its outputs, then a restart (G12).
     Crash(Box<Action>, usize),
 }
@@ -145,6 +153,9 @@ struct World {
     links: u8,
     restarts: u8,
     crashes: u8,
+    cuts: u8,
+    cut: Vec<bool>,
+    topo: Topo,
     asks: Vec<Vec<usize>>,
     persisted: Vec<Option<Persisted>>,
     ghost: Ghost,
@@ -155,6 +166,8 @@ struct World {
     /// Claim changes (Persist outputs) seen, for G10.
     persists: u64,
     rotate: usize,
+    /// The in-flight cap (copied from the bounds).
+    cap: usize,
     /// Members that emitted `BecameHolder` (G5 bookkeeping).
     became: Vec<bool>,
     /// Forwarded evidence frames delivered to each member (G5 bound).
@@ -194,6 +207,9 @@ impl World {
             links: b.links,
             restarts: b.restarts,
             crashes: b.crashes,
+            cuts: b.cuts,
+            cut: vec![false; b.members],
+            topo: b.topo,
             asks: vec![Vec::new(); b.members],
             persisted: vec![None; b.members],
             ghost: Ghost::default(),
@@ -203,6 +219,7 @@ impl World {
             kinds: b.kinds,
             persists: 0,
             rotate: 0,
+            cap: b.cap,
             became: vec![false; b.members],
             evidence_seen: vec![0; b.members],
         };
@@ -238,7 +255,7 @@ impl World {
                 assert_eq!((w.asks[0].clone(), w.asks[1].clone()), (vec![2], vec![2]));
             }
             Start::ChainTwoHolders => {
-                assert_eq!(b.topo, Topo::Chain);
+                assert!(matches!(b.topo, Topo::Chain | Topo::BridgedChain));
                 w.input(0, Input::App { command: Command::Take { state: st(b"A") } }, b, None).unwrap();
                 w.input(2, Input::App { command: Command::Take { state: st(b"C") } }, b, None).unwrap();
                 w.flush(b, Schedule::Fifo).unwrap();
@@ -262,7 +279,8 @@ impl World {
             self.up.hash(&mut h);
             self.net.hash(&mut h);
             self.heard_direct.hash(&mut h);
-            (self.cmds, self.dups, self.links, self.restarts, self.crashes).hash(&mut h);
+            (self.cmds, self.dups, self.links, self.restarts, self.crashes, self.cuts).hash(&mut h);
+            self.cut.hash(&mut h);
             self.asks.hash(&mut h);
             self.persisted.hash(&mut h);
             self.ghost.hash(&mut h);
@@ -438,6 +456,13 @@ impl World {
         Ok(())
     }
 
+    /// The bounds `input` needs for routing during a trial step (only `cap` matters).
+    fn bounds_for_trial(&self) -> Bounds {
+        let mut b = bounds(self.m.len(), "", (0, 0, 0, self.cap), 0);
+        b.topo = self.topo;
+        b
+    }
+
     fn single_member(&self, a: &Action) -> bool {
         match a {
             Action::Deliver(_) | Action::Dup(_) | Action::Link(..) => true,
@@ -505,10 +530,21 @@ impl World {
                 }
             }
         }
+        for i in 0..self.m.len() {
+            if self.cuts > 0 || self.cut[i] {
+                v.push(Action::Cut(i, !self.cut[i]));
+            }
+        }
         if self.crashes > 0 {
+            // G12: every prefix of the step's outputs.
             let base: Vec<Action> = v.iter().filter(|a| self.single_member(a)).cloned().collect();
             for a in base {
-                for k in 0..4 {
+                let mut t = self.clone();
+                let total = t
+                    .prepare(&a)
+                    .and_then(|(i, input)| t.input(i, input, &self.bounds_for_trial(), None).ok().flatten())
+                    .unwrap_or(0);
+                for k in 0..total {
                     v.push(Action::Crash(Box::new(a.clone()), k));
                 }
             }
@@ -580,6 +616,21 @@ impl World {
                 self.net.remove(*k);
             }
             Action::Tick => self.tick(b)?,
+            Action::Cut(i, c) => {
+                if *c {
+                    self.cuts -= 1;
+                }
+                self.cut[*i] = *c;
+                self.reach = reach_for(self.topo, self.m.len());
+                for j in 0..self.m.len() {
+                    if self.cut[j] {
+                        for k in 0..self.m.len() {
+                            self.reach[j][k] = false;
+                            self.reach[k][j] = false;
+                        }
+                    }
+                }
+            }
             Action::Cmd(i, Cmd::Restart) => {
                 self.cmds -= 1;
                 self.restarts -= 1;
@@ -632,7 +683,7 @@ impl World {
         let p = policy();
         let warm = (3 * p.holder_timeout_ms + 2 * p.ask_timeout_ms + 2 * p.beat_ms) / TICK;
         let observe = (3 * p.holder_timeout_ms + p.beat_ms) / TICK;
-        let mesh = b.topo == Topo::Mesh;
+        let mesh = matches!(b.topo, Topo::Mesh | Topo::BridgedChain) && !w.cut.iter().any(|c| *c);
         for t in 0..warm + observe {
             if t == warm {
                 w.persists = 0;
@@ -922,6 +973,7 @@ fn bounds(members: usize, kinds: &'static str, small: Small, depth: u32) -> Boun
         links: env_u64("COLOPHON_EXPLORE_LINKS", u64::from(links)) as u8,
         restarts: 1,
         crashes: 0,
+        cuts: 0,
         cap: env_u64("COLOPHON_EXPLORE_CAP", cap as u64) as usize,
         max_states: env_u64("COLOPHON_EXPLORE_STATES", if big { 100_000_000 } else { 3_000_000 })
             as usize,
@@ -1027,50 +1079,69 @@ fn three_members_membership() {
     check(3, "rlxu", (2, 0, 1, 2), 7);
 }
 
-/// H1: the chain a↔b↔c with a↮c held indefinitely, starting from the review's two holders
-/// (a 1.0.a, c 1.0.c), with no application command: G10, G4 per component, G11.
-fn chain_two_holders(fixes: Fixes) -> Report {
+/// H1: the chain a↔b↔c with a↮c held indefinitely, starting from two holders (a 1.0.a,
+/// c 1.0.c), with no application command: G10, G4 per component, G11.
+fn chain_two_holders(fixes: Fixes, topo: Topo) -> Report {
     let mut b = bounds(3, "", (0, 0, 0, 3), 8);
-    b.topo = Topo::Chain;
+    b.topo = topo;
     b.start = Start::ChainTwoHolders;
     run(b, fixes)
 }
 
+/// Revision 7: with bridging the chain is one group and settles.
 #[test]
-fn chain_two_holders_settle() {
-    let r = chain_two_holders(fixes_under_test());
+fn bridged_chain_two_holders_settle() {
+    let r = chain_two_holders(fixes_under_test(), Topo::BridgedChain);
     assert!(r.violation.is_none(), "{:?}", r.violation.map(|v| v.0));
     assert!(!r.truncated);
 }
 
-/// H1: revision 3's hearsay renewing livelocks on the chain (the review's first trace).
+/// Revision 6 (one-hop evidence) on the unbridged three-member chain, kept as a regression.
+#[test]
+fn chain_two_holders_settle_rev6() {
+    let r = chain_two_holders(Fixes::REV6, Topo::Chain);
+    assert!(r.violation.is_none(), "{:?}", r.violation.map(|v| v.0));
+    assert!(!r.truncated);
+}
+
+/// H1: revision 3's hearsay renewing livelocks on the unbridged chain.
 #[test]
 fn chain_two_holders_rev3_livelocks() {
-    let r = chain_two_holders(Fixes::REV3);
+    let r = chain_two_holders(Fixes::REV3, Topo::Chain);
     let v = r.violation.expect("revision 3 should livelock on the chain");
     assert!(v.0.starts_with("G10"), "{}", v.0);
 }
 
-fn chain_handoff_bounds() -> Bounds {
+fn chain_handoff_bounds(topo: Topo) -> Bounds {
     let mut b = bounds(3, "atp", (2, 0, 0, 3), 7);
-    b.topo = Topo::Chain;
+    b.topo = topo;
     b
 }
 
-/// Finding R1f: revision 5 as written livelocks on the chain. a and c both took because
-/// they wanted the role; each yields to evidence of the other relayed by b, keeps wanting,
-/// and takes again once the other is lapsed to it, forever (G10).
+/// Finding R1f: revision 5 as written livelocks on the unbridged chain (G10).
 #[test]
 fn chain_two_holders_rev5_livelocks() {
-    let r = chain_two_holders(Fixes::REV5);
+    let r = chain_two_holders(Fixes::REV5, Topo::Chain);
     let v = r.violation.expect("revision 5 should livelock on the chain");
     assert!(v.0.starts_with("G10"), "{}", v.0);
 }
 
-/// The chain with ask, take and pass.
+/// The bridged chain with ask, take and pass (revision 7), and the unbridged one under
+/// revision 6.
 #[test]
 fn chain_handoff() {
-    check_bounds(chain_handoff_bounds());
+    check_bounds(chain_handoff_bounds(Topo::BridgedChain));
+    let r = run(chain_handoff_bounds(Topo::Chain), Fixes::REV6);
+    assert!(r.violation.is_none(), "{:?}", r.violation.map(|v| v.0));
+}
+
+/// Groups split and merge (§S0): a member is cut from the others while its own link stays
+/// up, then merged back, with ask, take and pass.
+#[test]
+fn groups_split_merge() {
+    let mut b = bounds(3, "atp", (2, 0, 0, 3), 7);
+    b.cuts = 2;
+    check_bounds(b);
 }
 
 /// Revision 4 as written fails where revision 5 changed it: without evidence for silent
@@ -1079,13 +1150,14 @@ fn chain_handoff() {
 /// R1d an asker displaced by forwarded evidence of a cut-off holder never takes (G5).
 #[test]
 fn rev4_counterexamples() {
-    let r = run(chain_handoff_bounds(), Fixes { evidence_push: false, ..Fixes::ALL });
+    let r = run(chain_handoff_bounds(Topo::Chain), Fixes { evidence_push: false, ..Fixes::REV6 });
     let v = r.violation.expect("R1c off should break G4 on the chain");
     assert!(v.0.starts_with("G4"), "{}", v.0);
     let r = run(bounds(2, "atpu", (3, 1, 2, 3), 7), Fixes { yielded_ack: false, ..Fixes::ALL });
+    // (the `ack` is unchanged in revision 7)
     let v = r.violation.expect("R2d off should break G11");
     assert!(v.0.starts_with("G11"), "{}", v.0);
-    let r = run(bounds(3, "atp", (2, 0, 1, 3), 7), Fixes { evidence_keeps_want: false, ..Fixes::ALL });
+    let r = run(bounds(3, "atp", (2, 0, 1, 3), 7), Fixes { evidence_keeps_want: false, ..Fixes::REV6 });
     let v = r.violation.expect("R1d off should break G5");
     assert!(v.0.starts_with("G5"), "{}", v.0);
 }
@@ -1436,4 +1508,120 @@ fn f12_f21_two_passes_to_one_asker() {
             panic!("loss seed {seed}: {e}: {}", show(&m));
         }
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Revision 7 checks from the second review.
+
+fn frame_to(from: &str, to: &str, body: Body) -> Input {
+    Input::Frame {
+        frame: Frame { from: from.into(), to: Some(to.into()), retain: false, body },
+        writer: true,
+        key: None,
+        n: None,
+        forwarded: None,
+    }
+}
+
+/// a held 1.0.a and yielded to b's take, so it owes b a `yielded`. A third writer c cannot
+/// clear that with an `ack`, nor inject a `yielded` at b: revision 7 checks the sender.
+fn third_writer(fixes: Fixes) -> (bool, bool) {
+    let mut r = Router::new(&["a", "b", "c"], fixes, Policy::default());
+    for id in ["a", "b", "c"] {
+        r.cmd(id, Command::Join { state: None }, 0);
+    }
+    r.deliver(0);
+    r.cmd("a", Command::Take { state: Some(b("A")) }, 10);
+    r.deliver(20);
+    // a's yielded to b is lost.
+    r.reach[0][1] = false;
+    r.cmd("b", Command::Take { state: None }, 30);
+    r.tick_all(16_000);
+    r.deliver(16_010);
+    r.reach[0][1] = true;
+    assert_eq!(r.m[0].accepted(), Some(&Claim::new(2, 0, "b")));
+    // c forges an ack to a.
+    r.step(0, frame_to("c", "a", Body::Ack { yielded: Claim::new(1, 0, "a") }), 16_100);
+    // b's next beat: a resends (and b reports) only if the forged ack was ignored.
+    r.tick_all(22_000);
+    r.deliver(22_010);
+    let resent = r.events.iter().any(|(i, e)| *i == 1 && matches!(e, Event::Displaced { from, .. } if from == "a"));
+    // c injects a yielded naming a's old claim at b.
+    let n_before = r.events.len();
+    r.step(1, frame_to("c", "b", Body::Yielded { claim: Claim::new(1, 0, "a"), seq: 0, snapshot: b("FAKE") }), 22_100);
+    let injected = r.events[n_before..]
+        .iter()
+        .any(|(_, e)| matches!(e, Event::Displaced { snapshot, .. } if *snapshot == b("FAKE")));
+    (resent, injected)
+}
+
+#[test]
+fn third_writer_cannot_clear_or_inject_reports() {
+    let (resent, injected) = third_writer(Fixes::ALL);
+    assert!(resent, "revision 7: a forged ack must not clear the pending report");
+    assert!(!injected, "revision 7: a yielded from a non-holder of its claim is ignored");
+    let (_, injected_old) = third_writer(Fixes::REV6);
+    assert!(injected_old, "revision 6 accepted the injected yielded");
+}
+
+/// The `append` fold never makes a snapshot larger than maxPayload (revision 7), so a joiner
+/// gets `state` even after a maxPayload-sized payload.
+fn append_bound(fixes: Fixes) -> (usize, bool) {
+    let policy = Policy { fold: Fold::Append, max_payload: 64, ..Policy::default() };
+    let mut r = Router::new(&["a", "b"], fixes, policy);
+    r.cmd("a", Command::Join { state: None }, 0);
+    r.cmd("a", Command::Take { state: None }, 10);
+    r.cmd("a", Command::Publish { id: Id::from_label("small"), payload: Bytes(vec![1; 20]) }, 20);
+    r.cmd("a", Command::Publish { id: Id::from_label("big"), payload: Bytes(vec![2; 64]) }, 30);
+    r.net.clear();
+    let size = r.m[0].state().len();
+    r.cmd("b", Command::Join { state: None }, 40);
+    r.deliver(50);
+    (size, r.m[1].synced())
+}
+
+#[test]
+fn append_state_fits_a_frame() {
+    let (size, synced) = append_bound(Fixes::ALL);
+    assert!(size <= 64, "state is {size} bytes");
+    assert!(synced, "the joiner gets state");
+    let (old, old_synced) = append_bound(Fixes::REV6);
+    assert!(old > 64 && !old_synced, "revision 6: {old} bytes, joiner synced {old_synced}");
+}
+
+/// Freshness windows: at most 4 keys per member; all dropped when the member is no longer
+/// accepted.
+#[test]
+fn freshness_windows_are_bounded() {
+    let mut s = Session::new("a", true, Policy::default(), None).with_fresh_seed([7; 16]);
+    let outs = s.handle(Input::App { command: Command::Join { state: None } }, 0);
+    let mine = outs
+        .iter()
+        .find_map(|o| match o {
+            Output::Send { frame: Frame { body: Body::Hello { fresh, .. }, .. } } => Some(*fresh),
+            _ => None,
+        })
+        .unwrap();
+    for k in 0..6u8 {
+        let hello = Body::Hello {
+            fresh: Id([k; 16]),
+            echo: vec![mine],
+            seen: None,
+            heard: None,
+            lapsed: false,
+        };
+        s.handle(
+            Input::Frame {
+                frame: Frame { from: "x".into(), to: None, retain: false, body: hello },
+                writer: true,
+                key: Some(format!("kx{k}")),
+                n: Some(1),
+                forwarded: None,
+            },
+            10 + u64::from(k),
+        );
+    }
+    assert_eq!(s.windows_for("x"), MAX_KEYS_PER_MEMBER);
+    s.forget_member("x");
+    assert_eq!(s.windows_for("x"), 0);
 }
