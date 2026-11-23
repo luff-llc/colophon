@@ -100,9 +100,12 @@ public = true
 # Intentional binary files the content check cannot read as text.
 allow_paths = ["conformance/**/*.cbor", "**/gradle-wrapper.jar"]
 
-# Commands run with a cleared environment; this is their PATH (cargo and bun included).
+# Commands run with a cleared environment; this is their PATH: the pinned Rust
+# toolchain (see .github/workflows/ci.yml), bun, gh and the system tools.
 [run]
-path = "~/.cargo/bin:~/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+path = "~/.rustup/toolchains/1.99.1-aarch64-apple-darwin/bin:~/.cargo/bin:~/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+# Homebrew's bin is group-writable (admin) by design; gh and bun live there.
+trust_group_writable = ["/opt/homebrew/bin"]
 
 # Machine-specific values come from the environment (EDITION_VAR_<NAME>).
 [vars]
