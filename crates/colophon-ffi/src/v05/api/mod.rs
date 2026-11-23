@@ -10,10 +10,10 @@
 //!
 //! What never crosses in either direction: seed bytes, epoch key bytes, a PRF output or a raw
 //! ECDH result read back, a prepared action's state, a verified state supplied by the host.
-//! (The one exception is `SessionEpochs::with_keys`, which takes epoch keys inward for the
-//! conformance vectors and tests; an application's session keys come from its engine.)
 //!
-//! The 0.6 home stream (`stream.rs`) and sessions (`sessions.rs`) are part of this surface.
+//! The 0.6 home stream (`stream.rs`) and sessions (`sessions.rs`) are part of this surface. The
+//! conformance surface (`conformance.rs`, with its own name list) exists only with the
+//! `conformance` feature, which no shipped artifact enables.
 #![allow(missing_docs, clippy::too_many_arguments)]
 
 #[cfg(all(feature = "native05", feature = "web05"))]
@@ -23,6 +23,8 @@ compile_error!(
      supported; use `--features native05` for colophon-ffi and the default for colophon-wasm)"
 );
 
+#[macro_use]
+mod types;
 mod action;
 mod convert;
 mod create;
@@ -32,11 +34,14 @@ mod join;
 mod moving;
 mod pairing;
 mod session;
+#[macro_use]
 mod sessions;
 mod stream;
 mod successor;
-mod types;
 mod verify;
+/// The conformance surface: never in a shipped artifact (see the module).
+#[cfg(feature = "conformance")]
+mod conformance;
 
 pub use action::AccountAction;
 pub use create::{account_default_policy, AccountCreation};
@@ -49,9 +54,11 @@ pub use session::{
     AccountCopyWrite, SwiftCopyDestination, SwiftCopyPlan, SwiftCopyResult, SwiftSource,
     SwiftTranslator,
 };
+#[cfg(feature = "conformance")]
+pub use conformance::*;
 pub use sessions::{
     session_clock_sample, session_default_policy, session_validate_policy, SessionAccountView,
-    SessionEndpoint, SessionEpochs, SessionMachine, SessionWireReceiver,
+    SessionEndpoint,
 };
 pub use stream::{stream_default_config, stream_redact_url, HomeStream};
 pub use successor::SwiftSuccessorCreation;

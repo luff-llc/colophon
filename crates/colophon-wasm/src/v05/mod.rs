@@ -3,6 +3,8 @@
 //! record source, how an error is thrown, and the engine's constructor.
 use wasm_bindgen::prelude::*;
 
+// wasm-bindgen's getters for an optional record field drop a value without drop glue.
+#[allow(clippy::drop_non_drop)]
 #[path = "../../../colophon-ffi/src/v05/api/mod.rs"]
 pub mod api;
 pub use api::*;

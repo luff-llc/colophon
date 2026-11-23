@@ -1206,29 +1206,6 @@ record! {
 
 // --- 0.6 sessions (`sessions.rs`) --------------------------------------------------------------
 
-cenum! {
-    /// A member's `records` access to a namespace (§S1).
-    pub enum SessionAccess { Read, Write }
-}
-record! {
-    /// One `records` entry of a member in a session account view.
-    pub struct SessionRecordEntry { pub namespace: String, pub access: SessionAccess }
-}
-record! {
-    /// A member as a session verifier sees it: its signing point (65 bytes), session number,
-    /// expiry and `records` entries. For conformance vectors and tests; an application takes
-    /// its view from its engine (`session_account`).
-    pub struct SessionMemberEntry {
-        pub signing: Vec<u8>,
-        pub session: u64,
-        pub expires_ms: Option<i64>,
-        pub records: Vec<SessionRecordEntry>,
-    }
-}
-secret_record! {
-    /// One epoch key supplied for conformance vectors and tests (32 bytes, wiped once read).
-    pub struct SessionEpochKey { pub epoch: u64, pub key: Vec<u8> }
-}
 record! {
     /// The host's clocks at a call: monotonic ms (every session timer) and wall-clock ms since
     /// the Unix epoch (delegation windows, member expiry).
@@ -1262,33 +1239,15 @@ record! {
     pub struct SessionDrop { pub reason: String, pub hello_to: Option<String> }
 }
 record! {
-    /// What one endpoint call produced: the effects in order and, for `receive`, the drop.
-    pub struct SessionStep { pub effects: Vec<SessionEffect>, pub dropped: Option<SessionDrop> }
-}
-record! {
-    /// A frame that passed every §S3 check (conformance receiver): its canonical plaintext, the
-    /// sender, `to`, whether the sender may write, its session key, `n` and epoch.
-    pub struct SessionOpened {
-        pub plaintext: Vec<u8>,
-        pub from: String,
-        pub to: Option<String>,
-        pub writer: bool,
-        pub key: String,
-        pub n: u64,
-        pub epoch: u64,
+    /// What one endpoint call produced: the effects in order and, for `receive`, the drop. When
+    /// the last effect is a `Persist`, `awaiting_persist` is its acknowledgement ID: the effects
+    /// that follow it are held by the endpoint until the host has stored the claim and calls
+    /// `persisted` with that ID.
+    pub struct SessionStep {
+        pub effects: Vec<SessionEffect>,
+        pub dropped: Option<SessionDrop>,
+        pub awaiting_persist: Option<u64>,
     }
-}
-record! {
-    /// The conformance receiver's judgement of one frame: exactly one of the two is set.
-    pub struct SessionOpenResult { pub opened: Option<SessionOpened>, pub dropped: Option<SessionDrop> }
-}
-record! {
-    /// A member's session key.
-    pub struct SessionKeyRef { pub member: String, pub key: String }
-}
-record! {
-    /// What a new account view removed from a conformance receiver (§S2).
-    pub struct SessionForgotten { pub members: Vec<String>, pub keys: Vec<SessionKeyRef> }
 }
 record! {
     /// One §S7 clock sample: round trip, offset (`peer ≈ mine + offset`) and error, ms.
