@@ -11,10 +11,12 @@ final class TestPasskey: AsyncKeyProvider, @unchecked Sendable {
     let rp: String
     let credential: Data
     private let lock = NSLock()
-    private(set) var assertions = 0
+    private var assertions = 0
+    var assertCount: Int { lock.withLock { assertions } }
     private(set) var prfRequests = 0
     init(rp: String = "id.luff.works", credential: Data = Data([1, 2, 3])) { self.rp = rp; self.credential = credential }
     var form: KeyForm { .webauthn }
+    var supportsPRF: Bool { true }
     static func prfOutput(_ salt: Data) -> SecretBytes { SecretBytes(copying: SHA256.hash(data: Data("test-prf".utf8) + salt)) }
     func assert(challenge: String, prfSalt: Data?) async throws -> KeyAssertion? {
         lock.withLock { assertions += 1; if prfSalt != nil { prfRequests += 1 } }

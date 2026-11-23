@@ -24,6 +24,7 @@ use colophon_core::v05::engine::live::PendingLive;
 use colophon_core::v05::engine::{Engine, EngineOptions, OpenMode as CoreOpen, Saved};
 use colophon_core::v05::live::LiveVerdict as CoreLive;
 use colophon_core::v05::records::{HeldRecord, Level};
+use colophon_core::v05::slots::PrfInput;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -754,6 +755,22 @@ begin_methods! {
     fn begin_add_slot(signer: String, plan: SlotPlan) AddSlot |e, s| {
         let sd = seeds32(s, 1)?;
         done(e.account().begin_add_slot(&signer, cv::slot_plan(plan)?, sd[0]))
+    }
+    /// A slot signed by the specified keyring entry signers (§8.4). To reuse a transition
+    /// possession assertion for one PRF route, supply both its salt and decoded challenge.
+    /// Omit both for fresh core-generated inputs. 32 bytes of entropy.
+    fn begin_add_slot_with_signers(entry_signers: Vec<String>, plan: SlotPlan, prf_salt: Option<Vec<u8>>, prf_challenge: Option<Vec<u8>>) AddSlot |e, s| {
+        let sd = seeds32(s, 1)?;
+        let possession = match (prf_salt, prf_challenge) {
+            (None, None) => None,
+            (Some(salt), Some(challenge)) => Some(PrfInput {
+                salt: fixed(&salt, "PRF salt")?,
+                challenge: fixed(&challenge, "PRF challenge")?,
+            }),
+            _ => return Err(AccountError::bound("supply both PRF salt and challenge")),
+        };
+        done(e.account().begin_add_slot_with_signers(
+            &names(entry_signers, "entry signers")?, cv::slot_plan(plan)?, possession, sd[0]))
     }
     /// A `vault` entry from a new seed. 64 bytes: the new seed, then the entropy.
     fn begin_rotate_vault(signer: String, has_plans: bool, plans: Vec<SlotPlan>) RotateVault |e, s| {

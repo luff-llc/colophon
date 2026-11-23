@@ -25,9 +25,12 @@
 //! [`Account::begin_call`](crate::v05::account::Account::begin_call) (it holds the signing keys)
 //! and gives it to [`Engine::exchange_authorize`]. The engine never signs.
 use super::{paths, Engine, Have, RecordSource};
-use crate::v05::account::{Changes, Incoming};
+use crate::v05::account::{Changes, Identity, Incoming};
+use crate::v05::calls::{
+    controller_allows_call, home_record_writes, member_allows_home_write, HOME_WRITE,
+};
 use crate::v05::encoding::{canonical, encode_base64url};
-use crate::v05::history::Objects;
+use crate::v05::history::{Claim, Objects, Principal};
 use crate::v05::records::HeldRecord;
 use crate::v05::{malformed, require, Result};
 use serde_json::{json, Value};
@@ -735,13 +738,23 @@ impl<S: RecordSource> Engine<S> {
                 h.phase = Phase::Done;
             }
             if let Some(item) = h.queue.pop_front() {
-                let public = is_public(&item.0);
                 // A batch always carries its own `colophon.home.read` call (0.6 W1), whatever
                 // single reads need.
                 let needs = matches!(item.0, Tag::PullBatch { .. })
-                    || (!public
-                        && ((item.1 == Method::Get && h.require_read)
-                            || (item.1 != Method::Get && h.require_write)));
+                    || (!is_public(&item.0)
+                        && if item.1 == Method::Get {
+                            h.require_read
+                        } else {
+                            h.require_write
+                        });
+                // The first predecessor PUT can discover a home requires write calls after
+                // this phase was planned. Drop its retry and any other unauthorized entries.
+                if needs
+                    && matches!(item.0, Tag::PutPredecessor { .. })
+                    && !self.can_push_path(&endpoint, &item.2)
+                {
+                    continue;
+                }
                 let ticket = self.exchange.next_ticket;
                 self.exchange.next_ticket += 1;
                 if needs {
@@ -788,7 +801,7 @@ impl<S: RecordSource> Engine<S> {
                 Phase::LivePush => Phase::PullBlobs,
                 Phase::PullBlobs | Phase::Done => Phase::Done,
             };
-            self.plan(home, phase)?;
+            self.plan(home, &endpoint, phase)?;
         }
     }
 
@@ -873,7 +886,7 @@ impl<S: RecordSource> Engine<S> {
     }
 
     /// Queue the requests of `phase`.
-    fn plan(&mut self, home: &str, phase: Phase) -> Result<()> {
+    fn plan(&mut self, home: &str, endpoint: &str, phase: Phase) -> Result<()> {
         match phase {
             Phase::Head => {
                 self.enqueue(home, Tag::Head, Method::Get, "/head".into(), vec![], vec![]);
@@ -935,14 +948,14 @@ impl<S: RecordSource> Engine<S> {
                 let p = self.changes_path(cursor.as_deref());
                 self.enqueue(home, Tag::Changes, Method::Get, p, vec![], vec![]);
             }
-            Phase::PushBlobs => self.plan_push(home, true)?,
+            Phase::PushBlobs => self.plan_push(home, endpoint, true)?,
             Phase::Records => {
                 self.plan_pull_records(home);
-                self.plan_push(home, false)?;
-                self.plan_predecessor(home);
+                self.plan_push(home, endpoint, false)?;
+                self.plan_predecessor(home, endpoint);
             }
             Phase::Live => self.plan_live(home),
-            Phase::LivePush => self.plan_live_push(home),
+            Phase::LivePush => self.plan_live_push(home, endpoint),
             Phase::PullBlobs => self.plan_pull_blobs(home)?,
             Phase::Done => {}
         }
@@ -1137,7 +1150,7 @@ impl<S: RecordSource> Engine<S> {
     /// The history of a Swift predecessor, through its final entry, that this account's homes
     /// serve (§14): pulled when the account claims a Swift predecessor and holds less than the
     /// claim needs, and published to a home that does not list it.
-    fn plan_predecessor(&mut self, home: &str) {
+    fn plan_predecessor(&mut self, home: &str, endpoint: &str) {
         let Some(s) =
             crate::v05::history::succession_status(self.account.record_authority().state())
         else {
@@ -1154,7 +1167,9 @@ impl<S: RecordSource> Engine<S> {
             .iter()
             .filter_map(|b| entry_seq(b))
             .collect();
-        let remote: BTreeSet<String> = self.home_mut(home).remote.keys().cloned().collect();
+        let h = self.home_mut(home);
+        let require_write = h.require_write;
+        let remote: BTreeSet<String> = h.remote.keys().cloned().collect();
         let mut budget = MAX_PREDECESSOR_PER_PASS;
         // Pull the first entry this account lacks; the answer queues the next.
         if let Some(seq) = (1..=through).find(|n| !held.contains(n)) {
@@ -1184,12 +1199,16 @@ impl<S: RecordSource> Engine<S> {
             if remote.contains(&path) {
                 continue;
             }
+            let http_path = format!("/{path}");
+            if require_write && !self.can_push_path(endpoint, &http_path) {
+                continue;
+            }
             budget -= 1;
             self.enqueue(
                 home,
                 Tag::PutPredecessor { seq },
                 Method::Put,
-                format!("/predecessor/authority/{seq:08}.json"),
+                http_path,
                 bytes,
                 vec![
                     ("If-None-Match".into(), "*".into()),
@@ -1327,7 +1346,31 @@ impl<S: RecordSource> Engine<S> {
             .collect()
     }
 
-    fn plan_push(&mut self, home: &str, blobs: bool) -> Result<()> {
+    /// Whether this session's standing and grants cover a PUT at the home's resolved endpoint.
+    fn can_push_path(&self, endpoint: &str, http_path: &str) -> bool {
+        let identity = self.account.identity();
+        let claim = match identity {
+            Identity::Member(_) => Claim::Member,
+            Identity::Controller(_) => Claim::Controller {
+                roles: &[],
+                suspended_ok: false,
+            },
+        };
+        let state = self.account.record_authority().state();
+        match state.current_principal(identity.id(), claim, self.account.now_ms()) {
+            Ok(Principal::Member(m)) => {
+                let writes = http_path
+                    .strip_prefix("/records/")
+                    .and_then(home_record_writes)
+                    .unwrap_or_default();
+                member_allows_home_write(identity.id(), &m.terms, endpoint, &writes)
+            }
+            Ok(Principal::Controller(c)) => controller_allows_call(c, c, endpoint, HOME_WRITE),
+            _ => false,
+        }
+    }
+
+    fn plan_push(&mut self, home: &str, endpoint: &str, blobs: bool) -> Result<()> {
         let remote = self.home_mut(home).remote.clone();
         let chunks = if blobs {
             self.admitted_chunk_paths()?
@@ -1336,6 +1379,10 @@ impl<S: RecordSource> Engine<S> {
         };
         for p in self.local_paths(blobs) {
             if remote.contains_key(&p) {
+                continue;
+            }
+            let http_path = format!("/records/{p}");
+            if !self.can_push_path(endpoint, &http_path) {
                 continue;
             }
             let bytes = if blobs {
@@ -1380,7 +1427,7 @@ impl<S: RecordSource> Engine<S> {
                 home,
                 tag,
                 Method::Put,
-                format!("/records/{p}"),
+                http_path,
                 bytes,
                 vec![
                     ("If-None-Match".into(), "*".into()),
@@ -1593,23 +1640,26 @@ impl<S: RecordSource> Engine<S> {
     /// home's current value was pulled and verified in this pass and our head's generation is
     /// strictly higher; `If-Match` carries the digest of the value verified. A slot the home
     /// does not hold is created. An older head never replaces a newer value.
-    fn plan_live_push(&mut self, home: &str) {
+    fn plan_live_push(&mut self, home: &str, endpoint: &str) {
         let (remote, verified) = {
             let h = self.home_mut(home);
             (h.remote.clone(), h.verified_live.clone())
         };
-        let me = match self.account.me() {
-            crate::v05::account::Standing::Member(m) => Some(m.member.id),
-            _ => None,
+        let Identity::Member(me) = self.account.identity() else {
+            return;
         };
         let mine: Vec<(String, Vec<u8>, u64)> = self
             .account
             .live_heads()
             .iter()
-            .filter(|h| Some(&h.author) == me.as_ref())
+            .filter(|h| &h.author == me)
             .map(|h| (h.path.clone(), h.bytes.clone(), h.generation))
             .collect();
         for (p, bytes, generation) in mine {
+            let http_path = format!("/records/{p}");
+            if !self.can_push_path(endpoint, &http_path) {
+                continue;
+            }
             let sha = super::hex(&super::sha(&bytes));
             let cond = match remote.get(&p) {
                 Some(r) if *r == sha => continue,
@@ -1629,7 +1679,7 @@ impl<S: RecordSource> Engine<S> {
                     generation,
                 },
                 Method::Put,
-                format!("/records/{p}"),
+                http_path,
                 bytes,
                 vec![
                     cond,

@@ -9,6 +9,7 @@ public struct SessionKeyFailure: Error, Sendable, LocalizedError {
 struct SessionKeys: AsyncKeyProvider {
     let base: any AsyncKeyProvider
     var form: KeyForm { base.form }
+    var supportsPRF: Bool { base.supportsPRF }
     func assert(challenge: String, prfSalt: Data?) async throws -> KeyAssertion? {
         do { return try await base.assert(challenge: challenge, prfSalt: prfSalt) }
         catch is CancellationError { throw CancellationError() }

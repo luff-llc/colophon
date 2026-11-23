@@ -847,33 +847,47 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
                     else -> add.add(requested)
                 }
             }
-            // 2-3. One change, signed by the owner with the new key's possession proof, persisted.
-            if (appoint.isNotEmpty() || add.isNotEmpty()) {
-                val change = LinkedHashMap<String, Any?>()
-                if (appoint.isNotEmpty()) change["homes"] = mapOf("appoint" to appoint)
-                if (add.isNotEmpty()) change["keyring"] = mapOf("add" to add)
-                val json = Json.write(change)
-                val signers = signers(owner, ownerId, SignerNeed.CONTROL)
-                val written = owner.execute(custody, persistOn(owner)) { it.beginTransition(json, signers, RuleKind.CONTROL, ByteArray(0)) }
-                objectDigest(written.stores, "transitions/")?.let { inFlight.add(it); signedChange = it to json }
-                reached(AppointStep.SIGNED)
+            val possessionPrf = if (add.isNotEmpty() && addedId != null &&
+                adding.first.key.form == SignForm.WEBAUTHN && adding.second.supportsPrf) TransitionPossessionPrf(addedId) else null
+            possessionPrf.use {
+                val appointmentCustody = if (possessionPrf != null) KeyCustody(custody.providers, possessionPrf) else custody
+                // 2-3. One change, signed by the owner with the new key's possession proof, persisted.
+                if (appoint.isNotEmpty() || add.isNotEmpty()) {
+                    val change = LinkedHashMap<String, Any?>()
+                    if (appoint.isNotEmpty()) change["homes"] = mapOf("appoint" to appoint)
+                    if (add.isNotEmpty()) change["keyring"] = mapOf("add" to add)
+                    val json = Json.write(change)
+                    val signers = signers(owner, ownerId, SignerNeed.CONTROL)
+                    val written = owner.execute(appointmentCustody, persistOn(owner)) { it.beginTransition(json, signers, RuleKind.CONTROL, ByteArray(0)) }
+                    objectDigest(written.stores, "transitions/")?.let { inFlight.add(it); signedChange = it to json }
+                    reached(AppointStep.SIGNED)
+                }
+                // 4. Record what is due (at once when the account had no home).
+                val at = nowMs
+                owner.run { it.advance(at) }
+                withContext(NonCancellable) { for (due in owner.run { it.recordDue() }) persist(due, owner) }
+                reached(AppointStep.RECORDED)
+                val now = owner.run { it.homes() }
+                val controller = addedId?.let { id -> owner.run { it.controllers() }.firstOrNull { it.id == id } }
+                val homesDone = homes.all { isCurrent(it, now) }
+                val controllerDone = addedId == null || controller?.provisional == false
+                if (!homesDone || !controllerDone) return@withOwner HomesAppointment.Pending(inFlight.toSortedSet().toList())
+                // 5. Give the new controller a slot it can unlock alone.
+                if (adding != null && addedId != null && owner.run { it.slots() }.none { s -> s.controllers.map { it.id } == listOf(addedId) }) {
+                    val entrySigner = owner.run { engine ->
+                        val held = engine.controllers().firstOrNull { it.id == ownerId }
+                        if (engine.policy().addThreshold == 1uL && held?.form == SignForm.RAW &&
+                            ControllerRole.CONTROL in held.roles && !held.provisional && !held.suspended) ownerId else addedId
+                    }
+                    val input = possessionPrf?.input
+                    val plan = SlotPlan(listOf(addedId), adding.first.label)
+                    owner.execute(appointmentCustody, persistOn(owner)) { engine ->
+                        withEntropy(32) { engine.beginAddSlotWithSigners(listOf(entrySigner), plan, input?.salt, input?.challenge, it) }
+                    }
+                }
+                reached(AppointStep.SLOTTED)
+                HomesAppointment.Done
             }
-            // 4. Record what is due (at once when the account had no home).
-            val at = nowMs
-            owner.run { it.advance(at) }
-            withContext(NonCancellable) { for (due in owner.run { it.recordDue() }) persist(due, owner) }
-            reached(AppointStep.RECORDED)
-            val now = owner.run { it.homes() }
-            val controller = addedId?.let { id -> owner.run { it.controllers() }.firstOrNull { it.id == id } }
-            val homesDone = homes.all { isCurrent(it, now) }
-            val controllerDone = addedId == null || controller?.provisional == false
-            if (!homesDone || !controllerDone) return@withOwner HomesAppointment.Pending(inFlight.toSortedSet().toList())
-            // 5. The new controller's own slot (exactly it as holder), signed by it, so it unlocks alone.
-            if (adding != null && addedId != null && owner.run { it.slots() }.none { s -> s.controllers.map { it.id } == listOf(addedId) }) {
-                owner.execute(custody, persistOn(owner)) { e -> withEntropy(32) { e.beginAddSlot(addedId, SlotPlan(listOf(addedId), adding.first.label), it) } }
-            }
-            reached(AppointStep.SLOTTED)
-            HomesAppointment.Done
         }
         signedChange?.let { (digest, json) -> loadJournal(); journal.signedChanges = journal.signedChanges + (digest to json); saveJournal() }
         // 6. This session reaches the homes from now on (the exchange and the sync loop), without a relaunch.

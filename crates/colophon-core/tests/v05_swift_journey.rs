@@ -2193,6 +2193,48 @@ fn the_engine_pulls_and_pushes_predecessor_history() {
 
 // ---- the independent check of E9 (2026-11-14), ported ----
 
+#[test]
+fn a_member_skips_predecessor_uploads_when_the_home_requires_a_write_call() {
+    use colophon_core::model::Records;
+    use colophon_core::v05::engine::{Engine, EngineOptions};
+
+    let (mut j, _keys, _f, _fz) = through_f(false);
+    let member = copier_session(&mut j);
+    let mut files = Records::new();
+    for (i, entry) in member.objects().entries.iter().enumerate() {
+        files.insert(format!("authority/{:08}.json", i + 1), entry.clone());
+    }
+    let predecessor = &member.objects().predecessor;
+    assert!(predecessor.len() > 1);
+    for (i, entry) in predecessor.iter().enumerate() {
+        files.insert(
+            format!("predecessor/authority/{:08}.json", i + 1),
+            entry.clone(),
+        );
+    }
+    let listing = files.keys().cloned().collect();
+    let mut e = Engine::open(
+        files,
+        listing,
+        member.identity().clone(),
+        EngineOptions::new(member.id().as_str(), [7; 32]),
+        None,
+        member.now_ms(),
+    )
+    .unwrap();
+    e.load().unwrap();
+    assert_eq!(e.account().objects().predecessor.len(), predecessor.len());
+    assert!(matches!(e.account().me(), Standing::Member(_)));
+    let home = e.exchange_homes()[0].id.clone();
+    let empty = std::collections::BTreeMap::new();
+    // The first unauthenticated PUT discovers the requirement. The pass must finish
+    // without asking the member to sign a retry or sending any other predecessor PUT.
+    let (_, first_puts, _) = pass(&mut e, &home, &empty, 401);
+    assert_eq!(first_puts.len(), 1, "{first_puts:?}");
+    let (_, next_puts, _) = pass(&mut e, &home, &empty, 401);
+    assert!(next_puts.is_empty(), "{next_puts:?}");
+}
+
 /// Drive one pass with a home that answers predecessor GETs from `serve` (path -> bytes) and
 /// every other request as an empty honest home. Returns (pulled predecessor paths, PUT paths
 /// with their bodies, stored paths).
@@ -2201,6 +2243,7 @@ fn pass(
     e: &mut colophon_core::v05::engine::Engine<colophon_core::model::Records>,
     home: &str,
     serve: &std::collections::BTreeMap<String, Vec<u8>>,
+    predecessor_put_status: u16,
 ) -> (Vec<String>, Vec<(String, Vec<u8>)>, Vec<(String, Vec<u8>)>) {
     use colophon_core::v05::engine::exchange::{Method, Response, Step};
     let mut pulled = Vec::new();
@@ -2208,7 +2251,7 @@ fn pass(
     let mut stored = Vec::new();
     for _ in 0..400 {
         match e.exchange_next(home).unwrap() {
-            Step::Done => break,
+            Step::Done => return (pulled, puts, stored),
             Step::Request(r) => {
                 let path = r.url.split(".example").nth(1).unwrap_or("").to_string();
                 if r.method == Method::Put && path.starts_with("/predecessor/") {
@@ -2241,7 +2284,7 @@ fn pass(
                 } else if path == "/head" {
                     (404, b"{}".to_vec())
                 } else if path.starts_with("/predecessor/") && r.method == Method::Put {
-                    (201, b"{}".to_vec())
+                    (predecessor_put_status, b"{}".to_vec())
                 } else {
                     (200, serde_json::to_vec(&json!({"receipts": []})).unwrap())
                 };
@@ -2264,7 +2307,7 @@ fn pass(
             other => panic!("{other:?}"),
         }
     }
-    (pulled, puts, stored)
+    panic!("the pass did not end");
 }
 
 /// A home answers the predecessor entry the device lacks with a forgery: the real entry's
@@ -2327,11 +2370,11 @@ fn a_forged_predecessor_entry_from_a_home_is_not_held_or_forwarded() {
     // Pass 1: the hostile answer.
     let mut hostile = by_path.clone();
     hostile.insert(missing.clone(), forged.clone());
-    let (p1, puts1, st1) = pass(&mut e, &home, &hostile);
+    let (p1, puts1, st1) = pass(&mut e, &home, &hostile, 201);
     let held_forged = e.account().objects().predecessor.contains(&forged);
     let stored_forged = st1.iter().any(|(_, b)| *b == forged);
     // Pass 2: an honest home.
-    let (p2, puts2, _st2) = pass(&mut e, &home, &by_path);
+    let (p2, puts2, _st2) = pass(&mut e, &home, &by_path, 201);
     let held_real = e.account().objects().predecessor.contains(&real);
     let put_forged = puts2.iter().any(|(_, b)| *b == forged);
     println!(

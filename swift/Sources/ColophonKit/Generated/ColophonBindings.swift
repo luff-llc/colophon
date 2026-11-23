@@ -1411,6 +1411,13 @@ public protocol AccountEngineProtocol: AnyObject, Sendable {
     func beginAddSlot(signer: String, plan: SlotPlan, entropy: Data) throws  -> AccountAction
     
     /**
+     * A slot signed by the specified keyring entry signers (§8.4). To reuse a transition
+     * possession assertion for one PRF route, supply both its salt and decoded challenge.
+     * Omit both for fresh core-generated inputs. 32 bytes of entropy.
+     */
+    func beginAddSlotWithSigners(entrySigners: [String], plan: SlotPlan, prfSalt: Data?, prfChallenge: Data?, entropy: Data) throws  -> AccountAction
+    
+    /**
      * Approve a request (a `grant`), spending `pairing`: confirmed on this device, for this
      * account and exactly the request's `member.signing` (§9.1). Another account or key, or a
      * pairing confirmed on the joining device, is `refused:outOfScope`; an expired one
@@ -2161,6 +2168,25 @@ open func beginAddSlot(signer: String, plan: SlotPlan, entropy: Data)throws  -> 
             self.uniffiCloneHandle(),
         FfiConverterString.lower(signer),
         FfiConverterTypeSlotPlan_lower(plan),
+        FfiConverterData.lower(entropy),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * A slot signed by the specified keyring entry signers (§8.4). To reuse a transition
+     * possession assertion for one PRF route, supply both its salt and decoded challenge.
+     * Omit both for fresh core-generated inputs. 32 bytes of entropy.
+     */
+open func beginAddSlotWithSigners(entrySigners: [String], plan: SlotPlan, prfSalt: Data?, prfChallenge: Data?, entropy: Data)throws  -> AccountAction  {
+    return try  FfiConverterTypeAccountAction_lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_accountengine_begin_add_slot_with_signers(
+            self.uniffiCloneHandle(),
+        FfiConverterSequenceString.lower(entrySigners),
+        FfiConverterTypeSlotPlan_lower(plan),
+        FfiConverterOptionData.lower(prfSalt),
+        FfiConverterOptionData.lower(prfChallenge),
         FfiConverterData.lower(entropy),uniffiCallStatus
     )
 })
@@ -27137,6 +27163,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_colophon_ffi_checksum_method_accountengine_begin_add_slot() != 16458) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_accountengine_begin_add_slot_with_signers() != 62323) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_colophon_ffi_checksum_method_accountengine_begin_approve() != 12821) {

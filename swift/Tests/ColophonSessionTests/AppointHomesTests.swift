@@ -65,6 +65,73 @@ import ColophonSavedKit
     }
     private func transitions(_ medium: MemoryMedium) -> Int { medium.snapshot().keys.filter { $0.hasPrefix("transitions/") }.count }
 
+    enum SyncMode: CaseIterable { case active, paused, suspended }
+
+    @Test(arguments: SyncMode.allCases)
+    func aJoinedDeviceCanConfigureAnAppointedHomeLive(_ mode: SyncMode) async throws {
+        let first = Device()
+        let second = Device(medium: first.medium, homes: [])
+        let session = second.session
+        defer { first.session.stopSync(); session.stopSync() }
+        await first.session.create()
+        await session.restore()
+        try await approveByCode(joining: session, approving: first.session)
+        await session.refresh()
+        try #require(session.phase == .ready)
+
+        let home = SimHome()
+        let endpoint = try #require(URL(string: home.base + "/"))
+        let appointment = HomeConfiguration(endpoint: endpoint, request: { account in
+            home.setAccount(account)
+            return try home.memberRequest(account: account, createdMs: Int64(Date().timeIntervalSince1970 * 1000) - 5000)
+        }, transport: home)
+        first.session.stopSync()
+        try #require(await first.session.appointHomes([appointment]) == .done)
+        try #require(await first.session.syncNow())
+        await session.refresh()
+        try #require(session.homes.count == 1)
+        await session.configureHomes([])
+        #expect(session.hasConfiguredHomes == false)
+        #expect(await session.syncNow() == false)
+
+        let context = session.context
+        let requestCount = home.requestLog.count
+        switch mode {
+        case .active: break
+        case .paused: session.stopSync()
+        case .suspended: await session.lock()
+        }
+        let configuration = HomeConfiguration(endpoint: endpoint, transport: home)
+        await session.configureHomes([configuration])
+        #expect(session.hasConfiguredHomes)
+        if mode == .active {
+            #expect(session.syncTask != nil)
+        } else {
+            #expect(session.syncState == .idle)
+            #expect(session.syncTask == nil)
+            #expect(home.requestLog.count == requestCount)
+        }
+        if mode == .suspended {
+            #expect(session.phase == .locked)
+            #expect(await session.syncNow() == false)
+            await session.unlock()
+            #expect(session.syncTask != nil)
+        }
+        session.stopSync()
+        await session.drainSync()
+        try #require(session.phase == .ready)
+        #expect(session.context == context)
+
+        let duplicate = SimHome(base: home.base)
+        let equivalentEndpoint = try #require(URL(string: home.base))
+        await session.configureHomes([HomeConfiguration(endpoint: equivalentEndpoint, transport: duplicate)])
+        #expect(session.syncTask == nil)
+        let beforeManualSync = home.requestLog.count
+        #expect(await session.syncNow())
+        #expect(home.requestLog.count > beforeManualSync)
+        #expect(duplicate.requestLog.isEmpty)
+    }
+
     /// (2) Created without a home, records written, then one `appointHomes` appoints the relay and adds a passkey (control,
     /// recover): done at once, the session uploads without a relaunch, a second device joins through the home and reads the
     /// records, and the passkey unlocks the account alone.
@@ -83,6 +150,7 @@ import ColophonSavedKit
         let outcome = try await first.session.appointHomes([appointable(relay)], adding: (key: passkey, label: "Passkey", roles: [.control, .recover]))
         first.session.stopSync()
         #expect(outcome == .done, "no home before: final at once")
+        #expect(passkey.assertCount == 1)
         #expect(first.session.homes.count == 1 && !first.session.notices.noHome, "\(first.session.homes)")
         #expect(first.session.syncState != .disabled, "the running session syncs with the appointed home")
         let passkeyID = try await KeyCustody.keyID(of: passkey)
@@ -129,6 +197,7 @@ import ColophonSavedKit
         }
         first.session.stopSync()
         #expect(transitions(first.medium) == 1, "one transition signed before the stop")
+        #expect(passkey.assertCount == 1)
 
         let again = first.relaunch()
         await again.restore()
@@ -136,6 +205,7 @@ import ColophonSavedKit
         let outcome = try await again.appointHomes([home], adding: (key: passkey, label: "Passkey", roles: [.control, .recover]))
         again.stopSync()
         #expect(outcome == .done)
+        #expect(passkey.assertCount == (step == .slotted ? 1 : 2), "resume needs one fresh PRF get only if the slot was absent")
         #expect(transitions(first.medium) == 1, "nothing was appointed or added twice")
         #expect(again.homes.count == 1)
         let passkeyID = try await KeyCustody.keyID(of: passkey)

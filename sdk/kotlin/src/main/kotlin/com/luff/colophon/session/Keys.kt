@@ -10,6 +10,7 @@ import com.luff.colophon.PrfRequest
 import com.luff.colophon.PublicKeys
 import com.luff.colophon.SignForm
 import com.luff.colophon.Signature
+import com.luff.colophon.StepRole
 import com.luff.colophon.UnlockInput
 import com.luff.colophon.UnlockKind
 import com.luff.colophon.UnlockSecret
@@ -87,6 +88,8 @@ class KeyAssertion(val signature: ByteArray, val authenticatorData: ByteArray, v
 interface AsyncKeyProvider {
     /** Raw ES256 or WebAuthn assertions. */
     val form: SignForm get() = SignForm.RAW
+    /** Whether a WebAuthn get can also evaluate a PRF salt on this provider. */
+    val supportsPrf: Boolean get() = false
     suspend fun publicKeys(): PublicKeys
     suspend fun sign(body: ByteArray): ByteArray
     /** Raw 32-byte ECDH with this provider's agreement key. */
@@ -111,6 +114,7 @@ internal class SessionKeys(val base: AsyncKeyProvider) : AsyncKeyProvider {
         throw SessionKeyFailure(e.message ?: e.javaClass.simpleName, e)
     }
     override val form: SignForm get() = base.form
+    override val supportsPrf: Boolean get() = base.supportsPrf
     override suspend fun publicKeys() = classify { base.publicKeys() }
     override suspend fun sign(body: ByteArray) = classify { base.sign(body) }
     override suspend fun sharedSecret(peer: ByteArray) = classify { base.sharedSecret(peer) }
@@ -231,7 +235,12 @@ fun <R> List<HostEpochAnswer>.withRecords(body: (List<EpochAnswer>) -> R): R =
  * provider (docs/bindings-05.md §8): it returns exact bodies to sign, PRF requests, unlock inputs and epoch
  * agreements, and this type answers them, so raw keys and passkeys are driven the same way.
  */
-class KeyCustody(val providers: Map<String, AsyncKeyProvider>) {
+class KeyCustody internal constructor(
+    val providers: Map<String, AsyncKeyProvider>,
+    private val possessionPrf: TransitionPossessionPrf?,
+) {
+    constructor(providers: Map<String, AsyncKeyProvider>) : this(providers, null)
+
     companion object {
         suspend fun of(list: List<AsyncKeyProvider>): KeyCustody = KeyCustody(list.associateBy { keyId(it) })
         suspend fun keyId(provider: AsyncKeyProvider): String = accountKeyId(provider.publicKeys().signing)
@@ -262,6 +271,9 @@ class KeyCustody(val providers: Map<String, AsyncKeyProvider>) {
             SignForm.RAW -> Signature(provider.sign(step.body), null, null)
             SignForm.WEBAUTHN -> {
                 val challenge = step.challenge ?: throw KeyCustodyException.MissingChallenge()
+                if (possessionPrf != null && step.role == StepRole.POSSESSION && step.signer == possessionPrf.controller) {
+                    return@map possessionPrf.sign(challenge, provider)
+                }
                 val result = provider.assert(challenge, null) ?: throw KeyCustodyException.Unsupported()
                 result.prf?.close()
                 result.signatureValue
@@ -272,6 +284,7 @@ class KeyCustody(val providers: Map<String, AsyncKeyProvider>) {
 
     /** One assertion per request, evaluating the request's salt: `results.first` is the PRF output. */
     suspend fun answer(requests: List<PrfRequest>): List<HostPrfAnswer> = collect(requests, { it.output }) { request ->
+        possessionPrf?.takeAnswer(request)?.let { return@collect it }
         val result = provider(request.controller).assert(P256.base64url(request.challenge), request.salt) ?: throw KeyCustodyException.Unsupported()
         val prf = result.prf
         if (prf == null || prf.size != 32) { prf?.close(); throw KeyCustodyException.Unsupported() }
@@ -294,5 +307,40 @@ class KeyCustody(val providers: Map<String, AsyncKeyProvider>) {
     /** The ECDH results a member's host performs to open its epoch shares. */
     suspend fun answerEpochs(agreements: List<EpochAgreement>): List<HostEpochAnswer> = collect(agreements, { it.shared }) {
         HostEpochAnswer(it.namespace, it.epoch, provider(it.recipient).sharedSecret(it.peer))
+    }
+}
+
+/** One appointment's in-memory PRF evidence, consumed by the matching slot request. */
+internal class TransitionPossessionPrf(val controller: String) : AutoCloseable {
+    private val salt = ByteArray(32).also(SecureRandom()::nextBytes)
+    class Input(val salt: ByteArray, val challenge: ByteArray)
+    private var cached: Pair<Input, HostPrfAnswer>? = null
+    val input: Input? get() = cached?.first
+
+    suspend fun sign(challenge: String, provider: AsyncKeyProvider): Signature {
+        val bytes = Base64.getUrlDecoder().decode(challenge)
+        if (bytes.size != 32) throw KeyCustodyException.MissingChallenge()
+        val result = provider.assert(challenge, salt) ?: throw KeyCustodyException.Unsupported()
+        val output = result.prf
+        if (output?.size == 32) {
+            close()
+            cached = Input(salt, bytes) to HostPrfAnswer(result.authenticatorData, result.clientData, result.signature, output)
+        } else {
+            output?.close()
+        }
+        return result.signatureValue
+    }
+
+    fun takeAnswer(request: PrfRequest): HostPrfAnswer? {
+        val (input, answer) = cached ?: return null
+        if (request.controller != controller || !request.salt.contentEquals(input.salt) ||
+            !request.challenge.contentEquals(input.challenge)) return null
+        cached = null
+        return answer
+    }
+
+    override fun close() {
+        cached?.second?.output?.close()
+        cached = null
     }
 }

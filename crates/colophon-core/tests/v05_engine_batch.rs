@@ -696,3 +696,90 @@ fn a_twin_record_is_judged_the_same_in_a_batch_as_singly() {
     assert_eq!(bat.1, one.1);
     assert_eq!(bat.2, one.2);
 }
+
+/// Batch reads and the exchange's write filter together: a device whose store holds another
+/// member's records (a shared folder) reads the home's records in a batch and still uploads only
+/// its own, so a home that enforces write scope never answers `refused:outOfScope`.
+#[test]
+fn a_batch_reading_pass_still_skips_other_authors_records() {
+    let (mut s, ids) = setup(
+        NS,
+        &[
+            ("Writer", 31, "write"),
+            ("Reader", 32, "write"),
+            ("Other", 33, "write"),
+        ],
+    );
+    let mut host = std::mem::replace(&mut s.f.host, Host::new());
+    let home = s.home.clone();
+    s.sim.require_calls = true;
+    // The home holds three of the writer's records the reader lacks: enough to batch.
+    let w_src = device_source(&s);
+    let mut w = member_engine(&s.f, &host, &w_src, &ids[0], NOW);
+    for i in 0..3 {
+        engine_write(
+            &mut w,
+            &mut host,
+            &w_src,
+            NS,
+            "createNotebook",
+            json!({"id": format!("w{i}"), "title": format!("Writer {i}")}),
+        );
+    }
+    let f = sync_pass(&mut w, &w_src, &home, &mut s.sim, &host, NOW);
+    assert!(f.is_empty(), "{f:?}");
+    // Another member's records reach the reader's store, but not the home.
+    let o_src = device_source(&s);
+    let mut o = member_engine(&s.f, &host, &o_src, &ids[2], NOW);
+    for i in 0..2 {
+        engine_write(
+            &mut o,
+            &mut host,
+            &o_src,
+            NS,
+            "createNotebook",
+            json!({"id": format!("o{i}"), "title": format!("Other {i}")}),
+        );
+    }
+    let src = device_source(&s);
+    let other: Vec<String> = o_src
+        .listing()
+        .into_iter()
+        .filter(|p| p.contains(&format!("/{}/", ids[2])))
+        .collect();
+    assert!(!other.is_empty());
+    for p in &other {
+        src.put(p, o_src.get(p).unwrap());
+    }
+    let mut r = member_engine(&s.f, &host, &src, &ids[1], NOW);
+    engine_write(
+        &mut r,
+        &mut host,
+        &src,
+        NS,
+        "createNotebook",
+        json!({"id": "r0", "title": "Reader"}),
+    );
+
+    s.sim.requests.clear();
+    let f = sync_pass(&mut r, &src, &home, &mut s.sim, &host, NOW + 1_000);
+    assert!(f.is_empty(), "{f:?}");
+    let reqs = s.sim.requests.clone();
+    assert!(count(&reqs, "Post /records/batch") >= 1, "{reqs:?}");
+    assert_eq!(r.exchange_batch_support(&home), Some(true));
+    assert_eq!(count(&reqs, "Get /records/ops/"), 0, "{reqs:?}");
+    assert_eq!(notebooks(&r), 3 + 2 + 1);
+    // Only the reader's own records go up; none of the other member's.
+    let puts: Vec<&String> = reqs.iter().filter(|q| q.starts_with("Put /records/")).collect();
+    assert!(
+        puts.iter().any(|q| q.contains(&format!("/{}/", ids[1]))),
+        "{puts:?}"
+    );
+    assert!(
+        puts.iter().all(|q| !q.contains(&format!("/{}/", ids[2]))),
+        "{puts:?}"
+    );
+    for p in &other {
+        assert!(!s.sim.files.contains_key(p), "{p}");
+    }
+}
