@@ -203,7 +203,8 @@ describe('the container lock', () => {
     b.release();
   });
   test('started as another user than root, nothing is given away; a tree is given without following links', () => {
-    assert.equal(dropRoot(root), process.getuid() === 0 ? true : false);
+    // As root this would really leave root, for the whole test process: only the no-op is tested here.
+    if (process.getuid() !== 0) assert.equal(dropRoot(root), false);
     const tree = path.join(root, 'tree');
     mkdirSync(path.join(tree, 'in'), { recursive: true });
     writeFileSync(path.join(tree, 'in', 'file'), 'x');
