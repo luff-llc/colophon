@@ -104,6 +104,7 @@ struct Carrier {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[allow(clippy::large_enum_variant)]
 enum Ev {
     Deliver { to: usize, n: u64, frame: Frame },
     Tick(usize),
@@ -398,7 +399,7 @@ impl Sim {
                     self.m[i].playing = None;
                     let stopped = Anchor { pos, rate: RATE, playing: false, at: now };
                     if let Some(c) = self.m[i].s.accepted().cloned() {
-                        self.pass_positions.insert(Claim::new(c.term + 1, 1, &from), pos);
+                        self.pass_positions.insert(Claim::passed(c.term + 1, &from, &self.m[i].id.clone()), pos);
                     }
                     self.input(i, Input::App { command: Command::Pass { to: from, snapshot: stopped.encode() } })?;
                 } else {
@@ -838,9 +839,7 @@ fn carrier_independence() {
 fn fix_ablation() {
     let all = Fixes::ALL;
     let group = Fixes { bye_resend: false, answer_lesser: false, renew_wider: false, liveness_holder_frames: false, ..all };
-    let cases: [(&str, Fixes); 13] = [
-        ("F21 pass_echo", Fixes { pass_echo: false, ..all }),
-        ("F12 pass_conflict_renew", Fixes { pass_conflict_renew: false, ..all }),
+    let cases: [(&str, Fixes); 11] = [
         ("F5+F6+F7+F8 together", group),
         ("revision 1 draft (LITERAL)", Fixes::LITERAL),
         ("F1 rank1_from_holder", Fixes { rank1_from_holder: false, ..all }),

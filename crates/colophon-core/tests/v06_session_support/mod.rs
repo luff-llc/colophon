@@ -205,7 +205,10 @@ pub fn show_output(o: &Output) -> String {
 }
 /// `term.rank.holder`.
 pub fn show_claim(c: &Claim) -> String {
-    format!("{}.{}.{}", c.term, c.rank, c.holder)
+    match &c.via {
+        Some(v) => format!("{}.{}.{}.{v}", c.term, c.rank, c.holder),
+        None => format!("{}.{}.{}", c.term, c.rank, c.holder),
+    }
 }
 /// A short readable body.
 pub fn show_body(b: &Body) -> String {

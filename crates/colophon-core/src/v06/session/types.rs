@@ -40,8 +40,9 @@ impl<'de> Deserialize<'de> for Bytes {
     }
 }
 
-/// `{term, rank, holder}` (§S4). The derived order is the protocol order: term, then rank,
-/// then holder as a (lowercase hex) string.
+/// `{term, rank, holder, via}` (§S4, revision 3). The derived order is the protocol order:
+/// term, then rank, then holder, then via (member IDs as lowercase hex strings; `via` is
+/// present exactly when rank is 1).
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Claim {
     /// A positive integer at most [`MAX_TERM`].
@@ -50,24 +51,42 @@ pub struct Claim {
     pub rank: u8,
     /// The holder's member ID.
     pub holder: MemberId,
+    /// The passer's member ID, present exactly when `rank` is 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub via: Option<MemberId>,
 }
 impl Claim {
-    /// A claim.
+    /// A claim without `via` (rank 0; or a revision 1 rank-1 claim).
     pub fn new(term: u64, rank: u8, holder: &str) -> Self {
         Self {
             term,
             rank,
             holder: holder.to_owned(),
+            via: None,
         }
     }
-    /// Whether the fields are in range.
-    pub fn well_formed(&self) -> bool {
-        (1..=MAX_TERM).contains(&self.term) && self.rank <= 1 && !self.holder.is_empty()
+    /// A passed claim `{term, rank: 1, holder, via}`.
+    pub fn passed(term: u64, holder: &str, via: &str) -> Self {
+        Self {
+            term,
+            rank: 1,
+            holder: holder.to_owned(),
+            via: Some(via.to_owned()),
+        }
     }
-    /// The same claim at rank 0: how a rank-1 claim orders before its pass is seen (§S4 3).
+    /// Whether the fields are in range and `via` is present exactly when rank is 1.
+    pub fn well_formed(&self) -> bool {
+        (1..=MAX_TERM).contains(&self.term)
+            && self.rank <= 1
+            && !self.holder.is_empty()
+            && (self.rank == 1) == self.via.as_ref().is_some_and(|v| !v.is_empty())
+    }
+    /// The same claim at rank 0: how revision 1 ordered a rank-1 claim before its pass was
+    /// seen.
     pub fn as_rank0(&self) -> Self {
         Self {
             rank: 0,
+            via: None,
             ..self.clone()
         }
     }
@@ -156,7 +175,7 @@ pub enum Body {
     Pass {
         /// The passer's current claim.
         claim: Claim,
-        /// `{term: claim.term + 1, rank: 1, holder: asker}`.
+        /// `{term: claim.term + 1, rank: 1, holder: asker, via: passer}`.
         next: Claim,
         /// The final `seq` of `claim`.
         seq: u64,
@@ -339,7 +358,8 @@ impl Default for Policy {
 /// Departures from the draft text that the explorer showed necessary
 /// (`docs/colophon-0.6-sessions-findings.md`). [`Fixes::default`] is the reference reading;
 /// [`Fixes::LITERAL`] reproduces the revision 1 draft so the counterexamples stay
-/// reproducible. Revision 2 of the draft adopts every fix except F21 (proposed).
+/// reproducible. Revisions 2 and 3 of the draft adopt every fix; F12/F21 are settled by
+/// `Claim::via` (revision 3) rather than a switch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Fixes {
@@ -370,12 +390,6 @@ pub struct Fixes {
     /// F10: a holder judges another holder "not present" for §S5 renewing only after its own
     /// link has worked for `holderTimeoutMs` (a returning member has heard nobody yet).
     pub renew_needs_contact: bool,
-    /// F12: a holder made by a pass that meets a different `pass` naming its own claim (two
-    /// partitioned holders both passed to it) renews, so one state prevails.
-    pub pass_conflict_renew: bool,
-    /// F21: a passer also resends its `pass`, once, on the first holder frame it gets from
-    /// the new holder under `next`, so a new holder made by another pass meets this one (F12).
-    pub pass_echo: bool,
 }
 impl Fixes {
     /// The revision 1 draft as written.
@@ -388,8 +402,6 @@ impl Fixes {
         liveness_holder_frames: false,
         ask_resend: false,
         renew_needs_contact: false,
-        pass_conflict_renew: false,
-        pass_echo: false,
     };
     /// Every fix.
     pub const ALL: Fixes = Fixes {
@@ -401,8 +413,6 @@ impl Fixes {
         liveness_holder_frames: true,
         ask_resend: true,
         renew_needs_contact: true,
-        pass_conflict_renew: true,
-        pass_echo: true,
     };
 }
 impl Default for Fixes {

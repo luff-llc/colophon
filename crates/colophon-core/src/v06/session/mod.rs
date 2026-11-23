@@ -50,8 +50,6 @@ struct SentPass {
     next: Claim,
     seq: u64,
     snapshot: Bytes,
-    /// F21: already resent once to the new holder under `next`.
-    echoed: bool,
 }
 
 /// The protocol-visible state of a member, for digests and cross-implementation vectors.
@@ -90,8 +88,6 @@ pub struct Session {
     tail: VecDeque<(u64, Held)>,
     ordered: BTreeSet<Bytes>,
     sent_pass: Option<SentPass>,
-    /// The pass (passer's claim, snapshot) that made this member holder of its claim.
-    made_by: Option<(Claim, Bytes)>,
     /// When the last gap `hello` was sent (§S8: at most one per second).
     last_gap_hello: Option<u64>,
     want: Option<Want>,
@@ -142,7 +138,6 @@ impl Session {
             tail: VecDeque::new(),
             ordered: BTreeSet::new(),
             sent_pass: None,
-            made_by: None,
             last_gap_hello: None,
             want: None,
             gate: None,
@@ -269,7 +264,6 @@ impl Session {
         self.tail.hash(h);
         self.ordered.hash(h);
         self.sent_pass.hash(h);
-        self.made_by.hash(h);
         self.last_gap_hello
             .map(|t| now.saturating_sub(t).min(GAP_HELLO_MS))
             .hash(h);
@@ -549,7 +543,6 @@ impl Session {
         );
     }
     fn become_holder(&mut self, claim: Claim, now: u64, out: &mut Out) {
-        self.made_by = None;
         self.accepted = Some(claim.clone());
         self.released = false;
         self.gate = None;
@@ -666,18 +659,8 @@ impl Session {
             self.lapse_reported = false;
         }
         // §S5: resend the pass when the asker speaks under an older claim.
-        let echo = self.fixes.pass_echo
-            && f.body.is_holder_frame()
-            && self.sent_pass.as_ref().is_some_and(|p| {
-                !p.echoed && from == p.next.holder && f.body.claim() == Some(&p.next)
-            });
-        if echo {
-            if let Some(p) = &mut self.sent_pass {
-                p.echoed = true;
-            }
-        }
         if let Some(p) = &self.sent_pass {
-            if from == p.next.holder && (echo || f.body.claim().is_some_and(|c| *c < p.next)) {
+            if from == p.next.holder && f.body.claim().is_some_and(|c| *c < p.next) {
                 let body = Body::Pass {
                     claim: p.claim.clone(),
                     next: p.next.clone(),
@@ -993,9 +976,11 @@ impl Session {
         now: u64,
         out: &mut Out,
     ) {
+        // §S4 rule 3 (revision 3): a `pass` from `next.via`, which held `claim`.
         let shaped = next.well_formed()
             && claim.well_formed()
             && next.rank == 1
+            && next.via.as_deref() == Some(from)
             && Some(next.term) == claim.term.checked_add(1)
             && claim.holder == from;
         let verified = shaped
@@ -1006,15 +991,13 @@ impl Session {
                 self.accepted.as_ref().is_some_and(|a| a.holder == from)
             };
         if verified
-            && self.fixes.pass_conflict_renew
-            && self.sends_as_holder()
-            && self.accepted.as_ref() == Some(&next)
-            && self
-                .made_by
-                .as_ref()
-                .is_some_and(|(c, snap)| *c != claim || *snap != snapshot)
+            && self.fixes.renew_wider
+            && next.holder == self.me
+            && self.is_holder()
+            && self.accepted.as_ref().is_some_and(|a| next > *a)
         {
-            // F12: another holder passed to this member too; renew so one state prevails.
+            // §S5 (revision 3): a greater claim naming this holder that it has not acted under
+            // (a second pass from another holder): renew with the current state.
             self.renew(next.term, now, out);
             return;
         }
@@ -1028,11 +1011,9 @@ impl Session {
             if !self.may_take() {
                 return;
             }
-            let made = (claim, snapshot.clone());
             let claim = next.clone();
             self.state = snapshot.clone();
             self.become_holder(next, now, out);
-            self.made_by = Some(made);
             Self::event(
                 out,
                 Event::BecameHolder {
@@ -1243,13 +1224,12 @@ impl Session {
                     Self::reject(out, "pass", "term-exhausted");
                     return;
                 };
-                let next = Claim::new(t, 1, &to);
+                let next = Claim::passed(t, &to, &self.me);
                 let p = SentPass {
                     claim: claim.clone(),
                     next: next.clone(),
                     seq: self.seq,
                     snapshot: snapshot.clone(),
-                    echoed: false,
                 };
                 self.send(
                     out,

@@ -63,6 +63,18 @@ struct Bounds {
     /// Allowed commands: a ask, t take, p pass/decline, u publish, s submit, r release,
     /// l leave/join, x restart.
     kinds: &'static str,
+    /// The initial state.
+    start: Start,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Start {
+    /// Everyone joined, `a` took, all frames delivered.
+    Taken,
+    /// F12/F21: `a` holds 1.0.a and `b` holds 1.0.b, each unheard by the other (their frames
+    /// to each other were lost); `c` asked `a`, then accepted 1.0.b and asked `b`. Both
+    /// holders have `c`'s ask pending.
+    TwoHolders,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -134,12 +146,31 @@ impl World {
             fixes,
             kinds: b.kinds,
         };
-        // Start: everyone joined, `a` took, all frames delivered.
         for i in 0..b.members {
             w.input(i, Input::App { command: Command::Join { state: None } }, b).unwrap();
         }
-        w.input(0, Input::App { command: Command::Take { state: None } }, b).unwrap();
         w.flush(b).unwrap();
+        match b.start {
+            Start::Taken => {
+                w.input(0, Input::App { command: Command::Take { state: None } }, b).unwrap();
+                w.flush(b).unwrap();
+            }
+            Start::TwoHolders => {
+                let cut = |w: &mut World| w.net.retain(|(d, f)| !((*d == 0 && f.from == "b") || (*d == 1 && f.from == "a")));
+                let st = |x: &[u8]| Some(Bytes(x.to_vec()));
+                w.input(0, Input::App { command: Command::Take { state: st(b"A") } }, b).unwrap();
+                cut(&mut w);
+                w.flush(b).unwrap();
+                w.input(2, Input::App { command: Command::Ask }, b).unwrap();
+                cut(&mut w);
+                w.flush(b).unwrap();
+                w.input(1, Input::App { command: Command::Take { state: st(b"B") } }, b).unwrap();
+                cut(&mut w);
+                w.flush(b).unwrap();
+                assert_eq!(w.m[2].accepted(), Some(&Claim::new(1, 0, "b")));
+                assert_eq!((w.asks[0].clone(), w.asks[1].clone()), (vec![2], vec![2]));
+            }
+        }
         w.lossless = false;
         w
     }
@@ -659,6 +690,7 @@ fn bounds(members: usize, kinds: &'static str, small: (u8, u8, u8, usize), depth
         depth: env_u64("COLOPHON_EXPLORE_DEPTH", u64::from(depth)) as u32,
         completions: std::env::var("COLOPHON_EXPLORE_NO_COMPLETIONS").is_err(),
         kinds,
+        start: Start::Taken,
     }
 }
 
@@ -758,17 +790,41 @@ fn draft_counterexamples() {
     }
 }
 
-/// F12 (adopted in revision 2, §S5): two holders partitioned from each other both pass to the
-/// same asker. With `pass_conflict_renew` off, members end on the same claim with different
-/// states (G3/G4); with it on, the new holder renews and one state prevails.
-fn two_passes_to_one(fixes: Fixes, lose_a_pass_to_x: bool) -> Vec<Session> {
+/// F12/F21 (revision 3, §S4 `via`): two holders that cannot reach each other both pass to
+/// the same asker. Explored exhaustively from [`Start::TwoHolders`]: both passes (in any
+/// order, any losses, a duplicate, a link change) and the guarantees, with G4 by completion.
+#[test]
+fn two_passes_to_one_asker_explored() {
+    let mut b = bounds(3, "p", (2, 0, 1, 3), 7);
+    b.start = Start::TwoHolders;
+    let r = run(b, fixes_under_test());
+    assert!(r.violation.is_none(), "{:?}", r.violation.map(|v| v.0));
+    assert!(!r.truncated);
+}
+
+/// The same scenario scripted with the default policy: (1) every frame after the takes
+/// delivered, (2) `a`'s pass to `x` lost (F21), (3) 300 seeds of random loss of 30 % of the
+/// frames from the passes on, then eventual delivery. Each ends in one claim and one state.
+fn two_passes_to_one(fixes: Fixes, lose_a_pass_to_x: bool, loss_seed: Option<u64>) -> Vec<Session> {
     let ids = ["a", "b", "x"];
     let mut m: Vec<Session> = ids
         .iter()
         .map(|i| Session::with_fixes(i, true, Policy::default(), None, fixes))
         .collect();
     let mut net: Vec<(usize, Frame)> = Vec::new();
-    // Route one member's outputs into the network, dropping what `cut` rejects.
+    let rng = std::cell::Cell::new(loss_seed.unwrap_or(0).wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1);
+    let lossy = std::cell::Cell::new(false);
+    let lose = || {
+        if loss_seed.is_none() || !lossy.get() {
+            return false;
+        }
+        let mut x = rng.get();
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        rng.set(x);
+        x % 10 < 3
+    };
     let route = |net: &mut Vec<(usize, Frame)>, from: usize, outs: Vec<Output>, cut: &dyn Fn(usize, usize) -> bool| {
         for o in outs {
             if let Output::Send { frame } = o {
@@ -777,7 +833,7 @@ fn two_passes_to_one(fixes: Fixes, lose_a_pass_to_x: bool) -> Vec<Session> {
                     None => (0..3).filter(|j| *j != from).collect(),
                 };
                 for d in dsts {
-                    if !cut(from, d) {
+                    if !cut(from, d) && !lose() {
                         net.push((d, frame.clone()));
                     }
                 }
@@ -785,42 +841,45 @@ fn two_passes_to_one(fixes: Fixes, lose_a_pass_to_x: bool) -> Vec<Session> {
         }
     };
     let flush = |m: &mut Vec<Session>, net: &mut Vec<(usize, Frame)>, t: u64, cut: &dyn Fn(usize, usize) -> bool| {
+        let mut guard = 0;
         while !net.is_empty() {
+            guard += 1;
+            assert!(guard < 10_000, "frames never quiesce");
             let (d, f) = net.remove(0);
             let outs = m[d].handle(Input::Frame { frame: f, writer: true }, t);
             route(net, d, outs, cut);
         }
     };
-    // a and b cannot reach each other.
     let ab = |x: usize, y: usize| (x == 0 && y == 1) || (x == 1 && y == 0);
     for (i, s) in m.iter_mut().enumerate() {
         let outs = s.handle(Input::App { command: Command::Join { state: None } }, 0);
         route(&mut net, i, outs, &ab);
     }
     flush(&mut m, &mut net, 0, &ab);
-    // a takes 1.0.a; only x hears it.
     let outs = m[0].handle(Input::App { command: Command::Take { state: Some(Bytes(b"A".to_vec())) } }, 10);
     route(&mut net, 0, outs, &ab);
     flush(&mut m, &mut net, 10, &ab);
-    // x asks a; the ask reaches a.
     let outs = m[2].handle(Input::App { command: Command::Ask }, 20);
     route(&mut net, 2, outs, &ab);
     flush(&mut m, &mut net, 20, &ab);
-    // b takes 1.0.b (greater); x accepts it and re-asks b.
     let outs = m[1].handle(Input::App { command: Command::Take { state: Some(Bytes(b"B".to_vec())) } }, 30);
     route(&mut net, 1, outs, &ab);
     flush(&mut m, &mut net, 30, &ab);
     assert_eq!(m[2].accepted(), Some(&Claim::new(1, 0, "b")));
-    // Both holders pass to x: b's pass first, then a's (a still holds 1.0.a, and passes too).
+    lossy.set(true);
     let outs = m[1].handle(Input::App { command: Command::Pass { to: "x".into(), snapshot: Bytes(b"B".to_vec()) } }, 40);
     route(&mut net, 1, outs, &ab);
     let outs = m[0].handle(Input::App { command: Command::Pass { to: "x".into(), snapshot: Bytes(b"A".to_vec()) } }, 40);
     let cut_ax = |x: usize, y: usize| ab(x, y) || (lose_a_pass_to_x && x == 0 && y == 2);
     route(&mut net, 0, outs, &cut_ax);
     flush(&mut m, &mut net, 50, &ab);
-    // Heal and let beats and answers settle.
+    // The partition heals; losses go on for a while, then stop (eventual delivery).
     let none = |_: usize, _: usize| false;
-    for t in [6_000u64, 12_000, 18_000] {
+    for k in 1..=20u64 {
+        if k == 12 {
+            lossy.set(false);
+        }
+        let t = k * 6_000;
         for (i, s) in m.iter_mut().enumerate() {
             let outs = s.handle(Input::Tick, t);
             route(&mut net, i, outs, &none);
@@ -830,22 +889,22 @@ fn two_passes_to_one(fixes: Fixes, lose_a_pass_to_x: bool) -> Vec<Session> {
     m
 }
 
+fn show(m: &[Session]) -> String {
+    format!("{:?}", m.iter().map(|s| (s.me().to_owned(), s.accepted().map(show_claim), String::from_utf8_lossy(&s.state().0).into_owned())).collect::<Vec<_>>())
+}
+
 #[test]
-fn f12_two_passes_to_one_asker() {
-    let off = two_passes_to_one(Fixes { pass_conflict_renew: false, ..Fixes::ALL }, false);
-    let diverged = check_converged(&off).is_err();
-    println!("F12 off: {:?}", off.iter().map(|s| (s.me().to_owned(), s.accepted().map(show_claim), String::from_utf8_lossy(&s.state().0).into_owned())).collect::<Vec<_>>());
-    assert!(diverged, "without F12 the two passes should leave different states under one claim");
-    let on = two_passes_to_one(Fixes::ALL, false);
-    println!("F12 on: {:?}", on.iter().map(|s| (s.me().to_owned(), s.accepted().map(show_claim), String::from_utf8_lossy(&s.state().0).into_owned())).collect::<Vec<_>>());
-    check_converged(&on).unwrap();
-    // F21: if a's pass to x is lost, x never meets the second pass and nothing tells a that
-    // its state under 2.1.x differs: revision 2's F12 rule alone does not cover it. The
-    // passer's one-time echo of its pass (F21) does.
-    let lost = two_passes_to_one(Fixes { pass_echo: false, ..Fixes::ALL }, true);
-    println!("F12 on, F21 off, a's pass to x lost: {:?}", lost.iter().map(|s| (s.me().to_owned(), s.accepted().map(show_claim), String::from_utf8_lossy(&s.state().0).into_owned())).collect::<Vec<_>>());
-    assert!(check_converged(&lost).is_err(), "F21 scenario should diverge without the echo");
-    let echoed = two_passes_to_one(Fixes::ALL, true);
-    println!("F12 and F21 on, a's pass to x lost: {:?}", echoed.iter().map(|s| (s.me().to_owned(), s.accepted().map(show_claim), String::from_utf8_lossy(&s.state().0).into_owned())).collect::<Vec<_>>());
-    check_converged(&echoed).unwrap();
+fn f12_f21_two_passes_to_one_asker() {
+    let both = two_passes_to_one(Fixes::ALL, false, None);
+    println!("both passes delivered: {}", show(&both));
+    check_converged(&both).unwrap();
+    let lost = two_passes_to_one(Fixes::ALL, true, None);
+    println!("a's pass to x lost: {}", show(&lost));
+    check_converged(&lost).unwrap();
+    for seed in 0..300 {
+        let m = two_passes_to_one(Fixes::ALL, seed % 2 == 0, Some(seed));
+        if let Err(e) = check_converged(&m) {
+            panic!("loss seed {seed}: {e}: {}", show(&m));
+        }
+    }
 }

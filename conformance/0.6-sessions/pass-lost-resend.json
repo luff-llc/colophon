@@ -2,13 +2,14 @@
   "description": "a's pass to b is lost; b, still under the old claim, resends ask; a resends the same pass (§S5, F9).",
   "final": [
     {
-      "digest": "0087413e52f2333bdddcdfbc833405d3d91a7901946d2e3773696624672d9845",
+      "digest": "9cd5abfa0b25d7b8b17c50ae713f294eedb0a58edb3cee896172f3aada6e0286",
       "member": "a",
       "view": {
         "accepted": {
           "holder": "b",
           "rank": 1,
-          "term": 2
+          "term": 2,
+          "via": "a"
         },
         "gated": false,
         "holder": "b",
@@ -19,13 +20,14 @@
       }
     },
     {
-      "digest": "a9aea7461891b39b1de552d8361259082a744ae018793c4e131aa99545570f26",
+      "digest": "139c4585c1f9b834dbcfa7d15495f87a45a571b3268a0758f55a5d71ab274b00",
       "member": "b",
       "view": {
         "accepted": {
           "holder": "b",
           "rank": 1,
-          "term": 2
+          "term": 2,
+          "via": "a"
         },
         "gated": false,
         "holder": "b",
@@ -41,8 +43,6 @@
     "askResend": true,
     "byeResend": true,
     "livenessHolderFrames": true,
-    "passConflictRenew": true,
-    "passEcho": true,
     "rank1FromHolder": true,
     "renewNeedsContact": true,
     "renewWider": true,
@@ -467,7 +467,8 @@
               "next": {
                 "holder": "b",
                 "rank": 1,
-                "term": 2
+                "term": 2,
+                "via": "a"
               },
               "seq": 0,
               "snapshot": "c3RvcHBlZA=="
@@ -480,7 +481,8 @@
           "claim": {
             "holder": "b",
             "rank": 1,
-            "term": 2
+            "term": 2,
+            "via": "a"
           },
           "output": "persist"
         },
@@ -490,7 +492,8 @@
             "to": {
               "holder": "b",
               "rank": 1,
-              "term": 2
+              "term": 2,
+              "via": "a"
             }
           },
           "output": "event"
@@ -500,7 +503,8 @@
             "claim": {
               "holder": "b",
               "rank": 1,
-              "term": 2
+              "term": 2,
+              "via": "a"
             },
             "event": "holderChanged"
           },
@@ -511,7 +515,8 @@
             "claim": {
               "holder": "b",
               "rank": 1,
-              "term": 2
+              "term": 2,
+              "via": "a"
             },
             "event": "snapshot",
             "seq": 0,
@@ -599,7 +604,8 @@
               "next": {
                 "holder": "b",
                 "rank": 1,
-                "term": 2
+                "term": 2,
+                "via": "a"
               },
               "seq": 0,
               "snapshot": "c3RvcHBlZA=="
@@ -625,7 +631,8 @@
             "next": {
               "holder": "b",
               "rank": 1,
-              "term": 2
+              "term": 2,
+              "via": "a"
             },
             "seq": 0,
             "snapshot": "c3RvcHBlZA=="
@@ -642,7 +649,8 @@
           "claim": {
             "holder": "b",
             "rank": 1,
-            "term": 2
+            "term": 2,
+            "via": "a"
           },
           "output": "persist"
         },
@@ -651,7 +659,8 @@
             "claim": {
               "holder": "b",
               "rank": 1,
-              "term": 2
+              "term": 2,
+              "via": "a"
             },
             "event": "becameHolder",
             "snapshot": "c3RvcHBlZA==",

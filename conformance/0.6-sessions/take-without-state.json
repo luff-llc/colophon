@@ -58,8 +58,6 @@
     "askResend": true,
     "byeResend": true,
     "livenessHolderFrames": true,
-    "passConflictRenew": true,
-    "passEcho": true,
     "rank1FromHolder": true,
     "renewNeedsContact": true,
     "renewWider": true,

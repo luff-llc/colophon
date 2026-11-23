@@ -2,13 +2,14 @@
   "description": "b asks; a pauses and passes its final §S12 anchor (playing false); b holds from exactly that snapshot (§S5, G3).",
   "final": [
     {
-      "digest": "dcf1424d07294d6551ed474179331a9680bf3b3644f4ebe72fb8f9e829e4d69d",
+      "digest": "9f2feb4ccdbd0c6487772ce587b221fa9ccc4190661ee5f2377417c8d1e5f3f8",
       "member": "a",
       "view": {
         "accepted": {
           "holder": "b",
           "rank": 1,
-          "term": 2
+          "term": 2,
+          "via": "a"
         },
         "gated": false,
         "holder": "b",
@@ -19,13 +20,14 @@
       }
     },
     {
-      "digest": "3803cb6d5049ea8a23b1d147a3a1cf6e7c56f31544139cd36e2a47617c8caf76",
+      "digest": "bd6aac40841d8481af5da2f0271f2f5e9525d8d683f9b168a49e29059588569c",
       "member": "b",
       "view": {
         "accepted": {
           "holder": "b",
           "rank": 1,
-          "term": 2
+          "term": 2,
+          "via": "a"
         },
         "gated": false,
         "holder": "b",
@@ -36,13 +38,14 @@
       }
     },
     {
-      "digest": "dcf1424d07294d6551ed474179331a9680bf3b3644f4ebe72fb8f9e829e4d69d",
+      "digest": "9f2feb4ccdbd0c6487772ce587b221fa9ccc4190661ee5f2377417c8d1e5f3f8",
       "member": "c",
       "view": {
         "accepted": {
           "holder": "b",
           "rank": 1,
-          "term": 2
+          "term": 2,
+          "via": "a"
         },
         "gated": false,
         "holder": "b",
@@ -58,8 +61,6 @@
     "askResend": true,
     "byeResend": true,
     "livenessHolderFrames": true,
-    "passConflictRenew": true,
-    "passEcho": true,
     "rank1FromHolder": true,
     "renewNeedsContact": true,
     "renewWider": true,
@@ -748,7 +749,8 @@
               "next": {
                 "holder": "b",
                 "rank": 1,
-                "term": 2
+                "term": 2,
+                "via": "a"
               },
               "seq": 0,
               "snapshot": "eyJhdCI6MTAyMCwiZXBpc29kZSI6ImUxIiwicGxheWluZyI6ZmFsc2UsInBvc2l0aW9uTXMiOjYxMjUwLCJyYXRlUGVybWlsbGUiOjEyNTAsInNob3ciOiJzMSJ9"
@@ -761,7 +763,8 @@
           "claim": {
             "holder": "b",
             "rank": 1,
-            "term": 2
+            "term": 2,
+            "via": "a"
           },
           "output": "persist"
         },
@@ -771,7 +774,8 @@
             "to": {
               "holder": "b",
               "rank": 1,
-              "term": 2
+              "term": 2,
+              "via": "a"
             }
           },
           "output": "event"
@@ -781,7 +785,8 @@
             "claim": {
               "holder": "b",
               "rank": 1,
-              "term": 2
+              "term": 2,
+              "via": "a"
             },
             "event": "holderChanged"
           },
@@ -792,7 +797,8 @@
             "claim": {
               "holder": "b",
               "rank": 1,
-              "term": 2
+              "term": 2,
+              "via": "a"
             },
             "event": "snapshot",
             "seq": 0,
@@ -816,7 +822,8 @@
             "next": {
               "holder": "b",
               "rank": 1,
-              "term": 2
+              "term": 2,
+              "via": "a"
             },
             "seq": 0,
             "snapshot": "eyJhdCI6MTAyMCwiZXBpc29kZSI6ImUxIiwicGxheWluZyI6ZmFsc2UsInBvc2l0aW9uTXMiOjYxMjUwLCJyYXRlUGVybWlsbGUiOjEyNTAsInNob3ciOiJzMSJ9"
@@ -832,7 +839,8 @@
           "claim": {
             "holder": "b",
             "rank": 1,
-            "term": 2
+            "term": 2,
+            "via": "a"
           },
           "output": "persist"
         },
@@ -841,7 +849,8 @@
             "claim": {
               "holder": "b",
               "rank": 1,
-              "term": 2
+              "term": 2,
+              "via": "a"
             },
             "event": "becameHolder",
             "snapshot": "eyJhdCI6MTAyMCwiZXBpc29kZSI6ImUxIiwicGxheWluZyI6ZmFsc2UsInBvc2l0aW9uTXMiOjYxMjUwLCJyYXRlUGVybWlsbGUiOjEyNTAsInNob3ciOiJzMSJ9",
@@ -865,7 +874,8 @@
             "next": {
               "holder": "b",
               "rank": 1,
-              "term": 2
+              "term": 2,
+              "via": "a"
             },
             "seq": 0,
             "snapshot": "eyJhdCI6MTAyMCwiZXBpc29kZSI6ImUxIiwicGxheWluZyI6ZmFsc2UsInBvc2l0aW9uTXMiOjYxMjUwLCJyYXRlUGVybWlsbGUiOjEyNTAsInNob3ciOiJzMSJ9"
@@ -881,7 +891,8 @@
           "claim": {
             "holder": "b",
             "rank": 1,
-            "term": 2
+            "term": 2,
+            "via": "a"
           },
           "output": "persist"
         },
@@ -890,7 +901,8 @@
             "claim": {
               "holder": "b",
               "rank": 1,
-              "term": 2
+              "term": 2,
+              "via": "a"
             },
             "event": "holderChanged"
           },
@@ -901,7 +913,8 @@
             "claim": {
               "holder": "b",
               "rank": 1,
-              "term": 2
+              "term": 2,
+              "via": "a"
             },
             "event": "snapshot",
             "seq": 0,
