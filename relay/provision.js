@@ -128,11 +128,62 @@ export function clientAddressConfig(raw) {
   if (typeof raw.header !== 'string' || !/^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/.test(raw.header)) throw new Error('clientAddress.header must be a header name');
   if (!Array.isArray(raw.trustedPeers) || raw.trustedPeers.length === 0) throw new Error('clientAddress.trustedPeers must list the proxy addresses the header is read from');
   const peers = new Set();
+  const ranges = [];
   for (const p of raw.trustedPeers) {
-    if (typeof p !== 'string' || net.isIP(p) === 0) throw new Error(`clientAddress.trustedPeers: ${JSON.stringify(p)} is not an IP address`);
+    const range = typeof p === 'string' ? parseRange(p) : undefined;
+    if (range === null) throw new Error(`clientAddress.trustedPeers: ${JSON.stringify(p)} is not an IP range: write it as address/prefix with no host bits set, for example 10.0.0.0/8 (a /0 is refused: it would trust every peer)`);
+    if (range) { ranges.push(range); continue; }
+    if (typeof p !== 'string' || net.isIP(p) === 0) throw new Error(`clientAddress.trustedPeers: ${JSON.stringify(p)} is not an IP address or range`);
     peers.add(normalIp(p));
   }
-  return { header: raw.header.toLowerCase(), trustedPeers: peers };
+  const trusted = (peer) => {
+    const a = normalIp(peer);
+    if (peers.has(a)) return true;
+    if (ranges.length === 0) return false;
+    const n = ipBits(a);
+    return n !== null && ranges.some((r) => r.family === n.family && (n.value >> r.shift) === r.network);
+  };
+  return { header: raw.header.toLowerCase(), trustedPeers: peers, trusted };
+}
+
+/**
+ * A CIDR range (`10.0.0.0/8`, `fd00::/8`): `{family, shift, network}`; null for a malformed one
+ * (a bad prefix, host bits set, or a /0, which would trust every peer); undefined when `text` has
+ * no `/` (an exact address, checked by the caller). An IPv4-mapped IPv6 range is not accepted:
+ * peers are normalized to IPv4 first, so write the IPv4 range.
+ */
+function parseRange(text) {
+  const at = text.indexOf('/');
+  if (at < 0) return undefined;
+  const bits = ipBits(text.slice(0, at));
+  const prefix = text.slice(at + 1);
+  if (!bits || !/^\d{1,3}$/.test(prefix) || /^::ffff:/i.test(text)) return null;
+  const width = bits.family === 4 ? 32 : 128;
+  const n = Number(prefix);
+  if (n < 1 || n > width) return null;
+  const shift = BigInt(width - n);
+  const network = bits.value >> shift;
+  if ((network << shift) !== bits.value) return null;
+  return { family: bits.family, shift, network };
+}
+
+/** An address as `{family, value}` (value a BigInt), or null. Accepts what net.isIP accepts, without a zone. */
+function ipBits(text) {
+  const family = net.isIP(text);
+  if (family === 4) return { family, value: text.split('.').reduce((v, o) => (v << 8n) | BigInt(Number(o)), 0n) };
+  if (family !== 6 || text.includes('%')) return null;
+  let s = text.toLowerCase();
+  const v4 = /(\d+\.\d+\.\d+\.\d+)$/.exec(s);
+  if (v4) {
+    const o = v4[1].split('.').map(Number);
+    s = s.slice(0, -v4[1].length) + `${((o[0] << 8) | o[1]).toString(16)}:${((o[2] << 8) | o[3]).toString(16)}`;
+  }
+  const [head, tail] = s.includes('::') ? s.split('::') : [s, undefined];
+  const left = head ? head.split(':') : [];
+  const right = tail === undefined ? [] : tail ? tail.split(':') : [];
+  const groups = tail === undefined ? left : [...left, ...Array(8 - left.length - right.length).fill('0'), ...right];
+  if (groups.length !== 8) return null;
+  return { family, value: groups.reduce((v, g) => (v << 16n) | BigInt(parseInt(g, 16)), 0n) };
 }
 
 /** An IPv4-mapped IPv6 address as IPv4; IPv6 lower case. */
@@ -156,7 +207,7 @@ export function clientAddressResolver(cfg) {
   if (!cfg) return (req) => req.socket?.remoteAddress ?? '';
   return (req) => {
     const peer = req.socket?.remoteAddress ?? '';
-    if (!cfg.trustedPeers.has(normalIp(peer))) return peer;
+    if (!(cfg.trusted ? cfg.trusted(peer) : cfg.trustedPeers.has(normalIp(peer)))) return peer;
     const value = req.headers[cfg.header];
     if (typeof value !== 'string') return SHARED_BUCKET;
     const text = value.trim();

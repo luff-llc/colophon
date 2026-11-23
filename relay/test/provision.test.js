@@ -168,6 +168,26 @@ describe('the client address', () => {
     }
     assert.equal(f(req('127.0.0.1', {})), SHARED_BUCKET, 'absent');
   });
+  test('a trusted peer may be a CIDR range (a proxy on a container network has no fixed address)', () => {
+    const f = clientAddressResolver(clientAddressConfig({ header: 'X-Real-IP', trustedPeers: ['172.16.0.0/12', 'fd00::/8', '100.64.0.0/10', '192.0.2.5'] }));
+    const ip = { 'x-real-ip': '203.0.113.7' };
+    for (const peer of ['172.16.0.1', '172.31.255.254', '::ffff:172.18.0.3', 'fd12:3456::1', 'FD00::', '100.64.0.1', '100.127.255.255', '192.0.2.5']) {
+      assert.equal(f(req(peer, ip)), '203.0.113.7', peer);
+    }
+    for (const peer of ['172.32.0.1', '172.15.255.255', 'fe80::1', '100.128.0.1', '192.0.2.6', '10.0.0.1', '::ffff:10.0.0.1', '']) {
+      assert.equal(f(req(peer, ip)), peer, `not trusted: ${peer}`);
+    }
+    assert.equal(f(req('172.18.0.3', {})), SHARED_BUCKET, 'a trusted range is still one shared bucket without a usable header');
+    const v6 = clientAddressResolver(clientAddressConfig({ header: 'X', trustedPeers: ['2001:db8:0:0:0:0:0:0/32', '::/127'] }));
+    assert.equal(v6(req('2001:db8:ffff::1', { x: '198.51.100.1' })), '198.51.100.1');
+    assert.equal(v6(req('::1', { x: '198.51.100.1' })), '198.51.100.1', '::/127 holds ::1');
+    assert.equal(v6(req('2001:db9::1', { x: '198.51.100.1' })), '2001:db9::1');
+  });
+  test('a malformed or trust-everything range refuses start-up', () => {
+    for (const p of ['0.0.0.0/0', '::/0', '10.0.0.1/8', '10.0.0.0/33', 'fd00::/129', '10.0.0.0/', '10.0.0.0/08x', 'localhost/8', '::ffff:10.0.0.0/104', 'fe80::%eth0/64']) {
+      assert.throws(() => clientAddressConfig({ header: 'X', trustedPeers: [p] }), /trustedPeers/, p);
+    }
+  });
 });
 
 describe('the provisioning door', { skip: ready ? false : `build the module first (${wasm})` }, () => {
