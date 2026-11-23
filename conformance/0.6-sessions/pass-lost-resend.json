@@ -42,21 +42,30 @@
     "answerLesser": true,
     "askResend": true,
     "byeResend": true,
+    "evidence": true,
+    "evidencePush": true,
     "livenessHolderFrames": true,
+    "persistRelease": true,
     "rank1FromHolder": true,
+    "renewGuard": true,
     "renewNeedsContact": true,
     "renewWider": true,
-    "seenUnsynced": true
+    "seenUnsynced": true,
+    "stateReports": true,
+    "submitRetry": true,
+    "yieldedRetry": true
   },
   "format": "colophon/session-vectors/6",
   "members": [
     {
       "canWrite": true,
+      "freshSeed": null,
       "id": "a",
       "persisted": null
     },
     {
       "canWrite": true,
+      "freshSeed": null,
       "id": "b",
       "persisted": null
     }
@@ -88,10 +97,12 @@
         {
           "frame": {
             "body": {
+              "echo": [],
+              "fresh": "AAAAAAAAAAAAAAAAAAAAAA",
+              "heard": "unknown",
               "kind": "hello",
               "lapsed": false,
-              "seen": null,
-              "sessionKey": ""
+              "seen": null
             },
             "from": "a"
           },
@@ -113,10 +124,12 @@
         {
           "frame": {
             "body": {
+              "echo": [],
+              "fresh": "AAAAAAAAAAAAAAAAAAAAAA",
+              "heard": "unknown",
               "kind": "hello",
               "lapsed": false,
-              "seen": null,
-              "sessionKey": ""
+              "seen": null
             },
             "from": "b"
           },
@@ -129,10 +142,12 @@
       "input": {
         "frame": {
           "body": {
+            "echo": [],
+            "fresh": "AAAAAAAAAAAAAAAAAAAAAA",
+            "heard": "unknown",
             "kind": "hello",
             "lapsed": false,
-            "seen": null,
-            "sessionKey": ""
+            "seen": null
           },
           "from": "a"
         },
@@ -147,10 +162,12 @@
       "input": {
         "frame": {
           "body": {
+            "echo": [],
+            "fresh": "AAAAAAAAAAAAAAAAAAAAAA",
+            "heard": "unknown",
             "kind": "hello",
             "lapsed": false,
-            "seen": null,
-            "sessionKey": ""
+            "seen": null
           },
           "from": "b"
         },
@@ -266,6 +283,9 @@
         {
           "frame": {
             "body": {
+              "echo": [],
+              "fresh": "AAAAAAAAAAAAAAAAAAAAAA",
+              "heard": "live",
               "kind": "hello",
               "lapsed": false,
               "seen": {
@@ -273,8 +293,7 @@
                 "rank": 0,
                 "seq": null,
                 "term": 1
-              },
-              "sessionKey": ""
+              }
             },
             "from": "b",
             "to": "a"
@@ -325,6 +344,9 @@
       "input": {
         "frame": {
           "body": {
+            "echo": [],
+            "fresh": "AAAAAAAAAAAAAAAAAAAAAA",
+            "heard": "live",
             "kind": "hello",
             "lapsed": false,
             "seen": {
@@ -332,8 +354,7 @@
               "rank": 0,
               "seq": null,
               "term": 1
-            },
-            "sessionKey": ""
+            }
           },
           "from": "b",
           "to": "a"
@@ -456,28 +477,6 @@
       "member": "a",
       "outputs": [
         {
-          "frame": {
-            "body": {
-              "claim": {
-                "holder": "a",
-                "rank": 0,
-                "term": 1
-              },
-              "kind": "pass",
-              "next": {
-                "holder": "b",
-                "rank": 1,
-                "term": 2,
-                "via": "a"
-              },
-              "seq": 0,
-              "snapshot": "c3RvcHBlZA=="
-            },
-            "from": "a"
-          },
-          "output": "send"
-        },
-        {
           "claim": {
             "holder": "b",
             "rank": 1,
@@ -523,6 +522,28 @@
             "snapshot": "c3RvcHBlZA=="
           },
           "output": "event"
+        },
+        {
+          "frame": {
+            "body": {
+              "claim": {
+                "holder": "a",
+                "rank": 0,
+                "term": 1
+              },
+              "kind": "pass",
+              "next": {
+                "holder": "b",
+                "rank": 1,
+                "term": 2,
+                "via": "a"
+              },
+              "seq": 0,
+              "snapshot": "c3RvcHBlZA=="
+            },
+            "from": "a"
+          },
+          "output": "send"
         }
       ]
     },

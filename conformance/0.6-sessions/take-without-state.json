@@ -57,26 +57,36 @@
     "answerLesser": true,
     "askResend": true,
     "byeResend": true,
+    "evidence": true,
+    "evidencePush": true,
     "livenessHolderFrames": true,
+    "persistRelease": true,
     "rank1FromHolder": true,
+    "renewGuard": true,
     "renewNeedsContact": true,
     "renewWider": true,
-    "seenUnsynced": true
+    "seenUnsynced": true,
+    "stateReports": true,
+    "submitRetry": true,
+    "yieldedRetry": true
   },
   "format": "colophon/session-vectors/6",
   "members": [
     {
       "canWrite": true,
+      "freshSeed": null,
       "id": "a",
       "persisted": null
     },
     {
       "canWrite": true,
+      "freshSeed": null,
       "id": "b",
       "persisted": null
     },
     {
       "canWrite": true,
+      "freshSeed": null,
       "id": "c",
       "persisted": null
     }
@@ -108,10 +118,12 @@
         {
           "frame": {
             "body": {
+              "echo": [],
+              "fresh": "AAAAAAAAAAAAAAAAAAAAAA",
+              "heard": "unknown",
               "kind": "hello",
               "lapsed": false,
-              "seen": null,
-              "sessionKey": ""
+              "seen": null
             },
             "from": "a"
           },
@@ -133,10 +145,12 @@
         {
           "frame": {
             "body": {
+              "echo": [],
+              "fresh": "AAAAAAAAAAAAAAAAAAAAAA",
+              "heard": "unknown",
               "kind": "hello",
               "lapsed": false,
-              "seen": null,
-              "sessionKey": ""
+              "seen": null
             },
             "from": "b"
           },
@@ -158,10 +172,12 @@
         {
           "frame": {
             "body": {
+              "echo": [],
+              "fresh": "AAAAAAAAAAAAAAAAAAAAAA",
+              "heard": "unknown",
               "kind": "hello",
               "lapsed": false,
-              "seen": null,
-              "sessionKey": ""
+              "seen": null
             },
             "from": "c"
           },
@@ -174,10 +190,12 @@
       "input": {
         "frame": {
           "body": {
+            "echo": [],
+            "fresh": "AAAAAAAAAAAAAAAAAAAAAA",
+            "heard": "unknown",
             "kind": "hello",
             "lapsed": false,
-            "seen": null,
-            "sessionKey": ""
+            "seen": null
           },
           "from": "a"
         },
@@ -192,10 +210,12 @@
       "input": {
         "frame": {
           "body": {
+            "echo": [],
+            "fresh": "AAAAAAAAAAAAAAAAAAAAAA",
+            "heard": "unknown",
             "kind": "hello",
             "lapsed": false,
-            "seen": null,
-            "sessionKey": ""
+            "seen": null
           },
           "from": "a"
         },
@@ -210,10 +230,12 @@
       "input": {
         "frame": {
           "body": {
+            "echo": [],
+            "fresh": "AAAAAAAAAAAAAAAAAAAAAA",
+            "heard": "unknown",
             "kind": "hello",
             "lapsed": false,
-            "seen": null,
-            "sessionKey": ""
+            "seen": null
           },
           "from": "b"
         },
@@ -228,10 +250,12 @@
       "input": {
         "frame": {
           "body": {
+            "echo": [],
+            "fresh": "AAAAAAAAAAAAAAAAAAAAAA",
+            "heard": "unknown",
             "kind": "hello",
             "lapsed": false,
-            "seen": null,
-            "sessionKey": ""
+            "seen": null
           },
           "from": "b"
         },
@@ -246,10 +270,12 @@
       "input": {
         "frame": {
           "body": {
+            "echo": [],
+            "fresh": "AAAAAAAAAAAAAAAAAAAAAA",
+            "heard": "unknown",
             "kind": "hello",
             "lapsed": false,
-            "seen": null,
-            "sessionKey": ""
+            "seen": null
           },
           "from": "c"
         },
@@ -264,10 +290,12 @@
       "input": {
         "frame": {
           "body": {
+            "echo": [],
+            "fresh": "AAAAAAAAAAAAAAAAAAAAAA",
+            "heard": "unknown",
             "kind": "hello",
             "lapsed": false,
-            "seen": null,
-            "sessionKey": ""
+            "seen": null
           },
           "from": "c"
         },
@@ -383,6 +411,9 @@
         {
           "frame": {
             "body": {
+              "echo": [],
+              "fresh": "AAAAAAAAAAAAAAAAAAAAAA",
+              "heard": "live",
               "kind": "hello",
               "lapsed": false,
               "seen": {
@@ -390,8 +421,7 @@
                 "rank": 0,
                 "seq": null,
                 "term": 1
-              },
-              "sessionKey": ""
+              }
             },
             "from": "b",
             "to": "a"
@@ -441,6 +471,9 @@
         {
           "frame": {
             "body": {
+              "echo": [],
+              "fresh": "AAAAAAAAAAAAAAAAAAAAAA",
+              "heard": "live",
               "kind": "hello",
               "lapsed": false,
               "seen": {
@@ -448,8 +481,7 @@
                 "rank": 0,
                 "seq": null,
                 "term": 1
-              },
-              "sessionKey": ""
+              }
             },
             "from": "c",
             "to": "a"
@@ -492,6 +524,24 @@
             "snapshot": "czA="
           },
           "output": "event"
+        },
+        {
+          "frame": {
+            "body": {
+              "claim": {
+                "holder": "a",
+                "rank": 0,
+                "term": 1
+              },
+              "kind": "state",
+              "seq": 0,
+              "snapshot": "czA="
+            },
+            "from": "a",
+            "retain": true
+          },
+          "output": "forward",
+          "to": "c"
         }
       ]
     },
@@ -529,6 +579,24 @@
             "snapshot": "czA="
           },
           "output": "event"
+        },
+        {
+          "frame": {
+            "body": {
+              "claim": {
+                "holder": "a",
+                "rank": 0,
+                "term": 1
+              },
+              "kind": "state",
+              "seq": 0,
+              "snapshot": "czA="
+            },
+            "from": "a",
+            "retain": true
+          },
+          "output": "forward",
+          "to": "b"
         }
       ]
     },
@@ -537,6 +605,9 @@
       "input": {
         "frame": {
           "body": {
+            "echo": [],
+            "fresh": "AAAAAAAAAAAAAAAAAAAAAA",
+            "heard": "live",
             "kind": "hello",
             "lapsed": false,
             "seen": {
@@ -544,8 +615,7 @@
               "rank": 0,
               "seq": null,
               "term": 1
-            },
-            "sessionKey": ""
+            }
           },
           "from": "b",
           "to": "a"
@@ -580,6 +650,9 @@
       "input": {
         "frame": {
           "body": {
+            "echo": [],
+            "fresh": "AAAAAAAAAAAAAAAAAAAAAA",
+            "heard": "live",
             "kind": "hello",
             "lapsed": false,
             "seen": {
@@ -587,8 +660,7 @@
               "rank": 0,
               "seq": null,
               "term": 1
-            },
-            "sessionKey": ""
+            }
           },
           "from": "c",
           "to": "a"
@@ -617,6 +689,52 @@
           "output": "send"
         }
       ]
+    },
+    {
+      "at": 20,
+      "input": {
+        "frame": {
+          "body": {
+            "claim": {
+              "holder": "a",
+              "rank": 0,
+              "term": 1
+            },
+            "kind": "state",
+            "seq": 0,
+            "snapshot": "czA="
+          },
+          "from": "a",
+          "retain": true
+        },
+        "input": "frame",
+        "writer": true
+      },
+      "member": "c",
+      "outputs": []
+    },
+    {
+      "at": 20,
+      "input": {
+        "frame": {
+          "body": {
+            "claim": {
+              "holder": "a",
+              "rank": 0,
+              "term": 1
+            },
+            "kind": "state",
+            "seq": 0,
+            "snapshot": "czA="
+          },
+          "from": "a",
+          "retain": true
+        },
+        "input": "frame",
+        "writer": true
+      },
+      "member": "b",
+      "outputs": []
     },
     {
       "at": 20,
@@ -688,6 +806,9 @@
         {
           "frame": {
             "body": {
+              "echo": [],
+              "fresh": "AAAAAAAAAAAAAAAAAAAAAA",
+              "heard": "lapsed",
               "kind": "hello",
               "lapsed": false,
               "seen": {
@@ -695,8 +816,7 @@
                 "rank": 0,
                 "seq": 0,
                 "term": 1
-              },
-              "sessionKey": ""
+              }
             },
             "from": "b"
           },
@@ -768,6 +888,9 @@
       "input": {
         "frame": {
           "body": {
+            "echo": [],
+            "fresh": "AAAAAAAAAAAAAAAAAAAAAA",
+            "heard": "lapsed",
             "kind": "hello",
             "lapsed": false,
             "seen": {
@@ -775,8 +898,7 @@
               "rank": 0,
               "seq": 0,
               "term": 1
-            },
-            "sessionKey": ""
+            }
           },
           "from": "b"
         },
@@ -791,6 +913,9 @@
       "input": {
         "frame": {
           "body": {
+            "echo": [],
+            "fresh": "AAAAAAAAAAAAAAAAAAAAAA",
+            "heard": "lapsed",
             "kind": "hello",
             "lapsed": false,
             "seen": {
@@ -798,8 +923,7 @@
               "rank": 0,
               "seq": 0,
               "term": 1
-            },
-            "sessionKey": ""
+            }
           },
           "from": "b"
         },
@@ -848,6 +972,23 @@
           "output": "event"
         },
         {
+          "frame": {
+            "body": {
+              "claim": {
+                "holder": "a",
+                "rank": 0,
+                "term": 1
+              },
+              "kind": "yielded",
+              "seq": 0,
+              "snapshot": "czA="
+            },
+            "from": "a",
+            "to": "b"
+          },
+          "output": "send"
+        },
+        {
           "event": {
             "claim": {
               "holder": "b",
@@ -861,6 +1002,9 @@
         {
           "frame": {
             "body": {
+              "echo": [],
+              "fresh": "AAAAAAAAAAAAAAAAAAAAAA",
+              "heard": "live",
               "kind": "hello",
               "lapsed": false,
               "seen": {
@@ -868,8 +1012,7 @@
                 "rank": 0,
                 "seq": null,
                 "term": 2
-              },
-              "sessionKey": ""
+              }
             },
             "from": "a",
             "to": "b"
@@ -919,6 +1062,9 @@
         {
           "frame": {
             "body": {
+              "echo": [],
+              "fresh": "AAAAAAAAAAAAAAAAAAAAAA",
+              "heard": "live",
               "kind": "hello",
               "lapsed": false,
               "seen": {
@@ -926,8 +1072,7 @@
                 "rank": 0,
                 "seq": null,
                 "term": 2
-              },
-              "sessionKey": ""
+              }
             },
             "from": "c",
             "to": "b"
@@ -970,6 +1115,24 @@
             "snapshot": "czA="
           },
           "output": "event"
+        },
+        {
+          "frame": {
+            "body": {
+              "claim": {
+                "holder": "b",
+                "rank": 0,
+                "term": 2
+              },
+              "kind": "state",
+              "seq": 0,
+              "snapshot": "czA="
+            },
+            "from": "b",
+            "retain": true
+          },
+          "output": "forward",
+          "to": "c"
         }
       ]
     },
@@ -978,6 +1141,47 @@
       "input": {
         "frame": {
           "body": {
+            "claim": {
+              "holder": "a",
+              "rank": 0,
+              "term": 1
+            },
+            "kind": "yielded",
+            "seq": 0,
+            "snapshot": "czA="
+          },
+          "from": "a",
+          "to": "b"
+        },
+        "input": "frame",
+        "writer": true
+      },
+      "member": "b",
+      "outputs": [
+        {
+          "event": {
+            "claim": {
+              "holder": "a",
+              "rank": 0,
+              "term": 1
+            },
+            "event": "displaced",
+            "from": "a",
+            "seq": 0,
+            "snapshot": "czA="
+          },
+          "output": "event"
+        }
+      ]
+    },
+    {
+      "at": 20010,
+      "input": {
+        "frame": {
+          "body": {
+            "echo": [],
+            "fresh": "AAAAAAAAAAAAAAAAAAAAAA",
+            "heard": "live",
             "kind": "hello",
             "lapsed": false,
             "seen": {
@@ -985,8 +1189,7 @@
               "rank": 0,
               "seq": null,
               "term": 2
-            },
-            "sessionKey": ""
+            }
           },
           "from": "a",
           "to": "b"
@@ -1021,6 +1224,9 @@
       "input": {
         "frame": {
           "body": {
+            "echo": [],
+            "fresh": "AAAAAAAAAAAAAAAAAAAAAA",
+            "heard": "live",
             "kind": "hello",
             "lapsed": false,
             "seen": {
@@ -1028,8 +1234,7 @@
               "rank": 0,
               "seq": null,
               "term": 2
-            },
-            "sessionKey": ""
+            }
           },
           "from": "c",
           "to": "b"

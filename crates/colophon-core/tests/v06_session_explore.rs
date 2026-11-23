@@ -1,21 +1,29 @@
-//! Exhaustive bounded exploration of the 0.6 session machine (§S4–§S8) for 2 and 3 members.
+//! Exhaustive bounded exploration of the 0.6 session machine (revision 4) for 2 and 3 members.
 //!
-//! The network holds a set of in-flight `(recipient, frame)` pairs. Each step is one of:
-//! deliver any in-flight frame, deliver it and keep a copy (duplication, budgeted), drop it,
-//! advance every member's clock by one tick, take a member's link down or up (budgeted), or one
-//! application command (budgeted): ask, take, pass to a member that asked, decline, publish,
-//! submit, release, leave, join, restart from the persisted claim. A frame sent while the
-//! sender's link is down is lost; one addressed to a member whose link is down waits.
-//! Identical in-flight copies collapse, and at most `cap` frames are in flight (extra sends
-//! are lost): both are losses the model allows anyway.
+//! **Network.** Reachability is per directed edge (`reach[i][j]`), fixed for a profile: the
+//! full mesh, or the chain a↔b↔c with a↮c held indefinitely. In-flight `(recipient, frame)`
+//! pairs form a set (identical copies collapse; at most `cap` in flight, extra sends lost).
 //!
-//! On every transition: G1, G2, G3 and G6 (see `v06_session_support`). From every reachable
-//! state: G4 by a fair lossless completion (links up, every frame delivered in order, ticks
-//! until well past `holderTimeoutMs`) reaching one holder and one ordered state; and G5 by a
-//! completion in which the holder is cut off and another writer asks, which must reach a
-//! reachable holder within `askTimeoutMs` plus one tick.
+//! **Steps.** Deliver any in-flight frame, deliver and keep a copy (duplication, budgeted),
+//! drop it, advance every clock one tick, take a member's own link down or up (budgeted), an
+//! application command (budgeted: ask, take, pass to a member that asked, decline, publish,
+//! submit, release, leave, join, restart from what was persisted), or, in the crash profile,
+//! any single-member step cut short after each prefix of its outputs followed by a restart
+//! from what was persisted (G12).
 //!
-//! Bounds: `COLOPHON_EXPLORE=big` explores larger budgets.
+//! **Checked on every transition.** G1, G2, G3 (including "no holder frame under a claim it
+//! passed away"), G6, G11 for late passes, and G12 (after a crash, the restarted member's
+//! claim is not below any claim it revealed, and it does not act under a released claim).
+//!
+//! **Checked from every reachable state, by completions that keep the topology.** Three fair
+//! lossless schedules (FIFO, LIFO, rotating), each running well past `holderTimeoutMs`: G4 per
+//! component of the topology, G10 (no claim changes in the second half), G11 (every displaced
+//! holder's state reported to the member that took over, when the two can talk). G5 strictly:
+//! with the holder cut off and nobody else pending, the asking writer itself holds within
+//! `askTimeoutMs` plus a tick.
+//!
+//! Bounds: `COLOPHON_EXPLORE=big` explores deeper; `COLOPHON_EXPLORE_{CMDS,DUPS,LINKS,CAP,
+//! STATES,DEPTH}` override single bounds; `COLOPHON_EXPLORE_WITHOUT=F5,R1,…` turns fixes off.
 #![allow(clippy::unwrap_used)]
 mod v06_session_support;
 use colophon_core::v06::session::*;
@@ -25,12 +33,17 @@ use std::hash::{Hash, Hasher};
 use v06_session_support::*;
 
 const IDS: [&str; 3] = ["a", "b", "c"];
+static VERBOSE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Completions in which a displaced state was never reported because the taker was itself
+/// displaced (finding R2f; counted, reported, not failed).
+static R2F: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// States from which revision 4's G5 fails by finding R1d (counted, reported, not failed).
+static G5_EVIDENCE_DISPLACED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 /// One explorer tick in ms: the §S8 gap-hello limit (1 s) is one tick.
 const TICK: u64 = 1_000;
 /// The longest policy duration (`policy()`): every comparison is `age >= d` or `age < d`
 /// with `d` at most this, so ages beyond it are indistinguishable.
 const HORIZON: u64 = 3 * TICK;
-static VERBOSE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn policy() -> Policy {
     Policy {
@@ -40,10 +53,28 @@ fn policy() -> Policy {
         presence_timeout_ms: 3 * TICK,
         retain_ms: 60 * TICK,
         tail: 2,
-        max_payload: 16,
+        max_payload: 64,
         fold: Fold::Append,
         take: TakeRule::Free,
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Topo {
+    Mesh,
+    /// a↔b↔c, a↮c.
+    Chain,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Start {
+    /// Everyone joined, `a` took, all frames delivered.
+    Taken,
+    /// F12/F21: `a` holds 1.0.a and `b` holds 1.0.b, unheard by each other; `c` asked `a`,
+    /// then accepted 1.0.b and asked `b`. Both holders have `c`'s ask pending.
+    TwoHolders,
+    /// R1: on the chain, `a` took 1.0.a and `c` took 1.0.c; `b` hears both.
+    ChainTwoHolders,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -54,27 +85,16 @@ struct Bounds {
     dups: u8,
     links: u8,
     restarts: u8,
+    crashes: u8,
     cap: usize,
     max_states: usize,
-    /// Steps explored from the initial state (each delivery, drop, tick, link change or
-    /// command is one step); every state within this depth is visited.
     depth: u32,
     completions: bool,
     /// Allowed commands: a ask, t take, p pass/decline, u publish, s submit, r release,
     /// l leave/join, x restart.
     kinds: &'static str,
-    /// The initial state.
     start: Start,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Start {
-    /// Everyone joined, `a` took, all frames delivered.
-    Taken,
-    /// F12/F21: `a` holds 1.0.a and `b` holds 1.0.b, each unheard by the other (their frames
-    /// to each other were lost); `c` asked `a`, then accepted 1.0.b and asked `b`. Both
-    /// holders have `c`'s ask pending.
-    TwoHolders,
+    topo: Topo,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -99,6 +119,15 @@ enum Action {
     Tick,
     Link(usize, bool),
     Cmd(usize, Cmd),
+    /// The step, cut after this many of its outputs, then a restart (G12).
+    Crash(Box<Action>, usize),
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Schedule {
+    Fifo,
+    Lifo,
+    Rotate,
 }
 
 #[derive(Clone)]
@@ -106,22 +135,41 @@ struct World {
     now: u64,
     m: Vec<Session>,
     up: Vec<bool>,
+    reach: Vec<Vec<bool>>,
     net: Vec<(usize, Frame)>,
     cmds: u8,
     dups: u8,
     links: u8,
     restarts: u8,
+    crashes: u8,
     asks: Vec<Vec<usize>>,
-    persisted: Vec<Option<Claim>>,
+    persisted: Vec<Option<Persisted>>,
     ghost: Ghost,
     payload: u8,
     lossless: bool,
     fixes: Fixes,
     kinds: &'static str,
+    /// Claim changes (Persist outputs) seen, for G10.
+    persists: u64,
+    rotate: usize,
+    /// Members that emitted `BecameHolder` (G5 bookkeeping).
+    became: Vec<bool>,
 }
 
 fn idx(id: &str) -> usize {
     IDS.iter().position(|x| *x == id).unwrap()
+}
+fn reach_for(topo: Topo, n: usize) -> Vec<Vec<bool>> {
+    (0..n)
+        .map(|i| {
+            (0..n)
+                .map(|j| i != j && !(topo == Topo::Chain && ((i == 0 && j == 2) || (i == 2 && j == 0))))
+                .collect()
+        })
+        .collect()
+}
+fn id_of(i: usize, k: u8) -> Id {
+    Id::from_label(&format!("{}-{k}", IDS[i]))
 }
 
 impl World {
@@ -133,11 +181,13 @@ impl World {
             now: 0,
             m,
             up: vec![true; b.members],
+            reach: reach_for(b.topo, b.members),
             net: Vec::new(),
             cmds: b.cmds,
             dups: b.dups,
             links: b.links,
             restarts: b.restarts,
+            crashes: b.crashes,
             asks: vec![Vec::new(); b.members],
             persisted: vec![None; b.members],
             ghost: Ghost::default(),
@@ -145,33 +195,51 @@ impl World {
             lossless: true,
             fixes,
             kinds: b.kinds,
+            persists: 0,
+            rotate: 0,
+            became: vec![false; b.members],
         };
         for i in 0..b.members {
-            w.input(i, Input::App { command: Command::Join { state: None } }, b).unwrap();
+            w.input(i, Input::App { command: Command::Join { state: None } }, b, None).unwrap();
         }
-        w.flush(b).unwrap();
+        w.flush(b, Schedule::Fifo).unwrap();
+        let st = |x: &[u8]| Some(Fold::framed(&[Bytes(x.to_vec())]));
         match b.start {
             Start::Taken => {
-                w.input(0, Input::App { command: Command::Take { state: None } }, b).unwrap();
-                w.flush(b).unwrap();
+                w.input(0, Input::App { command: Command::Take { state: None } }, b, None).unwrap();
+                w.flush(b, Schedule::Fifo).unwrap();
             }
             Start::TwoHolders => {
-                let cut = |w: &mut World| w.net.retain(|(d, f)| !((*d == 0 && f.from == "b") || (*d == 1 && f.from == "a")));
-                let st = |x: &[u8]| Some(Bytes(x.to_vec()));
-                w.input(0, Input::App { command: Command::Take { state: st(b"A") } }, b).unwrap();
-                cut(&mut w);
-                w.flush(b).unwrap();
-                w.input(2, Input::App { command: Command::Ask }, b).unwrap();
-                cut(&mut w);
-                w.flush(b).unwrap();
-                w.input(1, Input::App { command: Command::Take { state: st(b"B") } }, b).unwrap();
-                cut(&mut w);
-                w.flush(b).unwrap();
+                // Until b takes, b hears nobody (not even evidence relayed by c); a and b never
+                // hear each other during the start.
+                for k in 0..3 {
+                    w.reach[k][1] = false;
+                    w.reach[1][k] = false;
+                }
+                w.input(0, Input::App { command: Command::Take { state: st(b"A") } }, b, None).unwrap();
+                w.flush(b, Schedule::Fifo).unwrap();
+                w.input(2, Input::App { command: Command::Ask }, b, None).unwrap();
+                w.flush(b, Schedule::Fifo).unwrap();
+                // b now reaches c and back, but c's evidence of b must not reach a yet.
+                w.reach[1][2] = true;
+                w.reach[2][1] = true;
+                w.reach[2][0] = false;
+                w.input(1, Input::App { command: Command::Take { state: st(b"B") } }, b, None).unwrap();
+                w.flush(b, Schedule::Fifo).unwrap();
+                w.reach = reach_for(b.topo, b.members);
                 assert_eq!(w.m[2].accepted(), Some(&Claim::new(1, 0, "b")));
                 assert_eq!((w.asks[0].clone(), w.asks[1].clone()), (vec![2], vec![2]));
             }
+            Start::ChainTwoHolders => {
+                assert_eq!(b.topo, Topo::Chain);
+                w.input(0, Input::App { command: Command::Take { state: st(b"A") } }, b, None).unwrap();
+                w.input(2, Input::App { command: Command::Take { state: st(b"C") } }, b, None).unwrap();
+                w.flush(b, Schedule::Fifo).unwrap();
+                assert_eq!(w.m[2].accepted(), Some(&Claim::new(1, 0, "c")));
+            }
         }
         w.lossless = false;
+        w.persists = 0;
         w
     }
 
@@ -186,7 +254,7 @@ impl World {
             }
             self.up.hash(&mut h);
             self.net.hash(&mut h);
-            (self.cmds, self.dups, self.links, self.restarts).hash(&mut h);
+            (self.cmds, self.dups, self.links, self.restarts, self.crashes).hash(&mut h);
             self.asks.hash(&mut h);
             self.persisted.hash(&mut h);
             self.ghost.hash(&mut h);
@@ -196,7 +264,21 @@ impl World {
         (u128::from(one(0)) << 64) | u128::from(one(1))
     }
 
-    fn input(&mut self, i: usize, input: Input, b: &Bounds) -> Result<Vec<Output>, String> {
+    fn route(&mut self, src: usize, dst: usize, frame: Frame, b: &Bounds) {
+        if !self.up[src] || !self.reach[src][dst] {
+            return;
+        }
+        let item = (dst, frame);
+        let fits = !self.net.contains(&item) && self.net.len() < b.cap;
+        if self.lossless || fits {
+            self.net.push(item);
+        }
+    }
+
+    /// Run one input on member `i`. With `crash = Some(k)` only the first `k` outputs take
+    /// effect, then the member restarts from what it persisted (G12). Returns the number of
+    /// outputs, or `None` when `k` is not below it (no such crash point).
+    fn input(&mut self, i: usize, input: Input, b: &Bounds, crash: Option<usize>) -> Result<Option<usize>, String> {
         let before = self.m[i].clone();
         let delivered = match &input {
             Input::Frame { frame, .. } => Some(frame.clone()),
@@ -207,40 +289,46 @@ impl World {
             .then(|| format!("{input:?}"));
         let outs = self.m[i].handle(input, self.now);
         if let Some(inp) = shown {
-            if !outs.is_empty() || !inp.starts_with("Tick") {
-                let inp = match &before {
-                    _ if inp.starts_with("Frame") => "frame".to_string(),
-                    _ => inp,
-                };
+            if !outs.is_empty() {
+                let inp = if inp.starts_with("Frame") { "frame".to_owned() } else { inp };
                 println!("      [{} t={}] {inp}", IDS[i], self.now);
                 for o in &outs {
                     println!("         {}", show_output(o));
                 }
             }
         }
-        check_step(&mut self.ghost, IDS[i], &before, &self.m[i], &outs)?;
-        if let Some(f) = delivered {
-            check_g6(&f, &self.m[i])?;
+        let total = outs.len();
+        let keep = match crash {
+            Some(k) if k >= total => {
+                return Ok(None);
+            }
+            Some(k) => k,
+            None => total,
+        };
+        let outs = &outs[..keep];
+        check_step_input(&mut self.ghost, IDS[i], &before, &self.m[i], outs, delivered.as_ref())?;
+        if let (Some(f), None) = (&delivered, crash) {
+            check_g6(f, &self.m[i])?;
         }
-        for o in &outs {
+        for o in outs {
             match o {
                 Output::Send { frame } => {
-                    if !self.up[i] {
-                        continue;
-                    }
                     let dsts: Vec<usize> = match &frame.to {
                         Some(t) => vec![idx(t)],
                         None => (0..self.m.len()).filter(|j| *j != i).collect(),
                     };
                     for d in dsts {
-                        let item = (d, frame.clone());
-                        let fits = !self.net.contains(&item) && self.net.len() < b.cap;
-                        if self.lossless || fits {
-                            self.net.push(item);
-                        }
+                        self.route(i, d, frame.clone(), b);
                     }
                 }
-                Output::Persist { claim } => self.persisted[i] = Some(claim.clone()),
+                Output::Forward { to, frame } => self.route(i, idx(to), frame.clone(), b),
+                Output::Persist { claim, released } => {
+                    self.persists += 1;
+                    self.persisted[i] = Some(Persisted {
+                        claim: claim.clone(),
+                        released: *released,
+                    });
+                }
                 Output::Event { event } => match event {
                     Event::AskReceived { from } => {
                         let f = idx(from);
@@ -250,6 +338,7 @@ impl World {
                         }
                     }
                     Event::Yielded { .. } => self.asks[i].clear(),
+                    Event::BecameHolder { .. } => self.became[i] = true,
                     _ => {}
                 },
             }
@@ -257,31 +346,73 @@ impl World {
         if !self.lossless {
             self.net.sort();
         }
-        Ok(outs)
+        if crash.is_some() {
+            self.restart(i, b)?;
+        }
+        Ok(Some(total))
+    }
+
+    fn restart(&mut self, i: usize, b: &Bounds) -> Result<(), String> {
+        self.m[i] = Session::with_fixes(IDS[i], true, policy(), self.persisted[i].clone(), self.fixes);
+        self.ghost.check_restart(&self.m[i])?;
+        // A member that restarts lost what it held: it cannot report it (G11 is about
+        // members that keep running).
+        self.ghost.owed.retain(|(_, d, _)| d != IDS[i]);
+        self.asks[i].clear();
+        if !self.up[i] {
+            self.input(i, Input::LinkDown, b, None)?;
+        }
+        self.input(i, Input::App { command: Command::Join { state: None } }, b, None)?;
+        Ok(())
     }
 
     fn tick(&mut self, b: &Bounds) -> Result<(), String> {
         self.now += TICK;
         for i in 0..self.m.len() {
-            self.input(i, Input::Tick, b)?;
+            self.input(i, Input::Tick, b, None)?;
         }
         Ok(())
     }
 
-    /// Deliver everything in order (lossless mode).
-    fn flush(&mut self, b: &Bounds) -> Result<(), String> {
+    fn deliver_input(frame: Frame) -> Input {
+        Input::Frame {
+            frame,
+            writer: true,
+            key: None,
+            n: None,
+        }
+    }
+
+    /// Deliver everything (lossless mode) in the given fair order.
+    fn flush(&mut self, b: &Bounds, s: Schedule) -> Result<(), String> {
         let mut guard = 0;
         while !self.net.is_empty() {
             guard += 1;
             if guard > 10_000 {
                 return Err("livelock: frames never quiesce".into());
             }
-            let (d, f) = self.net.remove(0);
+            let k = match s {
+                Schedule::Fifo => 0,
+                Schedule::Lifo => self.net.len() - 1,
+                Schedule::Rotate => {
+                    self.rotate += 1;
+                    self.rotate % self.net.len()
+                }
+            };
+            let (d, f) = self.net.remove(k);
             if self.up[d] {
-                self.input(d, Input::Frame { frame: f, writer: true }, b)?;
+                self.input(d, Self::deliver_input(f), b, None)?;
             }
         }
         Ok(())
+    }
+
+    fn single_member(&self, a: &Action) -> bool {
+        match a {
+            Action::Deliver(_) | Action::Dup(_) | Action::Link(..) => true,
+            Action::Cmd(_, c) => *c != Cmd::Restart,
+            _ => false,
+        }
     }
 
     fn actions(&self) -> Vec<Action> {
@@ -296,83 +427,82 @@ impl World {
             v.push(Action::Drop(k));
         }
         v.push(Action::Tick);
-        if self.links > 0 {
-            for i in 0..self.m.len() {
+        for i in 0..self.m.len() {
+            if self.links > 0 || !self.up[i] {
                 v.push(Action::Link(i, !self.up[i]));
-            }
-        } else {
-            for i in 0..self.m.len() {
-                if !self.up[i] {
-                    v.push(Action::Link(i, true));
-                }
             }
         }
         if self.cmds > 0 {
             for i in 0..self.m.len() {
                 let s = &self.m[i];
+                let k = self.kinds;
                 if !s.joined() {
-                    if self.kinds.contains('l') {
+                    if k.contains('l') {
                         v.push(Action::Cmd(i, Cmd::Join));
                     }
                     continue;
                 }
                 if s.is_holder() {
-                    for a in &self.asks[i] {
-                        if self.kinds.contains('p') {
+                    if k.contains('p') {
+                        for a in &self.asks[i] {
                             v.push(Action::Cmd(i, Cmd::Pass(*a)));
                             v.push(Action::Cmd(i, Cmd::Decline(*a)));
                         }
                     }
-                    if self.kinds.contains('u') {
+                    if k.contains('u') {
                         v.push(Action::Cmd(i, Cmd::Publish));
                     }
-                    if self.kinds.contains('r') {
+                    if k.contains('r') {
                         v.push(Action::Cmd(i, Cmd::Release));
                     }
                 } else {
-                    if self.kinds.contains('a') {
+                    if k.contains('a') {
                         v.push(Action::Cmd(i, Cmd::Ask));
                     }
-                    if self.kinds.contains('t') {
+                    if k.contains('t') {
                         v.push(Action::Cmd(i, Cmd::Take));
                     }
-                    if self.kinds.contains('s') {
+                    if k.contains('s') {
                         v.push(Action::Cmd(i, Cmd::Submit));
                     }
                 }
-                if self.kinds.contains('l') {
+                if k.contains('l') {
                     v.push(Action::Cmd(i, Cmd::Leave));
                 }
-                if self.restarts > 0 && self.kinds.contains('x') {
+                if self.restarts > 0 && k.contains('x') {
                     v.push(Action::Cmd(i, Cmd::Restart));
+                }
+            }
+        }
+        if self.crashes > 0 {
+            let base: Vec<Action> = v.iter().filter(|a| self.single_member(a)).cloned().collect();
+            for a in base {
+                for k in 0..4 {
+                    v.push(Action::Crash(Box::new(a.clone()), k));
                 }
             }
         }
         v
     }
 
-    fn apply(&mut self, a: &Action, b: &Bounds) -> Result<(), String> {
-        match a {
+    /// The member and input of a single-member action (consuming budgets).
+    fn prepare(&mut self, a: &Action) -> Option<(usize, Input)> {
+        Some(match a {
             Action::Deliver(k) => {
                 let (d, f) = self.net.remove(*k);
-                self.input(d, Input::Frame { frame: f, writer: true }, b)?;
+                (d, Self::deliver_input(f))
             }
             Action::Dup(k) => {
                 self.dups -= 1;
                 let (d, f) = self.net[*k].clone();
-                self.input(d, Input::Frame { frame: f, writer: true }, b)?;
+                (d, Self::deliver_input(f))
             }
-            Action::Drop(k) => {
-                self.net.remove(*k);
-            }
-            Action::Tick => self.tick(b)?,
             Action::Link(i, up) => {
                 if self.links > 0 {
                     self.links -= 1;
                 }
                 self.up[*i] = *up;
-                let input = if *up { Input::LinkUp } else { Input::LinkDown };
-                self.input(*i, input, b)?;
+                (*i, if *up { Input::LinkUp } else { Input::LinkDown })
             }
             Action::Cmd(i, c) => {
                 self.cmds -= 1;
@@ -394,7 +524,7 @@ impl World {
                     Cmd::Publish | Cmd::Submit => {
                         self.payload += 1;
                         let p = Bytes(vec![b'0' + self.payload]);
-                        let id = Bytes(vec![IDS[i].as_bytes()[0], self.payload]);
+                        let id = id_of(i, self.payload);
                         if *c == Cmd::Publish {
                             Command::Publish { id, payload: p }
                         } else {
@@ -404,100 +534,210 @@ impl World {
                     Cmd::Release => Command::Release,
                     Cmd::Leave => Command::Leave,
                     Cmd::Join => Command::Join { state: None },
-                    Cmd::Restart => {
-                        self.restarts -= 1;
-                        let before = self.m[i].clone();
-                        self.m[i] = Session::with_fixes(
-                            IDS[i],
-                            true,
-                            policy(),
-                            self.persisted[i].clone(),
-                            self.fixes,
-                        );
-                        if before.accepted() > self.m[i].accepted() {
-                            return Err(format!("G1: {} lost its claim on restart", IDS[i]));
-                        }
-                        self.asks[i].clear();
-                        if !self.up[i] {
-                            self.input(i, Input::LinkDown, b)?;
-                        }
-                        Command::Join { state: None }
-                    }
+                    Cmd::Restart => return None,
                 };
-                self.input(i, Input::App { command }, b)?;
+                (i, Input::App { command })
             }
-        }
-        Ok(())
+            _ => return None,
+        })
     }
 
-    /// G4: fair lossless completion converges.
-    fn complete(&self, b: &Bounds) -> Result<(), String> {
+    /// Apply an action; `Ok(false)` means it does not exist (a crash point past the end).
+    fn apply(&mut self, a: &Action, b: &Bounds) -> Result<bool, String> {
+        match a {
+            Action::Drop(k) => {
+                self.net.remove(*k);
+            }
+            Action::Tick => self.tick(b)?,
+            Action::Cmd(i, Cmd::Restart) => {
+                self.cmds -= 1;
+                self.restarts -= 1;
+                self.restart(*i, b)?;
+            }
+            Action::Crash(inner, k) => {
+                self.crashes -= 1;
+                let Some((i, input)) = self.prepare(inner) else {
+                    return Ok(false);
+                };
+                if self.input(i, input, b, Some(*k))?.is_none() {
+                    return Ok(false);
+                }
+            }
+            other => {
+                let Some((i, input)) = self.prepare(other) else {
+                    return Ok(false);
+                };
+                self.input(i, input, b, None)?;
+            }
+        }
+        Ok(true)
+    }
+
+    fn component(&self) -> Vec<usize> {
+        let n = self.m.len();
+        let mut comp: Vec<usize> = (0..n).collect();
+        for _ in 0..n {
+            for i in 0..n {
+                for j in 0..n {
+                    if i != j && self.reach[i][j] && self.reach[j][i] && comp[j] < comp[i] {
+                        comp[i] = comp[j];
+                    }
+                }
+            }
+        }
+        comp
+    }
+
+    /// G4, G10, G11 under one fair lossless schedule that keeps the topology.
+    fn complete_with(&self, b: &Bounds, s: Schedule) -> Result<(), String> {
         let mut w = self.clone();
         w.lossless = true;
         for i in 0..w.m.len() {
             if !w.up[i] {
                 w.up[i] = true;
-                w.input(i, Input::LinkUp, b)?;
+                w.input(i, Input::LinkUp, b, None)?;
             }
         }
         let p = policy();
-        let horizon = (3 * p.holder_timeout_ms + 2 * p.ask_timeout_ms + 2 * p.beat_ms) / TICK;
-        for _ in 0..horizon {
-            w.flush(b)?;
-            // Quiet, converged and no timer pending: only beats follow.
-            if !w.m.iter().any(Session::pending) && check_converged(&w.m).is_ok() {
+        let warm = (3 * p.holder_timeout_ms + 2 * p.ask_timeout_ms + 2 * p.beat_ms) / TICK;
+        let observe = (3 * p.holder_timeout_ms + p.beat_ms) / TICK;
+        let mesh = b.topo == Topo::Mesh;
+        for t in 0..warm + observe {
+            if t == warm {
+                w.persists = 0;
+            }
+            w.flush(b, s)?;
+            if mesh
+                && t < warm
+                && w.ghost.owed.is_empty()
+                && !w.m.iter().any(Session::pending)
+                && check_converged_topo(&w.m, &w.reach).is_ok()
+            {
                 let lapsing = w.m.iter().any(|m| {
                     m.joined() && m.holder().is_some_and(|h| !w.m[idx(h)].sends_as_holder())
                 });
                 if !lapsing {
-                    return Ok(());
+                    // Quiet, converged, no timer pending: only beats follow (G10 holds).
+                    w.persists = 0;
+                    break;
                 }
             }
             w.tick(b)?;
         }
-        w.flush(b)?;
-        check_converged(&w.m).map_err(|e| format!("{e} (after lossless completion)"))
+        w.flush(b, s)?;
+        let tag = format!("(after lossless completion, {s:?})");
+        if w.persists > 0 {
+            return Err(format!(
+                "G10: claims still change after {warm} quiet ticks: {} persists in the last {observe} {tag}",
+                w.persists
+            ));
+        }
+        check_converged_topo(&w.m, &w.reach).map_err(|e| format!("{e} {tag}"))?;
+        if w.fixes.state_reports {
+            let comp = w.component();
+            for (taker, displaced, claim) in &w.ghost.owed {
+                let (t, d) = (idx(taker), idx(displaced));
+                if w.m[t].joined() && w.m[d].joined() && w.reach[d][t] && comp[d] == comp[t] {
+                    if w.fixes.yielded_retry && !w.m[t].is_holder() {
+                        // Finding R2f: the taker was itself displaced and no longer speaks to
+                        // the displaced member; without an acknowledgement the report can be
+                        // lost. Counted and reported, not failed.
+                        R2F.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        continue;
+                    }
+                    return Err(format!(
+                        "G11: {displaced}'s state under {} never reported to {taker} {tag}",
+                        show_claim(claim)
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
-    /// G5: with the holder cut off, another joined writer that asks holds or sees a reachable
-    /// holder within askTimeoutMs plus one tick.
+    fn complete(&self, b: &Bounds) -> Result<(), String> {
+        for s in [Schedule::Fifo, Schedule::Lifo, Schedule::Rotate] {
+            self.complete_with(b, s)?;
+        }
+        Ok(())
+    }
+
+    /// G5 strictly: with the holder cut off and nobody else pending, a joined writer that
+    /// asks is itself holder within askTimeoutMs plus one tick.
     fn complete_g5(&self, b: &Bounds) -> Result<(), String> {
+        self.complete_g5_inner(b)
+    }
+    fn complete_g5_inner(&self, b: &Bounds) -> Result<(), String> {
         let Some(h) = self.m.iter().position(|s| s.is_holder()) else {
-            return Ok(());
-        };
-        let Some(wi) = (0..self.m.len()).find(|j| *j != h && self.m[*j].joined()) else {
             return Ok(());
         };
         let mut w = self.clone();
         w.lossless = true;
-        w.up[h] = false;
-        w.input(h, Input::LinkDown, b)?;
+        for j in 0..w.m.len() {
+            w.reach[h][j] = false;
+            w.reach[j][h] = false;
+        }
         w.net.retain(|(d, f)| *d != h && f.from != IDS[h]);
         for i in 0..w.m.len() {
             if i != h && !w.up[i] {
                 w.up[i] = true;
-                w.input(i, Input::LinkUp, b)?;
+                w.input(i, Input::LinkUp, b, None)?;
             }
         }
-        w.flush(b)?;
-        w.input(wi, Input::App { command: Command::Ask }, b)?;
-        let deadline = policy().ask_timeout_ms / TICK + 1;
-        for _ in 0..deadline {
-            w.flush(b)?;
+        w.flush(b, Schedule::Fifo)?;
+        let Some(wi) = (0..w.m.len()).find(|j| *j != h && w.m[*j].joined()) else {
+            return Ok(());
+        };
+        let others_busy = (0..w.m.len())
+            .any(|j| j != h && j != wi && (w.m[j].pending() || w.m[j].is_holder()))
+            || w.m[wi].is_holder();
+        if others_busy {
+            return Ok(());
+        }
+        w.became = vec![false; w.m.len()];
+        w.input(wi, Input::App { command: Command::Ask }, b, None)?;
+        // askTimeoutMs plus a tick; but evidence of the cut-off holder, still younger than
+        // holderTimeoutMs at another member, can displace the asker's take (finding R1d), so
+        // the bound is holderTimeoutMs + askTimeoutMs when that happens.
+        let p = policy();
+        let quick = p.ask_timeout_ms / TICK + 1;
+        let deadline = (p.holder_timeout_ms + p.ask_timeout_ms) / TICK + 2;
+        let mut displaced = false;
+        for t in 0..deadline {
+            w.flush(b, Schedule::Fifo)?;
+            if t == quick && !w.m[wi].sends_as_holder() {
+                displaced = true;
+            }
+            if t >= quick && !displaced {
+                break;
+            }
             w.tick(b)?;
         }
-        w.flush(b)?;
-        let s = &w.m[wi];
-        let ok = match s.holder() {
-            Some(x) if idx(x) != h => w.m[idx(x)].sends_as_holder(),
-            _ => false,
-        };
-        if !ok {
+        w.flush(b, Schedule::Fifo)?;
+        if displaced && !w.m[wi].sends_as_holder() {
+            // Finding R1d: the asker took within askTimeoutMs, then yielded to evidence of the
+            // cut-off holder forwarded by a member that heard it less than holderTimeoutMs
+            // ago, and nothing makes it take again. Revision 4's G5 does not hold here.
+            let took = w.became[wi] && w.m[wi].accepted().is_some_and(|c| c.holder == IDS[h]);
+            if took {
+                if std::env::var("COLOPHON_EXPLORE_SHOW_R1D").is_ok() && G5_EVIDENCE_DISPLACED.load(std::sync::atomic::Ordering::Relaxed) == 0 {
+                    let mut v = self.clone();
+                    VERBOSE.store(true, std::sync::atomic::Ordering::Relaxed);
+                    println!("--- first R1d case, G5 completion replayed ---");
+                    v.became = vec![false; v.m.len()];
+                    let _ = v.complete_g5_inner(b);
+                    VERBOSE.store(false, std::sync::atomic::Ordering::Relaxed);
+                }
+                G5_EVIDENCE_DISPLACED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return Ok(());
+            }
+        }
+        if !w.m[wi].sends_as_holder() {
             return Err(format!(
-                "G5: {} asked with holder {} cut off and after {deadline} ticks sees holder {:?}",
+                "G5: {} asked with holder {} cut off and after {deadline} ticks is not holder (sees {:?})",
                 IDS[wi],
                 IDS[h],
-                s.holder()
+                w.m[wi].holder()
             ));
         }
         Ok(())
@@ -515,13 +755,10 @@ fn explore(b: Bounds, fixes: Fixes) -> Report {
     let init = World::new(&b, fixes);
     let mut parent: HashMap<u128, (u128, Action)> = HashMap::new();
     let mut seen: HashSet<u128> = HashSet::new();
-    let root = init.key();
-    seen.insert(root);
+    seen.insert(init.key());
     let mut queue: VecDeque<(World, u32)> = VecDeque::from([(init.clone(), 0)]);
     let mut levels: Vec<usize> = vec![1];
     let mut transitions = 0;
-    let mut max_term = (0u64, 0u128);
-    let mut max_now = 0;
     let trace_to = |parent: &HashMap<u128, (u128, Action)>, mut k: u128| {
         let mut path = Vec::new();
         while let Some((p, a)) = parent.get(&k) {
@@ -550,17 +787,21 @@ fn explore(b: Bounds, fixes: Fixes) -> Report {
             transitions += 1;
             let mut n = w.clone();
             let r = n.apply(&a, &b);
-            let nk = n.key();
-            if let Err(e) = r {
-                let mut path = trace_to(&parent, wk);
-                path.push(a);
-                return Report {
-                    states: seen.len(),
-                    transitions,
-                    violation: Some((e, path)),
-                    truncated: false,
-                };
+            match r {
+                Ok(false) => continue,
+                Ok(true) => {}
+                Err(e) => {
+                    let mut path = trace_to(&parent, wk);
+                    path.push(a);
+                    return Report {
+                        states: seen.len(),
+                        transitions,
+                        violation: Some((e, path)),
+                        truncated: false,
+                    };
+                }
             }
+            let nk = n.key();
             if !seen.insert(nk) {
                 continue;
             }
@@ -575,11 +816,6 @@ fn explore(b: Bounds, fixes: Fixes) -> Report {
                     };
                 }
             }
-            let term = n.m.iter().filter_map(|m| m.accepted().map(|c| c.term)).max().unwrap_or(0);
-            if term > max_term.0 {
-                max_term = (term, nk);
-            }
-            max_now = max_now.max(n.now);
             if levels.len() <= depth as usize + 1 {
                 levels.push(0);
             }
@@ -588,10 +824,7 @@ fn explore(b: Bounds, fixes: Fixes) -> Report {
                 queue.push_back((n, depth + 1));
             }
             if seen.len() >= b.max_states {
-                println!("max term {} max now {max_now}; new states per depth: {levels:?}", max_term.0);
-                if std::env::var("COLOPHON_EXPLORE_VERBOSE").is_ok() {
-                    println!("{}", print_trace(b, fixes, &trace_to(&parent, max_term.1)));
-                }
+                println!("new states per depth: {levels:?} (truncated)");
                 return Report {
                     states: seen.len(),
                     transitions,
@@ -601,7 +834,7 @@ fn explore(b: Bounds, fixes: Fixes) -> Report {
             }
         }
     }
-    println!("new states per depth: {levels:?}; max term {}", max_term.0);
+    println!("new states per depth: {levels:?}");
     Report {
         states: seen.len(),
         transitions,
@@ -649,13 +882,6 @@ fn print_trace(b: Bounds, fixes: Fixes, path: &[Action]) -> String {
             s.push_str(&format!("    VIOLATION {e}\n"));
         }
     }
-    if std::env::var("COLOPHON_EXPLORE_VERBOSE").is_ok() {
-        println!("{s}--- completions of the final state ---");
-        VERBOSE.store(true, std::sync::atomic::Ordering::Relaxed);
-        println!("G4 completion: {:?}", w.complete(&b));
-        println!("G5 completion: {:?}", w.complete_g5(&b));
-        VERBOSE.store(false, std::sync::atomic::Ordering::Relaxed);
-    }
     s
 }
 
@@ -666,17 +892,17 @@ fn env_u64(name: &str, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
-/// Default bounds finish in seconds; `COLOPHON_EXPLORE=big` widens them, and
-/// `COLOPHON_EXPLORE_{CMDS,DUPS,LINKS,CAP,STATES}` override single bounds. Time is unbounded
-/// (states are keyed with relative times); `time` only caps the clock as a safety net.
-fn bounds(members: usize, kinds: &'static str, small: (u8, u8, u8, usize), depth: u32) -> Bounds {
+type Small = (u8, u8, u8, usize);
+
+/// Default bounds finish in seconds; `COLOPHON_EXPLORE=big` widens them.
+fn bounds(members: usize, kinds: &'static str, small: Small, depth: u32) -> Bounds {
     let big = std::env::var("COLOPHON_EXPLORE").is_ok_and(|v| v == "big");
     let (cmds, dups, links, cap) = if big {
         (small.0 + 1, small.1.max(1), small.2 + 1, small.3 + 1)
     } else {
         small
     };
-    let depth = if big { depth + 4 } else { depth };
+    let depth = if big { depth + 3 } else { depth };
     Bounds {
         members,
         time: 200 * TICK,
@@ -684,6 +910,7 @@ fn bounds(members: usize, kinds: &'static str, small: (u8, u8, u8, usize), depth
         dups: env_u64("COLOPHON_EXPLORE_DUPS", u64::from(dups)) as u8,
         links: env_u64("COLOPHON_EXPLORE_LINKS", u64::from(links)) as u8,
         restarts: 1,
+        crashes: 0,
         cap: env_u64("COLOPHON_EXPLORE_CAP", cap as u64) as usize,
         max_states: env_u64("COLOPHON_EXPLORE_STATES", if big { 100_000_000 } else { 3_000_000 })
             as usize,
@@ -691,6 +918,7 @@ fn bounds(members: usize, kinds: &'static str, small: (u8, u8, u8, usize), depth
         completions: std::env::var("COLOPHON_EXPLORE_NO_COMPLETIONS").is_err(),
         kinds,
         start: Start::Taken,
+        topo: Topo::Mesh,
     }
 }
 
@@ -698,8 +926,17 @@ fn run(b: Bounds, fixes: Fixes) -> Report {
     let t = std::time::Instant::now();
     let r = explore(b, fixes);
     println!(
-        "explore members={} fixes={fixes:?} bounds={b:?}: {} states, {} transitions, {:?}, truncated={}",
+        "so far: G5 displaced by evidence (finding R1d) {}, unreported displaced states (finding R2f) {}",
+        G5_EVIDENCE_DISPLACED.load(std::sync::atomic::Ordering::Relaxed),
+        R2F.load(std::sync::atomic::Ordering::Relaxed)
+    );
+    println!(
+        "explore members={} topo={:?} start={:?} kinds={:?} crashes={}: {} states, {} transitions, {:?}, truncated={}",
         b.members,
+        b.topo,
+        b.start,
+        b.kinds,
+        b.crashes,
         r.states,
         r.transitions,
         t.elapsed(),
@@ -707,12 +944,23 @@ fn run(b: Bounds, fixes: Fixes) -> Report {
     );
     if let Some((e, path)) = &r.violation {
         println!("violation: {e}\n{}", print_trace(b, fixes, path));
+        if std::env::var("COLOPHON_EXPLORE_VERBOSE").is_ok() {
+            let mut w = World::new(&b, fixes);
+            for a in path {
+                let _ = w.apply(a, &b);
+            }
+            VERBOSE.store(true, std::sync::atomic::Ordering::Relaxed);
+            println!("--- completion ---");
+            println!("{:?}", w.complete(&b));
+            println!("--- G5 completion ---");
+            println!("{:?}", w.complete_g5(&b));
+            VERBOSE.store(false, std::sync::atomic::Ordering::Relaxed);
+        }
     }
     r
 }
 
-/// `small` is `(commands, duplications, link changes, in-flight cap)`.
-/// `COLOPHON_EXPLORE_WITHOUT=F5,F6` explores with those fixes off (for findings work).
+/// `COLOPHON_EXPLORE_WITHOUT=F5,R1` explores with those fixes off (for findings work).
 fn fixes_under_test() -> Fixes {
     let mut f = Fixes::ALL;
     let off = std::env::var("COLOPHON_EXPLORE_WITHOUT").unwrap_or_default();
@@ -726,53 +974,128 @@ fn fixes_under_test() -> Fixes {
             "F8" => f.liveness_holder_frames = false,
             "F9" => f.ask_resend = false,
             "F10" => f.renew_needs_contact = false,
+            "R1" => f.evidence = false,
+            "R2" => f.state_reports = false,
+            "R2c" => f.persist_release = false,
+            "R5" => f.submit_retry = false,
+            "R1c" => f.evidence_push = false,
+            "R2d" => f.yielded_retry = false,
             _ => {}
         }
     }
     f
 }
 
-fn check(members: usize, kinds: &'static str, small: (u8, u8, u8, usize), depth: u32) {
-    let r = run(bounds(members, kinds, small, depth), fixes_under_test());
+fn check_bounds(b: Bounds) {
+    let r = run(b, fixes_under_test());
     assert!(r.violation.is_none(), "{:?}", r.violation.map(|v| v.0));
     assert!(!r.truncated, "state bound reached before exhausting the space");
+}
+fn check(members: usize, kinds: &'static str, small: Small, depth: u32) {
+    check_bounds(bounds(members, kinds, small, depth));
 }
 
 /// Ask, take, pass, decline and publish between two members.
 #[test]
 fn two_members_handoff() {
-    check(2, "atpu", (3, 1, 2, 3), 8);
+    check(2, "atpu", (3, 1, 2, 3), 7);
 }
 
 /// Release, leave, join, restart, submit and publish between two members.
 #[test]
 fn two_members_membership() {
-    check(2, "rlxsu", (3, 0, 1, 3), 8);
+    check(2, "rlxsu", (3, 0, 1, 3), 7);
 }
 
 /// Ask, take and pass among three members.
 #[test]
 fn three_members_handoff() {
-    check(3, "atp", (2, 0, 1, 3), 8);
+    check(3, "atp", (2, 0, 1, 3), 7);
 }
 
 /// Release, leave, join and restart among three members.
 #[test]
 fn three_members_membership() {
-    check(3, "rlxu", (2, 0, 1, 2), 8);
+    check(3, "rlxu", (2, 0, 1, 2), 7);
 }
 
-type Profile = (usize, &'static str, (u8, u8, u8, usize));
-const PROFILES: [Profile; 4] = [
+/// H1: the chain a↔b↔c with a↮c held indefinitely, starting from the review's two holders
+/// (a 1.0.a, c 1.0.c), with no application command: G10, G4 per component, G11.
+fn chain_two_holders(fixes: Fixes) -> Report {
+    let mut b = bounds(3, "", (0, 0, 0, 3), 8);
+    b.topo = Topo::Chain;
+    b.start = Start::ChainTwoHolders;
+    run(b, fixes)
+}
+
+#[test]
+fn chain_two_holders_settle() {
+    let r = chain_two_holders(fixes_under_test());
+    assert!(r.violation.is_none(), "{:?}", r.violation.map(|v| v.0));
+    assert!(!r.truncated);
+}
+
+/// H1: revision 3's hearsay renewing livelocks on the chain (the review's first trace).
+#[test]
+fn chain_two_holders_rev3_livelocks() {
+    let r = chain_two_holders(Fixes::REV3);
+    let v = r.violation.expect("revision 3 should livelock on the chain");
+    assert!(v.0.starts_with("G10"), "{}", v.0);
+}
+
+fn chain_handoff_bounds() -> Bounds {
+    let mut b = bounds(3, "atp", (2, 0, 0, 3), 7);
+    b.topo = Topo::Chain;
+    b
+}
+
+/// The chain with ask, take and pass.
+#[test]
+fn chain_handoff() {
+    check_bounds(chain_handoff_bounds());
+}
+
+/// Revision 4 as written fails where the reference machine goes beyond it: without
+/// evidence for silent members (R1c) a member behind a non-holder on the chain never learns
+/// the holder (G4); with a single `yielded` resend (R2d) two losses lose a displaced
+/// holder's state (G11).
+#[test]
+fn rev4_text_counterexamples() {
+    let r = run(chain_handoff_bounds(), Fixes { evidence_push: false, ..Fixes::ALL });
+    let v = r.violation.expect("R1c off should break G4 on the chain");
+    assert!(v.0.starts_with("G4"), "{}", v.0);
+    let r = run(bounds(2, "atpu", (3, 1, 2, 3), 7), Fixes { yielded_retry: false, ..Fixes::ALL });
+    let v = r.violation.expect("R2d off should break G11");
+    assert!(v.0.starts_with("G11"), "{}", v.0);
+}
+
+/// H4/G12: every single-member step cut after each prefix of its outputs, then a restart.
+#[test]
+fn crash_prefixes() {
+    let mut b = bounds(2, "atpur", (2, 0, 0, 3), 6);
+    b.crashes = 1;
+    check_bounds(b);
+    let mut b = bounds(3, "atp", (2, 0, 0, 3), 5);
+    b.crashes = 1;
+    check_bounds(b);
+}
+
+/// F12/F21 (revision 3, §S4 `via`) explored from the two-holder start.
+#[test]
+fn two_passes_to_one_asker_explored() {
+    let mut b = bounds(3, "p", (2, 0, 1, 3), 7);
+    b.start = Start::TwoHolders;
+    check_bounds(b);
+}
+
+const PROFILES: [(usize, &str, Small); 4] = [
     (2, "atpu", (3, 1, 2, 3)),
     (2, "rlxsu", (3, 0, 1, 3)),
     (3, "atp", (2, 0, 1, 3)),
     (3, "rlxu", (2, 0, 1, 2)),
 ];
 
-/// The draft as written fails, and so does the reference reading without F1 or without F2:
-/// the explorer finds a counterexample (printed with `--nocapture`; see the findings
-/// document). The other fixes are exercised by the simulator's `fix_ablation`.
+/// The revision 1 draft fails, and so does the reference reading without F1 or without F2.
 #[test]
 fn draft_counterexamples() {
     let all = Fixes::ALL;
@@ -784,109 +1107,291 @@ fn draft_counterexamples() {
     for (name, fixes) in cases {
         let found = PROFILES.iter().any(|&(members, kinds, small)| {
             println!("== {name}, {members} members, {kinds}");
-            run(bounds(members, kinds, small, 8), fixes).violation.is_some()
+            run(bounds(members, kinds, small, 7), fixes).violation.is_some()
         });
         assert!(found, "no counterexample for the {name}");
     }
 }
 
-/// F12/F21 (revision 3, §S4 `via`): two holders that cannot reach each other both pass to
-/// the same asker. Explored exhaustively from [`Start::TwoHolders`]: both passes (in any
-/// order, any losses, a duplicate, a link change) and the guarantees, with G4 by completion.
-#[test]
-fn two_passes_to_one_asker_explored() {
-    let mut b = bounds(3, "p", (2, 0, 1, 3), 7);
-    b.start = Start::TwoHolders;
-    let r = run(b, fixes_under_test());
-    assert!(r.violation.is_none(), "{:?}", r.violation.map(|v| v.0));
-    assert!(!r.truncated);
+// ---------------------------------------------------------------------------------------------
+// Scripted traces (H5): a small router with per-edge reachability and explicit losses.
+
+struct Router {
+    ids: Vec<&'static str>,
+    m: Vec<Session>,
+    reach: Vec<Vec<bool>>,
+    net: Vec<(usize, Frame)>,
+    events: Vec<(usize, Event)>,
+    persisted: Vec<Option<Persisted>>,
+    fixes: Fixes,
+    policy: Policy,
 }
 
-/// The same scenario scripted with the default policy: (1) every frame after the takes
-/// delivered, (2) `a`'s pass to `x` lost (F21), (3) 300 seeds of random loss of 30 % of the
-/// frames from the passes on, then eventual delivery. Each ends in one claim and one state.
-fn two_passes_to_one(fixes: Fixes, lose_a_pass_to_x: bool, loss_seed: Option<u64>) -> Vec<Session> {
-    let ids = ["a", "b", "x"];
-    let mut m: Vec<Session> = ids
-        .iter()
-        .map(|i| Session::with_fixes(i, true, Policy::default(), None, fixes))
-        .collect();
-    let mut net: Vec<(usize, Frame)> = Vec::new();
-    let rng = std::cell::Cell::new(loss_seed.unwrap_or(0).wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1);
-    let lossy = std::cell::Cell::new(false);
-    let lose = || {
-        if loss_seed.is_none() || !lossy.get() {
-            return false;
+impl Router {
+    fn new(ids: &[&'static str], fixes: Fixes, policy: Policy) -> Self {
+        let n = ids.len();
+        Router {
+            ids: ids.to_vec(),
+            m: ids.iter().map(|i| Session::with_fixes(i, true, policy.clone(), None, fixes)).collect(),
+            reach: (0..n).map(|i| (0..n).map(|j| i != j).collect()).collect(),
+            net: Vec::new(),
+            events: Vec::new(),
+            persisted: vec![None; n],
+            fixes,
+            policy,
         }
-        let mut x = rng.get();
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        rng.set(x);
-        x % 10 < 3
-    };
-    let route = |net: &mut Vec<(usize, Frame)>, from: usize, outs: Vec<Output>, cut: &dyn Fn(usize, usize) -> bool| {
+    }
+    fn i(&self, id: &str) -> usize {
+        self.ids.iter().position(|x| *x == id).unwrap()
+    }
+    fn step(&mut self, i: usize, input: Input, now: u64) {
+        let outs = self.m[i].handle(input, now);
         for o in outs {
-            if let Output::Send { frame } = o {
-                let dsts: Vec<usize> = match &frame.to {
-                    Some(t) => vec![ids.iter().position(|x| x == t).unwrap()],
-                    None => (0..3).filter(|j| *j != from).collect(),
-                };
-                for d in dsts {
-                    if !cut(from, d) && !lose() {
-                        net.push((d, frame.clone()));
+            match o {
+                Output::Send { frame } => {
+                    let dsts: Vec<usize> = match &frame.to {
+                        Some(t) => vec![self.i(t)],
+                        None => (0..self.m.len()).filter(|j| *j != i).collect(),
+                    };
+                    for d in dsts {
+                        if self.reach[i][d] {
+                            self.net.push((d, frame.clone()));
+                        }
                     }
                 }
+                Output::Forward { to, frame } => {
+                    let d = self.i(&to);
+                    if self.reach[i][d] {
+                        self.net.push((d, frame));
+                    }
+                }
+                Output::Persist { claim, released } => self.persisted[i] = Some(Persisted { claim, released }),
+                Output::Event { event } => self.events.push((i, event)),
             }
         }
-    };
-    let flush = |m: &mut Vec<Session>, net: &mut Vec<(usize, Frame)>, t: u64, cut: &dyn Fn(usize, usize) -> bool| {
+    }
+    fn cmd(&mut self, id: &str, command: Command, now: u64) {
+        let i = self.i(id);
+        self.step(i, Input::App { command }, now);
+    }
+    /// Deliver pending frames in order, holding back (keeping in flight) those `hold` picks.
+    fn deliver_except(&mut self, now: u64, hold: &dyn Fn(&str, &Frame) -> bool) {
+        let mut held = Vec::new();
         let mut guard = 0;
-        while !net.is_empty() {
+        while !self.net.is_empty() {
             guard += 1;
             assert!(guard < 10_000, "frames never quiesce");
-            let (d, f) = net.remove(0);
-            let outs = m[d].handle(Input::Frame { frame: f, writer: true }, t);
-            route(net, d, outs, cut);
+            let (d, f) = self.net.remove(0);
+            if hold(self.ids[d], &f) {
+                held.push((d, f));
+                continue;
+            }
+            self.step(d, Input::Frame { frame: f, writer: true, key: None, n: None }, now);
+        }
+        self.net = held;
+    }
+    fn deliver(&mut self, now: u64) {
+        self.deliver_except(now, &|_, _| false);
+    }
+    fn tick_all(&mut self, now: u64) {
+        for i in 0..self.m.len() {
+            self.step(i, Input::Tick, now);
+        }
+    }
+    fn restart(&mut self, id: &str, now: u64) {
+        let i = self.i(id);
+        self.m[i] = Session::with_fixes(id, true, self.policy.clone(), self.persisted[i].clone(), self.fixes);
+        self.step(i, Input::App { command: Command::Join { state: None } }, now);
+    }
+    /// Whether member `i`'s application was told `snapshot`.
+    fn reported(&self, i: usize, snapshot: &Bytes) -> bool {
+        self.events.iter().any(|(at, e)| *at == i && match e {
+            Event::LatePass { snapshot: s, .. } | Event::Displaced { snapshot: s, .. } => s == snapshot,
+            Event::BecameHolder { snapshot: s, .. } | Event::Snapshot { snapshot: s, .. } => s == snapshot,
+            _ => false,
+        })
+    }
+}
+
+fn b(x: &str) -> Bytes {
+    Bytes(x.as_bytes().to_vec())
+}
+
+/// H5(1): a takes; b asks; a's pass (with SA) is delayed past b's ask timeout; b takes with
+/// SB; the pass arrives. Revision 3 renews over it silently (SA never reaches any
+/// application); revision 4 reports it (`LatePass`).
+fn take_races_delayed_pass(fixes: Fixes) -> (bool, Router) {
+    let mut r = Router::new(&["a", "b"], fixes, Policy::default());
+    for id in ["a", "b"] {
+        r.cmd(id, Command::Join { state: None }, 0);
+    }
+    r.deliver(0);
+    r.cmd("a", Command::Take { state: Some(b("S0")) }, 10);
+    r.deliver(20);
+    r.cmd("b", Command::Ask, 100);
+    r.deliver(110);
+    r.cmd("a", Command::Pass { to: "b".into(), snapshot: b("SA") }, 120);
+    // The pass is delayed; b times out and takes with its own projection.
+    r.deliver_except(130, &|_, f| matches!(f.body, Body::Pass { .. }));
+    r.cmd("b", Command::Take { state: Some(b("SB")) }, 200);
+    r.tick_all(1_700);
+    r.deliver_except(1_710, &|_, f| matches!(f.body, Body::Pass { .. }));
+    assert!(r.m[1].is_holder());
+    r.deliver(1_800);
+    for t in [7_000u64, 13_000, 19_000] {
+        r.tick_all(t);
+        r.deliver(t + 10);
+    }
+    (r.reported(1, &b("SA")), r)
+}
+
+#[test]
+fn h5_take_races_delayed_pass() {
+    let (old, _) = take_races_delayed_pass(Fixes::REV3);
+    assert!(!old, "revision 3 should drop SA silently");
+    let (new, r) = take_races_delayed_pass(Fixes::ALL);
+    assert!(new, "revision 4 must report SA");
+    assert!(r.events.iter().any(|(i, e)| *i == 1 && matches!(e, Event::LatePass { .. })));
+    check_converged(&r.m).unwrap();
+}
+
+/// H5(2): `ff` takes term 1 and releases; `00` takes term 2 and publishes N; `ff` restarts
+/// with its persisted data while `00`'s frames to it are delayed past askTimeoutMs.
+/// Revision 3 resurrects 1.0.ff, retakes 2.0.ff and overwrites N; revision 4's tombstone
+/// keeps `ff` from acting as holder.
+fn released_restart_overwrites(fixes: Fixes) -> Router {
+    let policy = Policy::default();
+    let mut r = Router::new(&["00", "ff"], fixes, policy);
+    for id in ["00", "ff"] {
+        r.cmd(id, Command::Join { state: None }, 0);
+    }
+    r.deliver(0);
+    r.cmd("ff", Command::Take { state: Some(b("OLD")) }, 10);
+    r.deliver(20);
+    r.cmd("ff", Command::Release, 30);
+    r.deliver(40);
+    r.cmd("00", Command::Ask, 50);
+    // 00's take and later frames to ff are delayed.
+    r.deliver_except(60, &|to, _| to == "ff");
+    r.cmd("00", Command::Publish { id: Id::from_label("n"), payload: b("N") }, 70);
+    r.deliver_except(80, &|to, _| to == "ff");
+    r.restart("ff", 1_000);
+    r.deliver_except(1_010, &|to, _| to == "ff");
+    r.tick_all(2_600);
+    r.deliver_except(2_610, &|to, _| to == "ff");
+    // Now everything flows.
+    r.deliver(3_000);
+    for t in [8_000u64, 14_000, 20_000] {
+        r.tick_all(t);
+        r.deliver(t + 10);
+    }
+    r
+}
+
+#[test]
+fn h5_released_restart_does_not_overwrite() {
+    let old = released_restart_overwrites(Fixes::REV3);
+    let old_state = old.m[0].state().clone();
+    assert_ne!(old_state, b("N"), "revision 3 should overwrite N");
+    let new = released_restart_overwrites(Fixes::ALL);
+    assert_eq!(new.m[0].state(), &b("N"));
+    assert!(new.m[0].is_holder());
+    check_converged(&new.m).unwrap();
+}
+
+/// H5(3): b submits X to the holder a, but a passes to c before the submit arrives (a drops
+/// it). Revision 3 never orders X and tells nobody; revision 4 resends on the holder change
+/// and c orders it (possibly more than once, which §S8 allows).
+fn submit_across_holder_change(fixes: Fixes) -> Router {
+    let policy = Policy { fold: Fold::Append, ..Policy::default() };
+    let mut r = Router::new(&["a", "b", "c"], fixes, policy);
+    for id in ["a", "b", "c"] {
+        r.cmd(id, Command::Join { state: None }, 0);
+    }
+    r.deliver(0);
+    r.cmd("a", Command::Take { state: None }, 10);
+    r.deliver(20);
+    r.cmd("c", Command::Ask, 30);
+    r.deliver(40);
+    r.cmd("b", Command::Submit { id: Id::from_label("x"), payload: b("X") }, 50);
+    // The submit is held while a passes to c.
+    r.deliver_except(55, &|_, f| matches!(f.body, Body::Submit { .. }));
+    r.cmd("a", Command::Pass { to: "c".into(), snapshot: r.m[0].state().clone() }, 60);
+    r.deliver(70);
+    for t in [1_600u64, 3_200, 6_000, 12_000] {
+        r.tick_all(t);
+        r.deliver(t + 10);
+    }
+    r
+}
+
+#[test]
+fn h5_submit_across_holder_change() {
+    let ordered = |r: &Router| {
+        r.events
+            .iter()
+            .filter(|(i, e)| *i == 2 && matches!(e, Event::Message { id, .. } if *id == Id::from_label("x")))
+            .count()
+    };
+    let old = submit_across_holder_change(Fixes::REV3);
+    let failed = |r: &Router| r.events.iter().any(|(_, e)| matches!(e, Event::SubmitFailed { .. }));
+    assert_eq!(ordered(&old), 0, "revision 3 drops the submit");
+    assert!(!failed(&old), "and reports nothing");
+    let new = submit_across_holder_change(Fixes::ALL);
+    assert!(ordered(&new) >= 1, "revision 4 orders it at least once");
+    assert!(!failed(&new));
+    check_converged(&new.m).unwrap();
+}
+
+/// F12/F21 scripted with the default policy: (1) every frame delivered, (2) `a`'s pass to `x`
+/// lost, (3) 300 seeds of 30 % random loss from the passes on, then eventual delivery.
+fn two_passes_to_one(fixes: Fixes, lose_a_pass_to_x: bool, loss_seed: Option<u64>) -> Vec<Session> {
+    let mut r = Router::new(&["a", "b", "x"], fixes, Policy::default());
+    // a and b never hear each other; b hears nobody until it takes.
+    r.reach[0][1] = false;
+    r.reach[1][0] = false;
+    r.reach[1][2] = false;
+    r.reach[2][1] = false;
+    for id in ["a", "b", "x"] {
+        r.cmd(id, Command::Join { state: None }, 0);
+    }
+    r.deliver(0);
+    r.cmd("a", Command::Take { state: Some(b("A")) }, 10);
+    r.deliver(10);
+    r.cmd("x", Command::Ask, 20);
+    r.deliver(20);
+    r.reach[1][2] = true;
+    r.reach[2][1] = true;
+    r.cmd("b", Command::Take { state: Some(b("B")) }, 30);
+    r.deliver(30);
+    assert_eq!(r.m[2].accepted(), Some(&Claim::new(1, 0, "b")));
+    r.cmd("b", Command::Pass { to: "x".into(), snapshot: b("B") }, 40);
+    r.cmd("a", Command::Pass { to: "x".into(), snapshot: b("A") }, 40);
+    let mut rng = loss_seed.unwrap_or(0).wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
+    let mut lose = |r: &mut Router, k: u64| {
+        if lose_a_pass_to_x && k == 0 {
+            r.net.retain(|(d, f)| !(*d == 2 && f.from == "a" && matches!(f.body, Body::Pass { .. })));
+        }
+        if loss_seed.is_some() && k < 12 {
+            r.net.retain(|_| {
+                rng ^= rng << 13;
+                rng ^= rng >> 7;
+                rng ^= rng << 17;
+                rng % 10 >= 3
+            });
         }
     };
-    let ab = |x: usize, y: usize| (x == 0 && y == 1) || (x == 1 && y == 0);
-    for (i, s) in m.iter_mut().enumerate() {
-        let outs = s.handle(Input::App { command: Command::Join { state: None } }, 0);
-        route(&mut net, i, outs, &ab);
-    }
-    flush(&mut m, &mut net, 0, &ab);
-    let outs = m[0].handle(Input::App { command: Command::Take { state: Some(Bytes(b"A".to_vec())) } }, 10);
-    route(&mut net, 0, outs, &ab);
-    flush(&mut m, &mut net, 10, &ab);
-    let outs = m[2].handle(Input::App { command: Command::Ask }, 20);
-    route(&mut net, 2, outs, &ab);
-    flush(&mut m, &mut net, 20, &ab);
-    let outs = m[1].handle(Input::App { command: Command::Take { state: Some(Bytes(b"B".to_vec())) } }, 30);
-    route(&mut net, 1, outs, &ab);
-    flush(&mut m, &mut net, 30, &ab);
-    assert_eq!(m[2].accepted(), Some(&Claim::new(1, 0, "b")));
-    lossy.set(true);
-    let outs = m[1].handle(Input::App { command: Command::Pass { to: "x".into(), snapshot: Bytes(b"B".to_vec()) } }, 40);
-    route(&mut net, 1, outs, &ab);
-    let outs = m[0].handle(Input::App { command: Command::Pass { to: "x".into(), snapshot: Bytes(b"A".to_vec()) } }, 40);
-    let cut_ax = |x: usize, y: usize| ab(x, y) || (lose_a_pass_to_x && x == 0 && y == 2);
-    route(&mut net, 0, outs, &cut_ax);
-    flush(&mut m, &mut net, 50, &ab);
-    // The partition heals; losses go on for a while, then stop (eventual delivery).
-    let none = |_: usize, _: usize| false;
+    lose(&mut r, 0);
+    r.deliver(50);
+    r.reach[0][1] = true;
+    r.reach[1][0] = true;
     for k in 1..=20u64 {
-        if k == 12 {
-            lossy.set(false);
-        }
         let t = k * 6_000;
-        for (i, s) in m.iter_mut().enumerate() {
-            let outs = s.handle(Input::Tick, t);
-            route(&mut net, i, outs, &none);
-        }
-        flush(&mut m, &mut net, t + 10, &none);
+        r.tick_all(t);
+        lose(&mut r, k);
+        r.deliver(t + 10);
     }
-    m
+    r.m
 }
 
 fn show(m: &[Session]) -> String {

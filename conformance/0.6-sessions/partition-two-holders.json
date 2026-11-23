@@ -1,5 +1,5 @@
 {
-  "description": "a is cut off; b sees a lapsed and takes; when a's link heals its hello reaches b, which answers with state, and a yields to the greater claim (§S4, §S6, G6).",
+  "description": "a is cut off; b sees a lapsed and takes; when a's link heals its hello reaches b, which answers with state; a yields to the greater claim and sends `yielded` with what it held, which b reports (§S4, §S5 yielding state, §S6, G6, G11).",
   "final": [
     {
       "digest": "16e54c500308ac4b6575b092a341c8b4fbbf9eeb9317724c8617e3238878bdb1",
@@ -40,21 +40,30 @@
     "answerLesser": true,
     "askResend": true,
     "byeResend": true,
+    "evidence": true,
+    "evidencePush": true,
     "livenessHolderFrames": true,
+    "persistRelease": true,
     "rank1FromHolder": true,
+    "renewGuard": true,
     "renewNeedsContact": true,
     "renewWider": true,
-    "seenUnsynced": true
+    "seenUnsynced": true,
+    "stateReports": true,
+    "submitRetry": true,
+    "yieldedRetry": true
   },
   "format": "colophon/session-vectors/6",
   "members": [
     {
       "canWrite": true,
+      "freshSeed": null,
       "id": "a",
       "persisted": null
     },
     {
       "canWrite": true,
+      "freshSeed": null,
       "id": "b",
       "persisted": null
     }
@@ -86,10 +95,12 @@
         {
           "frame": {
             "body": {
+              "echo": [],
+              "fresh": "AAAAAAAAAAAAAAAAAAAAAA",
+              "heard": "unknown",
               "kind": "hello",
               "lapsed": false,
-              "seen": null,
-              "sessionKey": ""
+              "seen": null
             },
             "from": "a"
           },
@@ -111,10 +122,12 @@
         {
           "frame": {
             "body": {
+              "echo": [],
+              "fresh": "AAAAAAAAAAAAAAAAAAAAAA",
+              "heard": "unknown",
               "kind": "hello",
               "lapsed": false,
-              "seen": null,
-              "sessionKey": ""
+              "seen": null
             },
             "from": "b"
           },
@@ -127,10 +140,12 @@
       "input": {
         "frame": {
           "body": {
+            "echo": [],
+            "fresh": "AAAAAAAAAAAAAAAAAAAAAA",
+            "heard": "unknown",
             "kind": "hello",
             "lapsed": false,
-            "seen": null,
-            "sessionKey": ""
+            "seen": null
           },
           "from": "a"
         },
@@ -145,10 +160,12 @@
       "input": {
         "frame": {
           "body": {
+            "echo": [],
+            "fresh": "AAAAAAAAAAAAAAAAAAAAAA",
+            "heard": "unknown",
             "kind": "hello",
             "lapsed": false,
-            "seen": null,
-            "sessionKey": ""
+            "seen": null
           },
           "from": "b"
         },
@@ -264,6 +281,9 @@
         {
           "frame": {
             "body": {
+              "echo": [],
+              "fresh": "AAAAAAAAAAAAAAAAAAAAAA",
+              "heard": "live",
               "kind": "hello",
               "lapsed": false,
               "seen": {
@@ -271,8 +291,7 @@
                 "rank": 0,
                 "seq": null,
                 "term": 1
-              },
-              "sessionKey": ""
+              }
             },
             "from": "b",
             "to": "a"
@@ -323,6 +342,9 @@
       "input": {
         "frame": {
           "body": {
+            "echo": [],
+            "fresh": "AAAAAAAAAAAAAAAAAAAAAA",
+            "heard": "live",
             "kind": "hello",
             "lapsed": false,
             "seen": {
@@ -330,8 +352,7 @@
               "rank": 0,
               "seq": null,
               "term": 1
-            },
-            "sessionKey": ""
+            }
           },
           "from": "b",
           "to": "a"
@@ -415,6 +436,9 @@
         {
           "frame": {
             "body": {
+              "echo": [],
+              "fresh": "AAAAAAAAAAAAAAAAAAAAAA",
+              "heard": "lapsed",
               "kind": "hello",
               "lapsed": false,
               "seen": {
@@ -422,8 +446,7 @@
                 "rank": 0,
                 "seq": 0,
                 "term": 1
-              },
-              "sessionKey": ""
+              }
             },
             "from": "b"
           },
@@ -500,6 +523,9 @@
         {
           "frame": {
             "body": {
+              "echo": [],
+              "fresh": "AAAAAAAAAAAAAAAAAAAAAA",
+              "heard": "live",
               "kind": "hello",
               "lapsed": false,
               "seen": {
@@ -507,8 +533,7 @@
                 "rank": 0,
                 "seq": 0,
                 "term": 1
-              },
-              "sessionKey": ""
+              }
             },
             "from": "a"
           },
@@ -521,6 +546,9 @@
       "input": {
         "frame": {
           "body": {
+            "echo": [],
+            "fresh": "AAAAAAAAAAAAAAAAAAAAAA",
+            "heard": "live",
             "kind": "hello",
             "lapsed": false,
             "seen": {
@@ -528,8 +556,7 @@
               "rank": 0,
               "seq": 0,
               "term": 1
-            },
-            "sessionKey": ""
+            }
           },
           "from": "a"
         },
@@ -601,6 +628,23 @@
           "output": "event"
         },
         {
+          "frame": {
+            "body": {
+              "claim": {
+                "holder": "a",
+                "rank": 0,
+                "term": 1
+              },
+              "kind": "yielded",
+              "seq": 0,
+              "snapshot": "czA="
+            },
+            "from": "a",
+            "to": "b"
+          },
+          "output": "send"
+        },
+        {
           "event": {
             "claim": {
               "holder": "b",
@@ -614,6 +658,9 @@
         {
           "frame": {
             "body": {
+              "echo": [],
+              "fresh": "AAAAAAAAAAAAAAAAAAAAAA",
+              "heard": "live",
               "kind": "hello",
               "lapsed": false,
               "seen": {
@@ -621,8 +668,7 @@
                 "rank": 0,
                 "seq": null,
                 "term": 2
-              },
-              "sessionKey": ""
+              }
             },
             "from": "a",
             "to": "b"
@@ -649,6 +695,47 @@
       "input": {
         "frame": {
           "body": {
+            "claim": {
+              "holder": "a",
+              "rank": 0,
+              "term": 1
+            },
+            "kind": "yielded",
+            "seq": 0,
+            "snapshot": "czA="
+          },
+          "from": "a",
+          "to": "b"
+        },
+        "input": "frame",
+        "writer": true
+      },
+      "member": "b",
+      "outputs": [
+        {
+          "event": {
+            "claim": {
+              "holder": "a",
+              "rank": 0,
+              "term": 1
+            },
+            "event": "displaced",
+            "from": "a",
+            "seq": 0,
+            "snapshot": "czA="
+          },
+          "output": "event"
+        }
+      ]
+    },
+    {
+      "at": 10010,
+      "input": {
+        "frame": {
+          "body": {
+            "echo": [],
+            "fresh": "AAAAAAAAAAAAAAAAAAAAAA",
+            "heard": "live",
             "kind": "hello",
             "lapsed": false,
             "seen": {
@@ -656,8 +743,7 @@
               "rank": 0,
               "seq": null,
               "term": 2
-            },
-            "sessionKey": ""
+            }
           },
           "from": "a",
           "to": "b"

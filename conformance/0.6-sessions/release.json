@@ -1,21 +1,21 @@
 {
-  "description": "a releases (bye); the cell has no holder; b asks and takes at once (§S4, §S5).",
+  "description": "a releases: it persists the tombstone, then sends bye (leaving false); the cell has no holder; b asks and takes at once; a restarts and does not resurrect its claim (§S4, §S5 release, R2c, R3).",
   "final": [
     {
-      "digest": "16e54c500308ac4b6575b092a341c8b4fbbf9eeb9317724c8617e3238878bdb1",
+      "digest": "dc67f5f3305921327ebca06ed2ec1e45a3918d62efe4b203054d3bf4f5a951c6",
       "member": "a",
       "view": {
         "accepted": {
-          "holder": "b",
+          "holder": "a",
           "rank": 0,
-          "term": 2
+          "term": 1
         },
         "gated": false,
-        "holder": "b",
+        "holder": null,
         "holding": false,
         "seq": 0,
-        "state": "czA=",
-        "synced": true
+        "state": "",
+        "synced": false
       }
     },
     {
@@ -40,21 +40,30 @@
     "answerLesser": true,
     "askResend": true,
     "byeResend": true,
+    "evidence": true,
+    "evidencePush": true,
     "livenessHolderFrames": true,
+    "persistRelease": true,
     "rank1FromHolder": true,
+    "renewGuard": true,
     "renewNeedsContact": true,
     "renewWider": true,
-    "seenUnsynced": true
+    "seenUnsynced": true,
+    "stateReports": true,
+    "submitRetry": true,
+    "yieldedRetry": true
   },
   "format": "colophon/session-vectors/6",
   "members": [
     {
       "canWrite": true,
+      "freshSeed": null,
       "id": "a",
       "persisted": null
     },
     {
       "canWrite": true,
+      "freshSeed": null,
       "id": "b",
       "persisted": null
     }
@@ -86,10 +95,12 @@
         {
           "frame": {
             "body": {
+              "echo": [],
+              "fresh": "AAAAAAAAAAAAAAAAAAAAAA",
+              "heard": "unknown",
               "kind": "hello",
               "lapsed": false,
-              "seen": null,
-              "sessionKey": ""
+              "seen": null
             },
             "from": "a"
           },
@@ -111,10 +122,12 @@
         {
           "frame": {
             "body": {
+              "echo": [],
+              "fresh": "AAAAAAAAAAAAAAAAAAAAAA",
+              "heard": "unknown",
               "kind": "hello",
               "lapsed": false,
-              "seen": null,
-              "sessionKey": ""
+              "seen": null
             },
             "from": "b"
           },
@@ -127,10 +140,12 @@
       "input": {
         "frame": {
           "body": {
+            "echo": [],
+            "fresh": "AAAAAAAAAAAAAAAAAAAAAA",
+            "heard": "unknown",
             "kind": "hello",
             "lapsed": false,
-            "seen": null,
-            "sessionKey": ""
+            "seen": null
           },
           "from": "a"
         },
@@ -145,10 +160,12 @@
       "input": {
         "frame": {
           "body": {
+            "echo": [],
+            "fresh": "AAAAAAAAAAAAAAAAAAAAAA",
+            "heard": "unknown",
             "kind": "hello",
             "lapsed": false,
-            "seen": null,
-            "sessionKey": ""
+            "seen": null
           },
           "from": "b"
         },
@@ -264,6 +281,9 @@
         {
           "frame": {
             "body": {
+              "echo": [],
+              "fresh": "AAAAAAAAAAAAAAAAAAAAAA",
+              "heard": "live",
               "kind": "hello",
               "lapsed": false,
               "seen": {
@@ -271,8 +291,7 @@
                 "rank": 0,
                 "seq": null,
                 "term": 1
-              },
-              "sessionKey": ""
+              }
             },
             "from": "b",
             "to": "a"
@@ -323,6 +342,9 @@
       "input": {
         "frame": {
           "body": {
+            "echo": [],
+            "fresh": "AAAAAAAAAAAAAAAAAAAAAA",
+            "heard": "live",
             "kind": "hello",
             "lapsed": false,
             "seen": {
@@ -330,8 +352,7 @@
               "rank": 0,
               "seq": null,
               "term": 1
-            },
-            "sessionKey": ""
+            }
           },
           "from": "b",
           "to": "a"
@@ -395,6 +416,15 @@
       },
       "member": "a",
       "outputs": [
+        {
+          "claim": {
+            "holder": "a",
+            "rank": 0,
+            "term": 1
+          },
+          "output": "persist",
+          "released": true
+        },
         {
           "frame": {
             "body": {
@@ -506,163 +536,45 @@
       ]
     },
     {
-      "at": 210,
+      "member": "a",
+      "restart": true
+    },
+    {
+      "at": 300,
       "input": {
-        "frame": {
-          "body": {
-            "claim": {
-              "holder": "b",
-              "rank": 0,
-              "term": 2
-            },
-            "kind": "take"
-          },
-          "from": "b"
+        "command": {
+          "command": "join",
+          "state": null
         },
-        "input": "frame",
-        "writer": true
+        "input": "app"
       },
       "member": "a",
       "outputs": [
         {
-          "claim": {
-            "holder": "b",
-            "rank": 0,
-            "term": 2
-          },
-          "output": "persist"
-        },
-        {
-          "event": {
-            "claim": {
-              "holder": "b",
-              "rank": 0,
-              "term": 2
-            },
-            "event": "holderChanged"
-          },
-          "output": "event"
-        },
-        {
           "frame": {
             "body": {
+              "echo": [],
+              "fresh": "AAAAAAAAAAAAAAAAAAAAAA",
+              "heard": "live",
               "kind": "hello",
               "lapsed": false,
               "seen": {
-                "holder": "b",
+                "holder": "a",
                 "rank": 0,
                 "seq": null,
-                "term": 2
-              },
-              "sessionKey": ""
+                "term": 1
+              }
             },
-            "from": "a",
-            "to": "b"
+            "from": "a"
           },
           "output": "send"
         }
       ]
     },
     {
-      "at": 210,
+      "at": 2000,
       "input": {
-        "frame": {
-          "body": {
-            "claim": {
-              "holder": "b",
-              "rank": 0,
-              "term": 2
-            },
-            "kind": "state",
-            "seq": 0,
-            "snapshot": "czA="
-          },
-          "from": "b",
-          "retain": true
-        },
-        "input": "frame",
-        "writer": true
-      },
-      "member": "a",
-      "outputs": [
-        {
-          "event": {
-            "claim": {
-              "holder": "b",
-              "rank": 0,
-              "term": 2
-            },
-            "event": "snapshot",
-            "seq": 0,
-            "snapshot": "czA="
-          },
-          "output": "event"
-        }
-      ]
-    },
-    {
-      "at": 210,
-      "input": {
-        "frame": {
-          "body": {
-            "kind": "hello",
-            "lapsed": false,
-            "seen": {
-              "holder": "b",
-              "rank": 0,
-              "seq": null,
-              "term": 2
-            },
-            "sessionKey": ""
-          },
-          "from": "a",
-          "to": "b"
-        },
-        "input": "frame",
-        "writer": true
-      },
-      "member": "b",
-      "outputs": [
-        {
-          "frame": {
-            "body": {
-              "claim": {
-                "holder": "b",
-                "rank": 0,
-                "term": 2
-              },
-              "kind": "state",
-              "seq": 0,
-              "snapshot": "czA="
-            },
-            "from": "b",
-            "retain": true,
-            "to": "a"
-          },
-          "output": "send"
-        }
-      ]
-    },
-    {
-      "at": 210,
-      "input": {
-        "frame": {
-          "body": {
-            "claim": {
-              "holder": "b",
-              "rank": 0,
-              "term": 2
-            },
-            "kind": "state",
-            "seq": 0,
-            "snapshot": "czA="
-          },
-          "from": "b",
-          "retain": true,
-          "to": "a"
-        },
-        "input": "frame",
-        "writer": true
+        "input": "tick"
       },
       "member": "a",
       "outputs": []

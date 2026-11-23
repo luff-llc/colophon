@@ -2,7 +2,7 @@
   "description": "msg 2 is lost; msg 3 is held early; b's hello names the claim and seq 1; a resends msg 2 and 3 from its tail (§S8).",
   "final": [
     {
-      "digest": "a6512456c8c3d57083910e0747ee77b31050950bfdd89182ef2fab35daf4162f",
+      "digest": "35d4655008ad628a6430329d108416cad467b2f7825e25893f79be083d965db3",
       "member": "a",
       "view": {
         "accepted": {
@@ -14,12 +14,12 @@
         "holder": "a",
         "holding": true,
         "seq": 3,
-        "state": "czAxMjM=",
+        "state": "AAAAAnMwAAAAATEAAAABMgAAAAEz",
         "synced": true
       }
     },
     {
-      "digest": "657378d8e2b9d462035a5ec3deefac3ee662ddeb5ffe65f2fe6eb7b03c5d90db",
+      "digest": "608e6ee359a2bc918ebeb3e8f0946aad6ed08b6f6dbc6b0de098ee8b6d753fbe",
       "member": "b",
       "view": {
         "accepted": {
@@ -31,7 +31,7 @@
         "holder": "a",
         "holding": false,
         "seq": 3,
-        "state": "czAxMjM=",
+        "state": "AAAAAnMwAAAAATEAAAABMgAAAAEz",
         "synced": true
       }
     }
@@ -40,21 +40,30 @@
     "answerLesser": true,
     "askResend": true,
     "byeResend": true,
+    "evidence": true,
+    "evidencePush": true,
     "livenessHolderFrames": true,
+    "persistRelease": true,
     "rank1FromHolder": true,
+    "renewGuard": true,
     "renewNeedsContact": true,
     "renewWider": true,
-    "seenUnsynced": true
+    "seenUnsynced": true,
+    "stateReports": true,
+    "submitRetry": true,
+    "yieldedRetry": true
   },
   "format": "colophon/session-vectors/6",
   "members": [
     {
       "canWrite": true,
+      "freshSeed": null,
       "id": "a",
       "persisted": null
     },
     {
       "canWrite": true,
+      "freshSeed": null,
       "id": "b",
       "persisted": null
     }
@@ -86,10 +95,12 @@
         {
           "frame": {
             "body": {
+              "echo": [],
+              "fresh": "AAAAAAAAAAAAAAAAAAAAAA",
+              "heard": "unknown",
               "kind": "hello",
               "lapsed": false,
-              "seen": null,
-              "sessionKey": ""
+              "seen": null
             },
             "from": "a"
           },
@@ -111,10 +122,12 @@
         {
           "frame": {
             "body": {
+              "echo": [],
+              "fresh": "AAAAAAAAAAAAAAAAAAAAAA",
+              "heard": "unknown",
               "kind": "hello",
               "lapsed": false,
-              "seen": null,
-              "sessionKey": ""
+              "seen": null
             },
             "from": "b"
           },
@@ -127,10 +140,12 @@
       "input": {
         "frame": {
           "body": {
+            "echo": [],
+            "fresh": "AAAAAAAAAAAAAAAAAAAAAA",
+            "heard": "unknown",
             "kind": "hello",
             "lapsed": false,
-            "seen": null,
-            "sessionKey": ""
+            "seen": null
           },
           "from": "a"
         },
@@ -145,10 +160,12 @@
       "input": {
         "frame": {
           "body": {
+            "echo": [],
+            "fresh": "AAAAAAAAAAAAAAAAAAAAAA",
+            "heard": "unknown",
             "kind": "hello",
             "lapsed": false,
-            "seen": null,
-            "sessionKey": ""
+            "seen": null
           },
           "from": "b"
         },
@@ -163,7 +180,7 @@
       "input": {
         "command": {
           "command": "take",
-          "state": "czA="
+          "state": "AAAAAnMw"
         },
         "input": "app"
       },
@@ -201,7 +218,7 @@
               },
               "kind": "state",
               "seq": 0,
-              "snapshot": "czA="
+              "snapshot": "AAAAAnMw"
             },
             "from": "a",
             "retain": true
@@ -216,7 +233,7 @@
               "term": 1
             },
             "event": "becameHolder",
-            "snapshot": "czA=",
+            "snapshot": "AAAAAnMw",
             "via": "take"
           },
           "output": "event"
@@ -264,6 +281,9 @@
         {
           "frame": {
             "body": {
+              "echo": [],
+              "fresh": "AAAAAAAAAAAAAAAAAAAAAA",
+              "heard": "live",
               "kind": "hello",
               "lapsed": false,
               "seen": {
@@ -271,8 +291,7 @@
                 "rank": 0,
                 "seq": null,
                 "term": 1
-              },
-              "sessionKey": ""
+              }
             },
             "from": "b",
             "to": "a"
@@ -293,7 +312,7 @@
             },
             "kind": "state",
             "seq": 0,
-            "snapshot": "czA="
+            "snapshot": "AAAAAnMw"
           },
           "from": "a",
           "retain": true
@@ -312,7 +331,7 @@
             },
             "event": "snapshot",
             "seq": 0,
-            "snapshot": "czA="
+            "snapshot": "AAAAAnMw"
           },
           "output": "event"
         }
@@ -323,6 +342,9 @@
       "input": {
         "frame": {
           "body": {
+            "echo": [],
+            "fresh": "AAAAAAAAAAAAAAAAAAAAAA",
+            "heard": "live",
             "kind": "hello",
             "lapsed": false,
             "seen": {
@@ -330,8 +352,7 @@
               "rank": 0,
               "seq": null,
               "term": 1
-            },
-            "sessionKey": ""
+            }
           },
           "from": "b",
           "to": "a"
@@ -351,7 +372,7 @@
               },
               "kind": "state",
               "seq": 0,
-              "snapshot": "czA="
+              "snapshot": "AAAAAnMw"
             },
             "from": "a",
             "retain": true,
@@ -373,7 +394,7 @@
             },
             "kind": "state",
             "seq": 0,
-            "snapshot": "czA="
+            "snapshot": "AAAAAnMw"
           },
           "from": "a",
           "retain": true,
@@ -390,7 +411,7 @@
       "input": {
         "command": {
           "command": "publish",
-          "id": "AQ==",
+          "id": "yg3yyVqhRMHQ_y_zyPln_Q",
           "payload": "MQ=="
         },
         "input": "app"
@@ -405,7 +426,7 @@
               "term": 1
             },
             "event": "message",
-            "id": "AQ==",
+            "id": "yg3yyVqhRMHQ_y_zyPln_Q",
             "origin": "a",
             "payload": "MQ==",
             "seq": 1
@@ -420,7 +441,7 @@
                 "rank": 0,
                 "term": 1
               },
-              "id": "AQ==",
+              "id": "yg3yyVqhRMHQ_y_zyPln_Q",
               "kind": "msg",
               "origin": "a",
               "payload": "MQ==",
@@ -437,7 +458,7 @@
       "input": {
         "command": {
           "command": "publish",
-          "id": "Ag==",
+          "id": "KcGyiedSIZWzYuRPVOBUcA",
           "payload": "Mg=="
         },
         "input": "app"
@@ -452,7 +473,7 @@
               "term": 1
             },
             "event": "message",
-            "id": "Ag==",
+            "id": "KcGyiedSIZWzYuRPVOBUcA",
             "origin": "a",
             "payload": "Mg==",
             "seq": 2
@@ -467,7 +488,7 @@
                 "rank": 0,
                 "term": 1
               },
-              "id": "Ag==",
+              "id": "KcGyiedSIZWzYuRPVOBUcA",
               "kind": "msg",
               "origin": "a",
               "payload": "Mg==",
@@ -484,7 +505,7 @@
       "input": {
         "command": {
           "command": "publish",
-          "id": "Aw==",
+          "id": "FTgSrl_qC3OgEb8ovXzqkw",
           "payload": "Mw=="
         },
         "input": "app"
@@ -499,7 +520,7 @@
               "term": 1
             },
             "event": "message",
-            "id": "Aw==",
+            "id": "FTgSrl_qC3OgEb8ovXzqkw",
             "origin": "a",
             "payload": "Mw==",
             "seq": 3
@@ -514,7 +535,7 @@
                 "rank": 0,
                 "term": 1
               },
-              "id": "Aw==",
+              "id": "FTgSrl_qC3OgEb8ovXzqkw",
               "kind": "msg",
               "origin": "a",
               "payload": "Mw==",
@@ -536,7 +557,7 @@
               "rank": 0,
               "term": 1
             },
-            "id": "AQ==",
+            "id": "yg3yyVqhRMHQ_y_zyPln_Q",
             "kind": "msg",
             "origin": "a",
             "payload": "MQ==",
@@ -557,7 +578,7 @@
               "term": 1
             },
             "event": "message",
-            "id": "AQ==",
+            "id": "yg3yyVqhRMHQ_y_zyPln_Q",
             "origin": "a",
             "payload": "MQ==",
             "seq": 1
@@ -576,7 +597,7 @@
               "rank": 0,
               "term": 1
             },
-            "id": "Aw==",
+            "id": "FTgSrl_qC3OgEb8ovXzqkw",
             "kind": "msg",
             "origin": "a",
             "payload": "Mw==",
@@ -592,6 +613,9 @@
         {
           "frame": {
             "body": {
+              "echo": [],
+              "fresh": "AAAAAAAAAAAAAAAAAAAAAA",
+              "heard": "live",
               "kind": "hello",
               "lapsed": false,
               "seen": {
@@ -599,8 +623,7 @@
                 "rank": 0,
                 "seq": 1,
                 "term": 1
-              },
-              "sessionKey": ""
+              }
             },
             "from": "b",
             "to": "a"
@@ -614,6 +637,9 @@
       "input": {
         "frame": {
           "body": {
+            "echo": [],
+            "fresh": "AAAAAAAAAAAAAAAAAAAAAA",
+            "heard": "live",
             "kind": "hello",
             "lapsed": false,
             "seen": {
@@ -621,8 +647,7 @@
               "rank": 0,
               "seq": 1,
               "term": 1
-            },
-            "sessionKey": ""
+            }
           },
           "from": "b",
           "to": "a"
@@ -640,7 +665,7 @@
                 "rank": 0,
                 "term": 1
               },
-              "id": "Ag==",
+              "id": "KcGyiedSIZWzYuRPVOBUcA",
               "kind": "msg",
               "origin": "a",
               "payload": "Mg==",
@@ -659,7 +684,7 @@
                 "rank": 0,
                 "term": 1
               },
-              "id": "Aw==",
+              "id": "FTgSrl_qC3OgEb8ovXzqkw",
               "kind": "msg",
               "origin": "a",
               "payload": "Mw==",
@@ -682,7 +707,7 @@
               "rank": 0,
               "term": 1
             },
-            "id": "Ag==",
+            "id": "KcGyiedSIZWzYuRPVOBUcA",
             "kind": "msg",
             "origin": "a",
             "payload": "Mg==",
@@ -704,7 +729,7 @@
               "term": 1
             },
             "event": "message",
-            "id": "Ag==",
+            "id": "KcGyiedSIZWzYuRPVOBUcA",
             "origin": "a",
             "payload": "Mg==",
             "seq": 2
@@ -719,7 +744,7 @@
               "term": 1
             },
             "event": "message",
-            "id": "Aw==",
+            "id": "FTgSrl_qC3OgEb8ovXzqkw",
             "origin": "a",
             "payload": "Mw==",
             "seq": 3
@@ -738,7 +763,7 @@
               "rank": 0,
               "term": 1
             },
-            "id": "Aw==",
+            "id": "FTgSrl_qC3OgEb8ovXzqkw",
             "kind": "msg",
             "origin": "a",
             "payload": "Mw==",

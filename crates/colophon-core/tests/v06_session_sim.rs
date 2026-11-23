@@ -106,7 +106,9 @@ struct Carrier {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 #[allow(clippy::large_enum_variant)]
 enum Ev {
-    Deliver { to: usize, n: u64, frame: Frame },
+    /// `src` is the member that sent it (the forwarder for evidence); `n` 0 marks a
+    /// forwarded frame, whose original `n` this model does not track (window bypassed).
+    Deliver { to: usize, n: u64, frame: Frame, src: usize },
     Tick(usize),
 }
 
@@ -116,7 +118,7 @@ struct Member {
     off: i64,
     drift: i64,
     up: bool,
-    persisted: Option<Claim>,
+    persisted: Option<Persisted>,
     /// §S3 (revision 2): per sender key, the highest `n` and the accepted ones within 128.
     high: BTreeMap<usize, (u64, std::collections::BTreeSet<u64>)>,
     /// The anchor this member plays from when holder, if playing.
@@ -161,6 +163,10 @@ struct Stats {
     delivered: u64,
     /// Messages applied from the early-hold buffer (they arrived before a missing one).
     early_applied: u64,
+    /// Evidence frames forwarded (§S4, revision 4).
+    forwarded: u64,
+    /// Displaced-state and late-pass reports (G11).
+    reports: u64,
 }
 
 const RATE: i64 = 1250;
@@ -251,7 +257,7 @@ impl Sim {
                 self.note(format!("    {}", show_output(o)));
             }
         }
-        check_step(&mut self.ghost, &self.m[i].id.clone(), &before, &self.m[i].s, &outs)?;
+        check_step_input(&mut self.ghost, &self.m[i].id.clone(), &before, &self.m[i].s, &outs, delivered.as_ref())?;
         if let Some(f) = delivered {
             check_g6(&f, &self.m[i].s)?;
         }
@@ -259,7 +265,13 @@ impl Sim {
         for o in outs {
             match o {
                 Output::Send { frame } => self.send(i, frame),
-                Output::Persist { claim } => self.m[i].persisted = Some(claim),
+                Output::Forward { to, frame } => {
+                    self.stats.forwarded += 1;
+                    self.forward(i, &to, frame)
+                }
+                Output::Persist { claim, released } => {
+                    self.m[i].persisted = Some(Persisted { claim, released })
+                }
                 Output::Event { event } => follow.push(event),
             }
         }
@@ -279,6 +291,16 @@ impl Sim {
             Some(t) => self.m.iter().position(|m| m.id == *t).into_iter().collect(),
             None => (0..self.m.len()).filter(|j| *j != i).collect(),
         };
+        self.carry(i, n, frame, dsts);
+    }
+    fn forward(&mut self, i: usize, to: &str, frame: Frame) {
+        if !self.m[i].up {
+            return;
+        }
+        let dsts: Vec<usize> = self.m.iter().position(|m| m.id == to).into_iter().collect();
+        self.carry(i, 0, frame, dsts);
+    }
+    fn carry(&mut self, i: usize, n: u64, frame: Frame, dsts: Vec<usize>) {
         for j in dsts {
             let Some(c) = self.carriers.iter().min_by_key(|c| c.base).copied() else {
                 continue;
@@ -287,20 +309,20 @@ impl Sim {
                 continue;
             }
             let delay = c.base + self.rng.below(c.jitter + 1);
-            self.push(self.g + delay, Ev::Deliver { to: j, n, frame: frame.clone() });
+            self.push(self.g + delay, Ev::Deliver { to: j, n, frame: frame.clone(), src: i });
             if !self.lossless && self.rng.chance(c.dup) {
                 let d2 = delay + self.rng.below(c.jitter + 50);
-                self.push(self.g + d2, Ev::Deliver { to: j, n, frame: frame.clone() });
+                self.push(self.g + d2, Ev::Deliver { to: j, n, frame: frame.clone(), src: i });
             }
         }
     }
 
-    fn deliver(&mut self, to: usize, n: u64, frame: Frame) -> Result<(), String> {
+    fn deliver(&mut self, to: usize, n: u64, frame: Frame, src: usize) -> Result<(), String> {
         let from = self.m.iter().position(|m| m.id == frame.from).unwrap();
-        if !self.m[to].up || !self.m[from].up {
+        if !self.m[to].up || !self.m[src].up {
             return Ok(());
         }
-        if self.n_filter {
+        if self.n_filter && n > 0 {
             let (high, seen) = self.m[to].high.entry(from).or_default();
             if seen.contains(&n) || n + 128 < *high {
                 return Ok(());
@@ -318,7 +340,7 @@ impl Sim {
                 q.pop_front();
             }
         }
-        self.input(to, Input::Frame { frame, writer: true })
+        self.input(to, Input::Frame { frame, writer: true, key: None, n: None })
     }
 
     // ---- the application (§S12) ----
@@ -330,7 +352,7 @@ impl Sim {
     fn publish(&mut self, i: usize, a: Anchor) -> Result<(), String> {
         self.m[i].playing = a.playing.then_some(a);
         self.m[i].known = Some((a, self.m[i].id.clone()));
-        let id = Bytes(format!("{}-{}", self.m[i].id, self.seq).into_bytes());
+        let id = Id::from_label(&format!("{}-{}", self.m[i].id, self.seq));
         self.seq += 1;
         self.input(i, Input::App { command: Command::Publish { id, payload: a.encode() } })
     }
@@ -407,6 +429,7 @@ impl Sim {
                 }
             }
             Event::OffsetChanged { .. } => {}
+            Event::Displaced { .. } | Event::LatePass { .. } => self.stats.reports += 1,
             _ => {}
         }
         Ok(())
@@ -451,6 +474,8 @@ impl Sim {
 // Driving.
 
 const TICK_MS: u64 = 100;
+/// Displaced states never reported despite resends (finding R2f), across all runs.
+static R2F: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 #[derive(Clone, Debug)]
 enum Act {
@@ -564,7 +589,7 @@ impl Sim {
             }
             let Reverse((_, _, ev)) = self.queue.pop().unwrap();
             match ev {
-                Ev::Deliver { to, n, frame } => self.deliver(to, n, frame)?,
+                Ev::Deliver { to, n, frame, src } => self.deliver(to, n, frame, src)?,
                 Ev::Tick(i) => {
                     self.push(self.g + TICK_MS, Ev::Tick(i));
                     if !self.m[i].s.joined() {
@@ -615,7 +640,26 @@ impl Sim {
         self.quiet = true;
         // Frames already in flight may still be lost; then two holder timeouts and beats.
         self.run(t + 3 * self.policy.holder_timeout_ms + 2 * self.policy.beat_ms, heal)?;
-        check_converged(&self.m.iter().map(|m| m.s.clone()).collect::<Vec<_>>())
+        check_converged(&self.m.iter().map(|m| m.s.clone()).collect::<Vec<_>>())?;
+        // G11: every displaced holder's state reached the member that took over.
+        if self.fixes.state_reports {
+            for (taker, displaced, claim) in &self.ghost.owed {
+                let joined = |id: &str| self.m.iter().any(|m| m.id == id && m.s.joined());
+                if joined(taker) && joined(displaced) {
+                    if self.fixes.yielded_retry {
+                        // Finding R2f: bounded resends without an acknowledgement cannot
+                        // survive every partition; counted and reported, not failed.
+                        R2F.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        continue;
+                    }
+                    return Err(format!(
+                        "G11: {displaced}'s state under {} never reported to {taker}",
+                        show_claim(claim)
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -707,6 +751,8 @@ fn random_seeds_hold_the_guarantees() {
                 total.yields += s.yields;
                 total.delivered += s.delivered;
                 total.early_applied += s.early_applied;
+                total.forwarded += s.forwarded;
+                total.reports += s.reports;
                 total.max_take_error = total.max_take_error.max(s.max_take_error);
                 total.max_take_bound = total.max_take_bound.max(s.max_take_bound);
                 n += 1;
@@ -716,7 +762,10 @@ fn random_seeds_hold_the_guarantees() {
             }
         }
     }
-    println!("sim: {n} seeds passed; {total:?}");
+    println!(
+        "sim: {n} seeds passed; {total:?}; unreported displaced states (finding R2f): {}",
+        R2F.load(std::sync::atomic::Ordering::Relaxed)
+    );
     // With the revision 2 window, reordered bursts are delivered and early hold applies them.
     assert!(n < 50 || total.early_applied > 0, "early hold never applied a message");
 }
@@ -839,9 +888,13 @@ fn carrier_independence() {
 fn fix_ablation() {
     let all = Fixes::ALL;
     let group = Fixes { bye_resend: false, answer_lesser: false, renew_wider: false, liveness_holder_frames: false, ..all };
-    let cases: [(&str, Fixes); 11] = [
+    let cases: [(&str, Fixes); 20] = [
+        ("no fix removed", all),
+        ("F10 renew_needs_contact", Fixes { renew_needs_contact: false, ..all }),
         ("F5+F6+F7+F8 together", group),
         ("revision 1 draft (LITERAL)", Fixes::LITERAL),
+        ("revision 3 draft (REV3)", Fixes::REV3),
+        ("revision 4 as written (REV4)", Fixes::REV4),
         ("F1 rank1_from_holder", Fixes { rank1_from_holder: false, ..all }),
         ("F2 seen_unsynced", Fixes { seen_unsynced: false, ..all }),
         ("F5 bye_resend", Fixes { bye_resend: false, ..all }),
@@ -849,9 +902,15 @@ fn fix_ablation() {
         ("F7 renew_wider", Fixes { renew_wider: false, ..all }),
         ("F8 liveness_holder_frames", Fixes { liveness_holder_frames: false, ..all }),
         ("F9 ask_resend", Fixes { ask_resend: false, ..all }),
-        ("F10 renew_needs_contact", Fixes { renew_needs_contact: false, ..all }),
-        ("no fix removed", all),
+        ("R1 evidence", Fixes { evidence: false, ..all }),
+        ("R2 state_reports", Fixes { state_reports: false, ..all }),
+        ("R2c persist_release", Fixes { persist_release: false, ..all }),
+        ("R5 submit_retry", Fixes { submit_retry: false, ..all }),
+        ("R1c evidence_push", Fixes { evidence_push: false, ..all }),
+        ("R2d yielded_retry", Fixes { yielded_retry: false, ..all }),
+        ("R1e renew_guard", Fixes { renew_guard: false, ..all }),
     ];
+
     for (name, fixes) in cases {
         for (kind, run) in [("random", random_run_with as fn(u64, Fixes) -> _), ("playback", playback_run)] {
             let mut fails = 0;

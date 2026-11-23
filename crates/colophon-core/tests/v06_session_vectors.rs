@@ -17,21 +17,40 @@ fn dir() -> PathBuf {
 fn b(s: &str) -> Bytes {
     Bytes(s.as_bytes().to_vec())
 }
+/// An `append` state from payloads.
+fn ap(items: &[&str]) -> Bytes {
+    Fold::framed(&items.iter().map(|x| b(x)).collect::<Vec<_>>())
+}
+fn id(label: &str) -> Id {
+    Id::from_label(label)
+}
+fn frame_in(frame: Frame) -> Input {
+    Input::Frame { frame, writer: true, key: None, n: None }
+}
+
+/// Recipient, frame, and the sender key and `n` when keyed.
+type InFlight = (String, Frame, Option<(String, u64)>);
 
 /// A scripted scenario. Sends go to a pending list; `deliver` routes them in order.
 struct Script {
     name: &'static str,
     description: &'static str,
     policy: Policy,
-    members: Vec<(String, bool, Option<Claim>)>,
+    members: Vec<(String, bool, Option<Persisted>)>,
     s: BTreeMap<String, Session>,
-    pending: Vec<(String, Frame)>,
+    /// In flight: recipient, frame, and the sender key and `n` when keyed.
+    pending: Vec<InFlight>,
     steps: Vec<Value>,
+    /// Frames from `a` to `b` are lost when `(a, b)` is here.
+    cut: Vec<(String, String)>,
+    /// Keyed: each member has a session key `k-<id>`, an `n` counter and a `fresh` seed.
+    keyed: bool,
+    n: BTreeMap<String, u64>,
 }
 
 impl Script {
     fn new(name: &'static str, description: &'static str, policy: Policy, ids: &[&str]) -> Self {
-        let members: Vec<(String, bool, Option<Claim>)> =
+        let members: Vec<(String, bool, Option<Persisted>)> =
             ids.iter().map(|i| ((*i).to_owned(), true, None)).collect();
         let s = members
             .iter()
@@ -45,6 +64,25 @@ impl Script {
             s,
             pending: Vec::new(),
             steps: Vec::new(),
+            cut: Vec::new(),
+            keyed: false,
+            n: BTreeMap::new(),
+        }
+    }
+    fn keyed(mut self) -> Self {
+        self.keyed = true;
+        for (id, s) in self.s.iter_mut() {
+            *s = s.clone().with_fresh_seed(seed_of(id));
+        }
+        self
+    }
+    fn cut(&mut self, a: &str, b: &str) {
+        self.cut.push((a.into(), b.into()));
+        self.cut.push((b.into(), a.into()));
+    }
+    fn route(&mut self, from: &str, to: String, frame: Frame, key: Option<(String, u64)>) {
+        if !self.cut.iter().any(|(x, y)| x == from && *y == to) {
+            self.pending.push((to, frame, key));
         }
     }
     fn ids(&self) -> Vec<String> {
@@ -54,14 +92,23 @@ impl Script {
         let outs = self.s.get_mut(member).unwrap().handle(input.clone(), at);
         self.steps.push(json!({"member": member, "at": at, "input": input, "outputs": outs}));
         for o in &outs {
-            if let Output::Send { frame } = o {
-                let dsts: Vec<String> = match &frame.to {
-                    Some(t) => vec![t.clone()],
-                    None => self.ids().into_iter().filter(|i| i != member).collect(),
-                };
-                for d in dsts {
-                    self.pending.push((d, frame.clone()));
+            match o {
+                Output::Send { frame } => {
+                    let key = self.keyed.then(|| {
+                        let n = self.n.entry(member.to_owned()).or_insert(0);
+                        *n += 1;
+                        (format!("k-{member}"), *n)
+                    });
+                    let dsts: Vec<String> = match &frame.to {
+                        Some(t) => vec![t.clone()],
+                        None => self.ids().into_iter().filter(|i| i != member).collect(),
+                    };
+                    for d in dsts {
+                        self.route(member, d, frame.clone(), key.clone());
+                    }
                 }
+                Output::Forward { to, frame } => self.route(member, to.clone(), frame.clone(), None),
+                _ => {}
             }
         }
         outs
@@ -79,11 +126,15 @@ impl Script {
         while !self.pending.is_empty() {
             guard += 1;
             assert!(guard < 1000, "{}: frames never quiesce", self.name);
-            let (to, f) = self.pending.remove(0);
+            let (to, f, key) = self.pending.remove(0);
             if drop(&to, &f) {
                 continue;
             }
-            self.step(&to, at, Input::Frame { frame: f, writer: true });
+            let (key, n) = match key {
+                Some((k, n)) => (Some(k), Some(n)),
+                None => (None, None),
+            };
+            self.step(&to, at, Input::Frame { frame: f, writer: true, key, n });
         }
     }
     fn deliver(&mut self, at: u64) {
@@ -115,18 +166,32 @@ impl Script {
             "description": self.description,
             "policy": self.policy,
             "fixes": Fixes::default(),
-            "members": self.members.iter().map(|(id, w, p)| json!({"id": id, "canWrite": w, "persisted": p})).collect::<Vec<_>>(),
+            "members": self.members.iter().map(|(id, w, p)| json!({
+                "id": id, "canWrite": w, "persisted": p,
+                "freshSeed": self.keyed.then(|| hex(&seed_of(id))),
+            })).collect::<Vec<_>>(),
             "steps": self.steps,
             "final": finals,
         })
     }
 }
 
+fn seed_of(id: &str) -> [u8; 16] {
+    Id::from_label(&format!("seed-{id}")).0
+}
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
 fn started(name: &'static str, description: &'static str, policy: Policy, ids: &[&str]) -> Script {
+    let st = match policy.fold {
+        Fold::Latest => b("s0"),
+        Fold::Append => ap(&["s0"]),
+    };
     let mut s = Script::new(name, description, policy, ids);
     s.join_all(0);
     s.deliver(0);
-    s.cmd(ids[0], 10, Command::Take { state: Some(b("s0")) });
+    s.cmd(ids[0], 10, Command::Take { state: Some(st) });
     s.deliver(20);
     s
 }
@@ -137,10 +202,10 @@ fn scenarios() -> Vec<Script> {
     let mut v = Vec::new();
 
     let mut s = started("take-publish", "a takes with a snapshot, publishes two messages; b follows in order.", append(), &["a", "b"]);
-    s.cmd("a", 100, Command::Publish { id: b("id1"), payload: b("+1") });
-    s.cmd("a", 110, Command::Publish { id: b("id2"), payload: b("+2") });
+    s.cmd("a", 100, Command::Publish { id: id("id1"), payload: b("+1") });
+    s.cmd("a", 110, Command::Publish { id: id("id2"), payload: b("+2") });
     s.deliver(120);
-    assert_eq!(s.session("b").state(), &b("s0+1+2"));
+    assert_eq!(s.session("b").state(), &ap(&["s0", "+1", "+2"]));
     v.push(s);
 
     let mut s = started("ask-pass", "b asks; a pauses and passes its final §S12 anchor (playing false); b holds from exactly that snapshot (§S5, G3).", p(), &["a", "b", "c"]);
@@ -189,7 +254,7 @@ fn scenarios() -> Vec<Script> {
 
     let mut s = started("gap-tail-resume", "msg 2 is lost; msg 3 is held early; b's hello names the claim and seq 1; a resends msg 2 and 3 from its tail (§S8).", append(), &["a", "b"]);
     for (i, t) in [(1u8, 100u64), (2, 110), (3, 120)] {
-        s.cmd("a", t, Command::Publish { id: Bytes(vec![i]), payload: Bytes(vec![b'0' + i]) });
+        s.cmd("a", t, Command::Publish { id: id(&format!("m{i}")), payload: Bytes(vec![b'0' + i]) });
     }
     let lost = std::cell::Cell::new(false);
     s.deliver_if(130, |_, f| {
@@ -197,15 +262,15 @@ fn scenarios() -> Vec<Script> {
         lost.set(lost.get() || first);
         first
     });
-    assert_eq!(s.session("b").state(), &b("s0123"));
+    assert_eq!(s.session("b").state(), &ap(&["s0", "1", "2", "3"]));
     v.push(s);
 
-    let mut s = started("gap-state-resume", "with tail 1 the missing messages are gone; a answers b's hello with state (§S8).", Policy { tail: 1, ..append() }, &["a", "b"]);
+    let mut s = started("gap-state-resume", "with tail 1 the missing messages are gone; a answers b's hello with state; the append fold keeps the last `tail` payloads (§S8, §S1).", Policy { tail: 1, ..append() }, &["a", "b"]);
     for (i, t) in [(1u8, 100u64), (2, 110), (3, 120)] {
-        s.cmd("a", t, Command::Publish { id: Bytes(vec![i]), payload: Bytes(vec![b'0' + i]) });
+        s.cmd("a", t, Command::Publish { id: id(&format!("m{i}")), payload: Bytes(vec![b'0' + i]) });
     }
     s.deliver_if(130, |_, f| matches!(&f.body, Body::Msg { seq: 1 | 2, .. }) && f.to.is_none());
-    assert_eq!(s.session("b").state(), &b("s0123"));
+    assert_eq!(s.session("b").state(), &ap(&["3"]));
     v.push(s);
 
     let mut s = started("take-without-state", "b takes; its state frame to c is lost; c accepts the claim from take, says seen.seq = null and gets state (§S8, finding F2).", p(), &["a", "b", "c"]);
@@ -216,7 +281,7 @@ fn scenarios() -> Vec<Script> {
     assert!(s.session("c").synced());
     v.push(s);
 
-    let mut s = started("partition-two-holders", "a is cut off; b sees a lapsed and takes; when a's link heals its hello reaches b, which answers with state, and a yields to the greater claim (§S4, §S6, G6).", p(), &["a", "b"]);
+    let mut s = started("partition-two-holders", "a is cut off; b sees a lapsed and takes; when a's link heals its hello reaches b, which answers with state; a yields to the greater claim and sends `yielded` with what it held, which b reports (§S4, §S5 yielding state, §S6, G6, G11).", p(), &["a", "b"]);
     s.step("a", 1_000, Input::LinkDown);
     s.lose_all();
     s.cmd("b", 1_000, Command::Take { state: None });
@@ -225,6 +290,7 @@ fn scenarios() -> Vec<Script> {
     s.step("a", 10_000, Input::LinkUp);
     s.deliver(10_010);
     assert!(s.session("b").is_holder() && !s.session("a").is_holder());
+    assert!(s.steps.iter().any(|st| st["outputs"].to_string().contains("\"displaced\"")));
     v.push(s);
 
     let mut s = started("out-of-contact-return", "a has no link for 20 s; on link-up it sends hello lapsed:true, sends no holder frame for askTimeoutMs, then retakes at term + 1 (§S6).", p(), &["a", "b"]);
@@ -237,13 +303,13 @@ fn scenarios() -> Vec<Script> {
     assert_eq!(s.session("b").accepted(), Some(&Claim::new(2, 0, "a")));
     v.push(s);
 
-    let mut s = started("submit", "b submits; a orders it with origin b; a duplicate submit is dropped; a too-large one is refused (§S8).", Policy { max_payload: 8, ..append() }, &["a", "b"]);
-    s.cmd("b", 100, Command::Submit { id: b("x1"), payload: b("+b") });
+    let mut s = started("submit", "b submits; a orders it with origin b; a duplicate submit (same id, within the last `tail`) is dropped; an oversize one is dropped (§S8, §S3).", Policy { max_payload: 32, ..append() }, &["a", "b"]);
+    s.cmd("b", 100, Command::Submit { id: id("x1"), payload: b("+b") });
     s.deliver(110);
-    s.step("a", 120, Input::Frame { frame: Frame { from: "b".into(), to: Some("a".into()), retain: false, body: Body::Submit { id: b("x1"), payload: b("+b") } }, writer: true });
-    s.step("a", 130, Input::Frame { frame: Frame { from: "b".into(), to: Some("a".into()), retain: false, body: Body::Submit { id: b("x2"), payload: b("0123456789") } }, writer: true });
+    s.step("a", 120, frame_in(Frame { from: "b".into(), to: Some("a".into()), retain: false, body: Body::Submit { id: id("x1"), payload: b("+b") } }));
+    s.step("a", 130, frame_in(Frame { from: "b".into(), to: Some("a".into()), retain: false, body: Body::Submit { id: id("x2"), payload: Bytes(vec![b'z'; 40]) } }));
     s.deliver(140);
-    assert_eq!(s.session("b").state(), &b("s0+b"));
+    assert_eq!(s.session("b").state(), &ap(&["s0", "+b"]));
     v.push(s);
 
     let mut s = started("pass-lost-resend", "a's pass to b is lost; b, still under the old claim, resends ask; a resends the same pass (§S5, F9).", p(), &["a", "b"]);
@@ -251,46 +317,120 @@ fn scenarios() -> Vec<Script> {
     s.deliver(1_010);
     s.cmd("a", 1_020, Command::Pass { to: "b".into(), snapshot: b("stopped") });
     s.lose_all();
-    s.step("b", 2_600, Input::Frame { frame: Frame { from: "a".into(), to: None, retain: true, body: Body::Beat { claim: Claim::new(1, 0, "a"), seq: 0 } }, writer: true });
+    s.step("b", 2_600, frame_in(Frame { from: "a".into(), to: None, retain: true, body: Body::Beat { claim: Claim::new(1, 0, "a"), seq: 0 } }));
     s.tick("b", 2_600);
     s.deliver(2_610);
     assert!(s.session("b").is_holder());
     v.push(s);
 
     let mut s = started("restart-holder", "a restarts with its persisted claim; the application supplies the cell's state with join; a sends hello lapsed:true, waits askTimeoutMs, then retakes at term + 1 with that state (§S6, revision 2).", append(), &["a", "b"]);
-    s.cmd("a", 100, Command::Publish { id: b("1"), payload: b("+1") });
+    s.cmd("a", 100, Command::Publish { id: id("1"), payload: b("+1") });
     s.deliver(110);
-    let persisted = s.session("a").accepted().cloned();
+    let persisted = s.session("a").persisted();
     s.s.insert("a".into(), Session::new("a", true, append(), persisted));
     s.steps.push(json!({"member": "a", "restart": true}));
-    s.cmd("a", 200, Command::Join { state: Some(b("s0+1")) });
+    s.cmd("a", 200, Command::Join { state: Some(ap(&["s0", "+1"])) });
     s.deliver(210);
     s.tick("a", 2_000);
     s.deliver(2_010);
     assert_eq!(s.session("a").accepted(), Some(&Claim::new(2, 0, "a")));
-    assert_eq!(s.session("b").state(), &b("s0+1"));
+    assert_eq!(s.session("b").state(), &ap(&["s0", "+1"]));
     v.push(s);
 
-    let mut s = started("release", "a releases (bye); the cell has no holder; b asks and takes at once (§S4, §S5).", p(), &["a", "b"]);
+    let mut s = started("release", "a releases: it persists the tombstone, then sends bye (leaving false); the cell has no holder; b asks and takes at once; a restarts and does not resurrect its claim (§S4, §S5 release, R2c, R3).", p(), &["a", "b"]);
     s.cmd("a", 100, Command::Release);
     s.deliver(110);
     s.cmd("b", 200, Command::Ask);
-    s.deliver(210);
-    assert!(s.session("b").is_holder());
+    s.lose_all();
+    let persisted = s.session("a").persisted();
+    assert!(persisted.as_ref().is_some_and(|p| p.released));
+    s.s.insert("a".into(), Session::new("a", true, p(), persisted));
+    s.steps.push(json!({"member": "a", "restart": true}));
+    s.cmd("a", 300, Command::Join { state: None });
+    s.tick("a", 2_000);
+    assert!(s.session("b").is_holder() && !s.session("a").is_holder());
     v.push(s);
 
     let mut s = started("ping-offset", "b pings a; a pongs with its clock; b's offset and error bound follow §S7.", p(), &["a", "b"]);
     s.cmd("b", 1_000, Command::Ping { to: "a".into() });
     let pending = std::mem::take(&mut s.pending);
-    for (to, f) in pending {
-        s.step(&to, 1_037, Input::Frame { frame: f, writer: true });
+    for to in pending {
+        let f = to.1.clone();
+        s.step(&to.0, 1_037, frame_in(f));
     }
     let pending = std::mem::take(&mut s.pending);
-    for (to, f) in pending {
-        s.step(&to, 1_081, Input::Frame { frame: f, writer: true });
+    for to in pending {
+        let f = to.1.clone();
+        s.step(&to.0, 1_081, frame_in(f));
     }
     let o = s.session("b").offset_to("a").unwrap();
     assert_eq!((o.rtt, o.offset, o.error), (81, -4, 41));
+    v.push(s);
+
+    // Revision 4 behaviours.
+    let mut s = Script::new("evidence-forward", "the chain a↔b↔c with a↮c: a holds 1.0.a, c holds 1.0.c and b follows c; a's beat reaches b, which forwards c's last beat to a unchanged as evidence; a accepts 1.0.c and yields (§S4 correcting lesser claims, R1).", p(), &["a", "b", "c"]);
+    s.cut("a", "c");
+    s.join_all(0);
+    s.deliver(0);
+    s.cmd("a", 10, Command::Take { state: Some(b("A")) });
+    s.cmd("c", 10, Command::Take { state: Some(b("C")) });
+    s.deliver(20);
+    s.tick("c", 5_020);
+    s.deliver(5_030);
+    s.tick("a", 5_040);
+    s.deliver(5_050);
+    assert_eq!(s.session("a").accepted(), Some(&Claim::new(1, 0, "c")));
+    assert!(!s.session("a").is_holder());
+    v.push(s);
+
+    let mut s = started("heard-renew", "c, cut off from a, sees a lapsed and takes 2.0.c; b follows it, but the evidence b relays to a is lost, and c then falls silent. When a's beat reaches b while b has no fresh evidence: right after b restarts, b's hello says heard:unknown and a keeps its claim; once b's link has worked for holderTimeoutMs without hearing c, b says heard:lapsed and a renews over c to 3.0.a (§S4, §S5 renewing, R1).", p(), &["a", "b", "c"]);
+    s.cut("a", "c");
+    s.cmd("c", 100, Command::Take { state: Some(b("C")) });
+    s.tick("c", 16_000);
+    // b's evidence for a (c's frames, relayed) is lost.
+    s.deliver_if(16_010, |to, _| to == "a");
+    assert_eq!(s.session("b").accepted(), Some(&Claim::new(2, 0, "c")));
+    // c falls silent; b restarts.
+    let persisted = s.session("b").persisted();
+    s.s.insert("b".into(), Session::new("b", true, p(), persisted));
+    s.steps.push(json!({"member": "b", "restart": true}));
+    s.cmd("b", 20_000, Command::Join { state: None });
+    s.deliver_if(20_010, |_, f| f.from == "c");
+    s.tick("a", 20_100);
+    s.deliver_if(20_110, |_, f| f.from == "c");
+    assert_eq!(s.session("a").accepted(), Some(&Claim::new(1, 0, "a")));
+    s.tick("a", 36_000);
+    s.deliver_if(36_010, |_, f| f.from == "c");
+    assert_eq!(s.session("a").accepted(), Some(&Claim::new(3, 0, "a")));
+    assert_eq!(s.session("b").accepted(), Some(&Claim::new(3, 0, "a")));
+    v.push(s);
+
+    let mut s = started("late-pass", "b asks; a's pass (SA) is delayed past b's ask timeout; b takes with SB; the pass arrives: b reports it (late pass, with SA) and renews with SB; a, holding the pass's claim, follows (§S5, R2a, G11).", p(), &["a", "b"]);
+    s.cmd("b", 100, Command::Ask);
+    s.deliver(110);
+    s.cmd("a", 120, Command::Pass { to: "b".into(), snapshot: b("SA") });
+    let held: Vec<_> = std::mem::take(&mut s.pending);
+    s.cmd("b", 200, Command::Take { state: Some(b("SB")) });
+    s.tick("b", 1_700);
+    s.deliver_if(1_710, |to, _| to == "a");
+    s.pending = held;
+    s.deliver(1_800);
+    s.tick("b", 7_000);
+    s.deliver(7_010);
+    assert!(s.steps.iter().any(|st| st["outputs"].to_string().contains("\"latePass\"")));
+    assert_eq!(s.session("a").accepted(), Some(&Claim::new(3, 0, "b")));
+    v.push(s);
+
+    let mut s = Script::new("freshness", "keyed frames: a's join hello reaches b, which has no window for a's key and answers echoing a's fresh; that answer opens a's window for b's key, and a answers echoing b's fresh, which opens b's window; a frame below a window's floor is then dropped (§S3 freshness, R4).", p(), &["a", "b"]).keyed();
+    s.join_all(0);
+    s.deliver(0);
+    s.cmd("a", 10, Command::Take { state: Some(b("A")) });
+    s.deliver(20);
+    assert_eq!(s.session("b").accepted(), Some(&Claim::new(1, 0, "a")));
+    // A replay of a's take with n = 1 (below the window's floor) changes nothing.
+    let replay = Frame { from: "a".into(), to: None, retain: false, body: Body::Take { claim: Claim::new(1, 0, "a") } };
+    let outs = s.step("b", 30, Input::Frame { frame: replay, writer: true, key: Some("k-a".into()), n: Some(1) });
+    assert!(outs.is_empty());
     v.push(s);
 
     v
@@ -307,7 +447,7 @@ fn offset_cases() -> Value {
         (1_000, 5_050, 900, 200),
         (10_000_000, 2, 9_999_000, 10),
         (2, 10_000_000, 1, 0),
-        (u64::MAX, 0, 0, 0),
+        (MAX_INT, 0, 0, 0),
     ];
     let one: Vec<Value> = cases
         .iter()
@@ -356,18 +496,26 @@ fn replay(v: &Value) {
     let policy: Policy = serde_json::from_value(v["policy"].clone()).unwrap();
     let fixes: Fixes = serde_json::from_value(v["fixes"].clone()).unwrap();
     let mut s: BTreeMap<String, Session> = BTreeMap::new();
-    let mut initial: BTreeMap<String, (bool, Option<Claim>)> = BTreeMap::new();
+    let mut initial: BTreeMap<String, bool> = BTreeMap::new();
     for m in v["members"].as_array().unwrap() {
         let id = m["id"].as_str().unwrap().to_owned();
         let w = m["canWrite"].as_bool().unwrap();
-        initial.insert(id.clone(), (w, None));
-        s.insert(id.clone(), Session::with_fixes(&id, w, policy.clone(), None, fixes));
+        initial.insert(id.clone(), w);
+        let mut session = Session::with_fixes(&id, w, policy.clone(), None, fixes);
+        if let Some(seed) = m["freshSeed"].as_str() {
+            let mut b = [0u8; 16];
+            for (k, x) in b.iter_mut().enumerate() {
+                *x = u8::from_str_radix(&seed[2 * k..2 * k + 2], 16).unwrap();
+            }
+            session = session.with_fresh_seed(b);
+        }
+        s.insert(id.clone(), session);
     }
     for (k, step) in v["steps"].as_array().unwrap().iter().enumerate() {
         let member = step["member"].as_str().unwrap();
         if step.get("restart").is_some() {
-            let p = s[member].accepted().cloned();
-            s.insert(member.into(), Session::with_fixes(member, initial[member].0, policy.clone(), p, fixes));
+            let p = s[member].persisted();
+            s.insert(member.into(), Session::with_fixes(member, initial[member], policy.clone(), p, fixes));
             continue;
         }
         let input: Input = serde_json::from_value(step["input"].clone()).unwrap();
