@@ -107,7 +107,7 @@ slow consumer) closes the connection rather than skip a number. So a client that
 
 | `type` | Fields | Meaning |
 | --- | --- | --- |
-| `hello` | `protocol` (`colophon/home-stream/6`), `account`, `home` (the home's member ID), `instance`, `cursor`, `head` (`{seq, digest}` or `null`), `notice` (last notice number, 0 for none), `principal`, `expiresAt` (ms or `null`), `namespaces`, `limits` | First frame. `cursor` is the change-log position after the replay that follows (§4). `limits`: `frameBytes`, `messageBytes`, `subscriptions`, `framesPerSecond`, `bytesPerSecond`, `retainMs`, `pingMs` (how often the home sends a WebSocket-level ping), `idleMs` (the home closes with 4008 after this long with no pong and no message), `resumeEntries`. Without `after` the home sends no replay, and `cursor` is the live position. |
+| `hello` | `protocol` (`colophon/home-stream/6`), `account`, `home` (the home's member ID), `instance`, `cursor`, `head` (`{seq, digest}` or `null`), `notice` (last notice number, 0 for none), `principal`, `expiresAt` (ms or `null`), `namespaces`, `limits` | First frame. `cursor` is the change-log position after the replay that follows (§4). `limits`: `frameBytes`, `messageBytes`, `subscriptions`, `framesPerSecond`, `bytesPerSecond`, `sessionFramesPerSecond` and `sessionBytesPerSecond` (the account's shared budget for session frames, §5.2), `retainMs`, `pingMs` (how often the home sends a WebSocket-level ping), `idleMs` (the home closes with 4008 after this long with no pong and no message), `resumeEntries`. Without `after` the home sends no replay, and `cursor` is the live position. |
 | `change` | `cursor`, `entry` | One change-log entry, exactly as `GET {base}/changes` lists it (`{"path","size","sha256"}` or `{"path","deleted":true}`), and the cursor `/changes` gives after it (`<instance>.<position>`). |
 | `head` | `home`, `seq`, `digest` | The home stored a new head of its own over authority entry `seq` with that digest. |
 | `notice` | `notice`, `object`, `kind`, `deadline` | The home queued a notice (§6). `notice` is its number. |
@@ -212,15 +212,24 @@ that `to`, when present, is a member ID. A successful send has no answer, so the
 same thing whether or not the member `to` names is connected.
 
 **Fan-out.** Each frame goes to every other subscribed connection of the account, at most
-`streamsPerAccount − 1` = 63 with the defaults. The inbound caps per connection bound what one
-sender can cause: 50 frames/s (burst 100) and 256 KiB/s (burst 512 KiB), each frame at most
-16,384 bytes. In the worst case one connection makes the home send 50 × 63 = 3,150 frames/s, or
-256 KiB/s × 63 ≈ 15.75 MiB/s, and a whole account (64 connections, all sending, all subscribed)
-about 64 × 15.75 MiB/s ≈ 1,008 MiB/s, for a burst of 512 KiB × 63 ≈ 31.5 MiB per sender. This is
-the amplification an unaddressed frame already had; addressing no longer reduces it. Each
-receiver's queue is bounded by `bufferedBytes` (1 MiB): a connection that falls further behind is
-closed with 4013, so memory held for undelivered frames is at most 64 MiB per account. Operators
-who host many accounts lower `streamsPerAccount` or the rates.
+`streamsPerAccount − 1` = 63 with the defaults, so one inbound frame can cost the home 63 sends.
+Two caps bound that work:
+
+- per connection, the inbound rate for frames of every type: 50 frames/s (burst 100) and
+  256 KiB/s (burst 512 KiB);
+- per account, a budget for session frames from all its connections together: 100 frames/s
+  (burst 200) and 512 KiB/s (burst 1 MiB).
+
+The account budget is charged for every session frame that passes the checks above, whether or
+not anyone is subscribed to its cell, so what a sender hears does not depend on who is connected.
+A frame over the budget is dropped, counted and not retained, and its sender gets the same
+`rateLimited` error as for its own rate. With the defaults an account makes the home send at
+most 100 × 63 = 6,300 session frames/s or 512 KiB/s × 63 ≈ 31.5 MiB/s, with a burst of
+1 MiB × 63 = 63 MiB, however many of its connections send and whatever `to` says. The budget is
+shared: one connection sending at its own full rate uses half of it. Each receiver's queue is
+bounded by `bufferedBytes` (1 MiB): a connection that falls further behind is closed with 4013,
+so memory held for undelivered frames is at most 64 MiB per account. Operators who host many
+accounts lower `sessionFramesPerSecond`, `sessionBytesPerSecond` or `streamsPerAccount`.
 
 ### 5.3 Retained frames
 
@@ -309,6 +318,7 @@ A sender MUST:
 | WebSocket message | 20,480 bytes | Close 1009 |
 | Connections | 4 per principal, 64 per account | 429 on upgrade |
 | Inbound rate | 50 frames/s (burst 100), 256 KiB/s (burst 512 KiB) per connection | A frame over the rate is **dropped and counted**, never queued. The sender gets `error` `rateLimited` with its running `dropped` total, at most once a second |
+| Session frames per account | 100 frames/s (burst 200), 512 KiB/s (burst 1 MiB), all connections together | Dropped, counted and not retained; the sender gets `error` `rateLimited` as above. Charged whether or not anyone is subscribed |
 | Outbound backlog | 1 MiB unsent per connection | Close 4013 (slow consumer). The home never skips `n` and never queues without bound |
 | Subscriptions | 64 per connection | `error` `tooMany` |
 | Retained frames | 60 s, 1,024 per account | §5.3 |

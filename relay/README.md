@@ -629,19 +629,19 @@ forwards an addressed frame to every other subscribed, entitled member (a member
 through a bridge must still get it), and the sender's answer does not depend on whether the
 named member is connected. The home learns the account, namespace, cell, sender, `to`, the
 `retain` flag, sizes and timing, never the payload. Each frame reaches at most
-`streamsPerAccount − 1` connections (63 by default); with the per-connection rate caps below,
-one sending connection can cause at most about 3,150 frames/s or 15.75 MiB/s of outbound
-traffic (see `docs/colophon-0.6-stream.md` §5.2).
+`streamsPerAccount − 1` connections (63 by default). An account's connections share a budget
+for session frames, 100 frames/s and 512 KiB/s by default, so one account can cause at most
+about 6,300 frames/s or 31.5 MiB/s of outbound traffic (see `docs/colophon-0.6-stream.md` §5.2).
 
 Limits: WebSocket messages up to 20,480 bytes (larger closes 1009). The inbound rate is capped
-per connection at 50 frames/s and 256 KiB/s; excess frames are dropped and counted, with an
-`error rateLimited`. A connection with more than 1 MiB unsent is closed with 4013. The home pings
+per connection at 50 frames/s and 256 KiB/s, and session frames per account at 100 frames/s and
+512 KiB/s; excess frames are dropped and counted, with an `error rateLimited`. A connection with more than 1 MiB unsent is closed with 4013. The home pings
 every 20 s, and a connection silent for 60 s is closed with 4008. Every authority commit, and a
 sweep that runs while any connection is open (every `sweepMs`, at most 5 s, and never off),
 re-judges each connection; one whose access ended is closed with 1008. Shutdown
 sends `bye` and closes with 1012 (resume). A released slot closes with 1001. All of these are
 settings under `stream` in the config file (`ticketMs`, `streamsPerPrincipal`,
-`streamsPerAccount`, `framesPerSecond`, `bufferedBytes`, `retainMs`, `pingMs`, `idleMs`,
+`streamsPerAccount`, `framesPerSecond`, `sessionFramesPerSecond`, `sessionBytesPerSecond`, `bufferedBytes`, `retainMs`, `pingMs`, `idleMs`,
 `sweepMs` and the rest; see `relay/stream.js`).
 
 **Bun only for homes.** The stream uses Bun's built-in WebSocket server. A relay with home slots

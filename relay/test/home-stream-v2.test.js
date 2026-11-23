@@ -112,6 +112,29 @@ testHome('the sender hears the same whether or not `to` names a connected member
   assert.deepEqual(connected.map((f) => f.type), ['pong'], 'no acknowledgement and no error');
 }, { stream: { framesPerSecond: 1000, frameBurst: 1000 } });
 
+testHome('session frames are capped for the whole account, whoever is listening', async ({ open, slot }) => {
+  const [a, b, d] = [await open('a'), await open('b'), await open('d')];
+  await subscribe(b);
+  // Two senders share a budget of three frames; neither is near its own connection's rate.
+  for (let n = 1; n <= 2; n++) a.send({ type: 'session', frame: frame('a', { n }) });
+  await settle(a);
+  for (let n = 1; n <= 3; n++) d.send({ type: 'session', frame: frame('d', { n, retain: true }) });
+  const warned = await d.next('error');
+  assert.deepEqual([warned.code, warned.dropped], ['rateLimited', 1]);
+  await settle(a, b, d);
+  assert.equal(b.all('session').length, 3, 'only the frames within the budget are forwarded');
+  const { stream } = (await slot()).home;
+  assert.deepEqual([stream.counters.forwarded, stream.counters.limited], [3, 2]);
+  assert.equal(a.all('error').length, 0);
+
+  // The same with nobody subscribed: the budget does not depend on who is connected.
+  b.send({ type: 'unsubscribe', namespace: 'notes', cell: CELL });
+  await b.next('unsubscribed');
+  a.send({ type: 'session', frame: frame('a', { n: 3 }) });
+  assert.equal((await a.next('error')).code, 'rateLimited');
+  assert.equal(stream.counters.limited, 3);
+}, { stream: { sessionFramesPerSecond: 1, sessionFrameBurst: 3, framesPerSecond: 1000, frameBurst: 1000 } });
+
 testHome('spoofed senders and unentitled members cannot send', async ({ open }) => {
   const [a, b, c] = [await open('a'), await open('b'), await open('c')];
   await subscribe(b);
@@ -218,7 +241,7 @@ testHome('a member that cannot keep up is cut off (4013) instead of buffered', a
   assert.equal(a.ws.readyState, a.ws.OPEN, 'the sender is unaffected');
   socket.destroy();
   await closed;
-}, { stream: { bufferedBytes: 65_536, framesPerSecond: 10_000, frameBurst: 10_000, bytesPerSecond: 1 << 30, byteBurst: 1 << 30 } });
+}, { stream: { bufferedBytes: 65_536, framesPerSecond: 10_000, frameBurst: 10_000, bytesPerSecond: 1 << 30, byteBurst: 1 << 30, sessionFramesPerSecond: 10_000, sessionFrameBurst: 10_000, sessionBytesPerSecond: 1 << 30, sessionByteBurst: 1 << 30 } });
 
 testHome('nothing of a session frame is written under the data directory', async ({ open, dir, restart }) => {
   const [a, b] = [await open('a'), await open('b')];

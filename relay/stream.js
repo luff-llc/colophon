@@ -24,6 +24,12 @@ export const STREAM_DEFAULTS = Object.freeze({
   frameBurst: 100,
   bytesPerSecond: 262_144,
   byteBurst: 524_288,
+  // Session frames the whole account may send, all connections together. Each one is copied to
+  // every other subscriber, so this is what bounds the home's outbound work for an account.
+  sessionFramesPerSecond: 100,
+  sessionFrameBurst: 200,
+  sessionBytesPerSecond: 524_288,
+  sessionByteBurst: 1_048_576,
   bufferedBytes: 1_048_576, // a connection whose unsent bytes exceed this is cut off (4013)
   resumeEntries: 1024, // most missed changes replayed on connect; more answers `resync`
   retainMs: 60_000, // retained-frame life (at most 60 s, §S9)
@@ -86,7 +92,11 @@ export class HomeStream {
     this.tickets = new Map(); // sha256(ticket) -> grant
     this.conns = new Set();
     this.retained = new Map(); // namespace \0 cell \0 from -> { frame, from, namespace, cell, at }
-    this.counters = { forwarded: 0, dropped: 0, refused: 0, slow: 0, idle: 0 };
+    this.counters = { forwarded: 0, dropped: 0, limited: 0, refused: 0, slow: 0, idle: 0 };
+    this.session = {
+      frames: new Bucket(this.o.sessionFramesPerSecond, this.o.sessionFrameBurst),
+      bytes: new Bucket(this.o.sessionBytesPerSecond, this.o.sessionByteBurst),
+    };
     this.timers = null;
   }
 
@@ -198,6 +208,7 @@ export class HomeStream {
       limits: {
         frameBytes: 16_384, messageBytes: this.o.messageBytes, subscriptions: this.o.subscriptions,
         framesPerSecond: this.o.framesPerSecond, bytesPerSecond: this.o.bytesPerSecond,
+        sessionFramesPerSecond: this.o.sessionFramesPerSecond, sessionBytesPerSecond: this.o.sessionBytesPerSecond,
         retainMs: this.o.retainMs, pingMs: this.o.pingMs, idleMs: this.o.idleMs,
         resumeEntries: this.o.resumeEntries,
       },
@@ -302,22 +313,24 @@ export class HomeStream {
     this.send(conn, { type: 'error', code, ...(ref !== undefined ? { ref } : {}), ...extra });
   }
 
+  /** Count a frame dropped for a rate cap, and tell its sender at most once a second. */
+  limited(conn) {
+    conn.dropped += 1;
+    this.counters.dropped += 1;
+    const now = Date.now();
+    if (now - conn.warnedAt >= 1000) {
+      conn.warnedAt = now;
+      this.error(conn, 'rateLimited', undefined, { dropped: conn.dropped });
+    }
+  }
+
   receive(conn, data, isBinary) {
     conn.lastSeen = Date.now();
     if (!conn.live) return;
     const size = data.length ?? data.byteLength ?? 0;
     // Over the rate: dropped and counted, never queued. The sender hears of it at most once a
     // second, with its running total.
-    if (!conn.frames.take(1) || !conn.bytes.take(size)) {
-      conn.dropped += 1;
-      this.counters.dropped += 1;
-      const now = Date.now();
-      if (now - conn.warnedAt >= 1000) {
-        conn.warnedAt = now;
-        this.error(conn, 'rateLimited', undefined, { dropped: conn.dropped });
-      }
-      return;
-    }
+    if (!conn.frames.take(1) || !conn.bytes.take(size)) { this.limited(conn); return; }
     if (isBinary) { this.error(conn, 'binary'); return; }
     let msg;
     try { msg = JSON.parse(Buffer.from(data).toString('utf8')); } catch { msg = null; }
@@ -373,6 +386,14 @@ export class HomeStream {
       conn.refused += 1;
       this.counters.refused += 1;
       this.error(conn, r.code, ref);
+      return;
+    }
+    // The account's budget for session frames, charged for every valid frame whoever is
+    // listening: the answer cannot depend on how many members are connected or subscribed. Over
+    // it the frame is dropped like one over the connection's own rate, and never retained.
+    if (!this.session.frames.take(1) || !this.session.bytes.take(encoded.length)) {
+      this.counters.limited += 1;
+      this.limited(conn);
       return;
     }
     const out = { type: 'session', frame };
