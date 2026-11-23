@@ -220,7 +220,9 @@ a receiver can parse, and keeps nothing of them beyond the forwarded frame (and 
 
 Before parsing, the reference relay refuses with `badFrame` any client message, of any type,
 that nests objects and arrays more than 65 deep (a frame's 64 plus the message), so no client
-structure can exhaust the parser's or the serialiser's stack. A message that makes the host code
+structure can exhaust the parser's or the serialiser's stack. A message over the inbound rate is
+dropped before any parsing, so this `badFrame` applies only to messages the rate limit admitted. A
+message that makes the host code
 or the module fail also answers `badFrame`. The session budgets (the fan-out caps below) and the retained
 frames' sizes count UTF-8 bytes of the checked frame; every field a frame can carry is ASCII by
 its grammar.

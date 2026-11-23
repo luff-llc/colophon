@@ -920,11 +920,12 @@ above to its caller. A production embedder takes the view and the keys from the 
 (`Account::session_account`, `Account::session_epochs`); the shipping bindings enforce that and the
 orders above, and expose no way to supply either.
 
-**Open: the home carrier and the session codec disagree on the frame's form.** The home stream forwards a
-session frame as a 0.5 raw envelope, `{"body":"<base64>","signature":"<base64>"}` whose body is the frame's
-JSON (stream §5.2, `home_stream::check_session_frame`); the session codec seals one canonical object with
-`signature` and `delegation` as fields (wire §3). Until the home accepts the codec's form, a sealed frame
-cannot cross the home stream unchanged, and the binding does not adapt between the two.
+**The home carrier.** The home accepts the codec's frame form (stream §5.2,
+`home_stream::check_session_frame`): the bytes of a `Send` effect, as UTF-8 text, go to
+`HomeStream.session_frame`, which carries them verbatim in a `session` message. The home forwards
+the frame text unchanged as the message's `frame` value; a host hands exactly that text, as bytes, to
+`SessionEndpoint.receive` (re-serializing parsed JSON can change the bytes, and the receiver accepts
+only the canonical form).
 
 **Threads and ownership.** Every object is `Send + Sync` and serializes its calls (a second thread waits),
 which gives the one-call-at-a-time rule of the wire document. Nothing here calls back into the host. The

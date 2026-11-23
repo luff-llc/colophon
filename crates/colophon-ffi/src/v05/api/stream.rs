@@ -432,20 +432,18 @@ impl HomeStream {
                 .unsubscribe(&namespace, &cell, id.as_deref())?)
         })
     }
-    /// A `session` frame carrying `envelope` (the JSON of a sealed session frame, at most 16,384
-    /// bytes) to send on the live socket.
+    /// A `session` message carrying `frame`, a sealed session frame's JSON text exactly as the
+    /// endpoint produced it (a `Send` effect's bytes, at most 16,384), to send on the live
+    /// socket. The frame is carried verbatim: the message is `{"type":"session",["id":…,]"frame":`
+    /// followed by those bytes and `}`.
     pub fn session_frame(
         &self,
-        envelope: String,
+        frame: String,
         id: Option<String>,
     ) -> Result<String, AccountError> {
         guard(|| {
-            bytes_ok(
-                envelope.as_bytes(),
-                cs::MAX_SESSION_FRAME,
-                "a session frame",
-            )?;
-            Ok(self.s.lock()?.session_frame(&envelope, id.as_deref())?)
+            bytes_ok(frame.as_bytes(), cs::MAX_SESSION_FRAME, "a session frame")?;
+            Ok(self.s.lock()?.session_frame(&frame, id.as_deref())?)
         })
     }
 }

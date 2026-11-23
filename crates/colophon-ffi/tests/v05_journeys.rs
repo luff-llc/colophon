@@ -246,6 +246,45 @@ fn v06_through_the_engine(
         .any(|e| e.kind == SessionEffectKind::Unsent));
     assert!(joined.awaiting_persist.is_none());
 
+    // That frame crosses the home carrier unchanged: the home's own check admits it, and the
+    // stream's session message carries it byte for byte.
+    let outer = colophon_core::v05::home_stream::check_session_frame(
+        &own_hello,
+        account,
+        m1,
+        &["notes".to_string()],
+    )
+    .unwrap_or_else(|r| panic!("the home refused the endpoint's frame: {r:?}"));
+    assert_eq!(outer.namespace, "notes");
+    let carrier = HomeStream::new(
+        "h".into(),
+        "https://home.example".into(),
+        stream_default_config(),
+        None,
+    )
+    .unwrap();
+    assert_eq!(carrier.next(0).unwrap().kind, StreamStepKind::NeedTicketCall);
+    carrier.ticket_request(b"call".to_vec(), 0).unwrap();
+    let ticket = serde_json::json!({"ticket": "A".repeat(43), "path": "/stream"});
+    carrier
+        .on_ticket(
+            Some(HttpAnswer {
+                status: 200,
+                headers: vec![],
+                body: ticket.to_string().into_bytes(),
+            }),
+            0,
+        )
+        .unwrap();
+    assert_eq!(carrier.next(0).unwrap().kind, StreamStepKind::Connect);
+    carrier.on_open(0).unwrap();
+    let hello = serde_json::json!({"type": "hello", "n": 1, "protocol": "colophon/home-stream/6",
+        "cursor": "c.1", "head": null, "notice": 0, "principal": format!("member:{m1}")});
+    carrier.on_frame(hello.to_string(), 0).unwrap();
+    let text = String::from_utf8(own_hello.clone()).unwrap();
+    let message = carrier.session_frame(text.clone(), None).unwrap();
+    assert_eq!(message, format!("{{\"type\":\"session\",\"frame\":{text}}}"));
+
     // Taking the role persists a claim: the step stops at the Persist.
     let taken = ep
         .command(r#"{"command":"take","state":null}"#.into(), ea, clock(1_100))
