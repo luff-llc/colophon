@@ -263,6 +263,26 @@ fn scenarios() -> Vec<Script> {
     assert!(s.session("a").is_holder() && !s.session("b").is_holder());
     v.push(s);
 
+    let mut s = started("revoked-writer-ignored", "a holds; a new authority history removes c. Each host tells its core (an `entitled` input without c) before delivering any later frame (§S1, revision 14). Then c's frames arrive as if c still held a greater claim (take, state, msg, beat at 2.0.c) and c asks: a and b drop them all, keep 1.0.a with a's state, and a takes no ask from c (G8).", p(), &["a", "b", "c"]);
+    for m in ["a", "b"] {
+        s.step(m, 1_000, Input::Entitled { writers: vec!["a".into(), "b".into()] });
+    }
+    for (m, at) in [("a", 1_100u64), ("b", 1_100)] {
+        for f in revoked_frames() {
+            s.step(m, at, Input::Frame { frame: f, writer: true, key: None, n: None });
+        }
+    }
+    s.cmd("c", 1_200, Command::Ask);
+    s.deliver(1_210);
+    s.tick("a", 5_000);
+    s.deliver(5_010);
+    for m in ["a", "b"] {
+        assert_eq!(s.session(m).accepted(), Some(&Claim::new(1, 0, "a")), "{m}");
+        assert_eq!(s.session(m).state(), &b("s0"), "{m}");
+    }
+    assert!(s.session("a").is_holder() && s.session("a").asks().next().is_none());
+    v.push(s);
+
     let mut s = started("ask-decline", "b asks; a declines; b does not take when askTimeoutMs passes (§S5).", p(), &["a", "b"]);
     s.cmd("b", 1_000, Command::Ask);
     s.deliver(1_010);
@@ -654,4 +674,53 @@ fn vectors_match_and_replay() {
         assert_eq!((r.rtt, r.offset, r.error), (g("rtt"), c["offset"].as_i64().unwrap(), g("error")));
     }
     println!("{} session vectors and offset cases replayed", names.len());
+}
+
+
+/// Frames from c under 2.0.c, as a removed member that still thinks it holds would send.
+fn revoked_frames() -> Vec<Frame> {
+    let c = Claim::new(2, 0, "c");
+    let f = |body| Frame { from: "c".into(), to: None, retain: false, body };
+    vec![
+        f(Body::Take { claim: c.clone() }),
+        f(Body::State { claim: c.clone(), seq: 1, snapshot: b("from c") }),
+        f(Body::Msg { claim: c.clone(), seq: 2, origin: "c".into(), id: id("c2"), payload: b("from c 2") }),
+        f(Body::Beat { claim: c, seq: 2 }),
+    ]
+}
+
+/// Outside the model (§S1, revision 14, host ordering): b's host delivers the removed
+/// member's frames before telling its core of the new entitled set. b accepts c's greater
+/// claim, because as far as its core knew c was still a writer, and the later `entitled`
+/// input does not undo an accepted claim. Shown, not a guarantee: G8 depends on the order.
+/// a, told in order, ignores c.
+#[test]
+fn revocation_after_frames_is_outside_the_model() {
+    let mut s = started("x", "", Policy::default(), &["a", "b", "c"]);
+    s.step("a", 1_000, Input::Entitled { writers: vec!["a".into(), "b".into()] });
+    for f in revoked_frames() {
+        s.step("a", 1_100, Input::Frame { frame: f.clone(), writer: true, key: None, n: None });
+        s.step("b", 1_100, Input::Frame { frame: f, writer: true, key: None, n: None });
+    }
+    s.lose_all();
+    s.step("b", 1_140, Input::Entitled { writers: vec!["a".into(), "b".into()] });
+    let b_claim = s.session("b").accepted().cloned();
+    let b_state = s.session("b").state().clone();
+    s.tick("a", 5_000);
+    s.deliver(5_010);
+    s.tick("b", 30_000);
+    s.deliver(30_010);
+    println!(
+        "host order violated: b accepted {:?} (state {:?}) from the removed c; a kept 1.0.a; 30 s later b holds {:?}, a holds {:?}",
+        b_claim.as_ref().map(show),
+        String::from_utf8_lossy(&b_state.0),
+        s.session("b").accepted().map(show),
+        s.session("a").accepted().map(show)
+    );
+    assert_eq!(b_claim, Some(Claim::new(2, 0, "c")), "b follows c when its host delivers c's frames first");
+    assert_eq!(s.session("a").accepted().map(|c| c.holder.as_str()), Some("a"), "a, told first, ignores c");
+}
+
+fn show(c: &Claim) -> String {
+    format!("{}.{}.{}", c.term, c.rank, c.holder)
 }

@@ -388,3 +388,61 @@ pub fn show_body(b: &Body) -> String {
         other => other.kind().to_owned(),
     }
 }
+
+/// G4 (revision 14) as a prefix property: every state a listener holds under a claim, at a
+/// position `seq`, is the state the holder of that claim had at that position. A listener's
+/// applied sequence is therefore always a prefix of what the holder sent, and catching up
+/// once sending stops is the final-equality check of `check_converged`.
+#[derive(Default)]
+pub struct Prefix {
+    held: std::collections::HashMap<(Claim, u64), Bytes>,
+    top: std::collections::HashMap<Claim, u64>,
+    /// Under `fold: latest`, the state at `seq` ≥ 1 is the payload of the holder's `msg`
+    /// at `seq` (for positions the holder passed within one input).
+    msgs: std::collections::HashMap<(Claim, u64), Bytes>,
+    pub checks: u64,
+}
+
+impl Prefix {
+    /// The holder sent `frame` (fold `latest` only).
+    pub fn sent(&mut self, frame: &Frame) {
+        if let Body::Msg { claim, seq, payload, .. } = &frame.body {
+            self.msgs.insert((claim.clone(), *seq), payload.clone());
+            let top = self.top.entry(claim.clone()).or_insert(0);
+            *top = (*top).max(*seq);
+        }
+    }
+    /// Record or check `s` after one of its inputs.
+    pub fn observe(&mut self, s: &Session) -> Result<(), String> {
+        let Some(c) = s.accepted().cloned() else {
+            return Ok(());
+        };
+        if s.is_holder() && s.holder() == Some(s.me()) {
+            let key = (c.clone(), s.seq());
+            if let Some(old) = self.held.get(&key) {
+                if old != s.state() && s.synced() {
+                    return Err(format!("G4: holder {} changed its state at {} seq {}", s.me(), show_claim(&c), s.seq()));
+                }
+            } else if s.synced() {
+                self.held.insert(key, s.state().clone());
+                let top = self.top.entry(c).or_insert(0);
+                *top = (*top).max(s.seq());
+            }
+            return Ok(());
+        }
+        if !s.synced() {
+            return Ok(());
+        }
+        let Some(top) = self.top.get(&c).copied() else {
+            return Ok(());
+        };
+        self.checks += 1;
+        let key = (c.clone(), s.seq());
+        match self.held.get(&key).or_else(|| self.msgs.get(&key)) {
+            Some(st) if st == s.state() => Ok(()),
+            Some(_) => Err(format!("G4: {} at {} seq {} holds a state its holder never had there", s.me(), show_claim(&c), s.seq())),
+            None if s.seq() > top => Err(format!("G4: {} at {} seq {} is ahead of its holder (seq {top})", s.me(), show_claim(&c), s.seq())),
+            None => Err(format!("G4: {} at {} seq {} holds a position its holder never had", s.me(), show_claim(&c), s.seq())),
+        }
+    }
+}
