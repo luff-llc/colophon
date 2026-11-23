@@ -3,7 +3,8 @@
 //! Each member has its own clock (offset and drift in ppm from virtual time). Each directed
 //! link uses the best working carrier: a slow "home" carrier and, in some seeds, a fast
 //! "direct" one, each with its own latency, jitter, loss and duplication; jitter reorders.
-//! Some seeds apply the §S3 per-key `n` filter (reordered and duplicate frames dropped).
+//! Some seeds apply the §S3 (revision 2) per-key `n` window: duplicates and frames more than
+//! 128 below the highest are dropped, reordering inside the window is delivered.
 //! Partitions isolate members (their link goes down) and heal; members restart from their
 //! persisted claim.
 //!
@@ -11,7 +12,7 @@
 //! heals and the network becomes lossless: G4 (one holder, one ordered state). The §S12
 //! playback handoff is the workload: the holder publishes anchors; members ping the holder;
 //! a pass must start the new holder exactly at the passer's stopped position; a take must
-//! start within `rate × (offset error bound + drift × age of the samples) + 3 ms` of where the
+//! start within `ratePermille × (offset error bound + drift × age of the samples) + 3 ms` of where the
 //! unreachable holder actually is; a returning lapsed holder yields and pauses.
 //!
 //! `COLOPHON_SIM_SEEDS=n` runs n random seeds (default 300); `COLOPHON_SIM_SEED=s` runs one.
@@ -55,7 +56,7 @@ impl Rng {
 }
 
 // ---------------------------------------------------------------------------------------------
-// The §S12 anchor: `positionMs, rate (‰), playing, at` as ASCII.
+// The §S12 anchor (revision 2): `positionMs`, integer `ratePermille`, `playing`, `at`.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Anchor {
@@ -66,22 +67,25 @@ struct Anchor {
 }
 impl Anchor {
     fn encode(&self) -> Bytes {
-        Bytes(format!("{},{},{},{}", self.pos, self.rate, u8::from(self.playing), self.at).into_bytes())
+        let v = serde_json::json!({
+            "episode": "e1", "show": "s1", "positionMs": self.pos,
+            "ratePermille": self.rate, "playing": self.playing, "at": self.at,
+        });
+        Bytes(serde_json::to_vec(&v).unwrap())
     }
     fn decode(b: &Bytes) -> Option<Anchor> {
-        let s = std::str::from_utf8(&b.0).ok()?;
-        let v: Vec<i64> = s.split(',').map(|x| x.parse().ok()).collect::<Option<_>>()?;
-        (v.len() == 4).then(|| Anchor {
-            pos: v[0],
-            rate: v[1],
-            playing: v[2] == 1,
-            at: v[3],
+        let v: serde_json::Value = serde_json::from_slice(&b.0).ok()?;
+        Some(Anchor {
+            pos: v["positionMs"].as_i64()?,
+            rate: v["ratePermille"].as_i64()?,
+            playing: v["playing"].as_bool()?,
+            at: v["at"].as_i64()?,
         })
     }
-    /// The projected position at `now` on the anchoring clock (`now + offset`).
+    /// `positionMs + floor(ratePermille × (now + offset − at) / 1000)` while playing.
     fn project(&self, clock: i64) -> i64 {
         if self.playing {
-            self.pos + self.rate * (clock - self.at) / 1000
+            self.pos + (self.rate * (clock - self.at)).div_euclid(1000)
         } else {
             self.pos
         }
@@ -112,7 +116,8 @@ struct Member {
     drift: i64,
     up: bool,
     persisted: Option<Claim>,
-    high: BTreeMap<usize, u64>,
+    /// §S3 (revision 2): per sender key, the highest `n` and the accepted ones within 128.
+    high: BTreeMap<usize, (u64, std::collections::BTreeSet<u64>)>,
     /// The anchor this member plays from when holder, if playing.
     playing: Option<Anchor>,
     /// The last anchor received and the member that anchored it.
@@ -153,6 +158,8 @@ struct Stats {
     max_take_bound: i64,
     yields: u64,
     delivered: u64,
+    /// Messages applied from the early-hold buffer (they arrived before a missing one).
+    early_applied: u64,
 }
 
 const RATE: i64 = 1250;
@@ -230,6 +237,13 @@ impl Sim {
             other => format!("{} {other:?}", self.m[i].id),
         };
         let outs = self.m[i].s.handle(input, now);
+        if let Some(Body::Msg { seq, .. }) = delivered.as_ref().map(|f| &f.body) {
+            let drained = outs
+                .iter()
+                .filter(|o| matches!(o, Output::Event { event: Event::Message { seq: q, .. } } if q != seq))
+                .count();
+            self.stats.early_applied += drained as u64;
+        }
         if !outs.is_empty() || delivered.is_none() {
             self.note(label);
             for o in &outs {
@@ -286,11 +300,14 @@ impl Sim {
             return Ok(());
         }
         if self.n_filter {
-            let h = self.m[to].high.entry(from).or_insert(0);
-            if n <= *h {
+            let (high, seen) = self.m[to].high.entry(from).or_default();
+            if seen.contains(&n) || n + 128 < *high {
                 return Ok(());
             }
-            *h = n;
+            *high = (*high).max(n);
+            seen.insert(n);
+            let floor = high.saturating_sub(128);
+            seen.retain(|x| *x >= floor);
         }
         self.stats.delivered += 1;
         if matches!(frame.body, Body::Pong { .. }) {
@@ -311,6 +328,7 @@ impl Sim {
 
     fn publish(&mut self, i: usize, a: Anchor) -> Result<(), String> {
         self.m[i].playing = a.playing.then_some(a);
+        self.m[i].known = Some((a, self.m[i].id.clone()));
         let id = Bytes(format!("{}-{}", self.m[i].id, self.seq).into_bytes());
         self.seq += 1;
         self.input(i, Input::App { command: Command::Publish { id, payload: a.encode() } })
@@ -441,6 +459,8 @@ enum Act {
     Heal(usize),
     Restart(usize),
     Seek(usize),
+    /// Five seeks in the same millisecond: a burst that jitter reorders.
+    Burst(usize),
     Release(usize),
     Leave(usize),
     Join(usize),
@@ -455,7 +475,7 @@ impl Sim {
         self.note(format!("ACT {a:?}"));
         match a {
             Act::Ask(i) => self.input(i, Input::App { command: Command::Ask })?,
-            Act::Take(i) => self.input(i, Input::App { command: Command::Take { snapshot: None } })?,
+            Act::Take(i) => self.input(i, Input::App { command: Command::Take { state: None } })?,
             Act::Isolate(i) => {
                 if self.m[i].up {
                     self.m[i].up = false;
@@ -477,19 +497,25 @@ impl Sim {
                     return Err("G1: claim lost across restart".into());
                 }
                 self.m[i].playing = None;
-                self.m[i].known = None;
                 self.m[i].high.clear();
                 self.m[i].pongs.clear();
                 if !self.m[i].up {
                     self.input(i, Input::LinkDown)?;
                 }
-                self.input(i, Input::App { command: Command::Join })?;
+                // §S12: the device kept its last anchor and supplies it.
+                let state = self.m[i].known.as_ref().map(|(a, _)| a.encode());
+                self.input(i, Input::App { command: Command::Join { state } })?;
             }
             Act::Seek(i) => {
                 if self.m[i].s.is_holder() {
                     let now = self.clock(i) as i64;
                     let pos = self.rng.range(0, 3_600_000) as i64;
                     self.publish(i, Anchor { pos, rate: RATE, playing: true, at: now })?;
+                }
+            }
+            Act::Burst(i) => {
+                for _ in 0..5 {
+                    self.act(Act::Seek(i))?;
                 }
             }
             Act::Release(i) => {
@@ -506,7 +532,7 @@ impl Sim {
             }
             Act::Join(i) => {
                 if !self.m[i].s.joined() {
-                    self.input(i, Input::App { command: Command::Join })?;
+                    self.input(i, Input::App { command: Command::Join { state: None } })?;
                 }
             }
         }
@@ -573,10 +599,10 @@ impl Sim {
         for i in 0..self.m.len() {
             let jitter = self.rng.below(TICK_MS);
             self.push(jitter, Ev::Tick(i));
-            self.input(i, Input::App { command: Command::Join })?;
+            self.input(i, Input::App { command: Command::Join { state: None } })?;
         }
         // Member 0 starts playing.
-        self.input(0, Input::App { command: Command::Take { snapshot: None } })?;
+        self.input(0, Input::App { command: Command::Take { state: None } })?;
         Ok(())
     }
 
@@ -585,7 +611,6 @@ impl Sim {
         let t = self.g;
         let heal: Vec<(u64, Act)> = (0..self.m.len()).map(|i| (t, Act::Heal(i))).collect();
         self.lossless = true;
-        self.n_filter = false;
         self.quiet = true;
         // Frames already in flight may still be lost; then two holder timeouts and beats.
         self.run(t + 3 * self.policy.holder_timeout_ms + 2 * self.policy.beat_ms, heal)?;
@@ -633,7 +658,8 @@ fn random_run_with(seed: u64, fixes: Fixes) -> Result<Stats, (String, Vec<String
                 Act::Isolate(i)
             }
             60..=69 => Act::Restart(i),
-            70..=84 => Act::Seek(i),
+            70..=77 => Act::Seek(i),
+            78..=84 => Act::Burst(i),
             85..=91 => Act::Release(i),
             _ => {
                 script.push((t + rng.range(500, 20_000), Act::Join(i)));
@@ -679,6 +705,7 @@ fn random_seeds_hold_the_guarantees() {
                 total.takes_checked += s.takes_checked;
                 total.yields += s.yields;
                 total.delivered += s.delivered;
+                total.early_applied += s.early_applied;
                 total.max_take_error = total.max_take_error.max(s.max_take_error);
                 total.max_take_bound = total.max_take_bound.max(s.max_take_bound);
                 n += 1;
@@ -689,6 +716,8 @@ fn random_seeds_hold_the_guarantees() {
         }
     }
     println!("sim: {n} seeds passed; {total:?}");
+    // With the revision 2 window, reordered bursts are delivered and early hold applies them.
+    assert!(n < 50 || total.early_applied > 0, "early hold never applied a message");
 }
 
 /// §S12 scripted, over seeds for clocks and links: an ask is passed and the new holder starts
@@ -809,9 +838,11 @@ fn carrier_independence() {
 fn fix_ablation() {
     let all = Fixes::ALL;
     let group = Fixes { bye_resend: false, answer_lesser: false, renew_wider: false, liveness_holder_frames: false, ..all };
-    let cases: [(&str, Fixes); 11] = [
+    let cases: [(&str, Fixes); 13] = [
+        ("F21 pass_echo", Fixes { pass_echo: false, ..all }),
+        ("F12 pass_conflict_renew", Fixes { pass_conflict_renew: false, ..all }),
         ("F5+F6+F7+F8 together", group),
-        ("literal draft", Fixes::LITERAL),
+        ("revision 1 draft (LITERAL)", Fixes::LITERAL),
         ("F1 rank1_from_holder", Fixes { rank1_from_holder: false, ..all }),
         ("F2 seen_unsynced", Fixes { seen_unsynced: false, ..all }),
         ("F5 bye_resend", Fixes { bye_resend: false, ..all }),

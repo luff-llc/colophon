@@ -1,7 +1,7 @@
 # 0.6 session vectors
 
 Transcripts of the reference session machine (`colophon_core::v06::session`, spec
-`spec/colophon-0.6-sessions.md` §S4–§S8), for replay by the Swift, Kotlin and JS bindings.
+`spec/colophon-0.6-sessions.md` revision 2, §S4–§S8), for replay by the Swift, Kotlin and JS bindings.
 They are generated and checked by `crates/colophon-core/tests/v06_session_vectors.rs`
 (`COLOPHON_REGEN_VECTORS=1` rewrites them). The draft is unfrozen: these files change with it.
 
@@ -17,7 +17,7 @@ The machine runs with `Fixes::default()` (every fix in
   "description": "…",
   "policy": {"beatMs": 5000, "holderTimeoutMs": 15000, "askTimeoutMs": 1500,
              "presenceTimeoutMs": 15000, "retainMs": 60000, "tail": 256, "maxPayload": 8192,
-             "take": "free", "reducer": "latest"},
+             "fold": "latest", "take": "free"},
   "fixes": {"rank1FromHolder": true, "…": true},
   "members": [{"id": "a", "canWrite": true, "persisted": null}],
   "steps": [{"member": "a", "at": 0, "input": {…}, "outputs": [{…}]}, {"member": "a", "restart": true}],
@@ -33,12 +33,13 @@ machine with a new one whose persisted claim is the member's current accepted cl
 
 - `at` is that member's own monotonic clock in ms; members' clocks are unrelated.
 - `input` is tagged by `input`: `frame` (`frame`, `writer`), `tick`, `linkUp`, `linkDown`,
-  `app` (`command`, tagged by `command`: `join`, `leave`, `ask`, `pass {to, snapshot}`,
-  `decline {to}`, `take {snapshot|null}`, `release`, `publish {id, payload}`,
+  `app` (`command`, tagged by `command`: `join {state|null}`, `leave`, `ask`, `pass {to, snapshot}`,
+  `decline {to}`, `take {state|null}`, `release`, `publish {id, payload}`,
   `submit {id, payload}`, `presence {payload}`, `ping {to}`).
 - A frame is `{from, to?, retain?, body}`; `body` is the §S3 plaintext tagged by `kind` with
   the spec's field names. `hello.seen` is `{term, rank, holder, seq}` where `seq` may be
-  `null` (finding F2); `hello.sessionKey` is an empty placeholder in this layer.
+  `null` (finding F2); `hello.sessionKey` is an empty placeholder in this layer; `take` has no
+  `basis`, and `bye` carries `leaving` (revision 2).
 - Outputs are tagged by `output`: `send {frame}`, `persist {claim}`, `event {event}`; events are
   tagged by `event` (`becameHolder`, `yielded`, `holderChanged`, `askReceived`, `declined`,
   `message`, `snapshot`, `refused`, `presenceChanged`, `holderLapsed`, `offsetChanged`,

@@ -242,7 +242,7 @@ pub fn show_body(b: &Body) -> String {
         Body::Take { claim, .. } => format!("take {}", show_claim(claim)),
         Body::Ask { claim } => format!("ask {}", show_claim(claim)),
         Body::Decline { claim } => format!("decline {}", show_claim(claim)),
-        Body::Bye { claim } => format!("bye {:?}", claim.as_ref().map(show_claim)),
+        Body::Bye { claim, leaving } => format!("bye {:?} leaving={leaving}", claim.as_ref().map(show_claim)),
         other => other.kind().to_owned(),
     }
 }

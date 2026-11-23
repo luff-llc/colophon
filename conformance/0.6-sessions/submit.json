@@ -41,6 +41,8 @@
     "askResend": true,
     "byeResend": true,
     "livenessHolderFrames": true,
+    "passConflictRenew": true,
+    "passEcho": true,
     "rank1FromHolder": true,
     "renewNeedsContact": true,
     "renewWider": true,
@@ -63,10 +65,10 @@
   "policy": {
     "askTimeoutMs": 1500,
     "beatMs": 5000,
+    "fold": "append",
     "holderTimeoutMs": 15000,
     "maxPayload": 8,
     "presenceTimeoutMs": 15000,
-    "reducer": "append",
     "retainMs": 60000,
     "tail": 256,
     "take": "free"
@@ -76,7 +78,8 @@
       "at": 0,
       "input": {
         "command": {
-          "command": "join"
+          "command": "join",
+          "state": null
         },
         "input": "app"
       },
@@ -100,7 +103,8 @@
       "at": 0,
       "input": {
         "command": {
-          "command": "join"
+          "command": "join",
+          "state": null
         },
         "input": "app"
       },
@@ -161,7 +165,7 @@
       "input": {
         "command": {
           "command": "take",
-          "snapshot": "czA="
+          "state": "czA="
         },
         "input": "app"
       },
@@ -178,10 +182,6 @@
         {
           "frame": {
             "body": {
-              "basis": {
-                "seq": 0,
-                "term": 0
-              },
               "claim": {
                 "holder": "a",
                 "rank": 0,
@@ -230,10 +230,6 @@
       "input": {
         "frame": {
           "body": {
-            "basis": {
-              "seq": 0,
-              "term": 0
-            },
             "claim": {
               "holder": "a",
               "rank": 0,

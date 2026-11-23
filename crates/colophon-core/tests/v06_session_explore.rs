@@ -25,22 +25,24 @@ use std::hash::{Hash, Hasher};
 use v06_session_support::*;
 
 const IDS: [&str; 3] = ["a", "b", "c"];
+/// One explorer tick in ms: the §S8 gap-hello limit (1 s) is one tick.
+const TICK: u64 = 1_000;
 /// The longest policy duration (`policy()`): every comparison is `age >= d` or `age < d`
 /// with `d` at most this, so ages beyond it are indistinguishable.
-const HORIZON: u64 = 3;
+const HORIZON: u64 = 3 * TICK;
 static VERBOSE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn policy() -> Policy {
     Policy {
-        beat_ms: 2,
-        holder_timeout_ms: 3,
-        ask_timeout_ms: 1,
-        presence_timeout_ms: 3,
-        retain_ms: 60,
+        beat_ms: 2 * TICK,
+        holder_timeout_ms: 3 * TICK,
+        ask_timeout_ms: TICK,
+        presence_timeout_ms: 3 * TICK,
+        retain_ms: 60 * TICK,
         tail: 2,
         max_payload: 16,
+        fold: Fold::Append,
         take: TakeRule::Free,
-        reducer: Reducer::Append,
     }
 }
 
@@ -134,9 +136,9 @@ impl World {
         };
         // Start: everyone joined, `a` took, all frames delivered.
         for i in 0..b.members {
-            w.input(i, Input::App { command: Command::Join }, b).unwrap();
+            w.input(i, Input::App { command: Command::Join { state: None } }, b).unwrap();
         }
-        w.input(0, Input::App { command: Command::Take { snapshot: None } }, b).unwrap();
+        w.input(0, Input::App { command: Command::Take { state: None } }, b).unwrap();
         w.flush(b).unwrap();
         w.lossless = false;
         w
@@ -228,7 +230,7 @@ impl World {
     }
 
     fn tick(&mut self, b: &Bounds) -> Result<(), String> {
-        self.now += 1;
+        self.now += TICK;
         for i in 0..self.m.len() {
             self.input(i, Input::Tick, b)?;
         }
@@ -346,7 +348,7 @@ impl World {
                 let i = *i;
                 let command = match c {
                     Cmd::Ask => Command::Ask,
-                    Cmd::Take => Command::Take { snapshot: None },
+                    Cmd::Take => Command::Take { state: None },
                     Cmd::Pass(to) => {
                         self.asks[i].retain(|x| x != to);
                         Command::Pass {
@@ -370,7 +372,7 @@ impl World {
                     }
                     Cmd::Release => Command::Release,
                     Cmd::Leave => Command::Leave,
-                    Cmd::Join => Command::Join,
+                    Cmd::Join => Command::Join { state: None },
                     Cmd::Restart => {
                         self.restarts -= 1;
                         let before = self.m[i].clone();
@@ -388,7 +390,7 @@ impl World {
                         if !self.up[i] {
                             self.input(i, Input::LinkDown, b)?;
                         }
-                        Command::Join
+                        Command::Join { state: None }
                     }
                 };
                 self.input(i, Input::App { command }, b)?;
@@ -408,7 +410,7 @@ impl World {
             }
         }
         let p = policy();
-        let horizon = 3 * p.holder_timeout_ms + 2 * p.ask_timeout_ms + 2 * p.beat_ms;
+        let horizon = (3 * p.holder_timeout_ms + 2 * p.ask_timeout_ms + 2 * p.beat_ms) / TICK;
         for _ in 0..horizon {
             w.flush(b)?;
             // Quiet, converged and no timer pending: only beats follow.
@@ -448,7 +450,7 @@ impl World {
         }
         w.flush(b)?;
         w.input(wi, Input::App { command: Command::Ask }, b)?;
-        let deadline = policy().ask_timeout_ms + 1;
+        let deadline = policy().ask_timeout_ms / TICK + 1;
         for _ in 0..deadline {
             w.flush(b)?;
             w.tick(b)?;
@@ -646,7 +648,7 @@ fn bounds(members: usize, kinds: &'static str, small: (u8, u8, u8, usize), depth
     let depth = if big { depth + 4 } else { depth };
     Bounds {
         members,
-        time: 200,
+        time: 200 * TICK,
         cmds: env_u64("COLOPHON_EXPLORE_CMDS", u64::from(cmds)) as u8,
         dups: env_u64("COLOPHON_EXPLORE_DUPS", u64::from(dups)) as u8,
         links: env_u64("COLOPHON_EXPLORE_LINKS", u64::from(links)) as u8,
@@ -754,4 +756,96 @@ fn draft_counterexamples() {
         });
         assert!(found, "no counterexample for the {name}");
     }
+}
+
+/// F12 (adopted in revision 2, §S5): two holders partitioned from each other both pass to the
+/// same asker. With `pass_conflict_renew` off, members end on the same claim with different
+/// states (G3/G4); with it on, the new holder renews and one state prevails.
+fn two_passes_to_one(fixes: Fixes, lose_a_pass_to_x: bool) -> Vec<Session> {
+    let ids = ["a", "b", "x"];
+    let mut m: Vec<Session> = ids
+        .iter()
+        .map(|i| Session::with_fixes(i, true, Policy::default(), None, fixes))
+        .collect();
+    let mut net: Vec<(usize, Frame)> = Vec::new();
+    // Route one member's outputs into the network, dropping what `cut` rejects.
+    let route = |net: &mut Vec<(usize, Frame)>, from: usize, outs: Vec<Output>, cut: &dyn Fn(usize, usize) -> bool| {
+        for o in outs {
+            if let Output::Send { frame } = o {
+                let dsts: Vec<usize> = match &frame.to {
+                    Some(t) => vec![ids.iter().position(|x| x == t).unwrap()],
+                    None => (0..3).filter(|j| *j != from).collect(),
+                };
+                for d in dsts {
+                    if !cut(from, d) {
+                        net.push((d, frame.clone()));
+                    }
+                }
+            }
+        }
+    };
+    let flush = |m: &mut Vec<Session>, net: &mut Vec<(usize, Frame)>, t: u64, cut: &dyn Fn(usize, usize) -> bool| {
+        while !net.is_empty() {
+            let (d, f) = net.remove(0);
+            let outs = m[d].handle(Input::Frame { frame: f, writer: true }, t);
+            route(net, d, outs, cut);
+        }
+    };
+    // a and b cannot reach each other.
+    let ab = |x: usize, y: usize| (x == 0 && y == 1) || (x == 1 && y == 0);
+    for (i, s) in m.iter_mut().enumerate() {
+        let outs = s.handle(Input::App { command: Command::Join { state: None } }, 0);
+        route(&mut net, i, outs, &ab);
+    }
+    flush(&mut m, &mut net, 0, &ab);
+    // a takes 1.0.a; only x hears it.
+    let outs = m[0].handle(Input::App { command: Command::Take { state: Some(Bytes(b"A".to_vec())) } }, 10);
+    route(&mut net, 0, outs, &ab);
+    flush(&mut m, &mut net, 10, &ab);
+    // x asks a; the ask reaches a.
+    let outs = m[2].handle(Input::App { command: Command::Ask }, 20);
+    route(&mut net, 2, outs, &ab);
+    flush(&mut m, &mut net, 20, &ab);
+    // b takes 1.0.b (greater); x accepts it and re-asks b.
+    let outs = m[1].handle(Input::App { command: Command::Take { state: Some(Bytes(b"B".to_vec())) } }, 30);
+    route(&mut net, 1, outs, &ab);
+    flush(&mut m, &mut net, 30, &ab);
+    assert_eq!(m[2].accepted(), Some(&Claim::new(1, 0, "b")));
+    // Both holders pass to x: b's pass first, then a's (a still holds 1.0.a, and passes too).
+    let outs = m[1].handle(Input::App { command: Command::Pass { to: "x".into(), snapshot: Bytes(b"B".to_vec()) } }, 40);
+    route(&mut net, 1, outs, &ab);
+    let outs = m[0].handle(Input::App { command: Command::Pass { to: "x".into(), snapshot: Bytes(b"A".to_vec()) } }, 40);
+    let cut_ax = |x: usize, y: usize| ab(x, y) || (lose_a_pass_to_x && x == 0 && y == 2);
+    route(&mut net, 0, outs, &cut_ax);
+    flush(&mut m, &mut net, 50, &ab);
+    // Heal and let beats and answers settle.
+    let none = |_: usize, _: usize| false;
+    for t in [6_000u64, 12_000, 18_000] {
+        for (i, s) in m.iter_mut().enumerate() {
+            let outs = s.handle(Input::Tick, t);
+            route(&mut net, i, outs, &none);
+        }
+        flush(&mut m, &mut net, t + 10, &none);
+    }
+    m
+}
+
+#[test]
+fn f12_two_passes_to_one_asker() {
+    let off = two_passes_to_one(Fixes { pass_conflict_renew: false, ..Fixes::ALL }, false);
+    let diverged = check_converged(&off).is_err();
+    println!("F12 off: {:?}", off.iter().map(|s| (s.me().to_owned(), s.accepted().map(show_claim), String::from_utf8_lossy(&s.state().0).into_owned())).collect::<Vec<_>>());
+    assert!(diverged, "without F12 the two passes should leave different states under one claim");
+    let on = two_passes_to_one(Fixes::ALL, false);
+    println!("F12 on: {:?}", on.iter().map(|s| (s.me().to_owned(), s.accepted().map(show_claim), String::from_utf8_lossy(&s.state().0).into_owned())).collect::<Vec<_>>());
+    check_converged(&on).unwrap();
+    // F21: if a's pass to x is lost, x never meets the second pass and nothing tells a that
+    // its state under 2.1.x differs: revision 2's F12 rule alone does not cover it. The
+    // passer's one-time echo of its pass (F21) does.
+    let lost = two_passes_to_one(Fixes { pass_echo: false, ..Fixes::ALL }, true);
+    println!("F12 on, F21 off, a's pass to x lost: {:?}", lost.iter().map(|s| (s.me().to_owned(), s.accepted().map(show_claim), String::from_utf8_lossy(&s.state().0).into_owned())).collect::<Vec<_>>());
+    assert!(check_converged(&lost).is_err(), "F21 scenario should diverge without the echo");
+    let echoed = two_passes_to_one(Fixes::ALL, true);
+    println!("F12 and F21 on, a's pass to x lost: {:?}", echoed.iter().map(|s| (s.me().to_owned(), s.accepted().map(show_claim), String::from_utf8_lossy(&s.state().0).into_owned())).collect::<Vec<_>>());
+    check_converged(&echoed).unwrap();
 }

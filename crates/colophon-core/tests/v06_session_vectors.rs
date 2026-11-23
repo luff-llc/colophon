@@ -94,7 +94,7 @@ impl Script {
     }
     fn join_all(&mut self, at: u64) {
         for id in self.ids() {
-            self.cmd(&id, at, Command::Join);
+            self.cmd(&id, at, Command::Join { state: None });
         }
     }
     fn session(&self, id: &str) -> &Session {
@@ -126,14 +126,14 @@ fn started(name: &'static str, description: &'static str, policy: Policy, ids: &
     let mut s = Script::new(name, description, policy, ids);
     s.join_all(0);
     s.deliver(0);
-    s.cmd(ids[0], 10, Command::Take { snapshot: Some(b("s0")) });
+    s.cmd(ids[0], 10, Command::Take { state: Some(b("s0")) });
     s.deliver(20);
     s
 }
 
 fn scenarios() -> Vec<Script> {
     let p = Policy::default;
-    let append = || Policy { reducer: Reducer::Append, ..Policy::default() };
+    let append = || Policy { fold: Fold::Append, ..Policy::default() };
     let mut v = Vec::new();
 
     let mut s = started("take-publish", "a takes with a snapshot, publishes two messages; b follows in order.", append(), &["a", "b"]);
@@ -143,13 +143,14 @@ fn scenarios() -> Vec<Script> {
     assert_eq!(s.session("b").state(), &b("s0+1+2"));
     v.push(s);
 
-    let mut s = started("ask-pass", "b asks; a pauses and passes its final snapshot; b holds from exactly that snapshot (§S5, G3).", p(), &["a", "b", "c"]);
+    let mut s = started("ask-pass", "b asks; a pauses and passes its final §S12 anchor (playing false); b holds from exactly that snapshot (§S5, G3).", p(), &["a", "b", "c"]);
     s.cmd("b", 1_000, Command::Ask);
     s.deliver(1_010);
-    s.cmd("a", 1_020, Command::Pass { to: "b".into(), snapshot: b("stopped") });
+    let stopped = br#"{"at":1020,"episode":"e1","playing":false,"positionMs":61250,"ratePermille":1250,"show":"s1"}"#;
+    s.cmd("a", 1_020, Command::Pass { to: "b".into(), snapshot: Bytes(stopped.to_vec()) });
     s.deliver(1_030);
     assert!(s.session("b").is_holder());
-    assert_eq!(s.session("c").state(), &b("stopped"));
+    assert_eq!(s.session("c").state(), &Bytes(stopped.to_vec()));
     v.push(s);
 
     let mut s = started("ask-decline", "b asks; a declines; b does not take when askTimeoutMs passes (§S5).", p(), &["a", "b"]);
@@ -174,7 +175,7 @@ fn scenarios() -> Vec<Script> {
     v.push(s);
 
     let mut s = started("lapse-take", "b wants the role while a beats; when a falls silent for holderTimeoutMs it is lapsed and b takes (§S6, G5).", p(), &["a", "b"]);
-    s.cmd("b", 100, Command::Take { snapshot: None });
+    s.cmd("b", 100, Command::Take { state: None });
     s.tick("a", 5_010);
     s.deliver(5_020);
     s.tick("b", 5_100);
@@ -209,7 +210,7 @@ fn scenarios() -> Vec<Script> {
 
     let mut s = started("take-without-state", "b takes; its state frame to c is lost; c accepts the claim from take, says seen.seq = null and gets state (§S8, finding F2).", p(), &["a", "b", "c"]);
     s.lose_all();
-    s.cmd("b", 1_000, Command::Take { snapshot: None });
+    s.cmd("b", 1_000, Command::Take { state: None });
     s.tick("b", 20_000);
     s.deliver_if(20_010, |to, f| to == "c" && matches!(f.body, Body::State { .. }) && f.to.is_none());
     assert!(s.session("c").synced());
@@ -218,7 +219,7 @@ fn scenarios() -> Vec<Script> {
     let mut s = started("partition-two-holders", "a is cut off; b sees a lapsed and takes; when a's link heals its hello reaches b, which answers with state, and a yields to the greater claim (§S4, §S6, G6).", p(), &["a", "b"]);
     s.step("a", 1_000, Input::LinkDown);
     s.lose_all();
-    s.cmd("b", 1_000, Command::Take { snapshot: None });
+    s.cmd("b", 1_000, Command::Take { state: None });
     s.tick("b", 16_100);
     s.lose_all();
     s.step("a", 10_000, Input::LinkUp);
@@ -256,16 +257,18 @@ fn scenarios() -> Vec<Script> {
     assert!(s.session("b").is_holder());
     v.push(s);
 
-    let mut s = started("restart-holder", "a restarts with its persisted claim and no state: it sends hello lapsed:true, waits askTimeoutMs, then retakes with b's answer (§S6, reference reading).", append(), &["a", "b"]);
+    let mut s = started("restart-holder", "a restarts with its persisted claim; the application supplies the cell's state with join; a sends hello lapsed:true, waits askTimeoutMs, then retakes at term + 1 with that state (§S6, revision 2).", append(), &["a", "b"]);
     s.cmd("a", 100, Command::Publish { id: b("1"), payload: b("+1") });
     s.deliver(110);
     let persisted = s.session("a").accepted().cloned();
     s.s.insert("a".into(), Session::new("a", true, append(), persisted));
     s.steps.push(json!({"member": "a", "restart": true}));
-    s.cmd("a", 200, Command::Join);
+    s.cmd("a", 200, Command::Join { state: Some(b("s0+1")) });
     s.deliver(210);
     s.tick("a", 2_000);
     s.deliver(2_010);
+    assert_eq!(s.session("a").accepted(), Some(&Claim::new(2, 0, "a")));
+    assert_eq!(s.session("b").state(), &b("s0+1"));
     v.push(s);
 
     let mut s = started("release", "a releases (bye); the cell has no holder; b asks and takes at once (§S4, §S5).", p(), &["a", "b"]);

@@ -1,8 +1,8 @@
 {
-  "description": "a restarts with its persisted claim and no state: it sends hello lapsed:true, waits askTimeoutMs, then retakes with b's answer (§S6, reference reading).",
+  "description": "a restarts with its persisted claim; the application supplies the cell's state with join; a sends hello lapsed:true, waits askTimeoutMs, then retakes at term + 1 with that state (§S6, revision 2).",
   "final": [
     {
-      "digest": "d01d0c970a808727ec5b76c627124460b10bcb19f202bb65a7932cdb838bcb07",
+      "digest": "b1aa59f3562a3f15abccbdd3c6484da9b1d03377bbd9f4bd428d50d1a180551a",
       "member": "a",
       "view": {
         "accepted": {
@@ -14,12 +14,12 @@
         "holder": "a",
         "holding": true,
         "seq": 0,
-        "state": "",
+        "state": "czArMQ==",
         "synced": true
       }
     },
     {
-      "digest": "853fcd729649d9cde0454bd0e0e5368b03e224d9201b1a27841f08a65a125289",
+      "digest": "41360dd1cc4e0248a45149e625cd526f3e2e60ac88a85fb6bc27c28de7a0d430",
       "member": "b",
       "view": {
         "accepted": {
@@ -31,7 +31,7 @@
         "holder": "a",
         "holding": false,
         "seq": 0,
-        "state": "",
+        "state": "czArMQ==",
         "synced": true
       }
     }
@@ -41,6 +41,8 @@
     "askResend": true,
     "byeResend": true,
     "livenessHolderFrames": true,
+    "passConflictRenew": true,
+    "passEcho": true,
     "rank1FromHolder": true,
     "renewNeedsContact": true,
     "renewWider": true,
@@ -63,10 +65,10 @@
   "policy": {
     "askTimeoutMs": 1500,
     "beatMs": 5000,
+    "fold": "append",
     "holderTimeoutMs": 15000,
     "maxPayload": 8192,
     "presenceTimeoutMs": 15000,
-    "reducer": "append",
     "retainMs": 60000,
     "tail": 256,
     "take": "free"
@@ -76,7 +78,8 @@
       "at": 0,
       "input": {
         "command": {
-          "command": "join"
+          "command": "join",
+          "state": null
         },
         "input": "app"
       },
@@ -100,7 +103,8 @@
       "at": 0,
       "input": {
         "command": {
-          "command": "join"
+          "command": "join",
+          "state": null
         },
         "input": "app"
       },
@@ -161,7 +165,7 @@
       "input": {
         "command": {
           "command": "take",
-          "snapshot": "czA="
+          "state": "czA="
         },
         "input": "app"
       },
@@ -178,10 +182,6 @@
         {
           "frame": {
             "body": {
-              "basis": {
-                "seq": 0,
-                "term": 0
-              },
               "claim": {
                 "holder": "a",
                 "rank": 0,
@@ -230,10 +230,6 @@
       "input": {
         "frame": {
           "body": {
-            "basis": {
-              "seq": 0,
-              "term": 0
-            },
             "claim": {
               "holder": "a",
               "rank": 0,
@@ -486,7 +482,8 @@
       "at": 200,
       "input": {
         "command": {
-          "command": "join"
+          "command": "join",
+          "state": "czArMQ=="
         },
         "input": "app"
       },
@@ -552,10 +549,6 @@
         {
           "frame": {
             "body": {
-              "basis": {
-                "seq": 0,
-                "term": 1
-              },
               "claim": {
                 "holder": "a",
                 "rank": 0,
@@ -577,7 +570,7 @@
               },
               "kind": "state",
               "seq": 0,
-              "snapshot": ""
+              "snapshot": "czArMQ=="
             },
             "from": "a",
             "retain": true
@@ -592,7 +585,7 @@
               "term": 2
             },
             "event": "becameHolder",
-            "snapshot": "",
+            "snapshot": "czArMQ==",
             "via": "take"
           },
           "output": "event"
@@ -604,10 +597,6 @@
       "input": {
         "frame": {
           "body": {
-            "basis": {
-              "seq": 0,
-              "term": 1
-            },
             "claim": {
               "holder": "a",
               "rank": 0,
@@ -673,7 +662,7 @@
             },
             "kind": "state",
             "seq": 0,
-            "snapshot": ""
+            "snapshot": "czArMQ=="
           },
           "from": "a",
           "retain": true
@@ -692,7 +681,7 @@
             },
             "event": "snapshot",
             "seq": 0,
-            "snapshot": ""
+            "snapshot": "czArMQ=="
           },
           "output": "event"
         }
@@ -731,7 +720,7 @@
               },
               "kind": "state",
               "seq": 0,
-              "snapshot": ""
+              "snapshot": "czArMQ=="
             },
             "from": "a",
             "retain": true,
@@ -753,7 +742,7 @@
             },
             "kind": "state",
             "seq": 0,
-            "snapshot": ""
+            "snapshot": "czArMQ=="
           },
           "from": "a",
           "retain": true,
