@@ -820,7 +820,7 @@ policy. Errors are `AccountError`, as everywhere else.
 | `AccountEngine.stream_client(home, config, cursor)` | the client at the home's endpoint, with the account's safety-poll floor and the verified seq applied (`HomeStream.new` takes a base directly) |
 | `AccountEngine.stream_begin_call(home, key, entropy)` | the `colophon.home.stream` call that mints a ticket: an `AccountAction` signed and finished like any other; `artifact` goes to `ticket_request` |
 | `stream_default_config`, `stream_redact_url` | the documented `StreamConfig`; a URL with its ticket redacted |
-| `SessionEndpoint` | one member of one cell: `new(…, view, key_random, fresh_seed, clock)`; `begin_delegation` / `finish_delegation`; `set_account(view, engine, clock)`, `command(json, engine, clock)`, `tick(engine, clock)`, `link_up`, `link_down`, `receive(bytes, engine, clock)`, each returning a `SessionStep`; `persisted(ack, engine, clock)`, `awaiting_persist`, `queued`. Read-only: `next_deadline`, `me`, `key_id`, `last_n`, `entitled`, `can_write`, `joined`, `holder`, `is_holder`, `claim_json`, `view_json`, `digest` |
+| `SessionEndpoint` | one member of one cell: `new(…, view, key_random, fresh_seed, clock)`; `begin_delegation` / `finish_delegation`; `set_account(view, engine, clock)`, `command(json, engine, clock)`, `tick(engine, clock)`, `link_up`, `link_down`, `receive(bytes, engine, clock)`, each returning a `SessionStep`; `persisted(ack, engine, clock)` (only when the durable write of that `Persist` has completed), `awaiting_persist`, `queued`. Read-only: `next_deadline`, `me`, `key_id`, `last_n`, `entitled`, `can_write`, `joined`, `holder`, `is_holder`, `claim_json`, `view_json`, `digest` |
 | `AccountEngine.session_account(namespace, at_ms)` | the `SessionAccountView` of the verified history at `at_ms` for an endpoint of `namespace`, stamped with this engine, the account, the namespace and the authority head (sequence and digest) |
 | `session_default_policy`, `session_validate_policy`, `session_clock_sample` | the §S1 default policy (JSON); the policy check the endpoint applies; the §S7 sample |
 
@@ -846,29 +846,41 @@ way to its bytes outside the core), so an unlock or a rekey is seen at the next 
 randomness and the `fresh` seed are host randomness, new on every process start, and are wiped.
 
 **The endpoint's step.** Every call that runs the session returns one `SessionStep`: `effects` in
-order; at most one `awaiting_persist` (the acknowledgement ID of a `Persist` that ends `effects`);
-`drops`, the frames this call judged and dropped, in order, with their reasons; `queued`, true when
-this call's input is kept to run after the acknowledgement; and `discarded`, the number of effects
-decided under an older authority head that were dropped instead of released.
+order; `awaiting_persist`, set only on the step whose last effect is a `Persist` (that `Persist`'s
+acknowledgement ID; no other step ever carries an ID); `persist_outstanding`, true while some
+`Persist` is still unacknowledged after the call; `drops`, the frames this call judged and dropped,
+in order, with their reasons; `queued`, true when this call's input is kept to run after the
+acknowledgement; and `discarded`, the number of effects decided under an older authority head that
+were dropped instead of released.
 
-**The reference host loop.**
+**The reference host loop.** The acknowledgement is issued only by the completion of the durable
+write of the `Persist` effect it names, never by seeing a step:
 
 ```text
 on any input (a frame, a timer at next_deadline, a carrier change, an application command):
     step = endpoint.<call>(…, engine, clock)
-      error session:staleAccount  → endpoint.set_account(engine.session_account(ns, now), engine, clock)
-                                     and handle its step as below, then retry the input
-      error session:persistPending → (only a command) retry it after the next persisted
+      error session:staleAccount   → step = endpoint.set_account(engine.session_account(ns, now), engine, clock)
+                                     handle(step), then retry the input
+      error session:persistPending → (only a command) retry it after the next write completes
     handle(step)
 
 handle(step):
-    perform step.effects in order (Send: broadcast; Event: tell the app; Persist: store it durably)
+    for effect in step.effects, in order:
+        Send:    broadcast effect.bytes
+        Event:   tell the application
+        Persist: start the durable write of effect.persisted_json, tagged with step.awaiting_persist
     log step.drops
-    while step.awaiting_persist is some id:     # consecutive Persists come one per step
-        step = endpoint.persisted(id, engine, clock)
-        perform step.effects in order, log step.drops
+
+on the durable write of a Persist tagged id completing:
+    step = endpoint.persisted(id, engine, clock)
+    handle(step)                          # it may end in the next Persist, with its own id
+
+on the durable write failing:
+    retry it; never call persisted for it
 ```
 
+While a write is in progress (`persist_outstanding`), the other calls go on as usual: frames, ticks and
+link changes are kept and run after the acknowledgement; a command is refused and retried after it.
 After every exchange pass that moved the head, call `set_account` before delivering anything else.
 
 **Orders the endpoint enforces.**
@@ -887,7 +899,9 @@ After every exchange pass that moved the head, call `set_account` before deliver
   (read), then endpoint; nothing takes them otherwise, so there is no cycle. A tick can wait only
   for one installation in progress, and an installation only for the endpoint calls in progress,
   each bounded (one input, or one acknowledgement and its bounded queue); a long exchange pass or a
-  slow host callback never delays a tick.
+  slow host callback never delays a tick. `std::sync::RwLock` promises no fairness, so a writer
+  announces itself first and new endpoint calls wait while it does: a stream of endpoint calls
+  cannot starve an installation.
 * *Persist before what reveals it.* A step's effects end at the first `Persist`. Store
   `persisted_json` durably, then call `persisted(id, engine, clock)`; any other ID, or one already
   acknowledged, is `session:wrongAck`. If the head is still the installed view's, the effects held
@@ -902,11 +916,14 @@ After every exchange pass that moved the head, call `set_account` before deliver
   stored.
 * *Inputs while a `Persist` waits.* A `command` is refused with `session:persistPending` and
   changes nothing (retry it after `persisted`). A `tick` is kept as one pending tick however many
-  arrive; `link_up` and `link_down` keep only the latest link state; received frames are kept in
-  order, at most 64 frames and 1 MiB together (a durable write takes milliseconds to a few
-  hundred, and this covers several seconds of a busy cell); past either bound the newest frame is
-  lost (a `queueFull` drop). They run at `persisted` (or at `set_account` when the head had moved),
-  with that call's clock: the link state first, then the frames in order, then the tick.
+  arrive. Received frames and link transitions are kept in arrival order, each with the clock it
+  arrived at: frames up to 64 and 1 MiB together (a durable write takes milliseconds to a few
+  hundred, and this covers several seconds of a busy cell), past which the newest frame is lost (a
+  `queueFull` drop); a repeated transition (down after down, up after up) is a no-op to the machine
+  and is not kept, and past 16 transitions a new down removes the up before it, so the outage runs
+  from the earliest down. They run at `persisted` (or at `set_account` when the head had moved) in
+  that order, each with its own arrival clock, exactly as if they had run when they arrived (a down
+  then up still leaves a holder lapsed and gated); then the tick, with that call's clock.
   `next_deadline` stays the machine's deadline throughout.
 
 **Host loops.** Stream: §2 of the sync-stream document, with these names; after every exchange pass call

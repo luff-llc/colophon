@@ -461,6 +461,10 @@ impl Session {
     pub fn me(&self) -> &str {
         &self.me
     }
+    /// Whether this member's carriers work, as the last `LinkUp` or `LinkDown` said.
+    pub fn link_is_up(&self) -> bool {
+        self.link_up
+    }
     /// Whether it has joined.
     pub fn joined(&self) -> bool {
         self.joined

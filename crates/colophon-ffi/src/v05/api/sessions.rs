@@ -220,6 +220,10 @@ pub(crate) struct Published {
 /// whose work is bounded (one input, or one acknowledged `Persist` and its bounded queue).
 pub(crate) struct SessionGate {
     inner: std::sync::RwLock<Published>,
+    /// Writers waiting to install a head. `std::sync::RwLock` promises no fairness, so a new
+    /// endpoint call waits while one is set: a stream of endpoint calls cannot starve an
+    /// installation.
+    intent: std::sync::atomic::AtomicUsize,
 }
 impl SessionGate {
     pub(crate) fn new(a: &colophon_core::v05::account::Account, locked: bool) -> Self {
@@ -231,7 +235,16 @@ impl SessionGate {
                 locked,
                 epochs: Default::default(),
             }),
+            intent: std::sync::atomic::AtomicUsize::new(0),
         }
+    }
+    /// The write side, announced first so new readers hold back.
+    fn write(&self) -> Option<std::sync::RwLockWriteGuard<'_, Published>> {
+        use std::sync::atomic::Ordering;
+        self.intent.fetch_add(1, Ordering::SeqCst);
+        let w = self.inner.write().ok();
+        self.intent.fetch_sub(1, Ordering::SeqCst);
+        w
     }
     /// Install the engine's current head and keys, if they changed. Called with the engine held.
     pub(crate) fn publish(&self, a: &colophon_core::v05::account::Account, locked: bool) {
@@ -249,7 +262,7 @@ impl SessionGate {
             return;
         }
         drop(cur);
-        if let Ok(mut w) = self.inner.write() {
+        if let Some(mut w) = self.write() {
             w.seq = seq;
             w.digest = digest;
             w.locked = locked;
@@ -266,7 +279,7 @@ impl SessionGate {
             .map(|p| p.epochs.contains_key(namespace))
             .unwrap_or(false);
         if !known {
-            if let Ok(mut w) = self.inner.write() {
+            if let Some(mut w) = self.write() {
                 w.epochs.insert(
                     namespace.to_owned(),
                     std::sync::Arc::new(a.session_epochs(namespace)),
@@ -275,6 +288,9 @@ impl SessionGate {
         }
     }
     fn read(&self) -> R<std::sync::RwLockReadGuard<'_, Published>> {
+        while self.intent.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+            std::thread::yield_now();
+        }
         self.inner.read().map_err(|_| {
             AccountError::internal(
                 "an earlier call panicked; discard this engine and open a new one",
@@ -311,6 +327,18 @@ enum Input0 {
     Command(Command),
 }
 
+/// The most link transitions kept while a `Persist` waits. Repeated transitions (down after
+/// down, up after up) are no-ops to the machine and are not kept; past the bound a new down
+/// removes the up before it, so the outage runs from the earliest down (the more cautious
+/// reading: a longer outage can only make a holder lapse).
+const MAX_LINK_EVENTS: usize = 16;
+
+/// An input kept while a `Persist` waits, with the clock it arrived at.
+enum Kept {
+    Frame(Vec<u8>, Clock),
+    Link(bool, Clock),
+}
+
 /// What one call hands back, accumulated across the inputs it ran.
 struct Out {
     effects: Vec<SessionEffect>,
@@ -329,11 +357,13 @@ impl Out {
             discarded: 0,
         }
     }
-    fn step(self) -> SessionStep {
+    /// The step; `outstanding` says whether a `Persist` still waits for its acknowledgement.
+    fn step(self, outstanding: bool) -> SessionStep {
         SessionStep {
             effects: self.effects,
             drops: self.drops,
             awaiting_persist: self.awaiting,
+            persist_outstanding: outstanding,
             queued: self.queued,
             discarded: self.discarded,
         }
@@ -347,11 +377,12 @@ struct EndpointState {
     /// The body `begin_delegation` returned and `finish_delegation` has not installed yet.
     delegation: Option<Vec<u8>>,
     pending: Option<Pending>,
-    /// Inputs that arrived while a `Persist` waited: frames in order, the latest link state,
-    /// and whether a tick fell due.
-    frames: std::collections::VecDeque<Vec<u8>>,
+    /// Inputs that arrived while a `Persist` waited, in arrival order with their clocks (frames
+    /// and link transitions), and whether a tick fell due.
+    kept: std::collections::VecDeque<Kept>,
+    frames: usize,
     frame_bytes: usize,
-    link: Option<bool>,
+    links: usize,
     tick: bool,
     next_ack: u64,
 }
@@ -399,17 +430,23 @@ impl EndpointState {
         }
         self.absorb(step.effects, out)
     }
-    /// Run what waited, with this call's clock, until a `Persist`: the link state first (the
-    /// carriers as they are now), then the frames in arrival order, then one tick.
+    /// Run what waited until a `Persist`: the frames and link transitions in arrival order,
+    /// each with the clock it arrived at (as if it had run then), then one tick with this
+    /// call's clock.
     fn drain(&mut self, clock: Clock, epochs: &SessionEpochs, out: &mut Out) -> R<()> {
-        if let Some(up) = self.link.take() {
-            if self.run(Input0::Link(up), clock, epochs, out)? {
-                return Ok(());
-            }
-        }
-        while let Some(f) = self.frames.pop_front() {
-            self.frame_bytes = self.frame_bytes.saturating_sub(f.len());
-            if self.run(Input0::Receive(f), clock, epochs, out)? {
+        while let Some(k) = self.kept.pop_front() {
+            let (input, at) = match k {
+                Kept::Frame(b, at) => {
+                    self.frames -= 1;
+                    self.frame_bytes = self.frame_bytes.saturating_sub(b.len());
+                    (Input0::Receive(b), at)
+                }
+                Kept::Link(up, at) => {
+                    self.links -= 1;
+                    (Input0::Link(up), at)
+                }
+            };
+            if self.run(input, at, epochs, out)? {
                 return Ok(());
             }
         }
@@ -418,9 +455,15 @@ impl EndpointState {
         }
         Ok(())
     }
-    /// Keep an input that arrived while a `Persist` waits; a command is refused.
-    fn hold(&mut self, input: Input0, out: &mut Out) -> R<()> {
-        out.awaiting = self.pending.as_ref().map(|p| p.ack);
+    /// The link state the kept transitions end in, or none when none is kept.
+    fn last_link(&self) -> Option<bool> {
+        self.kept.iter().rev().find_map(|k| match k {
+            Kept::Link(up, _) => Some(*up),
+            Kept::Frame(..) => None,
+        })
+    }
+    /// Keep an input that arrived at `clock` while a `Persist` waits; a command is refused.
+    fn hold(&mut self, input: Input0, clock: Clock, out: &mut Out) -> R<()> {
         match input {
             Input0::Command(_) => Err(persist_pending()),
             Input0::Tick => {
@@ -429,12 +472,29 @@ impl EndpointState {
                 Ok(())
             }
             Input0::Link(up) => {
-                self.link = Some(up);
                 out.queued = true;
+                let last = self.last_link().unwrap_or(self.e.machine().link_is_up());
+                if last == up {
+                    return Ok(());
+                }
+                if !up && self.links >= MAX_LINK_EVENTS {
+                    // Keep the earliest down: drop the up that ended it, and this down.
+                    if let Some(i) = self
+                        .kept
+                        .iter()
+                        .rposition(|k| matches!(k, Kept::Link(true, _)))
+                    {
+                        self.kept.remove(i);
+                        self.links -= 1;
+                    }
+                    return Ok(());
+                }
+                self.kept.push_back(Kept::Link(up, clock));
+                self.links += 1;
                 Ok(())
             }
             Input0::Receive(b) => {
-                if self.frames.len() >= MAX_QUEUED
+                if self.frames >= MAX_QUEUED
                     || self.frame_bytes.saturating_add(b.len()) > MAX_QUEUED_BYTES
                 {
                     // The newest frame is lost, as on any carrier.
@@ -443,8 +503,9 @@ impl EndpointState {
                         hello_to: None,
                     });
                 } else {
+                    self.frames += 1;
                     self.frame_bytes += b.len();
-                    self.frames.push_back(b);
+                    self.kept.push_back(Kept::Frame(b, clock));
                     out.queued = true;
                 }
                 Ok(())
@@ -452,7 +513,7 @@ impl EndpointState {
         }
     }
     fn queued(&self) -> usize {
-        self.frames.len() + usize::from(self.tick) + usize::from(self.link.is_some())
+        self.kept.len() + usize::from(self.tick)
     }
 }
 
@@ -539,9 +600,10 @@ impl SessionEndpoint {
                         installed: view.stamp.clone(),
                         delegation: None,
                         pending: None,
-                        frames: Default::default(),
+                        kept: Default::default(),
+                        frames: 0,
                         frame_bytes: 0,
-                        link: None,
+                        links: 0,
                         tick: false,
                         next_ack: 0,
                     }),
@@ -601,19 +663,19 @@ impl SessionEndpoint {
             let current = s.installed.seq == p.seq && s.installed.digest == p.digest;
             let mut out = Out::new();
             if s.pending.is_some() {
-                s.hold(input, &mut out)?;
-                return Ok(out.step());
+                s.hold(input, clock, &mut out)?;
+                return Ok(out.step(s.pending.is_some()));
             }
             if !current {
                 return Err(stale());
             }
             s.drain(clock, epochs, &mut out)?;
             if s.pending.is_some() {
-                s.hold(input, &mut out)?;
+                s.hold(input, clock, &mut out)?;
             } else {
                 s.run(input, clock, epochs, &mut out)?;
             }
-            Ok(out.step())
+            Ok(out.step(s.pending.is_some()))
         })
     }
 }
@@ -706,13 +768,12 @@ impl SessionEndpoint {
             if let Some(pending) = s.pending.as_mut() {
                 out.discarded = count(pending.rest.len());
                 pending.rest = step.effects;
-                out.awaiting = Some(pending.ack);
-                return Ok(out.step());
+                return Ok(out.step(s.pending.is_some()));
             }
             if !s.absorb(step.effects, &mut out)? {
                 s.drain(clock, epochs, &mut out)?;
             }
-            Ok(out.step())
+            Ok(out.step(s.pending.is_some()))
         })
     }
     /// An application command (§S10), as JSON tagged by `command`. While a `Persist` waits it
@@ -787,12 +848,12 @@ impl SessionEndpoint {
             let rest = s.pending.take().map(|p| p.rest).unwrap_or_default();
             if !current {
                 out.discarded = count(rest.len());
-                return Ok(out.step());
+                return Ok(out.step(s.pending.is_some()));
             }
             if !s.absorb(rest, &mut out)? {
                 s.drain(clock, epochs, &mut out)?;
             }
-            Ok(out.step())
+            Ok(out.step(s.pending.is_some()))
         })
     }
     /// The acknowledgement ID of the `Persist` waiting for `persisted`, if any.

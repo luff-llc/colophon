@@ -302,15 +302,22 @@ fn v06_through_the_engine(
     let deadline = ep.next_deadline().unwrap();
     for t in [1_200, 1_300] {
         let q = ep.tick(ea, clock(t)).unwrap();
-        assert!(q.queued && q.effects.is_empty() && q.awaiting_persist == Some(ack));
+        assert!(q.queued && q.effects.is_empty() && q.persist_outstanding);
+        assert_eq!(q.awaiting_persist, None, "only the Persist's own step carries its id");
     }
-    ep.link_down(ea, clock(1_300)).unwrap();
-    ep.link_up(ea, clock(1_300)).unwrap();
-    assert_eq!(ep.queued().unwrap(), 2, "one tick and one link state");
+    for q in [
+        ep.link_down(ea, clock(1_300)).unwrap(),
+        ep.link_down(ea, clock(1_300)).unwrap(),
+        ep.link_up(ea, clock(1_300)).unwrap(),
+    ] {
+        assert!(q.queued && q.persist_outstanding && q.awaiting_persist.is_none());
+    }
+    assert_eq!(ep.queued().unwrap(), 3, "one tick and two transitions (a repeated down is a no-op)");
     assert_eq!(ep.next_deadline().unwrap(), deadline);
     let big = vec![b' '; 400 << 10];
-    for f in [b"x".to_vec(), vec![b' '; 20_000], own_hello, big.clone(), big.clone()] {
-        assert!(ep.receive(f, ea, clock(1_300)).unwrap().queued);
+    for f in [b"x".to_vec(), vec![b' '; 20_000], own_hello.clone(), big.clone(), big.clone()] {
+        let q = ep.receive(f, ea, clock(1_300)).unwrap();
+        assert!(q.queued && q.awaiting_persist.is_none());
     }
     let lost = ep.receive(big, ea, clock(1_300)).unwrap();
     assert!(!lost.queued, "past 1 MiB the newest frame is lost");
@@ -321,7 +328,7 @@ fn v06_through_the_engine(
     let lost = ep.receive(b"z".to_vec(), ea, clock(1_300)).unwrap();
     assert!(!lost.queued, "past 64 frames the newest is lost");
     assert_eq!(lost.drops[0].reason, "queueFull");
-    assert_eq!(ep.queued().unwrap(), 66);
+    assert_eq!(ep.queued().unwrap(), 67);
     assert_eq!(
         ep.persisted(ack + 1, ea, clock(1_400)).err().unwrap().code(),
         "session:wrongAck"
@@ -335,6 +342,7 @@ fn v06_through_the_engine(
     while let Some(id) = next {
         let r = ep.persisted(id, ea, clock(1_500)).unwrap();
         assert_eq!(r.discarded, 0);
+        assert_ack_only_with_persist(&r);
         next = r.awaiting_persist;
         effects.extend(r.effects);
         drops.extend(r.drops);
@@ -377,7 +385,8 @@ fn v06_through_the_engine(
     let fresh = ea.session_account("notes".into(), NOW).unwrap();
     let r = ep.set_account(&fresh, ea, clock(2_000)).unwrap();
     assert!(r.discarded > 0, "frames decided under the old head are discarded");
-    assert_eq!(r.awaiting_persist, Some(ack3));
+    assert_eq!(r.awaiting_persist, None, "no id: this step carries no Persist");
+    assert!(r.persist_outstanding);
     let e = ep.command(presence.into(), ea, clock(2_000)).err().unwrap();
     assert_eq!(e.code(), "session:persistPending", "the Persist still needs its ack");
     let r = ep.persisted(ack3, ea, clock(2_100)).unwrap();
@@ -437,6 +446,66 @@ fn v06_through_the_engine(
     let after = ea.session_account("notes".into(), NOW).unwrap();
     ep.set_account(&after, ea, clock(9_000)).unwrap();
 
+    // An outage while a Persist waits: down then up, kept with their own clocks, leave the
+    // holder lapsed and gated after the acknowledgement exactly as the same transitions run at
+    // once would.
+    let holder = |queue: bool| -> (Value, Vec<String>) {
+        let ep = SessionEndpoint::new(
+            account.into(),
+            "notes".into(),
+            "outage".into(),
+            m1.into(),
+            session_default_policy().unwrap(),
+            None,
+            after.clone(),
+            vec![if queue { 3 } else { 4 }; 32],
+            vec![5; 16],
+            clock(10_000),
+        )
+        .unwrap();
+        let body = ep.begin_delegation(NOW - 1_000, NOW + HOUR).unwrap();
+        let sig = host.sign_one(&body, m1, false).signature;
+        ep.finish_delegation(body, sig, clock(10_000)).unwrap();
+        ep.command(r#"{"command":"join","state":null}"#.into(), ea, clock(10_000))
+            .unwrap();
+        let taken = ep
+            .command(r#"{"command":"take","state":null}"#.into(), ea, clock(10_100))
+            .unwrap();
+        let ack = taken.awaiting_persist.expect("a take persists its claim");
+        let mut kinds = Vec::new();
+        let after_ack = |r: SessionStep, kinds: &mut Vec<String>| {
+            let mut next = r.awaiting_persist;
+            kinds.extend(r.effects.iter().filter_map(|e| e.frame_kind.clone()));
+            while let Some(id) = next {
+                let r = ep.persisted(id, ea, clock(40_000)).unwrap();
+                next = r.awaiting_persist;
+                kinds.extend(r.effects.iter().filter_map(|e| e.frame_kind.clone()));
+            }
+        };
+        if queue {
+            ep.link_down(ea, clock(12_000)).unwrap();
+            ep.link_up(ea, clock(32_000)).unwrap();
+            let r = ep.persisted(ack, ea, clock(40_000)).unwrap();
+            after_ack(r, &mut kinds);
+        } else {
+            let r = ep.persisted(ack, ea, clock(10_200)).unwrap();
+            after_ack(r, &mut kinds);
+            kinds.clear();
+            ep.link_down(ea, clock(12_000)).unwrap();
+            let r = ep.link_up(ea, clock(32_000)).unwrap();
+            after_ack(r, &mut kinds);
+        }
+        let v: Value = serde_json::from_str(&ep.view_json().unwrap()).unwrap();
+        (v, kinds)
+    };
+    let (direct, direct_kinds) = holder(false);
+    let (kept, kept_kinds) = holder(true);
+    assert_eq!(direct["gated"], true, "an outage past holderTimeoutMs gates the holder");
+    assert_eq!(kept["gated"], true, "the kept down and up gate it too");
+    assert_eq!(kept["gated"], direct["gated"]);
+    assert!(direct_kinds.iter().any(|k| k == "hello"), "{direct_kinds:?}");
+    assert!(kept_kinds.iter().any(|k| k == "hello"), "{kept_kinds:?}");
+
     // A long engine call (every record read slow, the engine's lock held throughout) does not
     // hold up a tick: endpoint calls read the gate, never the engine's lock.
     // A record path the engine has not read: refreshing reads it, slowly, under its lock.
@@ -469,6 +538,14 @@ fn v06_through_the_engine(
     *sa.mode.lock().unwrap() = 0;
     sa.files.lock().unwrap().remove(&probe_path);
     ea.refresh(sa.listing()).unwrap();
+}
+/// A step carries an acknowledgement ID exactly when its last effect is the Persist it names.
+fn assert_ack_only_with_persist(step: &SessionStep) {
+    let ends_in_persist = step
+        .effects
+        .last()
+        .is_some_and(|e| e.kind == SessionEffectKind::Persist);
+    assert_eq!(step.awaiting_persist.is_some(), ends_in_persist);
 }
 /// A new authority head: the controller adds a controller and both engines sync with the home.
 #[allow(clippy::too_many_arguments)]

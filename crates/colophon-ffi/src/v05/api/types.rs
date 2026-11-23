@@ -1241,14 +1241,17 @@ record! {
 record! {
     /// What one endpoint call produced: `effects` in order (perform them in order); `drops` the
     /// frames this call judged and dropped, in order, with their reasons (`queueFull` for a frame
-    /// that could not be kept). When the last effect is a `Persist`, `awaiting_persist` is its
-    /// acknowledgement ID: store it, then call `persisted` with it. `queued` says this call's
-    /// input is kept to run after that acknowledgement. `discarded` counts effects decided under
-    /// an older authority head that were dropped instead of released.
+    /// that could not be kept). `awaiting_persist` is set only on the step whose last effect is a
+    /// `Persist`: it is that `Persist`'s acknowledgement ID, to pass to `persisted` once the
+    /// host's durable write of that effect has completed, and no other step ever carries it.
+    /// `persist_outstanding` says a `Persist` is still unacknowledged after this call (this one's
+    /// or an earlier one's); `queued` says this call's input is kept to run after it. `discarded`
+    /// counts effects decided under an older authority head that were dropped, not released.
     pub struct SessionStep {
         pub effects: Vec<SessionEffect>,
         pub drops: Vec<SessionDrop>,
         pub awaiting_persist: Option<u64>,
+        pub persist_outstanding: bool,
         pub queued: bool,
         pub discarded: u32,
     }

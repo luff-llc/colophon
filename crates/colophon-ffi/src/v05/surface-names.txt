@@ -892,6 +892,7 @@ record:SessionStep.awaiting_persist
 record:SessionStep.discarded
 record:SessionStep.drops
 record:SessionStep.effects
+record:SessionStep.persist_outstanding
 record:SessionStep.queued
 record:Signature
 record:Signature.authenticator_data
