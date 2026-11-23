@@ -112,6 +112,86 @@ fn finish(engine: &Arc<AccountEngine>, host: &Host, action: Arc<AccountAction>) 
     let sigs = host.sign(&action.steps().unwrap());
     engine.finish(action, sigs).unwrap()
 }
+/// 0.6 through the same engine, after a pass with the home: the stream's ticket call (a real
+/// `colophon.home.stream` call, signed by the member and judged by the core with the home's
+/// rule), and a session endpoint whose account view and epoch keys come from the engine, its
+/// first frame opened by a receiver of another member under those keys.
+fn v06_through_the_engine(
+    ea: &Arc<AccountEngine>,
+    host: &mut Host,
+    m1: &str,
+    home: &str,
+    account: &str,
+) {
+    let stream = ea
+        .stream_client(home.into(), stream_default_config(), None)
+        .unwrap();
+    let mut step = stream.next(NOW).unwrap();
+    while step.kind == StreamStepKind::Wake {
+        step = stream.next(NOW).unwrap();
+    }
+    assert_eq!(step.kind, StreamStepKind::NeedTicketCall);
+    let key = host.keys[m1].public().signing;
+    let action = ea
+        .stream_begin_call(home.into(), key, host.fresh(32))
+        .unwrap();
+    assert_eq!(action.kind().unwrap(), ActionKind::Call);
+    let written = finish(ea, host, action);
+    let req = stream
+        .ticket_request(written.artifact.unwrap(), NOW)
+        .unwrap();
+    assert_eq!(req.method, HttpMethod::Post);
+    assert!(req.url.ends_with("/stream/ticket"), "{}", req.url);
+
+    let view = ea.session_account(NOW).unwrap();
+    assert_eq!(view.account(), account);
+    assert!(view.writers("notes".into(), NOW).contains(&m1.to_string()));
+    let epochs = ea.session_epochs("notes".into()).unwrap();
+    assert!(epochs.current_epoch().is_some(), "the member's unlocked epoch");
+    let clock = || SessionClock {
+        mono_ms: 1_000,
+        wall_ms: NOW,
+    };
+    let ep = SessionEndpoint::new(
+        account.into(),
+        "notes".into(),
+        "now-playing".into(),
+        m1.into(),
+        session_default_policy().unwrap(),
+        None,
+        view.clone(),
+        host.fresh(32),
+        host.fresh(16),
+        clock(),
+    )
+    .unwrap();
+    assert!(ep.entitled().unwrap() && ep.can_write().unwrap());
+    let body = ep.begin_delegation(NOW - 1_000, NOW + HOUR).unwrap();
+    let signature = host.sign_one(&body, m1, false).signature;
+    ep.finish_delegation(body, signature, clock()).unwrap();
+    let joined = ep
+        .command(r#"{"command":"join","state":null}"#.into(), &epochs, clock())
+        .unwrap();
+    let frames: Vec<Vec<u8>> = joined
+        .effects
+        .into_iter()
+        .filter(|e| e.kind == SessionEffectKind::Send)
+        .map(|e| e.bytes)
+        .collect();
+    assert!(!frames.is_empty(), "a join says hello");
+    let rx = SessionWireReceiver::new(
+        account.into(),
+        "notes".into(),
+        "now-playing".into(),
+        "0".repeat(32),
+    );
+    let r = rx
+        .open(frames[0].clone(), &view, &epochs, NOW, 8_192)
+        .unwrap();
+    let o = r.opened.unwrap();
+    assert_eq!(o.from, m1);
+    assert!(o.writer);
+}
 fn notes(engine: &AccountEngine) -> Vec<Value> {
     let v: Value = serde_json::from_str(&engine.view_json("notes".into()).unwrap()).unwrap();
     assert_eq!(v["ok"], true, "{v}");
@@ -525,6 +605,7 @@ fn journey_one_create_approve_write_pair_and_sync_two_engines() {
         "the second device reads what the first wrote"
     );
     assert_eq!(notes(&ea), notes(&eb));
+    v06_through_the_engine(&ea, &mut host, &m1, &home_id, &account);
 
     // --- The rest of the session: read scope, batched versions, faults, abort, lock.
     assert!(eb.set_read_scope(vec!["notes".into()]).is_ok());
