@@ -565,6 +565,19 @@ pub struct SimHome {
     pub log: Vec<String>,
     pub requests: Vec<String>,
     pub account: String,
+    /// Serve `POST /records/batch` (0.6 W1). Off, the home answers it 405, as a 0.5.2 home does.
+    pub batch: bool,
+    /// The batch answer budget in bytes (4 MiB at a real home): past it the answer is truncated.
+    pub batch_budget: usize,
+    /// Answer 401 to every request a real home guards (§13.4, §14) that carries no
+    /// `Authorization: Colophon` call. The call itself is not judged here.
+    pub require_calls: bool,
+    /// Serve the 0.6 stream: `POST /stream/ticket` and [`SimHome::stream_connect`]. Off, the
+    /// ticket route answers 404, as a 0.5 home does.
+    pub stream: bool,
+    /// Tickets minted and not yet presented: ticket to the time it was minted.
+    pub tickets: BTreeMap<String, i64>,
+    pub minted: u64,
 }
 fn resp(status: u16, body: Value) -> Response {
     Response {
@@ -631,6 +644,12 @@ impl SimHome {
             log,
             requests: Vec::new(),
             account: account.id().as_str().to_string(),
+            batch: true,
+            batch_budget: 4 * 1024 * 1024,
+            require_calls: false,
+            stream: true,
+            tickets: BTreeMap::new(),
+            minted: 0,
         }
     }
     pub fn head_seq(&self) -> u64 {
@@ -684,6 +703,143 @@ impl SimHome {
         self.files.insert(path.to_string(), bytes);
         self.log.push(path.to_string());
     }
+    /// The batch read, as `relay.js` serves it: 1–256 unique paths, items in order, a 4 MiB
+    /// (`batch_budget`) answer truncated before the item that does not fit.
+    fn serve_batch(&self, body: &[u8]) -> Response {
+        let Ok(v) = serde_json::from_slice::<Value>(body) else {
+            return resp(400, json!({}));
+        };
+        let Some(paths) = v["paths"].as_array() else {
+            return resp(400, json!({}));
+        };
+        let paths: Vec<String> = paths
+            .iter()
+            .filter_map(|p| p.as_str().map(str::to_string))
+            .collect();
+        let unique: BTreeSet<&String> = paths.iter().collect();
+        if paths.is_empty()
+            || paths.len() > 256
+            || unique.len() != paths.len()
+            || body.len() > 65_536
+        {
+            return resp(400, json!({}));
+        }
+        let mut items = Vec::new();
+        let mut used = b"{\"records\":[],\"truncated\":false}".len();
+        let mut truncated = false;
+        for p in &paths {
+            let item = match self.files.get(p) {
+                Some(b) => {
+                    let full = json!({"path": p, "status": 200,
+                        "etag": format!("\"{}\"", hex(&Sha256::digest(b))), "bytes": b64(b)});
+                    if serde_json::to_vec(&full).unwrap().len() + 1 + 48 > self.batch_budget {
+                        json!({"path": p, "status": 413,
+                            "etag": format!("\"{}\"", hex(&Sha256::digest(b))), "size": b.len()})
+                    } else {
+                        full
+                    }
+                }
+                None => json!({"path": p, "status": 404}),
+            };
+            let size = serde_json::to_vec(&item).unwrap().len() + 1;
+            if used + size > self.batch_budget {
+                truncated = true;
+                break;
+            }
+            used += size;
+            items.push(item);
+        }
+        resp(200, json!({"records": items, "truncated": truncated}))
+    }
+    /// The change-log entry at `index` as `/changes` and the stream list it.
+    pub fn change_entry(&self, index: usize) -> Value {
+        let p = &self.log[index];
+        json!({"path": p, "size": self.files[p].len(), "sha256": hex(&Sha256::digest(&self.files[p]))})
+    }
+    /// Open the stream with the URL a client built (`ws(s)://…/stream?ticket=…[&after=…]`): the
+    /// ticket is consumed whether or not the connection then succeeds. On success, the
+    /// connection and the frames the home sends first (`hello`, then the replay).
+    pub fn stream_connect(
+        &mut self,
+        url: &str,
+        now_ms: i64,
+    ) -> Result<(SimConn, Vec<String>), Response> {
+        self.requests.push("Get /stream".into());
+        let query = url.split_once('?').map(|(_, q)| q).unwrap_or("");
+        let Some(ticket) = q_get(query, "ticket") else {
+            return Err(resp(401, json!({"result": "refused:ticket"})));
+        };
+        let minted = self.tickets.remove(&ticket);
+        if minted.is_none_or(|t| now_ms > t + 30_000) {
+            return Err(resp(403, json!({"result": "refused:ticket"})));
+        }
+        let mut conn = SimConn {
+            n: 0,
+            sent: self.log.len(),
+            head: self.head_seq(),
+        };
+        let cursor = self.log.len().to_string();
+        let mut frames = vec![conn.frame(json!({
+            "type": "hello", "protocol": "colophon/home-stream/6", "account": self.account,
+            "home": self.id, "instance": "sim", "cursor": cursor,
+            "head": null, "notice": 0, "principal": "member:x", "expiresAt": null,
+            "namespaces": [], "limits": {"frameBytes": 16384, "messageBytes": 20480,
+                "subscriptions": 64, "framesPerSecond": 50, "bytesPerSecond": 262144,
+                "retainMs": 60000, "pingMs": 20000, "idleMs": 60000, "resumeEntries": 1024},
+        }))];
+        if let Some(after) = q_get(query, "after") {
+            match after.parse::<usize>() {
+                Ok(a) if a <= self.log.len() && self.log.len() - a <= 1024 => {
+                    for i in a..self.log.len() {
+                        frames.push(conn.frame(json!({"type": "change",
+                            "cursor": (i + 1).to_string(), "entry": self.change_entry(i)})));
+                    }
+                }
+                Ok(a) if a <= self.log.len() => frames.push(
+                    conn.frame(json!({"type": "resync", "reason": "tooFar", "after": after})),
+                ),
+                _ => frames
+                    .push(conn.frame(json!({"type": "resync", "reason": "gone", "after": after}))),
+            }
+        }
+        Ok((conn, frames))
+    }
+    /// The live frames for `conn` since it last pumped: a `change` per new log entry and a
+    /// `head` when the history grew.
+    pub fn stream_pump(&self, conn: &mut SimConn) -> Vec<String> {
+        let mut out = Vec::new();
+        for i in conn.sent..self.log.len() {
+            out.push(
+                conn.frame(json!({"type": "change", "cursor": (i + 1).to_string(),
+                "entry": self.change_entry(i)})),
+            );
+        }
+        conn.sent = self.log.len();
+        if self.head_seq() > conn.head {
+            conn.head = self.head_seq();
+            out.push(
+                conn.frame(json!({"type": "head", "home": self.id, "seq": conn.head,
+                "digest": "0".repeat(64)})),
+            );
+        }
+        out
+    }
+}
+
+/// One open stream connection of a [`SimHome`]: its frame numbering and what it has been sent.
+#[derive(Clone, Debug)]
+pub struct SimConn {
+    pub n: u64,
+    pub sent: usize,
+    pub head: u64,
+}
+impl SimConn {
+    /// Number and encode a frame.
+    pub fn frame(&mut self, mut v: Value) -> String {
+        self.n += 1;
+        v["n"] = json!(self.n);
+        serde_json::to_string(&v).unwrap()
+    }
 }
 impl Wire for SimHome {
     fn call(&mut self, host: &Host, req: &Request, now_ms: i64) -> Response {
@@ -694,7 +850,39 @@ impl Wire for SimHome {
         let (path, query) = rest.split_once('?').unwrap_or((rest, ""));
         self.requests.push(format!("{:?} {}", req.method, path));
         let now = format_date(now_ms);
+        let has_call = req
+            .headers
+            .iter()
+            .any(|(k, v)| k == "Authorization" && v.starts_with("Colophon "));
+        let open = path == "/head"
+            || (req.method == Method::Post && (path == "/authority" || path == "/pending"))
+            || (req.method == Method::Put && path.starts_with("/records/heads/"));
+        let calls_needed = (self.require_calls && !open)
+            || (path == "/records/batch" && self.batch)
+            || (path == "/stream/ticket" && self.stream);
+        if calls_needed && !has_call {
+            return Response {
+                status: 401,
+                headers: vec![("WWW-Authenticate".into(), "Colophon".into())],
+                body: b"{}".to_vec(),
+            };
+        }
         match (req.method, path) {
+            (Method::Post, "/records/batch") if !self.batch => resp(405, json!({})),
+            (Method::Post, "/records/batch") => self.serve_batch(&req.body),
+            (Method::Post, "/stream/ticket") if !self.stream => resp(404, json!({})),
+            (Method::Post, "/stream/ticket") => {
+                if !req.body.is_empty() {
+                    return resp(400, json!({}));
+                }
+                self.minted += 1;
+                let ticket = format!("{:0>43}", self.minted);
+                self.tickets.insert(ticket.clone(), now_ms);
+                resp(
+                    200,
+                    json!({"ticket": ticket, "expires": now_ms + 30_000, "path": "/stream"}),
+                )
+            }
             (Method::Get, "/head") => match self.head_env(host, now_ms) {
                 Some(h) => bytes_resp(200, h),
                 None => resp(404, json!({})),

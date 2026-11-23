@@ -1,6 +1,6 @@
 {
   "name": "@colophon/relay",
-  "version": "0.5.2",
+  "version": "0.6.0-dev",
   "description": "Colophon 0.5 reference relay: an untrusted HTTP exchange for intent, live state and blobs, and a home (§13-§14) by way of the Rust home module",
   "type": "module",
   "private": true,

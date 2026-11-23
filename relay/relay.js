@@ -1,10 +1,12 @@
 // Colophon 0.3 reference relay (spec §8). Stores opaque records per library slot.
-// Dependency-free: node:http, node:https, node:fs, node:path and node:crypto only.
+// Uses built-in Node APIs; a home's stream uses Bun's built-in `ws` module, so a relay with home
+// slots runs on Bun only (startRelay refuses another runtime rather than serving no stream).
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { constants as fsc, promises as fsp, writeSync } from 'node:fs';
 import http from 'node:http';
 import https from 'node:https';
 import { HomeKey, HomeModule, HomeSlot, ModuleError } from './home.js';
+import { streamOptions } from './stream.js';
 import {
   ProvisionReplay, ProvisionTable, REPLAY_DIR, TABLE_FILE, clientAddressConfig, tableKind, clientAddressResolver, isJsonType, memberRequest,
   grantLimits, parseProvisionBody, provisionConfig, provisionGate, provisionRoute,
@@ -28,6 +30,9 @@ export const DEFAULT_LIMITS = Object.freeze({
 
 const SLOT = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const HEX64 = /^[0-9a-f]{64}$/;
+const STREAM_PATH = /^\/v1\/libraries\/([a-z0-9][a-z0-9._-]{0,63})\/stream$/;
+/** The largest WebSocket message a stream takes (a 16,384-byte session frame and its wrapper). */
+const STREAM_MESSAGE_BYTES = 20_480;
 const BATCH_BYTES = 4 * 1024 * 1024; // Encoded JSON/base64 response budget.
 
 export function sha256(bytes) { return createHash('sha256').update(bytes).digest('hex'); }
@@ -112,7 +117,8 @@ function answerOptions(req, res, listed) {
   const headers = {}; // a 204 carries no Content-Length (RFC 9110 §8.6)
   if (preflight) {
     if (listed) {
-      headers['access-control-allow-methods'] = CORS_METHODS;
+      headers['access-control-allow-methods'] = /^\/v1\/libraries\/[^/]+\/routes\/[0-9a-f]{64}$/.test(req.url)
+        ? 'DELETE, OPTIONS' : CORS_METHODS;
       headers['access-control-allow-headers'] = CORS_HEADERS;
       headers['access-control-max-age'] = CORS_MAX_AGE;
     }
@@ -262,6 +268,7 @@ class Slot {
     const handle = await fsp.open(file, fsc.O_WRONLY | fsc.O_APPEND | fsc.O_CREAT | fsc.O_NOFOLLOW, 0o600);
     try { await handle.write(JSON.stringify(e) + '\n'); await handle.sync(); } finally { await handle.close(); }
     this.indexEntry(e);
+    this.onEntry?.(this.entries.length - 1); // a home's stream pushes the same entry and cursor
     for (const waiter of [...this.waiters]) {
       if (!waiter.namespaces.length || waiter.namespaces.some((ns) => pathInNamespace(e.path, ns))) waiter.wake();
     }
@@ -448,15 +455,55 @@ function readBody(req, max) {
   });
 }
 
+function readBatchBody(req, url) {
+  if (req.method !== 'POST') throw new HttpError(405, 'Method not allowed', { allow: 'POST' });
+  if (url.search) throw new HttpError(400, 'Record URLs take no query');
+  if (!isJsonType(req.headers['content-type'])) throw new HttpError(415, 'Content-Type must be application/json');
+  return readBody(req, 64 * 1024);
+}
+
+/** A home base as compared for duplicates: scheme and host case and trailing slashes ignored. */
+function normalBase(base) {
+  try { return new URL(base).href.replace(/\/+$/, ''); } catch { return String(base).replace(/\/+$/, ''); }
+}
+function basePair(account, base) { return `${account} ${normalBase(base)}`; }
+
+async function serveBatch(res, slot, decisions) {
+  const records = [];
+  // Include the envelope (false is longer than true), commas, and JSON path escaping.
+  const envelopeBytes = Buffer.byteLength(JSON.stringify({ records: [], truncated: false }));
+  let total = envelopeBytes;
+  for (const { path: p, status } of decisions) {
+    const entry = status === 200 ? slot.current.get(p) : undefined;
+    const encodedSize = entry ? Math.ceil(entry.size / 3) * 4 + Buffer.byteLength(JSON.stringify(p)) + 128 : 0;
+    const refusal = !entry ? { path: p, status: status === 200 ? 404 : status }
+      : encodedSize + envelopeBytes > BATCH_BYTES ? { path: p, status: 413, etag: `"${entry.sha256}"`, size: entry.size } : null;
+    const cost = (refusal ? Buffer.byteLength(JSON.stringify(refusal)) : encodedSize) + (records.length ? 1 : 0);
+    if (total + cost > BATCH_BYTES) break;
+    total += cost;
+    if (refusal) { records.push(refusal); continue; }
+    const max = slot.classify(p) === 'blob' ? slot.limits.blobBytes : slot.limits.recordBytes;
+    if (entry.size > max) throw new HttpError(500, 'Stored record exceeds its limit');
+    // Indexed, so it must be there: a missing or unreadable file is a storage failure (500,
+    // naming no path), never a whole-request 404. The call is spent either way.
+    let bytes;
+    try { bytes = await slot.readFile(p); } catch { throw new HttpError(500, 'Stored record failed integrity check'); }
+    if (bytes.length !== entry.size || sha256(bytes) !== entry.sha256) throw new HttpError(500, 'Stored record failed integrity check');
+    records.push({ path: p, status: 200, etag: `"${entry.sha256}"`, bytes: bytes.toString('base64') });
+  }
+  return send(res, 200, { records, truncated: records.length < decisions.length });
+}
+
 /**
  * Creates the relay. `libraries` maps slot names to `{ tokenSha256 }`, `{ token }` or
  * `{ open: true }` (no bearer token; local testing only).
  */
-export async function createRelay({ dataDir, libraries, limits = {}, home, clock = Date.now, resolve, tickMs = 0, tracing = false, cors, provision, clientAddress: addressConfig, crashAt, hook }) {
+export async function createRelay({ dataDir, libraries, limits = {}, home, clock = Date.now, resolve, tickMs = 0, tracing = false, cors, provision, clientAddress: addressConfig, crashAt, hook, stream: streamOptionsIn = {} }) {
   if (!dataDir) throw new Error('dataDir is required');
   if (cors !== undefined && cors !== null && (typeof cors !== 'object' || Array.isArray(cors))) throw new Error('cors must be an object with origins, an array of origins');
   const origins = corsOrigins(cors?.origins);
   const provisioning = provisionConfig(provision);
+  streamOptions(streamOptionsIn);
   // The address requests count against, for every per-address limit (never for access).
   const clientAddress = clientAddressResolver(clientAddressConfig(addressConfig));
   // Test builds only (tracing needs --test-clock): a marker on stderr, a SIGKILL of this process
@@ -516,6 +563,22 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
     else throw new Error(`Library slot ${name} needs tokenSha256, a token of at least 16 characters, or open: true`);
   }
   for (const [name, e] of table.rows) if (!homeSlots.has(name)) homeSlots.set(name, { base: e.base, account: e.account });
+  // Replay tables are per slot: two slots serving one account at one base would each take the
+  // same captured call once. One account, one home slot per base.
+  // The door checks the same pair under its lock (`baseHolder`) before it reserves or writes.
+  const bases = new Map();
+  for (const [name, { base, account }] of homeSlots) {
+    const pair = basePair(account, base);
+    const other = bases.get(pair);
+    if (other !== undefined) throw new Error(`Home slots ${other} and ${name} both serve account ${account} at base ${normalBase(base)}: a base names one home slot per account`);
+    bases.set(pair, name);
+  }
+  /** Another home slot serving `account` at `base`, if any (not `except`). */
+  const baseHolder = (account, base, except) => {
+    const pair = basePair(account, base);
+    for (const [name, e] of homeSlots) if (name !== except && basePair(e.account, e.base) === pair) return name;
+    return undefined;
+  };
   const configured = new Set(Object.keys(libraries ?? {}));
   // Gate "grant": the operator account is one of this home's own slots, and the door's audience
   // is its own. A slot named but not set up yet is not a start-up failure (every grant request is
@@ -551,8 +614,8 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
         if (isHome) {
           s.home = new HomeSlot({
             slot: s, wasm: homeModule, key: homeKey, base: homeSlots.get(name).base, account: homeSlots.get(name).account,
-            clock, resolve, tracing,
-            deps: { HttpError, send, readBody, clampInt, clientAddress, reach },
+            clock, resolve, tracing, stream: streamOptions(streamOptionsIn), scheduled: tickMs > 0,
+            deps: { HttpError, send, readBody, readBatchBody, serveBatch, clampInt, clientAddress, isJsonType, reach },
             limits: { ...effective, requestsPerMinute: effective.requestsPerMinute ?? 0 },
           });
           await s.home.open();
@@ -628,6 +691,7 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
       const refuse = () => Promise.reject(new Error(`slot ${name} was released`));
       s.released = true;
       s.home.lock = refuse; s.home.replayLock = refuse; s.exclusive = refuse;
+      s.home.stream.closeAll('released');
       slots.delete(name); opening.delete(name);
       await fsp.rm(s.root, { recursive: true, force: true });
       return true;
@@ -735,6 +799,11 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
           if (reserve) await provisionReplay.reserve(reserve, null);
           return Buffer.from(verdict.existing.request, 'base64');
         }
+        // One account, one home slot per base: a slot that would repeat another's (account,
+        // base) would let one captured call be taken once in each. Refused before any effect.
+        if (baseHolder(asked.account, asked.base, asked.slot) !== undefined) {
+          throw new HttpError(409, 'Another home slot already serves this account at this base');
+        }
         // Verify, reserve, make the slot (the durable write names the call's digest), complete.
         if (reserve) { await provisionReplay.reserve(reserve, { slot: asked.slot }); await reach('grant reserved'); }
         const request = await memberRequest({ wasm: homeModule, key: homeKey, account: asked.account, base: asked.base, now: clock() });
@@ -758,7 +827,7 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
     const url = new URL(req.url, 'http://relay.invalid');
     if (url.pathname === '/healthz' && req.method === 'GET') return send(res, 200, { ok: true });
     if (provisioning.enabled && url.pathname === '/v1/provision') return door(req, res);
-    const route = /^\/v1\/libraries\/([^/]+)(?:\/(changes|records|head|authority|pending|predecessor)(?:\/(.*))?)?$/.exec(url.pathname);
+    const route = /^\/v1\/libraries\/([^/]+)(?:\/(changes|records|head|authority|pending|predecessor|routes|stream)(?:\/(.*))?)?$/.exec(url.pathname);
     if (!route) throw new HttpError(404, 'Not found');
     const [, name, section, recordPath] = route;
     // With provisioning on, a slot this home does not hold is named as such (an app asks for its
@@ -767,19 +836,17 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
       throw notProvisioned();
     }
     if (!SLOT.test(name)) throw new HttpError(401, 'Unauthorized', { 'www-authenticate': 'Bearer' });
-    if (!homeSlots.has(name)) authorize(req, name);
+    if (!homeSlots.has(name)) {
+      if (section === 'routes' || section === 'stream') throw new HttpError(404, 'Not found');
+      authorize(req, name);
+    }
     const s = await slot(name);
     // Counted from here until the response has ended and this handler has settled.
     if (closing || s.closing || s.releasing || s.released) throw notProvisioned();
     enter(s); work.slot = s;
     if (s.home && await s.home.handle(req, res, url, section, recordPath)) return undefined;
     if (section === 'records' && recordPath === 'batch') {
-      // Home authorization and rate limiting run before any batch parsing/classification.
-      if (s.home) throw new HttpError(405, 'Batch reads require home module support', { allow: 'GET' });
-      if (req.method !== 'POST') throw new HttpError(405, 'Method not allowed', { allow: 'POST' });
-      if (url.search) throw new HttpError(400, 'Record URLs take no query');
-      if (!isJsonType(req.headers['content-type'])) throw new HttpError(415, 'Content-Type must be application/json');
-      const body = await readBody(req, 64 * 1024);
+      const body = await readBatchBody(req, url);
       let parsed;
       try { parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(body)); } catch { throw new HttpError(400, 'Invalid JSON'); }
       const paths = parsed?.paths;
@@ -787,26 +854,7 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
           new Set(paths).size !== paths.length || paths.some((p) => typeof p !== 'string' || !s.classify(p))) {
         throw new HttpError(400, 'Expected 1–256 unique valid record paths');
       }
-      const records = [];
-      // Include the envelope (false is longer than true), commas, and JSON path escaping.
-      const envelopeBytes = Buffer.byteLength(JSON.stringify({ records: [], truncated: false }));
-      let total = envelopeBytes;
-      for (const p of paths) {
-        const entry = s.current.get(p);
-        const encodedSize = entry ? Math.ceil(entry.size / 3) * 4 + Buffer.byteLength(JSON.stringify(p)) + 128 : 0;
-        const refusal = !entry ? { path: p, status: 404 }
-          : encodedSize + envelopeBytes > BATCH_BYTES ? { path: p, status: 413, etag: `"${entry.sha256}"`, size: entry.size } : null;
-        const cost = (refusal ? Buffer.byteLength(JSON.stringify(refusal)) : encodedSize) + (records.length ? 1 : 0);
-        if (total + cost > BATCH_BYTES) break;
-        total += cost;
-        if (refusal) { records.push(refusal); continue; }
-        const max = s.classify(p) === 'blob' ? effective.blobBytes : effective.recordBytes;
-        if (entry.size > max) throw new HttpError(500, 'Stored record exceeds its limit');
-        const bytes = await s.readFile(p);
-        if (bytes.length !== entry.size || sha256(bytes) !== entry.sha256) throw new HttpError(500, 'Stored record failed integrity check');
-        records.push({ path: p, status: 200, etag: `"${entry.sha256}"`, bytes: bytes.toString('base64') });
-      }
-      return send(res, 200, { records, truncated: records.length < paths.length });
+      return serveBatch(res, s, paths.map((path) => ({ path, status: 200 })));
     }
     if (!s.home && ['head', 'authority', 'pending', 'predecessor'].includes(section)) throw new HttpError(404, 'Not found');
     if (!section) {
@@ -884,6 +932,18 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
     throw new HttpError(405, 'Method not allowed', { allow: kind === 'request' ? 'GET, PUT, DELETE' : 'GET, PUT' });
   }
 
+  async function upgrade(req, connect) {
+    // The ticket is in the query: never log req.url (or this URL) anywhere.
+    const url = new URL(req.url, 'http://relay.invalid');
+    const match = STREAM_PATH.exec(url.pathname);
+    if (!match || !homeSlots.has(match[1])) throw new HttpError(404, 'Not found');
+    if (closing) throw new HttpError(503, 'Relay is closing');
+    const s = await slot(match[1]); // the home burns the ticket before any other refusal
+    if (closing || s.closing || s.releasing || s.released) { s.home.stream.take(url); throw notProvisioned(); }
+    enter(s);
+    try { await s.home.upgrade(req, url, connect); } finally { leave(s); }
+  }
+
   function listener(req, res) {
     const listed = enforceAnswerHeaders(req, res, origins);
     if (req.method === 'OPTIONS') { answerOptions(req, res, listed); return; }
@@ -921,11 +981,15 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
   if ((homeSlots.size > 0 || provisioning.enabled) && tickMs > 0) { timer = setInterval(() => { tickAll(); }, tickMs); timer.unref?.(); }
 
   let closePromise;
-  return { listener, limits: effective, slot, tickAll, close: () => {
+  return { listener, upgrade, homes: homeModule !== null, limits: effective, slot, tickAll, close: () => {
     if (closePromise) return closePromise;
     closing = true;
     if (timer) clearInterval(timer);
-    for (const s of slots.values()) { s.closing = true; for (const waiter of [...s.waiters]) waiter.wake(); }
+    for (const s of slots.values()) {
+      s.closing = true;
+      s.home?.stream.closeAll('restart');
+      for (const waiter of [...s.waiters]) waiter.wake();
+    }
     const drain = async () => {
       await Promise.allSettled([...requests, ...opening.values(), provisionTail]);
       await Promise.all([...slots.values()].map(async (s) => { await drained(s); await s.chain; }));
@@ -1040,13 +1104,44 @@ function send(res, status, json, headers = {}) {
   res.end(body);
 }
 
+/** A home's stream, on Bun's built-in `ws` module, on the same HTTP/TLS listener. A relay with
+ * no home slot needs none. A relay with home slots on another runtime is refused at start-up:
+ * a home that silently served no stream would leave clients polling without knowing why. */
+async function enableStreams(server, relay) {
+  if (!relay.homes) return;
+  if (!globalThis.Bun) {
+    throw new Error('A relay with home slots needs Bun (bun relay/server.js): its stream uses Bun\'s built-in WebSocket server');
+  }
+  const { WebSocketServer } = await import('ws');
+  const streams = new WebSocketServer({ noServer: true, clientTracking: false, maxPayload: STREAM_MESSAGE_BYTES });
+  server.on('upgrade', (req, socket, head) => {
+    socket.on('error', () => socket.destroy());
+    if (req.headers.upgrade?.toLowerCase() !== 'websocket') { socket.destroy(); return; }
+    const connect = (onOpen) => {
+      if (!socket.destroyed) streams.handleUpgrade(req, socket, head, onOpen);
+    };
+    relay.upgrade(req, connect).catch((error) => {
+      if (socket.destroyed) return;
+      const httpError = error instanceof HttpError;
+      if (!httpError) console.error(error);
+      const status = httpError ? error.status : 500;
+      const body = JSON.stringify(httpError ? (error.body ?? { error: error.message }) : { error: 'Internal relay error' });
+      const headers = Object.entries(httpError ? error.headers : {}).map(([name, value]) => `${name}: ${value}\r\n`).join('');
+      socket.end(`HTTP/1.1 ${status} ${http.STATUS_CODES[status]}\r\n${headers}Connection: close\r\nContent-Type: application/json\r\nCache-Control: no-store\r\nContent-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`);
+    });
+  });
+}
+
 /** Starts an HTTP (or HTTPS when `tls` holds PEM `cert` and `key`) server. */
 export async function startRelay({ host = '127.0.0.1', port = 8787, tls, ...options }) {
   const relay = await createRelay(options);
   const server = tls ? https.createServer({ cert: tls.cert, key: tls.key }, relay.listener) : http.createServer(relay.listener);
   server.requestTimeout = 60_000;
   server.headersTimeout = 20_000;
-  try { await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, host, resolve); }); }
+  try {
+    await enableStreams(server, relay);
+    await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, host, resolve); });
+  }
   catch (error) { await relay.close(); throw error; }
   const address = server.address();
   return { server, relay, host: address.address, port: address.port,

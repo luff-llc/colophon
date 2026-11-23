@@ -29,7 +29,9 @@ extension SessionWorker {
     func acceptPredecessorEntry(_ entry: Data) async throws {
         try await inGate {
             let at = Int64((configuration.now().timeIntervalSince1970 * 1000).rounded())
-            _ = try await requireEngine().run { try $0.acceptPredecessorEntry(entry: entry, nowMs: at) }
+            let engine = try requireEngine()
+            let changes = try await engine.run { try $0.acceptPredecessorEntry(entry: entry, nowMs: at) }
+            observeAuthorityChanges(changes, from: engine)
         }
     }
 }

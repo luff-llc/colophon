@@ -343,6 +343,18 @@ describe('the provisioning door', { skip: ready ? false : `build the module firs
     assert.equal(existsSync(path.join(dir, 'nothere')), false);
   });
 
+  test('a slot that would repeat a configured home slot\'s account and base is 409, before any effect', async () => {
+    // `configured` serves ACCOUNT at the base the door would give `tslot0000dd`.
+    const port = await fresh({ libraries: { configured: { home: true, account: ACCOUNT, base: `${PREFIX.replace('home.example', 'HOME.example')}tslot0000dd/` } } });
+    const r = await ask(port, 'tslot0000dd');
+    assert.equal(r.status, 409, r.body.toString());
+    assert.equal(await table(dir), null);
+    assert.equal(existsSync(path.join(dir, 'tslot0000dd')), false);
+    // Another account at that base, and the same account at another base, are still admitted.
+    assert.equal((await ask(port, 'tslot0000dd', { account: OTHER })).status, 200);
+    assert.equal((await ask(port, 'tslot0000de')).status, 200);
+  });
+
   test('a restart keeps provisioned slots and answers the same bytes', async () => {
     const port = await fresh();
     const first = await ask(port, 'tabcdef0123');

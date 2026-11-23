@@ -35,11 +35,16 @@ use std::collections::{BTreeMap, BTreeSet};
 /// The purpose a `recover`-only (or suspended) controller may call (§12.3 step 5, §13.4).
 pub const HISTORY_READ: &str = "colophon.history.read";
 /// The purposes a home accepts at its own endpoints without configuration (§12.3 step 7).
-pub const HOME_PURPOSES: [&str; 3] = [HISTORY_READ, HOME_READ, HOME_WRITE];
+pub const HOME_PURPOSES: [&str; 4] = [HISTORY_READ, HOME_READ, HOME_WRITE, HOME_STREAM];
 /// The purpose of a call that reads at a home (§14).
 pub const HOME_READ: &str = "colophon.home.read";
 /// The purpose of a call that writes at a home (§14).
 pub const HOME_WRITE: &str = "colophon.home.write";
+/// The purpose of a call that mints a home stream ticket (Colophon 0.6 draft,
+/// `docs/colophon-0.6-stream.md`): accepted only for `POST {base}/stream/ticket`, from the
+/// principals that may read records at the home (§14 `colophon.home.read`), through links only
+/// when every link's terms grant this purpose there.
+pub const HOME_STREAM: &str = "colophon.home.stream";
 
 /// A controller's status from pending transitions (§8.7), supplied by the history verifier.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -520,6 +525,24 @@ impl AccountView {
     /// Held history digests.
     pub fn history(&self) -> &[String] {
         &self.v.history
+    }
+    /// The member's expiry and session generation for a long-lived stream opened by a
+    /// verified call. A delegated stream also expires with its last (narrowest) link.
+    pub fn stream_grant(&self, verified: &VerifiedCall) -> Option<(Option<i64>, u64)> {
+        let CallSigner::Member(id) = &verified.call.signer else {
+            return None;
+        };
+        let member = self.v.members.iter().find(|m| &m.id == id)?;
+        let links = &verified.call.links;
+        let expires = links
+            .last()
+            .map(|link| link.expires_ms)
+            .or_else(|| member.expiry_at(verified.evaluated_at));
+        let session = links
+            .first()
+            .and_then(|link| link.session)
+            .unwrap_or(member.end_sessions.len() as u64);
+        Some((expires, session))
     }
     fn policy_at(&self, seq: u64) -> Option<&Policy> {
         self.v
@@ -1181,7 +1204,8 @@ pub fn home_call_args(method: &str, path: &str, body_sha256: &str) -> Value {
 }
 
 /// The purpose a signer gives a call to a home: `colophon.home.read` for GET and HEAD,
-/// `colophon.home.write` otherwise (§14).
+/// `colophon.home.write` otherwise (§14). For a request with a known path, use
+/// [`home_purposes`], which also recognizes the batch read route.
 pub fn home_call_purpose(method: &str) -> &'static str {
     if is_read(method) {
         HOME_READ
@@ -1193,9 +1217,14 @@ pub fn home_call_purpose(method: &str) -> &'static str {
 /// The purposes a home accepts for a request with `method` at `path` (relative to the home's
 /// base, as sent): for GET and HEAD, `colophon.home.read`, and `colophon.history.read` too when
 /// the path serves the history ([`home_path_serves_history`]; §12.3 step 7 and §13.4 limit that
-/// purpose to the history); `colophon.home.write` for anything else.
+/// purpose to the history). `POST /records/batch` takes only `colophon.home.read`. Other
+/// requests take `colophon.home.write`.
 pub fn home_purposes(method: &str, path: &str) -> &'static [&'static str] {
-    if !is_read(method) {
+    if method == "POST" && path == "/records/batch" {
+        &[HOME_READ]
+    } else if method == "POST" && path == "/stream/ticket" {
+        &[HOME_STREAM]
+    } else if !is_read(method) {
         &[HOME_WRITE]
     } else if home_path_serves_history(path) {
         &[HOME_READ, HISTORY_READ]
@@ -1309,6 +1338,37 @@ pub fn check_home_call_as_signer(
     home_request(envelope, view, cfg, &mut store, req, true).map(|_| ())
 }
 
+/// [`check_home_call_as_signer`] for `POST /records/batch` serving `paths`: the signer's own
+/// judgement of a batch call by the home's rule ([`verify_home_batch`]), so a signer refuses
+/// exactly the batches a home refuses for a path out of the scope of its terms or links.
+pub fn check_home_batch_as_signer(
+    envelope: &[u8],
+    view: &AccountView,
+    cfg: &CallConfig<'_>,
+    req: &HomeRequest<'_>,
+    paths: &[String],
+) -> Result<()> {
+    let mut store = super::replay::MemoryReplayStore::new();
+    home_request_with(envelope, view, cfg, &mut store, req, true, paths).map(|_| ())
+}
+
+/// [`verify_home_request`] for `POST /records/batch` serving `paths` (record paths relative to
+/// `{base}/records/`). A batch must not reach further than single-record reads: besides the
+/// conditions on the batch's own `args`, the conditions of the member's terms and of every link
+/// must hold for the `args` a single `GET {base}/records/<path>` would carry
+/// ([`home_call_args`] with the empty body), for every path. Any path out of scope refuses the
+/// whole batch with `refused:outOfScope` at §12.3 step 7, reserving nothing.
+pub fn verify_home_batch(
+    envelope: &[u8],
+    view: &AccountView,
+    cfg: &CallConfig<'_>,
+    store: &mut dyn ReplayStore,
+    req: &HomeRequest<'_>,
+    paths: &[String],
+) -> Result<VerifiedCall> {
+    home_request_with(envelope, view, cfg, store, req, false, paths)
+}
+
 fn home_request(
     envelope: &[u8],
     view: &AccountView,
@@ -1317,8 +1377,25 @@ fn home_request(
     req: &HomeRequest<'_>,
     signer: bool,
 ) -> Result<VerifiedCall> {
+    home_request_with(envelope, view, cfg, store, req, signer, &[])
+}
+
+fn home_request_with(
+    envelope: &[u8],
+    view: &AccountView,
+    cfg: &CallConfig<'_>,
+    store: &mut dyn ReplayStore,
+    req: &HomeRequest<'_>,
+    signer: bool,
+    batch_paths: &[String],
+) -> Result<VerifiedCall> {
     let bound = home_call_args(req.method, req.path, req.body_sha256);
-    let writes = if is_read(req.method) { &[][..] } else { req.writes };
+    let purposes = home_purposes(req.method, req.path);
+    let writes = if purposes.contains(&HOME_WRITE) {
+        req.writes
+    } else {
+        &[]
+    };
     verify(
         envelope,
         view,
@@ -1328,33 +1405,72 @@ fn home_request(
             writes,
             bound: Some(&bound),
             signer,
-            purposes: Some(home_purposes(req.method, req.path)),
+            purposes: Some(purposes),
             names_writes: false,
+            // Route upkeep (listing, registering and deleting its own routes) is available
+            // even to a suspended or recover-only controller: it is how such a key keeps
+            // hearing of pending changes. Member links still need an explicit service grant.
+            route_write: is_route_upkeep(req.method, req.path),
+            batch_paths,
         },
     )
 }
 
-/// Whether the member `m` may make `writes` under its own author ID (see [`verify_home_write`]).
-fn own_writes(m: &ViewMember, writes: &[HomeWrite]) -> bool {
+/// Whether a request at a home is notice-route upkeep: `GET /routes`, `POST /routes` (register
+/// or replace one's own route), or `DELETE /routes/<64 lowercase hex>`.
+pub fn is_route_upkeep(method: &str, path: &str) -> bool {
+    match method {
+        "GET" | "POST" => path == "/routes",
+        "DELETE" => path
+            .strip_prefix("/routes/")
+            .is_some_and(super::home_stream::is_route_id),
+        _ => false,
+    }
+}
+
+/// Whether a member's grants cover a home write, before checking links and conditions.
+pub(crate) fn member_allows_home_write(
+    id: &str,
+    terms: &Terms,
+    endpoint: &str,
+    writes: &[HomeWrite],
+) -> bool {
+    if terms.allows(endpoint, HOME_WRITE) {
+        return true;
+    }
     use super::terms::Access;
     let grants = |ns: &str, needed: Access| {
-        m.terms
-            .records()
+        terms.records()
             .is_some_and(|rs| rs.iter().any(|e| e.namespace == ns && e.access >= needed))
     };
     !writes.is_empty()
         && writes.iter().all(|w| match w {
             HomeWrite::Record { author, namespace } => {
-                author == &m.id && grants(namespace, Access::Propose)
+                author == id && grants(namespace, Access::Propose)
             }
             HomeWrite::Live { author, namespace } => {
-                author == &m.id && grants(namespace, Access::Write)
+                author == id && grants(namespace, Access::Write)
             }
-            HomeWrite::Blob => m
-                .terms
+            HomeWrite::Blob => terms
                 .records()
                 .is_some_and(|rs| rs.iter().any(|e| e.access >= Access::Propose)),
         })
+}
+
+pub(crate) fn controller_allows_call(
+    at_s: &Controller,
+    latest: &Controller,
+    audience: &str,
+    purpose: &str,
+) -> bool {
+    let both = |r: &Role| at_s.has(r) && latest.has(r);
+    both(&Role::Approve)
+        || both(&Role::Control)
+        || (both(&Role::Sign)
+            && [at_s, latest]
+                .iter()
+                .all(|c| c.audiences().is_some_and(|a| a.iter().any(|s| s == audience))))
+        || (both(&Role::Recover) && purpose == HISTORY_READ)
 }
 
 /// How [`verify`] runs: what a home write writes, the `args` a home binds the call to, and
@@ -1369,6 +1485,10 @@ struct Mode<'a> {
     purposes: Option<&'a [&'a str]>,
     /// A home write must name what it writes (`malformed` otherwise), judged at the same point.
     names_writes: bool,
+    route_write: bool,
+    /// The record paths a batch read serves ([`verify_home_batch`]): the conditions of the
+    /// member's and every link's terms must also hold for the `args` a single `GET` of each.
+    batch_paths: &'a [String],
 }
 
 fn verify(
@@ -1462,20 +1582,14 @@ fn verify(
                 id,
                 Claim::Controller {
                     roles: &[],
-                    suspended_ok: call.purpose == HISTORY_READ,
+                    suspended_ok: call.purpose == HISTORY_READ || (at_home && mode.route_write),
                 },
                 cfg.now_ms,
             )
             .map_err(|_| revoked())?;
-            let both = |r: &Role| at_s.has(r) && latest.has(r);
-            let sign_ok = both(&Role::Sign)
-                && [at_s, latest]
-                    .iter()
-                    .all(|c| c.audiences().is_some_and(|a| a.contains(&call.audience)));
-            let role_ok = both(&Role::Approve)
-                || both(&Role::Control)
-                || sign_ok
-                || (both(&Role::Recover) && call.purpose == HISTORY_READ);
+            // Route upkeep is open to any controller at its own home (see `Mode::route_write`).
+            let role_ok = (at_home && mode.route_write)
+                || controller_allows_call(at_s, latest, &call.audience, &call.purpose);
             require_refused(role_ok, Reason::OutOfScope)?;
             require_sig(
                 latest.key().signing() == call.key.as_slice()
@@ -1561,24 +1675,33 @@ fn verify(
         None if standing_unknown => {}
         Some(m) => {
             let home_read = at_home && call.links.is_empty() && call.purpose != HOME_WRITE;
-            let home_write = at_home
-                && call.purpose == HOME_WRITE
-                && own_writes(m, writes)
-                && call
-                    .links
-                    .iter()
-                    .all(|l| l.terms.allows(&call.audience, &call.purpose));
+            let grant_allows = if at_home && call.purpose == HOME_WRITE {
+                member_allows_home_write(&m.id, &m.terms, &call.audience, writes)
+                    || (mode.route_write && call.links.is_empty())
+            } else {
+                m.terms.allows(&call.audience, &call.purpose)
+            };
             let allowed = home_read
-                || home_write
-                || (m.terms.allows(&call.audience, &call.purpose)
+                || (grant_allows
                     && call
                         .links
                         .iter()
                         .all(|l| l.terms.allows(&call.audience, &call.purpose)));
             require_refused(allowed, Reason::OutOfScope)?;
+            let on = |args: &Value| {
+                Truth::all(
+                    std::iter::once(m.terms.conditions_on(args))
+                        .chain(call.links.iter().map(|l| l.terms.conditions_on(args))),
+                )
+            };
+            // A batch read: each path as a single-record GET would carry it, too.
+            let empty = digest(b"");
             let truth = Truth::all(
-                std::iter::once(m.terms.conditions_on(&call.args))
-                    .chain(call.links.iter().map(|l| l.terms.conditions_on(&call.args))),
+                std::iter::once(on(&call.args)).chain(
+                    mode.batch_paths
+                        .iter()
+                        .map(|p| on(&home_call_args("GET", &format!("/records/{p}"), &empty))),
+                ),
             );
             require_refused(truth != Truth::False, Reason::OutOfScope)?;
             condition_unknown = truth == Truth::Unknown;

@@ -17,40 +17,76 @@ One home per account is the supported configuration in 0.5. Several homes for on
 the tests, but exchange between them (forwarding and candidate exchange) is experimental
 (spec §13.1; open issues in `docs/multi-home-open-issues.md`).
 
-## Batch record reads (plain slots)
+## Batch record reads
 
-`POST /v1/libraries/<slot>/records/batch` is an additive endpoint for plain relay
-slots. It uses the same bearer authorization as a single-record GET. Send
-`Content-Type: application/json`, `Content-Length`, and a body of at most 64 KiB:
-
-```json
-{"paths":["ops/member/one.json","blobs/<64 lowercase hex digits>"]}
-```
-
-`paths` must contain 1–256 unique valid record paths. Invalid JSON or paths return
-400, an unsupported content type returns 415, and a body over the bound returns
-413. A successful answer preserves request order:
+Home batches implement the [proposed Colophon 0.6 W1 exchange](../docs/colophon-0.6-w1-batch.md).
+`POST /v1/libraries/<slot>/records/batch` works on both plain slots and home slots.
+Plain slots use the same bearer authorization as single-record GET. On a home
+slot, send `Authorization: Colophon <base64url call>` with purpose
+`colophon.home.read`, audience equal to the slot's configured base URL, and
+these signed arguments:
 
 ```json
-{"records":[{"path":"ops/member/one.json","status":200,"etag":"\"<sha256>\"","bytes":"<base64>"},{"path":"ops/member/missing.json","status":404}],"truncated":false}
+{"method":"POST","path":"/records/batch","body":"<lowercase hex SHA-256 of the raw request body>"}
 ```
+
+Send `Content-Type: application/json`, `Content-Length`, and a body of at most
+64 KiB:
+
+```json
+{"paths":["state/0123456789abcdef0123456789abcdef/notes/current.json","state/0123456789abcdef0123456789abcdef/notes/draft.json"]}
+```
+
+`paths` must contain 1–256 unique record paths valid for the slot. Invalid JSON
+or paths return 400, a missing `Content-Length` returns 411, an unsupported
+content type returns 415, and a body over the bound returns 413. A successful
+answer preserves request order:
+
+```json
+{
+  "records": [
+    {"path":"state/0123456789abcdef0123456789abcdef/notes/current.json","status":200,"etag":"\"<sha256>\"","bytes":"<base64>"},
+    {"path":"state/0123456789abcdef0123456789abcdef/notes/draft.json","status":404}
+  ],
+  "truncated": false
+}
+```
+
+An unappointed home returns 404 before checking credentials or parsing the body.
+An appointed home applies its per-address rate limit and checks for a Colophon
+authorization header and valid batch structure before taking the slot lock.
+It then verifies the bound call under its replay rules. Any current member
+calling with its own key may read ciphertext records in any namespace. A batch
+reaches no further than single GETs: the conditions of the member's terms and of
+every link must hold for each path as a single GET of it would carry them, or the
+whole batch is refused with `refused:outOfScope` before anything is reserved or read. E2EE
+epoch keys control who can decrypt those records.
+
+- Every home batch requires a `colophon.home.read` call, including batches of
+  public history or heads. Single GET can serve those paths without a call.
+- Batch refuses `colophon.history.read`, so recover-only controllers cannot
+  batch history. They can read members-only history with single GET and that purpose.
+- A stopped home returns a whole-request 503 for a well-formed batch carrying a
+  call. Single GET can still serve public history while the home is stopped.
+
+A missing call returns 401. Refused calls, including revoked, expired, replayed
+or mismatched calls, return 403 for the whole request. Rate limits return 429
+with `Retry-After`. If the home's own head needs to be refreshed and cannot be
+signed, its entry returns 503.
 
 Records are checked against their indexed size and SHA-256 before serving; storage
-corruption fails the request with 500. Answers carry `Cache-Control: no-store,
+corruption, or an indexed record that is missing or unreadable, fails the whole request
+with 500, no path named and no per-item results. Clients can
+fall back to single-record GETs to fetch the unaffected paths. Answers carry `Cache-Control: no-store,
 no-transform` and the configured CORS headers. Each response has a strict 4 MiB
 encoded JSON/base64 budget, including response framing and per-record overhead.
 An individual record exceeding that budget is not read or base64-encoded; its
 entry is `{ "path": "…", "status": 413, "etag": "\"<sha256>\"", "size": 4194304 }`
-(with its actual raw byte size). Fetch such records via plain GET. These entries
+(with its actual raw byte size). Fetch such records via single-record GET. These entries
 count as returned paths so pagination always makes progress. When `truncated` is true,
-request the unreturned suffix of `paths` in the next batch. Slot metadata is
-unchanged; clients should probe the route and remember a 404/405 for fallback.
-
-The current 0.5 home authorization module does not support this route: home slots
-return 405 after their rate gate, without parsing the batch body or classifying
-its paths, and serve no batch bytes. Home reads still require their
-original individually bound Colophon calls. This endpoint alone does not change
-SDK sync scheduling.
+request the unreturned suffix of `paths` in the next batch. A home requires a new
+call bound to that next batch's body. Clients can probe the route and use single-record
+GET when an older relay returns 404 or 405.
 
 ## Run it
 
@@ -90,7 +126,7 @@ home holds no account secret: no controller or member key, no PRF output, no see
 | Config file | `COLOPHON_RELAY_CONFIG` or `--config` | none |
 | Plain tokens | `COLOPHON_RELAY_TOKENS="slot=token,…"` (or `tokenSha256` in a config file) | none |
 | Token-free slots (tests only) | `COLOPHON_RELAY_OPEN="slot"` | none |
-| Home slots | `COLOPHON_RELAY_HOME_SLOTS="slot=<account ID>@<base URL>,…"` (config: `libraries.slot = {"home":true,"account":…,"base":…}`) | none |
+| Home slots | `COLOPHON_RELAY_HOME_SLOTS="slot=<account ID>@<base URL>,…"` (config: `libraries.slot = {"home":true,"account":…,"base":…}`). Two home slots for one account at one base (after normalizing case and trailing slashes) are refused at start-up: replay tables are per slot, so one captured call could be taken once in each | none |
 | Home key | `COLOPHON_HOME_KEY_FILE` (preferred) or `home.keyFile` in the config; `COLOPHON_HOME_KEY` (the JWK itself) is readable from the process environment, so prefer a file | required for a home |
 | Home module | `COLOPHON_HOME_WASM`, or `home.wasm` | required for a home |
 | Scheduler tick | `COLOPHON_RELAY_TICK_MS` or `tickMs` | `2000` |
@@ -177,7 +213,7 @@ released after `unclaimedHours`, as any other.
 | 403 `{"result":"<code>"}` | A grant's call is refused, with the core's code: `malformed`, `badSignature`, `refused:audience`, `refused:outOfScope`, `refused:revoked`, `refused:expired`, `refused:ended`, `refused:notNarrower`, `refused:window`, `refused:replay`, `refused:conflict`, `refused:fork`. Final: it never falls back to another path |
 | 403 | The request carries an `Origin` not on the CORS list (checked before the body is read) |
 | 405 | Not `POST` |
-| 409 | The slot is held by another account, configured by the operator, or a directory of that name is in the data directory |
+| 409 | The slot is held by another account, configured by the operator, or a directory of that name is in the data directory; or another home slot already serves the account at that base (checked before the call is reserved or anything is written) |
 | 411, 413 | No `Content-Length`, or a body over 4 KiB |
 | 415 | The media type is not `application/json` (checked before the body is read; a browser must preflight such a request, and only a listed origin's preflight succeeds) |
 | 429 `{"result":"refused:overQuota"}` | The address is over `perAddressPerHour`, with `Retry-After` (checked first: a guesser over its share learns nothing about its token); for a grant request, the address is over its attempts or its refusals, the replay table is full, or the grant is over `grantPerHour`, each with `Retry-After` |
@@ -324,14 +360,16 @@ real time. Without `--test-clock` stdin is not read.
 Production use is over TLS (directly, or behind Caddy/nginx or Tailscale, as for the 0.3 relay:
 pass `Authorization`, `If-None-Match`, `If-Match` and `Content-Length`, do not buffer bodies).
 
-## What a home serves (0.5 §14)
+## What a home serves
 
-At `{base}` (`/v1/libraries/<slot>`), in addition to the 0.3 endpoints (`changes`, `records/...`):
+At `{base}` (`/v1/libraries/<slot>`), a home adds the endpoints from 0.5 §14 and the
+proposed 0.6 batch read to the 0.3 endpoints (`changes`, `records/...`).
 
 | Request | Answer |
 | --- | --- |
 | `GET {base}` | 200 as 0.3 plus `"home":{"member":"<ID>"}` |
 | `GET {base}/head` | 200 the latest head this home signed, after producing the due one (§13.3); 503 with `Retry-After: 1` when a head is due and cannot be signed yet (the clock has not passed the latest head's `issued`, or the history stops at a fork): the older head is never served in its place; 404 if none. Public. The same at `records/heads/<this home>.json`. |
+| `POST {base}/records/batch` | Ordered per-path results under a single `colophon.home.read` call. See [Batch record reads](#batch-record-reads). |
 | `GET {base}/authority?after=&limit=` | 200 `{"entries","receipts","more"}`, 1–64 from `after + 1`, under 13.4; `receipts` holds the receipts of a successor genesis. At a fork: the prefix, then every candidate held from the fork's seq, in seq then digest order |
 | `GET {base}/predecessor/authority/<8 digits>.json` | 200 a Swift predecessor's entry; 404. A history path (§13.4) |
 | `PUT {base}/predecessor/authority/<8 digits>.json` | a predecessor entry: 201 stored, 200 held already, 412 another entry at that seq, 422 `{"result"}`. Needs a `colophon.home.write` call by a controller (see "Predecessor entries") |
@@ -340,17 +378,18 @@ At `{base}` (`/v1/libraries/<slot>`), in addition to the 0.3 endpoints (`changes
 | `GET {base}/pending/{digest}` | 200 `{"envelope","receipts"}`; 404 |
 | `POST {base}/pending` | `{"objects":[…]}`, 1–16: 200 `{"receipts"}`; 422 a JSON array with the result string of each refused object, in request order. Receipts in a batch are taken first, so an object later in it finds them. No credential needed. |
 
-**Before it is appointed** a home serves nothing it holds: every path but `GET {base}` and the two
-`POST`s answers 404. **Once appointed**, every access decision is the Rust module's (§13.4, §14):
+**Before it is appointed** a home serves nothing it holds. It exposes its identity at `GET {base}`
+and accepts admission requests such as `POST {base}/authority` and `POST {base}/pending`.
+**Once appointed**, access decisions follow the Rust module's rules (§13.4, §14):
 the head (`/head`, `records/heads/*`) is public; the history (`authority`, `pending`, and
 `records/authority/`, `transitions/`, `vetoes/`, `receipts/`) follows `policy.history`: `public`,
 or a call; records, blob chunks and the change feed always need a call. A call is
 `Authorization: Colophon <base64url call envelope>`, verified under §12.3 with `{base}` as the
 audience, and bound to its request: its `args` are exactly
 `{"method": <HTTP method>, "path": <path and query relative to {base}, as sent>, "body": <hex SHA-256 of the body>}`,
-its purpose `colophon.home.read` for GET and HEAD (`colophon.history.read` is accepted on the
-history paths only, never for records, blob chunks or the change feed) and `colophon.home.write`
-otherwise. A current member may write records, live
+its purpose `colophon.home.read` for GET, HEAD and `POST /records/batch` (`colophon.history.read`
+is also accepted for GET and HEAD on history paths only) and `colophon.home.write` for writes.
+A current member may write records, live
 values and blob chunks under its own author ID in namespaces its terms grant; a revoked member is
 refused as soon as the revocation is in the history the home holds. Refused: 401 with
 `WWW-Authenticate: Colophon` when there is no call, 403 `{"result":"<§1 code>"}` for a call that
@@ -412,7 +451,7 @@ first upload is sent again. One entry per seq, at most the claimed head's seq, 5
 8 MiB per slot; bytes that do not fit the chain are refused and nothing of them is kept, so
 flooding cannot take a place the genuine entry needs. Nothing staged is served.
 
-**Notices are not built** (§13.1, §17.5): see "Notices" below.
+**Notice routes and the stream** are available on home slots. See “Notices” and “Stream” below. Nothing of a session frame or a stream ticket is ever stored.
 
 ## Storage layout
 
@@ -426,6 +465,9 @@ flooding cannot take a place the genuine entry needs. Nothing staged is served.
                                   fsynced before any effect; a completion line after it)
 <dataDir>/<slot>/forward.json     home slots: what each other home has been sent
 <dataDir>/<slot>/alive.json       home slots: the serving lease's end (serving intervals, §13.1)
+<dataDir>/<slot>/routes.json      home slots: registered notice routes (includes private addresses)
+<dataDir>/<slot>/notices.jsonl   home slots: durable queue of public notice metadata
+<dataDir>/<slot>/notice-commit.json  home slots: temporary journal for crash recovery of a queue append
 ```
 
 Home slots add `authority/<8 digits>.json`, `transitions/<digest>.json`, `vetoes/<digest>.json`,
@@ -493,38 +535,113 @@ this relay as a process (`crates/colophon-home-wasm/tests`, including the kill l
 here. **CI runs that script.** With `CI` or `COLOPHON_REQUIRE_RELAY=1` set, a missing Bun or module
 fails those tests; otherwise they are skipped with a printed `SKIPPED:` line naming what is missing.
 
-## Notices (not built: the contract is missing)
+## Notices
 
-Notice delivery and route registration are deferred to 0.6 (spec §17.5, revision 18). 0.5 requires
-a home to keep and serve pending objects until they are settled, and a syncing host to show them
-with their due time; this home does both. The contract below remains the proposal for 0.6. 0.5 gives a notice no signed body and no wire format, and nothing defines how
-a host registers a route with a home. The Swift and Kotlin sessions expect one: a
-`DeliveryRoute {kind: push|email|sms|webhook|other, address, reaches}` and a host-supplied
-`registerRoutes(account, routes) -> Bool` closure (`swift/Sources/ColophonSession/HostDuties.swift`,
-`SessionTypes.swift`; `sdk/kotlin/.../SessionTypes.kt`), with the HTTP call left to the host. So
-this home builds no route store, queue or sender: there is nothing for a session to call that a
-second implementation would also implement.
+A host registers delivery routes with each home (§17.5). Use `Authorization: Colophon <call>`
+with the slot's base URL as the audience. Bind the call to the method, the path relative to
+that base, and the lowercase SHA-256 digest of the request body (empty bytes for GET and DELETE).
+The `kind` is one of `push`, `email`, `sms`, `webhook` or `other`. The `address` is the delivery
+destination and `reaches` describes the device or service reached.
 
-What is missing, and the smallest contract that would close it (a proposal, not built):
+| Request | Purpose | Result |
+| --- | --- | --- |
+| `POST {base}/routes` with JSON `{"kind","address","reaches"}` | `colophon.home.write` | 201 `{"id"}` on creation, 200 `{"id"}` when it replaces the caller's route for that kind and address |
+| `DELETE {base}/routes/<route ID>` | `colophon.home.write` | 204 on removal or 404 when absent |
+| `GET {base}/routes` | `colophon.home.read` | 200 with `{"routes":[{"id","kind","reaches","by"}]}` |
 
-- **Register.** `PUT {base}/routes/<route ID>` with body `{"kind","address","reaches"}`, under a
-  `colophon.home.write` call by a controller (any role, suspended or not: a recover-only key must
-  be able to keep a route) or a current member; the route ID is the lowercase hex SHA-256 of
-  `kind ‖ 0x00 ‖ address`. 200 or 201. `DELETE` the same path removes it. `GET {base}/routes`
-  (same call, `colophon.home.read`) lists `{"routes":[{"id","kind","reaches","by"}]}`, never the
-  addresses. The `Bool` the sessions expect is "201 or 200".
-- **What triggers a notice.** The module returns, with every admission that receipted a
-  transition, a veto or a `suspend`, a `notify` list: `{"object","kind","issued","deadline"}`.
-  The relay appends one queue line per route (`notices.jsonl`, fsynced before the receipt is
-  returned), and a sender drains it with retries; the queue survives restarts like the replay log.
-- **The text.** Fixed by the home, carrying only public facts: the account ID, the object's kind
-  and digest, its veto deadline, and the §17.5 sentence about what the delay protects. Nothing
-  from a private record.
-- **The sender.** Pluggable (`deliver(route, notice) -> ok | retry | drop`), a test sender that
-  writes to a file, and production senders that each need operator credentials outside this
-  repository: APNs (a token-signing key and topic per app), FCM (a service account), e-mail (an
-  SMTP or provider API key with a verified sender domain), webhooks (an allow-list, since an
-  account would otherwise make the home call arbitrary addresses, finding L7 of the H1 check).
+**Route IDs reveal no address.** An ID is the HMAC-SHA256, under the slot's secret route key,
+of the principal, `kind` and `address`. The key is 32 random bytes kept in `routes.json` and
+never served. A reader of the list cannot test guessed numbers or emails against the IDs, and
+the same address registered by two principals gives two unrelated IDs. A `routes.json` in the
+unshipped W2 layout is re-keyed on load.
+
+Route upkeep (listing, and changing one's own routes) is open to every current controller,
+including recover-only and suspended ones. A current member can use its own key, and member
+links need explicit service grants. `by` identifies the registering principal as
+`controller:<ID>` or `member:<ID>`. **A principal deletes only its own routes**: another
+principal's route answers 403 `{"result":"refused:notGranted"}`. Each principal holds at most 8
+routes, and the slot at most 64; a new route past either cap answers 507
+`{"result":"refused:overQuota"}`. The home module derives the ID and decides ownership, caps and
+the route's form. It checks the address per kind; a `webhook` must be `https://` to a public DNS
+name, with no IP literal, port, user information or local-only name. It also requires that
+`reaches` does not contain the address. The route list omits delivery addresses. POST takes an
+`application/json` body up to 4 KiB. The home stages, fsyncs and renames the route file before
+acknowledging a change. Routes of a principal that is no longer one are dropped on the next
+authority commit.
+
+**Delivery senders** (none is built in) MUST, for a webhook, resolve the host at delivery time
+and refuse loopback, private, link-local, unique-local, CGNAT, multicast and other non-global
+addresses. They MUST pin the checked address for the request, verify TLS for the host name,
+and follow no redirect. See
+[docs/colophon-0.6-stream.md §6](../docs/colophon-0.6-stream.md#6-notices-and-routes).
+
+When the home admits a suspend or agrees to receipt a new transition or veto, it fsyncs
+`notices.jsonl` before responding. It writes **one line per notice**:
+`{"seq","account","object","kind","issued","deadline","routes":[…]}`. `seq` is the notice's
+number (increasing, never reused, possibly skipping after a failed commit). `routes` holds the
+IDs of the routes registered when the notice was queued, so a delivery sender keeps a cursor per
+route. Retrying an already-held object does not duplicate notices. The queue survives restarts.
+Delivery providers and signed notice payloads are outside this implementation.
+
+## Stream
+
+The stream is a draft for Colophon 0.6, and
+[docs/colophon-0.6-stream.md](../docs/colophon-0.6-stream.md) is its full description. It is a
+two-way WebSocket at `GET {base}/stream`. It pushes what the home commits and carries sealed
+session frames between the account's connected members. The home never reads those frames.
+
+1. **Mint a ticket:** `POST {base}/stream/ticket`, no body, with a call of purpose
+   `colophon.home.stream` bound to `{"method":"POST","path":"/stream/ticket","body":"<SHA-256 of
+   empty bytes>"}`. Whoever may read records at the home may mint one, including a member
+   through links whose terms grant `colophon.home.stream` at `{base}` (a device whose member key
+   is locked). The answer is 200 `{"ticket","expires","path"}`. A ticket is opaque, single use
+   and lives 30 s. The home keeps only its hash and never logs it.
+2. **Connect:** `GET {base}/stream?ticket=<ticket>[&after=<cursor>]`. Browsers can do this.
+   A missing ticket answers 401 and a used or expired one 403 `{"result":"refused:ticket"}`.
+   A principal that lost access answers 403 `refused:revoked`. Past 4 connections per principal
+   or 64 per account, the answer is 429.
+3. The first frame is `hello` (`instance`, `cursor`, `head`, `notice`, `namespaces`, `limits`).
+   Every frame carries `n`, its number on the connection, with no gap. With `after`, the missed
+   change-log entries follow as `change` frames, or a `resync` when they cannot be replayed.
+
+| Home → client | |
+| --- | --- |
+| `change` `{cursor, entry}` | The `/changes` entry and cursor, so either can resume the other |
+| `head` `{home, seq, digest}` | The home stored a new head |
+| `notice` `{notice, object, kind, deadline}` | A notice was queued (`notice` is its number) |
+| `route` `{id, change, kind?, reaches?, by?}` | A route changed |
+| `session` `{frame, retained?}` | A sealed frame from another member |
+| `subscribed`, `unsubscribed`, `pong`, `error {code, ref?}`, `resync {reason, after}`, `bye {reason, resume}` | |
+
+| Client → home | |
+| --- | --- |
+| `subscribe` / `unsubscribe` `{namespace, cell, id?}` | Members entitled to the namespace only |
+| `session` `{frame, id?}` | Forwarded to the other subscribed, entitled members, or only to `to`. Never echoed |
+| `ping` `{t?, id?}` | |
+
+A session frame is checked by the home module: at most 16,384 bytes, its outer fields well
+formed, `from` the connection's member, and that member holding a `records` entry for the
+namespace. Unknown or malformed client frames answer `error` without closing.
+The latest `retain: true` frame per (namespace, cell, sender) is kept **in memory only** for at
+most 60 s and given to members when they subscribe. Session frames are never written to disk.
+
+Limits: WebSocket messages up to 20,480 bytes (larger closes 1009). The inbound rate is capped
+per connection at 50 frames/s and 256 KiB/s; excess frames are dropped and counted, with an
+`error rateLimited`. A connection with more than 1 MiB unsent is closed with 4013. The home pings
+every 20 s, and a connection silent for 60 s is closed with 4008. Every authority commit, and a
+sweep that runs while any connection is open (every `sweepMs`, at most 5 s, and never off),
+re-judges each connection; one whose access ended is closed with 1008. Shutdown
+sends `bye` and closes with 1012 (resume). A released slot closes with 1001. All of these are
+settings under `stream` in the config file (`ticketMs`, `streamsPerPrincipal`,
+`streamsPerAccount`, `framesPerSecond`, `bufferedBytes`, `retainMs`, `pingMs`, `idleMs`,
+`sweepMs` and the rest; see `relay/stream.js`).
+
+**Bun only for homes.** The stream uses Bun's built-in WebSocket server. A relay with home slots
+refuses to start on another runtime instead of silently serving no stream. A relay with only
+0.3 token slots runs anywhere.
+
+Clients of 0.5 are unaffected. `GET {base}/changes`, `GET {base}/pending` and every other request
+behave as before.
 
 ## A stopped home
 

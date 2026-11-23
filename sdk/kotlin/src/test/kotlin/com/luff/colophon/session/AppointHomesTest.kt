@@ -83,6 +83,7 @@ class AppointHomesTest {
             val outcome = first.session.appointHomes(listOf(appointable(relay)), AdditionalController(passkey, "Passkey", passkeyRoles))
             first.session.stopSync()
             assertEquals(HomesAppointment.Done, outcome, "no home before: final at once")
+            assertEquals(1, passkey.assertCount)
             assertEquals(1, first.session.homes.size)
             assertTrue(!first.session.notices.noHome)
             assertTrue(first.session.state.value.syncState != HomeSyncState.Disabled, "the running session syncs with the appointed home")
@@ -133,6 +134,7 @@ class AppointHomesTest {
                 assertFailsWith<SessionWorker.AppointStopped> { first.session.appointHomes(listOf(home), AdditionalController(passkey, "Passkey", passkeyRoles)) }
                 first.session.stopSync()
                 assertEquals(1, transitions(first.medium), "$step: one transition signed before the stop")
+                assertEquals(1, passkey.assertCount, "$step")
 
                 // A relaunch: a new session over the same store, private directory and device secrets.
                 val again = Device(medium = first.medium, member = first.member, owner = first.owner, secrets = first.secrets, dir = first.dir, now = clock)
@@ -141,6 +143,7 @@ class AppointHomesTest {
                 val outcome = again.session.appointHomes(listOf(home), AdditionalController(passkey, "Passkey", passkeyRoles))
                 again.session.stopSync()
                 assertEquals(HomesAppointment.Done, outcome, "$step")
+                assertEquals(if (step == SessionWorker.AppointStep.SLOTTED) 1 else 2, passkey.assertCount, "$step")
                 assertEquals(1, transitions(first.medium), "$step: nothing was appointed or added twice")
                 assertEquals(1, again.session.homes.size, "$step")
                 val passkeyId = KeyCustody.keyId(passkey)

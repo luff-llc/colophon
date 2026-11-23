@@ -580,14 +580,20 @@ needs a device key or a kit, and no standalone `prf` slot; hosts SHOULD offer th
 `results.first`. A CTAP `hmac-secret` host applies SHA-256(`"WebAuthn PRF"` ‖ 0x00 ‖ salt) and
 selects the UV-associated secret. Missing PRF fails explicitly; there is no fallback.
 
-**Building a PRF route.** The PRF output for a new slot or part MUST come from an assertion
-restricted to that slot's credential, evaluating its salt over a fresh random 32-byte core
-challenge (never a body digest), never from registration. The assertion's origin is judged by
-the general origin rule of §4.3 for that credential's `rp` and `origins` (the authority-origin
-restriction does not apply: this is not an authority signature), and UV is required exactly
-when the controller has `verification: true` (§4.3 step 3). The core verifies that assertion
-against the new controller's key, builds the slot, opens it again with the same output and
-checks the vault before it is published. The host is trusted to pass PRF bytes unchanged.
+**Building a PRF route.** The PRF output for a new slot or part MUST come from a get assertion
+restricted to that slot's credential and evaluating its salt. The challenge MUST be a fresh
+random 32-byte core challenge unless reusing a transition possession proof. When a transition
+adds that controller, the host MAY request PRF with a fresh salt in the same get as the
+controller's possession proof. After
+activation, the host uses that assertion and its PRF output to build the slot, with the
+possession proof's exact transition body challenge as the expected challenge. The ordinary
+possession proof is recorded in the transition. The PRF output and the slot builder's copy
+of the assertion are local inputs only. The slot builder uses the general origin rule of
+§4.3 for the credential's `rp` and `origins`, and requires UV exactly when the controller has
+`verification: true` (§4.3 step 3). The possession proof separately follows its authority
+signature rules. The core verifies the slot assertion against the new controller's key,
+builds the slot, opens it again with the same output and checks the vault before publication.
+The host is trusted to pass PRF bytes unchanged.
 
 ### 7.3 Pairing
 

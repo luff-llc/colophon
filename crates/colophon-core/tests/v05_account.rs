@@ -6,7 +6,10 @@
 //! carry, answers the slot routes the account asks for, and does the ECDH a member's shares need.
 //! Nothing in this file shares encoding code with the vector generator.
 #![allow(clippy::unwrap_used, clippy::cloned_ref_to_slice_refs)]
-use base64::{engine::general_purpose::STANDARD, Engine};
+use base64::{
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+    Engine,
+};
 use colophon_core::keys::testing::SyntheticAuthenticator;
 use colophon_core::v05::account::*;
 use colophon_core::v05::encoding::{canonical, digest};
@@ -18,13 +21,13 @@ use colophon_core::v05::ids::key_id;
 use colophon_core::v05::pairing::{ExistingWaiting, FailureLimiter, Joiner, TransferKey};
 use colophon_core::v05::records::{HeldRecord, Level};
 use colophon_core::v05::slots::{
-    answer_with_identity, OpeningInput, OpeningSecret, PrfAssertion, PrfRequest, PrfResult,
+    answer_with_identity, OpeningInput, OpeningSecret, PrfAssertion, PrfInput, PrfRequest, PrfResult,
     SlotPlan,
 };
 use colophon_core::v05::vault::{kit_identity, PrfOutput, SoftwareIdentity};
 use colophon_core::v05::write::authority::TransitionRule;
 use colophon_core::v05::write::calls::RequestSpec;
-use colophon_core::v05::write::{SignatureResult, SigningStep};
+use colophon_core::v05::write::{SignatureResult, SigningStep, StepRole};
 use colophon_core::v05::{Failure, Reason};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -3679,7 +3682,7 @@ fn create_one_controller_no_home() -> Fixture {
 /// one-controller account with no home: signed by the owner under the control rule with the
 /// passkey's possession proof, it passes `classify`, is due at `issued` (no receipt: there is no
 /// home in the state before it to witness time), and its activation is final at once, so the
-/// added passkey is current and may build its own slot straight away.
+/// added passkey is current and the owner can publish a slot using the same assertion.
 #[test]
 fn appointing_a_home_and_adding_a_controller_in_one_transition_is_final_at_once() {
     let mut f = create_one_controller_no_home();
@@ -3729,7 +3732,24 @@ fn appointing_a_home_and_adding_a_controller_in_one_transition_is_final_at_once(
         vec![f.d.clone(), f.p.clone()],
         "the owner signs, then the passkey's possession proof"
     );
-    let done = run(&mut f.account, &f.host, action);
+    let possession = &action.steps()[1];
+    assert_eq!(possession.role(), StepRole::Possession);
+    let input = PrfInput {
+        salt: f.host.fresh(),
+        challenge: URL_SAFE_NO_PAD
+            .decode(possession.challenge().unwrap())
+            .unwrap()
+            .try_into()
+            .unwrap(),
+    };
+    let signatures = f.host.sign(action.steps());
+    let (authenticator_data, client_data) = signatures[1].assertion.clone().unwrap();
+    let proof = PrfAssertion {
+        authenticator_data,
+        client_data,
+        signature: signatures[1].signature.clone(),
+    };
+    let done = f.account.finish(action, signatures).unwrap();
     assert_eq!(done.pending.len(), 1, "one transition");
     let issued = f.account.now_ms();
     let pending = f.account.pending();
@@ -3754,21 +3774,43 @@ fn appointing_a_home_and_adding_a_controller_in_one_transition_is_final_at_once(
         .expect("the passkey is a controller");
     assert!(!pk.provisional, "the activation is final at once");
     assert_eq!(pk.roles, vec!["control".to_string(), "recover".to_string()]);
-    // Being final, the passkey is current: its own slot is accepted now.
+    // The possession assertion must still match the requested challenge at slot build time.
+    let plan = SlotPlan {
+        controllers: vec![f.p.clone()],
+        label: "Passkey".into(),
+    };
+    let signers = std::slice::from_ref(&f.d);
+    let entropy = f.host.fresh();
+    let mut wrong = input;
+    wrong.challenge[0] ^= 1;
+    let action = f
+        .account
+        .begin_add_slot_with_signers(signers, plan.clone(), Some(wrong), entropy)
+        .unwrap();
+    let answer = |host: &Host, assertion| {
+        vec![PrfResult {
+            assertion,
+            output: host.prf(&input.salt),
+        }]
+    };
+    assert!(f
+        .account
+        .provide_prf(action, answer(&f.host, proof.clone()))
+        .is_err());
     let entropy = f.host.fresh();
     let action = f
         .account
-        .begin_add_slot(
-            &f.p,
-            SlotPlan {
-                controllers: vec![f.p.clone()],
-                label: "Passkey".into(),
-            },
-            entropy,
-        )
+        .begin_add_slot_with_signers(signers, plan, Some(input), entropy)
         .unwrap();
-    let results = f.host.answer_prf(action.prf_requests());
-    let action = f.account.provide_prf(action, results).unwrap();
+    assert_eq!(action.prf_requests()[0].challenge, input.challenge);
+    assert_eq!(action.prf_requests()[0].salt, input.salt);
+    let action = f
+        .account
+        .provide_prf(action, answer(&f.host, proof))
+        .unwrap();
+    assert_eq!(action.steps().len(), 1);
+    assert_eq!(action.steps()[0].signer(), f.d);
+    assert!(action.steps()[0].challenge().is_none());
     run(&mut f.account, &f.host, action);
     assert!(
         f.account
@@ -3778,5 +3820,16 @@ fn appointing_a_home_and_adding_a_controller_in_one_transition_is_final_at_once(
             .unwrap()
             .has_slot
     );
-    assert_eq!(f.account.status().code, "ok");
+    let mut reopened = Account::open(
+        f.account.objects().clone(),
+        vec![],
+        None,
+        Identity::Controller(f.p.clone()),
+        issued,
+    )
+    .unwrap();
+    assert_eq!(reopened.head(), f.account.head());
+    assert_eq!(reopened.status().code, "ok");
+    unlock_controller(&f.host, &mut reopened, &f.p);
+    assert!(reopened.is_unlocked());
 }

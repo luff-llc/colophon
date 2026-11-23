@@ -10,18 +10,22 @@
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use colophon_core::v05::account::{Account, Identity};
 use colophon_core::v05::calls::{
-    home_purposes, home_record_writes, verify_call, verify_home_request, AccountView, Call,
-    CallConfig, CallSigner, HomeRequest, HomeWrite,
+    home_purposes, home_record_writes, verify_call, verify_home_batch, verify_home_request,
+    AccountView, Call, CallConfig, CallSigner, HomeRequest, HomeWrite,
 };
-use colophon_core::v05::descriptor::HistoryAccess;
+use colophon_core::v05::descriptor::{HistoryAccess, Role};
 use colophon_core::v05::encoding::{bounds, canonical, digest, parse_date, strict_parse};
 use colophon_core::v05::engine::paths::{self, Kind};
 use colophon_core::v05::heads::HeadContext;
 use colophon_core::v05::history::envelope::AuthEnvelope;
 use colophon_core::v05::history::home::{
-    admit, admit_first_with, admit_pending_batch, admit_predecessor, admit_with, stage_predecessor, FirstUpload, HomeState, ReceiptToSign, Refusal,
+    admit, admit_first_with, admit_pending_batch_notices, admit_predecessor, admit_with, stage_predecessor, FirstUpload, HomeState, ReceiptToSign, Refusal,
 };
-use colophon_core::v05::history::{verify_history, Objects, Persisted, State, Stop};
+use colophon_core::v05::history::{verify_history, Claim, Objects, Persisted, Principal, State, Stop};
+use colophon_core::v05::home_stream::{
+    self, check_session_frame, check_subscription, parse_route, stream_namespaces, FrameRefusal,
+    RouteVerdict,
+};
 use colophon_core::v05::ids::{key_id, AccountId};
 use colophon_core::v05::records::{OperationHeader, RecordAuthority};
 use colophon_core::v05::replay::{
@@ -37,7 +41,7 @@ use colophon_core::v05::write::succession::prepare_succession_vetoed;
 use colophon_core::v05::write::{format_date, SignatureResult};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 type R<T> = Result<T, String>;
 
@@ -54,6 +58,8 @@ const BOOTING_PREDECESSOR_BYTES: usize = 8 * 1024 * 1024;
 const MIN_SHARE: usize = 64;
 /// Replay rows of a slot when the host names no capacity.
 const DEFAULT_REPLAY_ROWS: usize = 65_536;
+const BATCH_BODY_BYTES: usize = 64 * 1024;
+const BATCH_PATHS: usize = 256;
 
 /// Run one request. The input is JSON, the output is JSON; nothing panics on bad input.
 pub fn handle(input: &[u8]) -> Vec<u8> {
@@ -80,7 +86,17 @@ fn run(input: &[u8]) -> R<Value> {
         "resume" => resume(&req),
         "lease" => lease(&req),
         "classify" => classify(&req),
+        "validate_batch" => Ok(match batch_input(&req) {
+            Ok(_) => json!({"allowed": true}),
+            Err(response) => response,
+        }),
         "access" => access(&req),
+        "stream_standing" => stream_standing(&req),
+        "session_frame" => session_frame(&req),
+        "subscription" => subscription(&req),
+        "route_change" => route_change(&req),
+        "route_id" => route_id_op(&req),
+        "principals_current" => principals_current(&req),
         "call_key" => call_key(&req),
         "replay_keep" => replay_keep(&req),
         "replay_recover" => replay_recover(&req),
@@ -384,6 +400,14 @@ enum Class {
     History,
     /// Records, live values, blob chunks and the change feed.
     RecordsRead,
+    /// `POST /records/batch`, with one call for the raw JSON body.
+    BatchRead,
+    /// `POST {base}/routes` or `DELETE {base}/routes/<route ID>`: notice-route upkeep by the
+    /// route's owner.
+    RouteWrite,
+    /// `POST {base}/stream/ticket` (0.6 draft): a `colophon.home.stream` call mints a stream
+    /// ticket for the principal that signed it.
+    StreamTicket,
     /// Writes, with what they write.
     Write(Vec<HomeWrite>),
     /// `PUT {base}/predecessor/authority/<8 digits>.json` (§14): a predecessor entry published.
@@ -401,6 +425,42 @@ fn not_allowed(allow: &str) -> R<Value> {
     Ok(json!({"allowed": false, "status": 405, "allow": allow}))
 }
 
+fn record_kind(path: &str) -> Option<Kind> {
+    paths::classify(path).filter(|kind| !matches!(kind, Kind::Request))
+}
+
+/// Validate without slot state so the host can reject malformed batches before taking the lock.
+fn batch_input(req: &Value) -> Result<(Vec<u8>, Vec<String>), Value> {
+    let bad_request = |error: String| json!({"allowed": false, "status": 400, "error": error});
+    let body = bytes_of(req, "batchBody").map_err(bad_request)?;
+    if body.len() > BATCH_BODY_BYTES {
+        return Err(json!({"allowed": false, "status": 413}));
+    }
+    let paths = batch_paths(&body).map_err(bad_request)?;
+    Ok((body, paths))
+}
+
+fn batch_paths(body: &[u8]) -> R<Vec<String>> {
+    let body = body.strip_prefix(b"\xef\xbb\xbf").unwrap_or(body);
+    let parsed: Value = serde_json::from_slice(body).map_err(|_| "Invalid JSON")?;
+    let invalid = "Expected 1–256 unique valid record paths";
+    let paths = parsed["paths"].as_array().ok_or(invalid)?;
+    if !(1..=BATCH_PATHS).contains(&paths.len()) {
+        return Err(invalid.into());
+    }
+    let mut seen = BTreeSet::new();
+    paths
+        .iter()
+        .map(|path| {
+            let path = path.as_str().ok_or(invalid)?;
+            if !seen.insert(path) || record_kind(path).is_none() {
+                return Err(invalid.into());
+            }
+            Ok(path.to_string())
+        })
+        .collect()
+}
+
 /// The whole access decision for one request (§13.4, §14, §12.3, §12.4):
 /// `{"allowed":true,"via":…,"kind":…,"reserve":…}` or `{"allowed":false,"status":…}` with a
 /// `result` for 403 and 429. A home that is not appointed serves nothing it holds: everything
@@ -409,7 +469,6 @@ fn not_allowed(allow: &str) -> R<Value> {
 /// what §13.4 and §14 allow. The replay table's share is per principal (a member or controller,
 /// with every link key under it), so one caller over its share is refused alone.
 fn access(req: &Value) -> R<Value> {
-    let l = load(req)?;
     let now_ms = i64_of(req, "now")?;
     let method = str_of(req, "method")?;
     let section = req.get("section").and_then(Value::as_str).unwrap_or("");
@@ -438,6 +497,23 @@ fn access(req: &Value) -> R<Value> {
             "GET" => Class::RecordsRead,
             _ => return not_allowed("GET"),
         },
+        ("stream", None) => match method {
+            "GET" => Class::RecordsRead,
+            _ => return not_allowed("GET"),
+        },
+        ("routes", None) => match method {
+            "GET" => Class::RecordsRead,
+            "POST" => Class::RouteWrite,
+            _ => return not_allowed("GET, POST"),
+        },
+        ("stream", Some("ticket")) => match method {
+            "POST" => Class::StreamTicket,
+            _ => return not_allowed("POST"),
+        },
+        ("routes", Some(id)) if home_stream::is_route_id(id) => match method {
+            "DELETE" => Class::RouteWrite,
+            _ => return not_allowed("DELETE"),
+        },
         // §14: a successor's home serves its Swift predecessor's history (a history path,
         // §13.4) and takes it by `PUT`, with a call (below).
         ("predecessor", Some(p)) => match (method, paths::classify(&format!("predecessor/{p}"))) {
@@ -446,8 +522,12 @@ fn access(req: &Value) -> R<Value> {
             (_, Some(Kind::Predecessor(_))) => return not_allowed("GET, PUT"),
             _ => return answer(404),
         },
+        ("records", Some("batch")) => match method {
+            "POST" => Class::BatchRead,
+            _ => return not_allowed("POST"),
+        },
         ("records", Some(p)) => {
-            let Some(kind) = paths::classify(p).filter(|k| !matches!(k, Kind::Request)) else {
+            let Some(kind) = record_kind(p) else {
                 return Ok(json!({"allowed": false, "status": 400, "error": "Invalid record path"}));
             };
             match (read, method, kind) {
@@ -471,6 +551,7 @@ fn access(req: &Value) -> R<Value> {
         }
         _ => return answer(404),
     };
+    let l = load(req)?;
     if matches!(class, Class::Identity | Class::Admit) {
         return Ok(json!({"allowed": true, "via": "open"}));
     }
@@ -481,6 +562,21 @@ fn access(req: &Value) -> R<Value> {
     }
     let Some(h) = l.home.as_ref() else {
         return answer(404);
+    };
+    let call_text = req.get("call").and_then(Value::as_str);
+    let batch = if matches!(class, Class::BatchRead) {
+        if str_of(req, "path")? != "/records/batch" {
+            return answer(400);
+        }
+        if call_text.is_none() {
+            return answer(401);
+        }
+        match batch_input(req) {
+            Ok((body, paths)) => Some((digest(&body), paths)),
+            Err(response) => return Ok(response),
+        }
+    } else {
+        None
     };
     if matches!(class, Class::Head) {
         return Ok(json!({"allowed": true, "via": "public"}));
@@ -493,7 +589,7 @@ fn access(req: &Value) -> R<Value> {
     if v.stopped {
         return Ok(json!({"allowed": false, "status": 503, "result": "unavailable"}));
     }
-    let Some(call_text) = req.get("call").and_then(Value::as_str) else {
+    let Some(call_text) = call_text else {
         return answer(401);
     };
     let call = B64.decode(call_text).map_err(|e| e.to_string())?;
@@ -539,10 +635,21 @@ fn access(req: &Value) -> R<Value> {
     let request = HomeRequest {
         method,
         path,
-        body_sha256: str_of(req, "bodySha256")?,
+        body_sha256: match &batch {
+            Some((digest, _)) => digest,
+            None => str_of(req, "bodySha256")?,
+        },
         writes,
     };
-    let vc = match verify_home_request(&call, &account_view, &cfg, &mut store, &request) {
+    // A batch reaches no further than single-record reads: the call's conditions must hold for
+    // each path as a single GET of it would carry them, or the whole batch is refused.
+    let verified = match &batch {
+        Some((_, paths)) => {
+            verify_home_batch(&call, &account_view, &cfg, &mut store, &request, paths)
+        }
+        None => verify_home_request(&call, &account_view, &cfg, &mut store, &request),
+    };
+    let vc = match verified {
         Ok(vc) => vc,
         Err(f) => return refuse(f.code()),
     };
@@ -584,11 +691,216 @@ fn access(req: &Value) -> R<Value> {
         return Ok(json!({"allowed": false, "status": 429, "result": "refused:window",
                          "retryAfter": (wait_ms + 999) / 1000, "drop": drop}));
     }
-    Ok(json!({
+    let mut answer = json!({
         "allowed": true, "via": "call", "signer": signer, "drop": drop,
         "reserve": {"key": key_text(&vc.replay_key), "signer": signer, "at": now_ms,
                     "digest": vc.call.digest},
-    }))
+    });
+    if let Some((_, paths)) = batch {
+        // The verified home read also meets the call requirement for members-only history.
+        answer["records"] = json!(paths
+            .into_iter()
+            .map(|path| json!({"path": path, "status": 200}))
+            .collect::<Vec<_>>());
+    }
+    if matches!(class, Class::StreamTicket) {
+        // The ticket carries what the stream is re-checked by on every commit: the principal,
+        // the session it was opened under, the narrowest expiry of the call's chain, and the
+        // namespaces its terms hold `records` entries for (what it may subscribe and send to).
+        let grant = account_view.stream_grant(&vc);
+        let nonce = grant.map(|(_, nonce)| nonce);
+        let standing = standing_of(&v.state, &signer, nonce, &base, now_ms);
+        if standing.is_null() {
+            return refuse("refused:outOfScope".into());
+        }
+        let expires = match (grant.and_then(|(e, _)| e), standing["expiresAt"].as_i64()) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        answer["stream"] = json!({
+            "principalId": signer,
+            "expiresAt": expires,
+            "sessionNonce": nonce,
+            "namespaces": standing["namespaces"],
+        });
+    }
+    Ok(answer)
+}
+
+/// One stream principal's standing at the committed history (`null`: it may no longer stream):
+/// a controller holding `approve` or `control`, or `sign` listing `base`, not suspended; or a
+/// current member whose session number is still `session_nonce`, with its expiry and the
+/// namespaces its terms hold `records` entries for (0.6 sessions §S1, §S9).
+fn standing_of(state: &State, principal: &str, session_nonce: Option<u64>, base: &str, now: i64) -> Value {
+    let Some((kind, id)) = principal.split_once(':') else {
+        return Value::Null;
+    };
+    let claim = match kind {
+        "controller" => Claim::Controller {
+            roles: &[Role::Approve, Role::Control, Role::Sign],
+            suspended_ok: false,
+        },
+        "member" => Claim::Member,
+        _ => return Value::Null,
+    };
+    match state.current_principal(id, claim, now) {
+        Ok(Principal::Controller(c))
+            if c.has(&Role::Approve)
+                || c.has(&Role::Control)
+                || c.audiences().is_some_and(|a| a.iter().any(|audience| audience == base)) =>
+        {
+            json!({"expiresAt": null, "namespaces": []})
+        }
+        Ok(Principal::Member(m)) if session_nonce == Some(m.end_sessions.len() as u64) => {
+            let namespaces: Vec<String> =
+                stream_namespaces(&m.terms).into_iter().map(|(ns, _)| ns).collect();
+            json!({"expiresAt": m.expires_ms, "namespaces": namespaces})
+        }
+        _ => Value::Null,
+    }
+}
+
+/// Recheck streams against the committed branch without replaying their opening calls.
+fn stream_standing(req: &Value) -> R<Value> {
+    let l = load(req)?;
+    let now = i64_of(req, "now")?;
+    let base = str_of(req, "base")?;
+    let subscribers = req["subscribers"].as_array().ok_or("missing subscribers")?;
+    let Some(v) = l.home.as_ref().map(|h| view(h, now)).transpose()?
+        .filter(|v| !v.stopped && v.fork.is_none())
+    else {
+        return Ok(json!({"standing": vec![Value::Null; subscribers.len()]}));
+    };
+    let standing: Vec<Value> = subscribers
+        .iter()
+        .map(|subscriber| {
+            let principal = subscriber["principalId"].as_str().unwrap_or_default();
+            standing_of(&v.state, principal, subscriber["sessionNonce"].as_u64(), base, now)
+        })
+        .collect();
+    Ok(json!({"standing": standing}))
+}
+
+fn str_list(req: &Value, k: &str) -> R<Vec<String>> {
+    req.get(k)
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("missing {k}"))?
+        .iter()
+        .map(|v| v.as_str().map(str::to_string).ok_or_else(|| format!("{k}: not a string")))
+        .collect()
+}
+
+/// A session frame sent on a stream (0.6 sessions §S3, §S9): `frame` is the envelope exactly as
+/// it would be forwarded, `member` the connection's authenticated member, `entitled` its
+/// namespaces from the last standing check. The outer fields to route by, or a refusal code.
+fn session_frame(req: &Value) -> R<Value> {
+    let frame = str_of(req, "frame")?;
+    let entitled = str_list(req, "entitled")?;
+    match check_session_frame(frame.as_bytes(), str_of(req, "account")?, str_of(req, "member")?, &entitled) {
+        Ok(o) => Ok(json!({"allowed": true, "namespace": o.namespace, "cell": o.cell,
+                           "from": o.from, "to": o.to, "retain": o.retain})),
+        Err(r) => Ok(json!({"allowed": false, "code": r.code(),
+                            "error": match r { FrameRefusal::Malformed(why) => why, _ => "" }})),
+    }
+}
+
+/// A subscription to `(namespace, cell)` on a stream: the same entitlement as a frame.
+fn subscription(req: &Value) -> R<Value> {
+    let entitled = str_list(req, "entitled")?;
+    match check_subscription(str_of(req, "namespace")?, str_of(req, "cell")?, &entitled) {
+        Ok(()) => Ok(json!({"allowed": true})),
+        Err(r) => Ok(json!({"allowed": false, "code": r.code()})),
+    }
+}
+
+/// A notice-route change by `principal`, after its call was verified. `key` is the slot's
+/// secret route key (hex, [`home_stream::ROUTE_KEY_BYTES`] bytes, made by the host from its
+/// randomness), `routes` the held routes as `{"id","by"}` (no addresses). `POST` registers or
+/// replaces the principal's route for the body's kind and address, under the keyed ID the module
+/// derives ([`home_stream::route_id`]); `DELETE` removes the route `id`. Ownership and the caps
+/// follow [`home_stream::route_change`].
+fn route_change(req: &Value) -> R<Value> {
+    let key = hex_bytes(str_of(req, "key")?).ok_or("route_change: key is 32 bytes of hex")?;
+    if key.len() != home_stream::ROUTE_KEY_BYTES {
+        return Err("route_change: key is 32 bytes of hex".into());
+    }
+    let principal = str_of(req, "principal")?;
+    let held: Vec<(String, String)> = req
+        .get("routes")
+        .and_then(Value::as_array)
+        .ok_or("missing routes")?
+        .iter()
+        .map(|r| (r["id"].as_str().unwrap_or_default().to_string(), r["by"].as_str().unwrap_or_default().to_string()))
+        .collect();
+    let (id, route, deleting) = match str_of(req, "method")? {
+        "POST" => match parse_route(&bytes_of(req, "body")?) {
+            Ok(r) => (home_stream::route_id(&key, principal, &r.kind, &r.address), Some(r), false),
+            Err(error) => return Ok(json!({"allowed": false, "status": 400, "error": error})),
+        },
+        "DELETE" => (str_of(req, "id")?.to_string(), None, true),
+        _ => return Err("route_change: method is POST or DELETE".into()),
+    };
+    let owner = held.iter().find(|(i, _)| i == &id).map(|(_, by)| by.as_str());
+    let mine = held.iter().filter(|(_, by)| by == principal).count();
+    let verdict = home_stream::route_change(owner, principal, mine, held.len(), deleting);
+    Ok(match verdict {
+        RouteVerdict::Allow { created } => json!({"allowed": true, "created": created, "id": id,
+            "route": route.map(|r| json!({"kind": r.kind, "address": r.address, "reaches": r.reaches}))}),
+        RouteVerdict::NotOwner => json!({"allowed": false, "status": 403, "result": "refused:notGranted"}),
+        RouteVerdict::Absent => json!({"allowed": false, "status": 404}),
+        RouteVerdict::PrincipalFull | RouteVerdict::SlotFull => {
+            json!({"allowed": false, "status": 507, "result": "refused:overQuota"})
+        }
+    })
+}
+
+/// The keyed ID of a held route (`key`, `principal`, `kind`, `address`): how a host re-keys
+/// routes it held under an older ID scheme.
+fn route_id_op(req: &Value) -> R<Value> {
+    let key = hex_bytes(str_of(req, "key")?).filter(|k| k.len() == home_stream::ROUTE_KEY_BYTES)
+        .ok_or("route_id: key is 32 bytes of hex")?;
+    Ok(json!({"id": home_stream::route_id(&key, str_of(req, "principal")?, str_of(req, "kind")?, str_of(req, "address")?)}))
+}
+
+fn hex_bytes(text: &str) -> Option<Vec<u8>> {
+    if text.len() % 2 != 0 {
+        return None;
+    }
+    (0..text.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(text.get(i..i + 2)?, 16).ok())
+        .collect()
+}
+
+/// Which of `principals` (`controller:<ID>` or `member:<ID>`) are still principals of the
+/// account at the committed history: a controller present and final (suspended or not, any
+/// role), a member current. A home that cannot tell (no verified history, stopped, at a fork)
+/// answers true for all, so nothing is dropped on a guess.
+fn principals_current(req: &Value) -> R<Value> {
+    let now = i64_of(req, "now")?;
+    let principals = str_list(req, "principals")?;
+    let l = load(req)?;
+    let Some(v) = l
+        .home
+        .as_ref()
+        .map(|h| view(h, now))
+        .transpose()?
+        .filter(|v| !v.stopped && v.fork.is_none())
+    else {
+        return Ok(json!({"current": vec![true; principals.len()]}));
+    };
+    let current: Vec<bool> = principals
+        .iter()
+        .map(|p| match p.split_once(':') {
+            Some(("controller", id)) => v
+                .state
+                .current_principal(id, Claim::Controller { roles: &[], suspended_ok: true }, now)
+                .is_ok(),
+            Some(("member", id)) => v.state.current_principal(id, Claim::Member, now).is_ok(),
+            _ => false,
+        })
+        .collect();
+    Ok(json!({"current": current}))
 }
 
 fn signer_text(s: &CallSigner) -> String {
@@ -923,6 +1235,7 @@ fn post_authority(req: &Value) -> R<Value> {
     }
     let before = files_before(&l)?;
     let mut sign: Vec<Value> = Vec::new();
+    let mut notify = Vec::new();
     let mut accepted = Vec::new();
     let mut outcome = json!({"outcome": "ok"});
     let mut deferred: Option<Value> = None;
@@ -950,6 +1263,7 @@ fn post_authority(req: &Value) -> R<Value> {
                 // in a.state, with no entry to store. Return it for commit before the 422.
                 l.home = Some(a.state);
                 sign.extend(signs(&a.receipts));
+                notify.extend(a.notices);
                 a.result
             }
             None => {
@@ -1017,6 +1331,7 @@ fn post_authority(req: &Value) -> R<Value> {
     out["state"] = json!(l.dump()?);
     out["store"] = json!(new_files(&before, &after, now_ms)?);
     out["sign"] = json!(sign);
+    out["notify"] = json!(notify);
     out["accepted"] = json!(accepted);
     out["appointed"] = json!(l.home.is_some());
     Ok(out)
@@ -1052,8 +1367,8 @@ fn post_pending(req: &Value) -> R<Value> {
         }
     }
     let before = held(h)?;
-    let (next, results, receipts) =
-        admit_pending_batch(h, &objs, &now).map_err(|e| e.to_string())?;
+    let (next, results, receipts, notices) =
+        admit_pending_batch_notices(h, &objs, &now).map_err(|e| e.to_string())?;
     let after = held(&next)?;
     let refused: Vec<Value> = results
         .iter()
@@ -1076,6 +1391,7 @@ fn post_pending(req: &Value) -> R<Value> {
         "state": l2.dump()?,
         "store": new_files(&before, &after, now_ms)?,
         "sign": signs(&receipts),
+        "notify": notices,
     }))
 }
 
@@ -1707,6 +2023,7 @@ fn record_due(req: &Value) -> R<Value> {
     let before = objects.clone();
     let mut note = Value::Null;
     let mut sign = Vec::new();
+    let mut notify = Vec::new();
     let mut result = "ok".to_string();
     let mut recorded = 0usize;
     // Whether what is due at `now` could be determined: when it could not, the host signs no
@@ -1734,6 +2051,7 @@ fn record_due(req: &Value) -> R<Value> {
                 let a = admit(&h, &bytes, &now);
                 if a.result.is_ok() {
                     h = a.state;
+                    notify.extend(a.notices);
                     recorded += 1;
                 }
             }
@@ -1762,6 +2080,7 @@ fn record_due(req: &Value) -> R<Value> {
                         let a = admit(&h, &bytes, &now);
                         h = a.state;
                         sign.extend(signs(&a.receipts));
+                        notify.extend(a.notices);
                         match a.result {
                             Ok(()) => recorded += 1,
                             Err(r) => {
@@ -1787,6 +2106,7 @@ fn record_due(req: &Value) -> R<Value> {
                     for (_, bytes) in rec.entries {
                         let a = admit(&h, &bytes, &now);
                         h = a.state;
+                        notify.extend(a.notices);
                         match a.result {
                             Ok(()) => recorded += 1,
                             Err(r) => result = r.code(),
@@ -1807,6 +2127,7 @@ fn record_due(req: &Value) -> R<Value> {
         "state": l.dump()?,
         "store": new_files(&before, &after, now_ms)?,
         "sign": sign,
+        "notify": notify,
         "result": result,
         "note": note,
         "settled": settled,
@@ -1885,6 +2206,8 @@ fn waiting(h: &HomeState, objects: &Objects, now_ms: i64) -> Value {
 
 #[cfg(test)]
 mod waiting_tests;
+#[cfg(test)]
+mod stream_tests;
 
 // ---------------------------------------------------------------------------------------------
 // Records, live values, blob chunks.

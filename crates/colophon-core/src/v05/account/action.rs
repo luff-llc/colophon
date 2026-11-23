@@ -21,7 +21,7 @@ use crate::v05::members::Request;
 use crate::v05::pairing::ConfirmedPairing;
 use crate::v05::records::{EpochKeys, HeldRecord, Level};
 use crate::v05::slots::{
-    plan_rotation, PrfRequest, PrfResult, Slot, SlotBuild, SlotPlan, SlotTarget,
+    plan_rotation, PrfInput, PrfRequest, PrfResult, Slot, SlotBuild, SlotPlan, SlotTarget,
 };
 use crate::v05::vault::VaultSeed;
 use crate::v05::write::authority::{
@@ -30,7 +30,7 @@ use crate::v05::write::authority::{
     prepare_vetoed, PendingBatch, TransitionParams, TransitionRule, VetoParams,
 };
 use crate::v05::write::calls::{
-    finish_call, finish_home_call, finish_link, prepare_call, prepare_link, CallSignerSpec, CallSpec, LinkSpec,
+    finish_call, finish_home_batch_call, finish_home_call, finish_link, prepare_call, prepare_link, CallSignerSpec, CallSpec, LinkSpec,
     PreparedCall, PreparedLink,
 };
 use crate::v05::write::records::{
@@ -245,8 +245,10 @@ struct PrfStage {
 }
 /// What to do with the built slots.
 enum Plan {
-    /// A self-slot `keyring` entry: slots appended, signed by `signer`.
-    AddSlot { signer: String },
+    /// A `keyring` entry that appends slots to the current vault.
+    AddSlot {
+        entry_signers: Vec<String>,
+    },
     /// A vault entry from a new seed.
     VaultEntry {
         new_seed: VaultSeed,
@@ -276,7 +278,8 @@ enum Work {
     Operation(Box<PreparedOperation>),
     Link(Box<PreparedLink>),
     Call(Box<PreparedCall>, Box<CallTarget>),
-    HomeCall(Box<PreparedCall>, Box<HomeCall>),
+    /// A call at a home; the record paths when it is `POST /records/batch`.
+    HomeCall(Box<PreparedCall>, Box<HomeCall>, Vec<String>),
 }
 
 /// One request at a home that needs its own call (§14): what the engine's
@@ -312,6 +315,25 @@ impl HomeCall {
             .and_then(crate::v05::calls::home_record_writes)
             .unwrap_or_default()
     }
+}
+
+/// The record paths of a batch body `{"paths":[…]}`: 1–256 unique strings (the home judges
+/// each path by its store layout as well).
+fn batch_body_paths(body: &[u8]) -> Result<Vec<String>> {
+    let body = body.strip_prefix(b"\xef\xbb\xbf").unwrap_or(body);
+    let parsed: Value = serde_json::from_slice(body).map_err(|_| malformed("batch body"))?;
+    let list = parsed
+        .get("paths")
+        .and_then(Value::as_array)
+        .filter(|l| (1..=256).contains(&l.len()))
+        .ok_or_else(|| malformed("batch body: 1–256 paths"))?;
+    let mut seen = BTreeSet::new();
+    list.iter()
+        .map(|p| match p.as_str() {
+            Some(p) if seen.insert(p) => Ok(p.to_string()),
+            _ => Err(malformed("batch body: unique string paths")),
+        })
+        .collect()
 }
 
 /// What a call's verifier is configured with (§12.3): the target service's own audiences,
@@ -795,15 +817,32 @@ impl Account {
         plan: SlotPlan,
         entropy: [u8; 32],
     ) -> Result<PendingAction> {
+        self.begin_add_slot_with_signers(&[signer.to_string()], plan, None, entropy)
+    }
+
+    /// Build a slot for the current vault. The entry signers must meet the keyring add rule
+    /// or be the sole slot holder (§8.4). For a single PRF route, the host may supply the
+    /// salt and challenge from the controller's transition possession ceremony after
+    /// activation (§7.2).
+    pub fn begin_add_slot_with_signers(
+        &self,
+        entry_signers: &[String],
+        plan: SlotPlan,
+        possession: Option<PrfInput>,
+        entropy: [u8; 32],
+    ) -> Result<PendingAction> {
         self.require_writable()?;
         let seed = self.current_seed()?;
         let target = SlotTarget::verified(self.d.auth.state(), seed)?;
-        let build = SlotBuild::begin(&plan, &target, entropy)?;
+        let build = match possession {
+            Some(input) => SlotBuild::begin_with(&plan, &target, &[input], entropy)?,
+            None => SlotBuild::begin(&plan, &target, entropy)?,
+        };
         self.start_prf(
             "slot",
             vec![build],
             Plan::AddSlot {
-                signer: signer.to_string(),
+                entry_signers: entry_signers.to_vec(),
             },
         )
     }
@@ -1011,7 +1050,7 @@ impl Account {
             slots.push(slot);
         }
         let mut out = match plan {
-            Plan::AddSlot { signer } => {
+            Plan::AddSlot { entry_signers } => {
                 let new = self.raw_keyring_edit(|m| {
                     let list = m
                         .get_mut("slots")
@@ -1027,7 +1066,7 @@ impl Account {
                     self.now_ms,
                     Kind::Keyring { keyring: new },
                     self.now_ms,
-                    &[signer],
+                    &entry_signers,
                 )?;
                 self.batch_action("slot", batch)
             }
@@ -1814,7 +1853,7 @@ impl Account {
     }
 
     /// A call for one request at a home (§12.2, §14), signed by this session's own key (a
-    /// member's, or a controller's): audience the home's base, purpose by the method, `args`
+    /// member's, or a controller's): audience the home's base, purpose by the method and path, `args`
     /// bound to exactly this request. `finish` judges it with the home's own rule over what this
     /// account holds ([`crate::v05::calls::check_home_call_as_signer`]) and returns the envelope
     /// as `artifact`. `asOf` is the head of the verified history.
@@ -1822,6 +1861,48 @@ impl Account {
         &self,
         key: &[u8],
         call: &HomeCall,
+        request_id: [u8; 32],
+    ) -> Result<PendingAction> {
+        // A batch is judged path by path, which needs its body: `begin_home_batch_call`.
+        require(
+            !(call.method == "POST" && call.path == "/records/batch"),
+            "a batch read is begun with begin_home_batch_call",
+        )?;
+        self.home_call(key, &[], call, Vec::new(), request_id)
+    }
+
+    /// A call for `POST {audience}/records/batch` with exactly `body` (§14; the proposed 0.6
+    /// batch read), signed by this session's key, or a link's key when `links` are given with
+    /// `key`. `finish` judges it as the home will ([`crate::v05::calls::check_home_batch_as_signer`]):
+    /// the conditions of the member's terms and of every link must hold for each requested path
+    /// as a single `GET` of it would carry them, so a batch the home would refuse for one path
+    /// out of scope is refused here before it is sent. `as_of` is as for [`HomeCall`].
+    pub fn begin_home_batch_call(
+        &self,
+        key: &[u8],
+        links: &[Vec<u8>],
+        audience: &str,
+        body: &[u8],
+        as_of: Option<u64>,
+        request_id: [u8; 32],
+    ) -> Result<PendingAction> {
+        let paths = batch_body_paths(body)?;
+        let call = HomeCall {
+            audience: audience.to_string(),
+            method: "POST".into(),
+            path: "/records/batch".into(),
+            body_sha256: crate::v05::encoding::digest(body),
+            as_of,
+        };
+        self.home_call(key, links, &call, paths, request_id)
+    }
+
+    fn home_call(
+        &self,
+        key: &[u8],
+        links: &[Vec<u8>],
+        call: &HomeCall,
+        paths: Vec<String>,
         request_id: [u8; 32],
     ) -> Result<PendingAction> {
         self.refuse_call_if_stopped()?;
@@ -1866,9 +1947,9 @@ impl Account {
             as_of: (seq, &digest),
             signer,
             key,
-            links: &[],
+            links,
             audience: &call.audience,
-            purpose: crate::v05::calls::home_call_purpose(&call.method),
+            purpose: crate::v05::calls::home_purposes(&call.method, &call.path)[0],
             args: crate::v05::calls::home_call_args(&call.method, &call.path, &call.body_sha256),
             request_id,
             created: &created,
@@ -1877,7 +1958,7 @@ impl Account {
         let steps = vec![prepared.step().clone()];
         Ok(self.pending_for(
             "call",
-            Work::HomeCall(Box::new(prepared), Box::new(call.clone())),
+            Work::HomeCall(Box::new(prepared), Box::new(call.clone()), paths),
             steps,
         ))
     }
@@ -1969,7 +2050,7 @@ impl Account {
                 finished.artifact = Some(finish_call(&c, &sig, &view, &cfg)?);
                 return Ok(finished);
             }
-            Work::HomeCall(c, call) => {
+            Work::HomeCall(c, call, paths) => {
                 require(signatures.len() == 1, "one signature per step")?;
                 let view = self.call_view()?;
                 let sig = signatures
@@ -1992,7 +2073,11 @@ impl Account {
                     body_sha256: &call.body_sha256,
                     writes: &writes,
                 };
-                finished.artifact = Some(finish_home_call(&c, &sig, &view, &cfg, &req)?);
+                finished.artifact = Some(if paths.is_empty() {
+                    finish_home_call(&c, &sig, &view, &cfg, &req)?
+                } else {
+                    finish_home_batch_call(&c, &sig, &view, &cfg, &req, &paths)?
+                });
                 return Ok(finished);
             }
         }

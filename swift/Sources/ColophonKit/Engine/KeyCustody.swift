@@ -9,14 +9,22 @@ import Foundation
 public struct KeyCustody: Sendable {
     /// Providers by key ID (the first 32 hex characters of SHA-256 of the signing point).
     public let providers: [String: any AsyncKeyProvider]
+    private let possessionPRF: TransitionPossessionPRF?
 
-    public init(providers: [String: any AsyncKeyProvider]) { self.providers = providers }
+    public init(providers: [String: any AsyncKeyProvider]) {
+        self.init(providers: providers, possessionPRF: nil)
+    }
+
+    package init(providers: [String: any AsyncKeyProvider], possessionPRF: TransitionPossessionPRF?) {
+        self.providers = providers
+        self.possessionPRF = possessionPRF
+    }
 
     /// Reads each provider's public key to find its ID.
     public init(_ list: [any AsyncKeyProvider]) async throws {
         var byId: [String: any AsyncKeyProvider] = [:]
         for provider in list { byId[try await Self.keyID(of: provider)] = provider }
-        providers = byId
+        self.init(providers: byId)
     }
 
     public static func keyID(of spec: ControllerSpec) throws -> String { try accountKeyId(signing: spec.key.signing) }
@@ -43,7 +51,13 @@ public struct KeyCustody: Sendable {
                 out.append(Signature(signature: try await provider.sign(body: step.body), authenticatorData: nil, clientData: nil))
             case .webauthn:
                 guard let challenge = step.challenge else { throw KeyCustodyError.missingChallenge }
-                guard let result = try await provider.assert(challenge: challenge, prfSalt: nil) else { throw KeyCustodyError.unsupported }
+                let result: KeyAssertion?
+                if let possessionPRF, step.role == .possession, step.signer == possessionPRF.controller {
+                    result = try await possessionPRF.sign(challenge: challenge, with: provider)
+                } else {
+                    result = try await provider.assert(challenge: challenge, prfSalt: nil)
+                }
+                guard let result else { throw KeyCustodyError.unsupported }
                 out.append(result.signatureValue)
             case .unknown:
                 throw KeyCustodyError.unsupported
@@ -57,6 +71,10 @@ public struct KeyCustody: Sendable {
         var out: [HostPrfAnswer] = []
         for request in requests {
             try Task.checkCancellation()
+            if let answer = await possessionPRF?.takeAnswer(for: request) {
+                out.append(answer)
+                continue
+            }
             let provider = try provider(for: request.controller)
             let challenge = Self.base64url(request.challenge)
             guard let result = try await provider.assert(challenge: challenge, prfSalt: request.salt),
@@ -98,6 +116,42 @@ public struct KeyCustody: Sendable {
     static func base64url(_ data: Data) -> String {
         data.base64EncodedString().replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
             .replacingOccurrences(of: "=", with: "")
+    }
+}
+
+/// One appointment's in-memory PRF evidence, consumed by the matching slot request.
+package actor TransitionPossessionPRF {
+    let controller: String
+    private let salt: Data
+    private var cached: (challenge: Data, answer: HostPrfAnswer)?
+
+    package init(controller: String) throws {
+        self.controller = controller
+        salt = try withEntropy(32) { bytes in bytes.withUnsafeBytes { Data($0) } }
+    }
+
+    func sign(challenge: String, with provider: any AsyncKeyProvider) async throws -> KeyAssertion? {
+        let encoded = challenge.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+        guard let bytes = Data(base64Encoded: encoded + "="), bytes.count == 32 else {
+            throw KeyCustodyError.missingChallenge
+        }
+        let result = try await provider.assert(challenge: challenge, prfSalt: salt)
+        if let result, let output = result.prf, output.count == 32 {
+            cached = (bytes, HostPrfAnswer(authenticatorData: result.authenticatorData, clientData: result.clientData,
+                                          signature: result.signature, output: output))
+        }
+        return result
+    }
+
+    package func input() -> (salt: Data, challenge: Data)? {
+        cached.map { (salt, $0.challenge) }
+    }
+
+    func takeAnswer(for request: PrfRequest) -> HostPrfAnswer? {
+        guard let cached, request.controller == controller, request.salt == salt,
+              request.challenge == cached.challenge else { return nil }
+        self.cached = nil
+        return cached.answer
     }
 }
 
