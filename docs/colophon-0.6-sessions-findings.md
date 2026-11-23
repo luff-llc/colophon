@@ -1,10 +1,10 @@
 # Colophon 0.6 sessions: findings from the reference machine
 
-**Date:** 2026-11-22, updated 2026-11-23. **Against:** `spec/colophon-0.6-sessions.md`, revisions 1–4 (revision 4: `f63cbad`). **Code:** `crates/colophon-core/src/v06/session/`.
+**Date:** 2026-11-22, updated 2026-11-23. **Against:** `spec/colophon-0.6-sessions.md`, revisions 1–5 (revision 5: `7c07150`). **Code:** `crates/colophon-core/src/v06/session/`.
 
 The reference machine implements the draft, and also the departures listed here. Each
 departure that changes behaviour has a switch in `Fixes`. `Fixes::default()` (= `ALL`) is the
-reference reading (revision 4 plus the R-fixes below; `Fixes::REV4` is revision 4 as written, `Fixes::REV3` revision 3), and `Fixes::LITERAL` is the revision 1 draft, so every counterexample below
+reference reading (revision 5 plus R1f; `Fixes::REV5`, `REV4` and `REV3` are those drafts as written), and `Fixes::LITERAL` is the revision 1 draft, so every counterexample below
 can be reproduced. Evidence comes from three sources:
 
 - **Explorer:** `tests/v06_session_explore.rs`, an exhaustive BFS to depth 8 with fair
@@ -410,6 +410,74 @@ Proposed wording: "…and a member that becomes holder by that `pass` starts wit
 - **Implementation choices.**
   - Ask liveness uses a "heard since ask" flag rather than comparing timestamps; a beat in the same millisecond as the ask counts.
   - `Pass` is rejected when its snapshot exceeds `maxPayload`.
+
+## R (continued). Revision 5
+
+**Status:** revision 5 (`7c07150`) adopts R1c, R1e, R2e, R4a and R5a as implemented.
+
+It decides R2d, R2f and R1d differently, and the machine now follows those decisions:
+
+- **R2d/R2f:** `ack {yielded}`. The displaced member resends `yielded` to its current holder whenever it hears that holder directly, at most once per askTimeoutMs, until an `ack` arrives.
+- **R1d:** forwarded evidence does not count for the ask-timeout take. A writer displaced by evidence keeps wanting and takes once that holder is lapsed to it.
+- **§S3 evidence without a window:** only the frame's claim is used, and the holder counts as heard. The carrier reports this with `Input::Frame.forwarded {via, windowed}`. The simulator decides `windowed` from its 128-wide `n` window.
+
+`Fixes::ALL` is revision 5 plus R1f, R1g and R1h below. `Fixes::REV5`, `REV4` and `REV3` are regression presets.
+
+**Evidence.** These checks are now strict; none is "counted, not failed":
+
+- **G11:** a displaced member that keeps running and can talk to its component's holder must have had its state reported. Crashes are excluded.
+- **G5:** the bound is askTimeoutMs, or holderTimeoutMs + askTimeoutMs from the last forwarded evidence.
+
+| Test | What it shows |
+| --- | --- |
+| `rev4_counterexamples` | Revision 4 fails each of these, as expected: G4 without R1c, G11 without the `ack`, G5 without R1d. |
+| Vector `want-kept-after-evidence` | `x` yields to evidence, does not take on the ask timeout, and takes 3.0.x once `z` is lapsed. |
+| Vectors `stale-evidence` and `evidence-forward` | A windowless or replayed evidence frame only makes a member accept a claim that was once real. The member keeps its own state, then lapses and takes. |
+
+### R1f. Revision 5 livelocks on the chain (spec bug; fixed beyond revision 5, switch `evidence_refresh`)
+
+**Trace.** `chain_two_holders_rev5_livelocks` runs a↔b↔c with a↮c, both `a` and `c` having taken because they wanted the role, and no application command. G10 fails: 11 claim changes in 11 ticks.
+
+1. `a` yields to `c`'s claim, relayed by `b`. Under R1d it keeps wanting.
+2. `c` is lapsed to `a` after holderTimeoutMs, because `a` never hears `c` directly. `a` takes.
+3. `b` relays `a`'s claim to `c`. `c` yields and keeps wanting.
+4. And so on, forever. Revision 5 says this loop cannot happen; it only cannot happen between members that hear each other.
+
+**Fix.** A want kept after evidence takes only askTimeoutMs after its lapse `hello` (which goes to all). A member that still has fresh evidence of that holder answers such a `hello` (heard: lapsed, naming its own claim) with the evidence; a holder answers it with `state`. The lapse then clears and the claims stop changing: `chain_two_holders_settle` covers 1,023 states. G5's bound, holderTimeoutMs + askTimeoutMs from the last evidence, still holds.
+
+**Proposed spec text (§S5, after "keeps wanting the role").** "It takes only `askTimeoutMs` after its lapse `hello`. A member that accepted a holder frame of that claim within `holderTimeoutMs` answers a `hello` that reports that holder `lapsed` with the frame, as evidence."
+
+### Machine bugs the revision 5 harness caught
+
+- **Lesser-claim ordering.** The machine still ordered a reported rank-1 claim of another holder as rank 0, a leftover from revision 1. On the two-holder start, a holder and a listener answered each other forever with `state` and `hello`. That order now applies only under `Fixes::LITERAL`.
+- **Report before ack.** The holder emitted `ack` before its `Displaced` event. A crash between the two would lose the report, and `crash_prefixes` caught it. The event now comes first.
+
+### R1g. A kept want hands the role back to a returning holder (reading; fixed)
+
+**Trace.** Sim playback seed 18, out of 2,000.
+
+1. `1b` returns after an outage and yields to `2c`'s claim. Evidence relayed by `0a` arrives before `2c`'s direct `state`, so `1b` yields to evidence and keeps wanting under R1d.
+2. `1b` asks `2c` at once.
+3. The playback application passes on every ask, so `1b` holds again. That contradicts §S6: the returning holder should yield.
+
+**Cause.** Revision 5 keeps the want of a writer that yields to evidence "of a holder it cannot reach". At the moment of yielding, the member cannot know whether the holder is reachable.
+
+**Reading applied.**
+
+- A want kept only because the member had taken does not ask. It waits for the lapse.
+- If the member hears the holder directly, the want is dropped. A want that the application had asked for is kept, but it is no longer limited to the lapse rule.
+
+### R1h. Forwarded evidence must not renew evidence (spec gap; fixed)
+
+**Trace.** With the holder cut off, two non-holders that store each other's forwarded frames as evidence keep the dead holder "fresh" for each other forever. The strict G5 completion on the two-holder start never ended (the G5 deadline kept moving).
+
+**Reading applied.** Only a frame heard directly from its holder becomes evidence, and its age is the age of that direct hearing.
+
+**Proposed spec text (§S4 evidence).** "The most recent holder frame it accepted directly from the greater claim's holder."
+
+**Ablation (500 seeds; seeds failing, random/playback).** Revision 5 as written: 0/23, first failure seed 18 (R1g). Revision 4: 4/6. Revision 3: 10/11. Without the `ack`: 1/6. Without R2: 12/12. With every fix: 0/0.
+
+**Results under revision 5.** Explorer 16/16, with G4, G5 (revision 5 bound), G10, G11 (strict) and G12. Sim: 2,000 random and 2,000 playback seeds pass. Vectors: 21 scenarios plus `offset.json`. The vectors include `ack`, `stale-evidence`, `want-kept-after-evidence`, and windowless `evidence-forward`.
 
 ## Where the machine and the spec differed (resolved 2026-11-23)
 
