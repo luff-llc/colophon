@@ -13,10 +13,14 @@
 //                                       token itself is printed once, at the start that makes it
 //   <data>/.container.lock              held by the running container; see acquireContainerLock
 //
+// The image runs it as UID 65532. Started as root instead (a platform whose volumes are root's,
+// such as Railway with RAILWAY_RUN_UID=0), it gives the volume to that user and becomes it before
+// anything else: see dropRoot.
+//
 //   bun container-entry.js              prepare and run the relay
 //   bun container-entry.js identity <key file>   print {"member": "<home ID>"} for a key (used at start)
 import { spawnSync } from 'node:child_process';
-import { closeSync, constants as fsc, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, utimesSync, writeSync, chmodSync, existsSync } from 'node:fs';
+import { closeSync, constants as fsc, fsyncSync, lchownSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, utimesSync, writeSync, chmodSync, existsSync } from 'node:fs';
 import { hostname } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -234,10 +238,15 @@ export function prepare(dataRoot, env) {
  * container that is gone, so it is removed before the relay starts; the relay then takes its own
  * lock as always. If the lock is taken from under a running holder (it was frozen longer than
  * `staleMs`), the holder exits at its next beat instead of writing beside the new one.
+ *
+ * A lock that names this container's own host name and process ID is an earlier run of this same
+ * container (restarted after a hard stop): no other container has its host name. A live holder
+ * beats every `beatMs`, so such a lock is stale after two missed beats rather than `staleMs`.
  */
-export function acquireContainerLock(dataRoot, { staleMs = 30_000, beatMs = 5_000, now = Date.now, onLost } = {}) {
+export function acquireContainerLock(dataRoot, { staleMs = 30_000, beatMs = 5_000, now = Date.now, onLost, host = hostname(), pid = process.pid } = {}) {
   const file = path.join(dataRoot, '.container.lock');
-  const owner = JSON.stringify({ host: hostname(), pid: process.pid, at: new Date(now()).toISOString() }) + '\n';
+  const owner = JSON.stringify({ host, pid, at: new Date(now()).toISOString() }) + '\n';
+  const ownStaleMs = Math.min(staleMs, 2 * beatMs + 1_000);
   const take = () => {
     const fd = openSync(file, fsc.O_WRONLY | fsc.O_CREAT | fsc.O_EXCL | fsc.O_NOFOLLOW, 0o600);
     try { writeSync(fd, owner); fsyncSync(fd); } finally { closeSync(fd); }
@@ -249,10 +258,14 @@ export function acquireContainerLock(dataRoot, { staleMs = 30_000, beatMs = 5_00
     let st;
     try { st = statSync(file); } catch (e) { if (e.code === 'ENOENT') continue; throw e; }
     const age = now() - st.mtimeMs;
-    if (age < staleMs) {
-      let holder = '';
-      try { holder = JSON.parse(readFileSync(file, 'utf8')).host ?? ''; } catch { /* torn */ }
-      const err = new Error(`another container holds this volume (${file}, host ${holder || 'unknown'}, heartbeat ${Math.round(age / 1000)}s ago); a relay never shares its data directory. Stop the other container, or wait ${Math.ceil((staleMs - age) / 1000)}s if it is gone.`);
+    let held = {};
+    try { held = JSON.parse(readFileSync(file, 'utf8')) ?? {}; } catch { /* torn */ }
+    const own = held.host === host && held.pid === pid;
+    const limit = own ? ownStaleMs : staleMs;
+    if (age < limit) {
+      const err = new Error(own
+        ? `this container's earlier run left ${file} (heartbeat ${Math.round(age / 1000)}s ago); starting once it is ${Math.ceil(limit / 1000)}s old, in ${Math.ceil((limit - age) / 1000)}s.`
+        : `another container holds this volume (${file}, host ${held.host || 'unknown'}, heartbeat ${Math.round(age / 1000)}s ago); a relay never shares its data directory. Stop the other container, or wait ${Math.ceil((limit - age) / 1000)}s if it is gone.`);
       err.code = 'ELOCKED';
       throw err;
     }
@@ -298,6 +311,37 @@ export function clearDeadRelayLock(dataDir) {
   return removed;
 }
 
+/** The user the image runs the home as (distroless "nonroot"). */
+export const RUN_UID = 65532;
+
+/** Gives `root` and everything under it to `uid:gid`, following no symbolic link. Returns how many entries changed owner. */
+export function giveTree(root, uid, gid) {
+  let changed = 0;
+  const visit = (p) => {
+    const st = lstatSync(p);
+    if (st.uid !== uid || st.gid !== gid) { lchownSync(p, uid, gid); changed++; }
+    if (st.isDirectory()) for (const name of readdirSync(p)) visit(path.join(p, name));
+  };
+  visit(root);
+  return changed;
+}
+
+/**
+ * Started as root, the home gives its volume to the unprivileged user and becomes that user, for
+ * good (groups, group, then user), before it reads a setting or opens a file of its own. Some
+ * platforms mount a volume owned by root and can only start the container as root to use it.
+ * Started as any other user it does nothing.
+ */
+export function dropRoot(dataRoot, { uid = RUN_UID, gid = RUN_UID } = {}) {
+  if (process.getuid?.() !== 0) return false;
+  mkdirSync(dataRoot, { recursive: true, mode: 0o700 });
+  const changed = giveTree(dataRoot, uid, gid);
+  process.setgroups([gid]); process.setgid(gid); process.setuid(uid);
+  if (process.getuid() !== uid || process.geteuid() !== uid || process.getgid() !== gid) throw new Error('could not leave root');
+  console.error(`colophon-home: started as root; now UID ${uid}${changed ? `, after giving it ${changed} entries under ${dataRoot}` : ''}`);
+  return true;
+}
+
 async function main() {
   process.umask(0o077);
   // As PID 1 a signal with no handler is ignored. Until server.js installs its own (after the
@@ -308,6 +352,7 @@ async function main() {
   const dataRoot = path.resolve(process.env.COLOPHON_DATA || '/data');
   let lock; let prepared;
   try {
+    dropRoot(dataRoot);
     privateDir(dataRoot);
     lock = acquireContainerLock(dataRoot);
     process.on('exit', () => lock.release());

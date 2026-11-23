@@ -149,9 +149,10 @@ and refuse to start, every time. The entry point therefore keeps a lock of its o
   container holds it.
 - After a clean stop (SIGTERM, as `docker stop` sends) the lock is released, and the next start
   is immediate. `docker stop` took about 0.4 s in testing.
-- After an unclean stop, a start is refused until the lock's last update is 30 seconds old. Then
-  the lock is taken over, and the dead container's relay lock is removed. With `restart:
-  unless-stopped`, Docker keeps retrying, so the home comes back within about 30 seconds.
+- After an unclean stop, a start is refused until the lock is stale. Then the lock is taken
+  over, and the dead container's relay lock is removed. The same container restarted (same host
+  name) waits for two missed updates, 11 seconds; a different container waits 30 seconds. With
+  `restart: unless-stopped`, Docker keeps retrying, so the home comes back on its own.
 - If a running container finds its lock taken (for example, it was paused for more than 30
   seconds and another container started meanwhile), it exits at once.
 
@@ -174,10 +175,22 @@ the Docker network's subnet (`docker network inspect <net>`). A list such as `X-
 a, b` is not an address and counts against one shared bucket. The header is used for limits
 only, never for access.
 
-On a platform such as Railway, set `COLOPHON_PUBLIC_URL` to the service's public domain. The
-platform sets `PORT`. The proxy's addresses and headers, and whether the platform's volume is
-writable by a non-root user, are the platform's to document. None of this has been tried on
-Railway.
+## Railway and similar platforms
+
+Set `COLOPHON_PUBLIC_URL` to the service's public domain; the platform sets `PORT`. Tried on
+Railway in November 2026:
+
+- Attach a volume mounted at `/data`. The Dockerfile has no `VOLUME` instruction because Railway
+  refuses one.
+- Railway mounts volumes owned by root, so set `RAILWAY_RUN_UID=0`. The home then starts as
+  root, gives `/data` to UID 65532, and becomes that user before it does anything else; the log
+  says `started as root; now UID 65532`. Any platform with root-owned volumes works the same way
+  when the container is started as root (`docker run --user 0`).
+- Set `RAILWAY_DOCKERFILE_PATH=relay/Dockerfile` when deploying from the repository.
+- For per-client rate limits, set `COLOPHON_CLIENT_IP_HEADER=X-Real-IP` and
+  `COLOPHON_TRUSTED_PROXIES=100.64.0.0/10` (the range Railway's edge connects from).
+- A redeploy stops the old container before the new one starts, so the home is briefly
+  unavailable; clients retry.
 
 ## What the operator can and cannot see
 

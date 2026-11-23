@@ -5,13 +5,13 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync, statSync, utimesSync, writeFileSync, mkdirSync } from 'node:fs';
+import { existsSync, readFileSync, statSync, symlinkSync, utimesSync, writeFileSync, mkdirSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { after, before, describe, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { SettingError, acquireContainerLock, clearDeadRelayLock, prepare, readSettings, relayConfig } from '../container-entry.js';
+import { SettingError, acquireContainerLock, clearDeadRelayLock, dropRoot, giveTree, prepare, readSettings, relayConfig } from '../container-entry.js';
 import { clientAddressConfig, provisionConfig } from '../provision.js';
 import { corsOrigins } from '../relay.js';
 
@@ -160,7 +160,8 @@ describe('the container lock', () => {
   test('a second holder is refused while the heartbeat is fresh; a stale lock is taken over', () => {
     const a = acquireContainerLock(root, { staleMs: 30_000, beatMs: 60_000 });
     assert.equal(mode(a.file), 0o600);
-    assert.throws(() => acquireContainerLock(root), (e) => e.code === 'ELOCKED' && /another container holds this volume/.test(e.message));
+    assert.throws(() => acquireContainerLock(root, { host: 'another-box' }), (e) => e.code === 'ELOCKED' && /another container holds this volume/.test(e.message));
+    assert.throws(() => acquireContainerLock(root), (e) => e.code === 'ELOCKED' && /earlier run/.test(e.message));
     // As after a SIGKILL: the lock stays, its heartbeat stops.
     const old = new Date(Date.now() - 60_000);
     utimesSync(a.file, old, old);
@@ -184,6 +185,31 @@ describe('the container lock', () => {
     a.release();
     assert.ok(existsSync(b.file));
     b.release();
+  });
+  test('its own earlier run\'s lock is stale after two missed beats; another container\'s only after staleMs', () => {
+    const opts = { staleMs: 30_000, beatMs: 5_000 };
+    const a = acquireContainerLock(root, { ...opts, host: 'box-a', pid: 1, onLost: () => {} });
+    const age = (ms) => { const t = new Date(Date.now() - ms); utimesSync(a.file, t, t); };
+    // One beat late: the holder may be alive, whoever asks.
+    age(6_000);
+    assert.throws(() => acquireContainerLock(root, { ...opts, host: 'box-a', pid: 1 }), (e) => e.code === 'ELOCKED' && /earlier run/.test(e.message));
+    // Two beats missed: another container still waits, as does another process in this one.
+    age(12_000);
+    assert.throws(() => acquireContainerLock(root, { ...opts, host: 'box-b', pid: 1 }), (e) => e.code === 'ELOCKED' && /another container/.test(e.message));
+    assert.throws(() => acquireContainerLock(root, { ...opts, host: 'box-a', pid: 7 }), (e) => e.code === 'ELOCKED');
+    const b = acquireContainerLock(root, { ...opts, host: 'box-a', pid: 1 });
+    a.release();
+    assert.ok(existsSync(b.file));
+    b.release();
+  });
+  test('started as another user than root, nothing is given away; a tree is given without following links', () => {
+    assert.equal(dropRoot(root), process.getuid() === 0 ? true : false);
+    const tree = path.join(root, 'tree');
+    mkdirSync(path.join(tree, 'in'), { recursive: true });
+    writeFileSync(path.join(tree, 'in', 'file'), 'x');
+    symlinkSync('/', path.join(tree, 'link'));
+    // To its present owner: every entry is visited, none changes, and the link is not followed.
+    assert.equal(giveTree(tree, process.getuid(), statSync(tree).gid), 0);
   });
   test('a dead container\'s relay lock is removed', () => {
     const dir = path.join(root, 'records');
