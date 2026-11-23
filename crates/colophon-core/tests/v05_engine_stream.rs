@@ -981,15 +981,14 @@ fn the_engine_lowers_the_safety_poll_to_the_accounts_recovery_rule() {
 // Second review: the circuit breaker, clock rollback and extreme times, request redaction.
 
 /// Drive `s` from `t` to `end` against a home that answers every ticket and says `hello`; a
-/// connection is held for `stable` (with pongs) when `keep(mint index)` says so, and closed at
-/// once otherwise. Returns the mint times and whether the stream was ever suspended.
+/// connection is held (with pongs) for as long as `keep(mint index)` says, and closed at once
+/// when it says `None`. Returns the mint times and whether the stream was ever suspended.
 fn hostile_run(
     s: &mut HomeStream,
     mut t: i64,
     end: i64,
-    keep: &dyn Fn(usize) -> bool,
+    keep: &dyn Fn(usize) -> Option<i64>,
 ) -> (Vec<i64>, bool) {
-    let stable = s.config().stable_ms;
     let mut mints = Vec::new();
     let mut suspended = false;
     while t < end {
@@ -1007,9 +1006,9 @@ fn hostile_run(
                 };
                 s.on_open(t);
                 s.on_frame(&hello(1, "c"), t);
-                if keep(k) {
+                if let Some(hold) = keep(k) {
                     let mut n = 2;
-                    let until = t + stable + 1_000;
+                    let until = t + hold;
                     while t < until {
                         t += 5_000;
                         while let StreamStep::Send { .. } | StreamStep::Wake = s.next(t) {}
@@ -1035,7 +1034,7 @@ fn a_day_of_hello_then_close_mints_a_bounded_total_then_suspends() {
     let bound = cfg.suspend_after as i64 * (DAY / cfg.suspend_ms + 1);
     let mut s = HomeStream::new("h", BASE, cfg, None);
     s.on_history(5);
-    let (mints, suspended) = hostile_run(&mut s, 0, DAY, &|_| false);
+    let (mints, suspended) = hostile_run(&mut s, 0, DAY, &|_| None);
     println!("24 h hello/close loop: {} mints", mints.len());
     assert!(suspended);
     assert!(s.polling());
@@ -1048,7 +1047,7 @@ fn a_day_of_hello_then_close_mints_a_bounded_total_then_suspends() {
 fn a_suspended_stream_recovers_by_history_retry_now_or_cool_off() {
     let mut s = HomeStream::new("h", BASE, StreamConfig::default(), None);
     s.on_history(5);
-    let (mints, _) = hostile_run(&mut s, 0, 3 * 3_600_000, &|_| false);
+    let (mints, _) = hostile_run(&mut s, 0, 3 * 3_600_000, &|_| None);
     assert_eq!(mints.len(), 16);
     let StreamStatus::Suspended(until) = s.status() else {
         panic!("{:?}", s.status())
@@ -1077,20 +1076,91 @@ fn a_suspended_stream_recovers_by_history_retry_now_or_cool_off() {
     assert_eq!(c.next(until), StreamStep::NeedTicketCall);
 }
 
+/// The largest number of mints within any `window` of `mints`.
+fn densest(mints: &[i64], window: i64) -> usize {
+    (0..mints.len())
+        .map(|k| {
+            mints[k..]
+                .iter()
+                .take_while(|x| **x - mints[k] < window)
+                .count()
+        })
+        .max()
+        .unwrap_or(0)
+}
+
 #[test]
-fn a_flaky_network_that_sometimes_holds_a_connection_never_suspends() {
+fn a_home_that_holds_one_connection_in_four_cannot_sign_past_the_daily_budget() {
+    for (label, hold) in [("60 s", 61_000), ("20 min", 20 * 60_000)] {
+        let cfg = StreamConfig::default();
+        let (budget, window, day) = (
+            cfg.mint_budget as usize,
+            cfg.mint_window_ms,
+            cfg.max_mints_per_day as usize,
+        );
+        let mut s = HomeStream::new("h", BASE, cfg, None);
+        s.on_history(5);
+        let (mints, suspended) = hostile_run(&mut s, 0, 7 * DAY, &|k| (k % 4 == 3).then_some(hold));
+        let first_day = mints.iter().filter(|m| **m < DAY).count();
+        println!(
+            "hold {label} every 4th: {first_day} mints on day 1, {} in 7 days",
+            mints.len()
+        );
+        assert!(suspended);
+        assert!(first_day <= day, "{first_day}");
+        assert!(densest(&mints, DAY) <= day);
+        assert!(densest(&mints, window) <= budget);
+        assert!(mints.len() <= 7 * day, "{}", mints.len());
+    }
+}
+
+#[test]
+fn a_flaky_network_under_the_budget_never_suspends() {
     let cfg = StreamConfig::default();
-    let (budget, window) = (cfg.mint_budget as usize, cfg.mint_window_ms);
+    let day = cfg.max_mints_per_day as usize;
     let mut s = HomeStream::new("h", BASE, cfg, None);
     s.on_history(5);
-    // Every fourth connection stays up past `stable_ms`.
-    let (mints, suspended) = hostile_run(&mut s, 0, DAY, &|k| k % 4 == 3);
-    println!("24 h flaky network: {} mints", mints.len());
+    // Two connections in three hold for half an hour; the third fails at once.
+    let (mints, suspended) =
+        hostile_run(&mut s, 0, 3 * DAY, &|k| (k % 3 != 2).then_some(30 * 60_000));
+    println!("flaky network: {} mints in 3 days", mints.len());
     assert!(!suspended);
-    assert!(mints.len() > 64, "it keeps reconnecting: {}", mints.len());
-    for (k, m) in mints.iter().enumerate() {
-        assert!(mints[k..].iter().take_while(|x| **x - m < window).count() <= budget);
+    assert!(densest(&mints, DAY) <= day);
+    assert!(mints.len() > 100, "it kept reconnecting: {}", mints.len());
+}
+
+#[test]
+fn retry_now_allows_a_small_allowance_past_the_daily_budget_and_no_more() {
+    // No breaker and no short window: only the daily budget binds.
+    let cfg = StreamConfig {
+        suspend_after: 10_000,
+        mint_budget: 10_000,
+        ..StreamConfig::default()
+    };
+    let (day, extra) = (cfg.max_mints_per_day as usize, cfg.retry_allowance as usize);
+    let mut s = HomeStream::new("h", BASE, cfg, None);
+    s.on_history(5);
+    let (mints, _) = hostile_run(&mut s, 0, 6 * 3_600_000, &|_| None);
+    assert_eq!(mints.len(), day);
+    assert!(matches!(s.status(), StreamStatus::Suspended(_)));
+    // A host calling `retry_now` from a timer gets the allowance once per day, not per call.
+    let mut t = 6 * 3_600_000;
+    let mut more = 0;
+    for _ in 0..50 {
+        s.retry_now();
+        let (m, _) = hostile_run(&mut s, t, t + 60_000, &|_| None);
+        more += m.len();
+        t += 600_000;
     }
+    assert_eq!(more, extra, "the allowance, once");
+    let StreamStatus::Suspended(until) = s.status() else {
+        panic!("{:?}", s.status())
+    };
+    // 104 signed: under the budget again once the 9 oldest are a day old.
+    assert_eq!(until, mints[extra] + DAY);
+    // A changed history starts a new day.
+    s.on_history(6);
+    assert_eq!(s.next(t), StreamStep::NeedTicketCall);
 }
 
 #[test]
@@ -1130,13 +1200,27 @@ fn a_clock_rollback_never_delays_the_safety_poll_idle_check_backoff_or_window() 
     let window = cfg.mint_window_ms;
     let mut s = HomeStream::new("h", BASE, cfg, None);
     s.on_history(1);
-    let (_, _) = hostile_run(&mut s, t0, t0 + 120_000, &|_| false);
+    let (_, _) = hostile_run(&mut s, t0, t0 + 120_000, &|_| None);
     if let StreamStatus::Throttled(_) = s.status() {
         let StreamStep::Sleep { until: Some(u) } = s.next(back) else {
             panic!()
         };
         assert!(u <= back + window, "{u} vs {}", back + window);
     }
+    // A spent daily budget clears within a day of the rollback point.
+    let cfg = StreamConfig {
+        suspend_after: 10_000,
+        mint_budget: 10_000,
+        ..StreamConfig::default()
+    };
+    let mut s = HomeStream::new("h", BASE, cfg, None);
+    s.on_history(1);
+    let (m, _) = hostile_run(&mut s, t0, t0 + 3 * 3_600_000, &|_| None);
+    assert_eq!(m.len(), 96);
+    let StreamStep::Sleep { until: Some(u) } = s.next(back) else {
+        panic!()
+    };
+    assert!(u <= back + DAY, "{u} vs {}", back + DAY);
     // A ticket held across a rollback is not presented: its age is unknown.
     let mut s = HomeStream::new("h", BASE, StreamConfig::default(), None);
     assert_eq!(s.next(t0), StreamStep::NeedTicketCall);

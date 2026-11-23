@@ -36,6 +36,8 @@ pub const TICKET_USE_MS: i64 = 20_000;
 pub const MAX_MESSAGE: usize = 64 * 1024;
 /// The largest session envelope a client sends (the home refuses larger with `tooLarge`).
 pub const MAX_SESSION_FRAME: usize = 16_384;
+/// The rolling window of [`StreamConfig::max_mints_per_day`].
+pub const DAY_MS: i64 = 86_400_000;
 /// Close code this client sends for a frame-number gap or another protocol violation.
 pub const CLOSE_PROTOCOL: u16 = 1002;
 /// Close code this client sends when the connection went silent past `idleMs`.
@@ -76,6 +78,14 @@ pub struct StreamConfig {
     pub suspend_after: u32,
     /// How long a suspension lasts at most. Default 6 hours.
     pub suspend_ms: i64,
+    /// The most tickets signed in any rolling 24 hours, whatever the connections did: past it
+    /// the stream is [`StreamStatus::Suspended`] until the oldest of them is a day old, the
+    /// history changes, or [`HomeStream::retry_now`] grants `retry_allowance` more. Default 96.
+    pub max_mints_per_day: u32,
+    /// The extra tickets [`HomeStream::retry_now`] allows past `max_mints_per_day`. They count in
+    /// the same day, so no number of calls lets more than `max_mints_per_day +
+    /// retry_allowance` through in 24 hours. Default 8.
+    pub retry_allowance: u32,
 }
 impl Default for StreamConfig {
     fn default() -> Self {
@@ -92,6 +102,8 @@ impl Default for StreamConfig {
             safety_poll_ms: 60_000,
             suspend_after: 16,
             suspend_ms: 6 * 3_600_000,
+            max_mints_per_day: 96,
+            retry_allowance: 8,
         }
     }
 }
@@ -328,6 +340,10 @@ pub struct HomeStream {
     unstable: u32,
     /// The last `now` the host gave: a smaller one is a clock rollback.
     clock: Option<i64>,
+    /// When the tickets of the last 24 hours were signed.
+    day: std::collections::VecDeque<i64>,
+    /// Tickets past the daily budget that `retry_now` still allows.
+    extra: u32,
 }
 
 fn q(v: &str) -> String {
@@ -398,6 +414,8 @@ impl HomeStream {
             last_wake: 0,
             unstable: 0,
             clock: None,
+            day: std::collections::VecDeque::new(),
+            extra: 0,
         }
     }
 
@@ -422,12 +440,14 @@ impl HomeStream {
             if let Some(t) = self.wake_at.as_mut() {
                 clamp(t);
             }
-            for t in self.mints.iter_mut() {
+            for t in self.mints.iter_mut().chain(self.day.iter_mut()) {
                 clamp(t);
             }
             match &mut self.conn {
                 Conn::Backoff(t) | Conn::Throttled(t) => clamp(t),
-                Conn::Suspended(t) => *t = (*t).min(now.saturating_add(self.config.suspend_ms)),
+                Conn::Suspended(t) => {
+                    *t = (*t).min(now.saturating_add(self.config.suspend_ms.max(DAY_MS)))
+                }
                 // A ticket's age can no longer be told: it is not presented.
                 Conn::Ticket(_, at) => *at = i64::MIN,
                 _ => {}
@@ -437,11 +457,32 @@ impl HomeStream {
         now
     }
 
-    /// A connection stayed live long enough: the backoff and the circuit breaker start again.
-    fn stable(&mut self) {
+    /// Credit the open connection's uptime: each whole `stable_ms` of it resets the backoff and
+    /// takes one off the breaker's count (never below zero). A connection the home holds for one
+    /// `stable_ms` and then drops earns one credit, not a fresh breaker.
+    fn uptime(&mut self, now: i64) {
+        let step = self.config.stable_ms.max(1);
+        let Some(t) = self.live_since else { return };
+        let whole = now.saturating_sub(t) / step;
+        if whole <= 0 {
+            return;
+        }
         self.attempts = 0;
-        self.unstable = 0;
-        self.live_since = None;
+        self.unstable = self
+            .unstable
+            .saturating_sub(u32::try_from(whole).unwrap_or(u32::MAX));
+        self.live_since = Some(t.saturating_add(whole.saturating_mul(step)));
+    }
+
+    /// A ticket was signed (or signing was attempted) at `now`.
+    fn record_mint(&mut self, now: i64) {
+        self.mints.push_back(now);
+        self.day.push_back(now);
+        self.unstable = self.unstable.saturating_add(1);
+        let cap = usize::try_from(self.config.max_mints_per_day.max(1)).unwrap_or(usize::MAX);
+        if self.day.len() > cap {
+            self.extra = self.extra.saturating_sub(1);
+        }
     }
 
     /// The configuration in force (after [`Engine::stream_client`] applied the account's floor).
@@ -492,12 +533,7 @@ impl HomeStream {
         }
         if self.conn == (Conn::Open { hello: true }) {
             // A connection that stayed up long enough has earned a fresh backoff.
-            if self
-                .live_since
-                .is_some_and(|t| now.saturating_sub(t) >= self.config.stable_ms)
-            {
-                self.stable();
-            }
+            self.uptime(now);
             // The safety poll: never longer than `safety_poll_ms` without a pass, whatever the
             // home sends (pongs and unknown frames keep a socket alive, not the sync).
             if now.saturating_sub(self.last_wake) >= self.config.safety_poll_ms {
@@ -517,7 +553,6 @@ impl HomeStream {
             },
             Conn::Suspended(t) if now >= t => {
                 self.unstable = 0;
-                self.mints.clear();
                 self.ticket_step(now, wake)
             }
             Conn::Suspended(t) => StreamStep::Sleep {
@@ -596,8 +631,7 @@ impl HomeStream {
         )?;
         require(!call.is_empty() && call.len() <= 16_384, "a call is small")?;
         self.conn = Conn::Minting;
-        self.mints.push_back(now);
-        self.unstable = self.unstable.saturating_add(1);
+        self.record_mint(now);
         let ticket = self.next_ticket;
         self.next_ticket += 1;
         Ok(Request {
@@ -622,8 +656,7 @@ impl HomeStream {
             return Vec::new();
         }
         // A signature may have been asked for: it counts like a mint.
-        self.mints.push_back(now);
-        self.unstable = self.unstable.saturating_add(1);
+        self.record_mint(now);
         self.down(now, None)
     }
 
@@ -862,13 +895,8 @@ impl HomeStream {
             _ => return Vec::new(),
         };
         let bye = self.bye.take();
-        if self
-            .live_since
-            .take()
-            .is_some_and(|t| now.saturating_sub(t) >= self.config.stable_ms)
-        {
-            self.stable();
-        }
+        self.uptime(now);
+        self.live_since = None;
         if let Some(c) = ours {
             return match c {
                 Closing::Unsupported => self.block(Blocked::Unsupported),
@@ -901,6 +929,8 @@ impl HomeStream {
         // A new history is a new standing: the ticket budget starts again.
         if self.history.is_some_and(|h| h != seq) {
             self.mints.clear();
+            self.day.clear();
+            self.extra = 0;
             self.unstable = 0;
             if matches!(self.conn, Conn::Throttled(_) | Conn::Suspended(_)) {
                 self.conn = Conn::NeedTicket;
@@ -921,14 +951,14 @@ impl HomeStream {
 
     /// Try again now whatever the stream's state (for example on foreground entry after a long
     /// time, or when the network changed): a blocked or backing-off stream mints a new ticket.
-    /// An open stream is left alone, and the ticket budget still holds. A suspended stream starts
-    /// again with a fresh budget. Call it on an explicit user action or on foreground entry, never
-    /// from a timer: it is what lets a suspension end before `suspend_ms`.
+    /// An open stream is left alone, and the 10-minute window still holds. It clears the
+    /// breaker's count and allows `retry_allowance` tickets past the daily budget (counted in the
+    /// same day, so a host that calls this from a timer by mistake still signs at most
+    /// `max_mints_per_day + retry_allowance` a day). Call it on an explicit user action or on
+    /// foreground entry, never from a timer.
     pub fn retry_now(&mut self) {
-        if matches!(self.conn, Conn::Suspended(_)) {
-            self.unstable = 0;
-            self.mints.clear();
-        }
+        self.unstable = 0;
+        self.extra = self.config.retry_allowance;
         if matches!(
             self.conn,
             Conn::Backoff(_) | Conn::Blocked(..) | Conn::Suspended(_)
@@ -990,6 +1020,28 @@ impl HomeStream {
     /// Ask for a ticket call, unless the ticket budget of the window is spent: then stay on
     /// polling until the oldest mint leaves the window.
     fn ticket_step(&mut self, now: i64, wake: Option<i64>) -> StreamStep {
+        // The daily budget, whatever the connections did.
+        while self
+            .day
+            .front()
+            .is_some_and(|t| now.saturating_sub(*t) >= DAY_MS)
+        {
+            self.day.pop_front();
+        }
+        let cap = usize::try_from(self.config.max_mints_per_day.max(1)).unwrap_or(usize::MAX);
+        let ceiling = cap.saturating_add(usize::try_from(self.config.retry_allowance).unwrap_or(0));
+        if self.day.len() >= ceiling || (self.day.len() >= cap && self.extra == 0) {
+            // Until enough of the day's mints are a day old to be under the budget again.
+            let until = self
+                .day
+                .get(self.day.len().saturating_sub(cap))
+                .map_or(now, |t| t.saturating_add(DAY_MS))
+                .max(now);
+            self.conn = Conn::Suspended(until);
+            return StreamStep::Sleep {
+                until: Some(wake.map_or(until, |w| w.min(until))),
+            };
+        }
         if self.unstable >= self.config.suspend_after.max(1) {
             let until = now.saturating_add(self.config.suspend_ms.max(0));
             self.conn = Conn::Suspended(until);
