@@ -198,7 +198,12 @@ state: a key is remembered, and `n` recorded, only when steps 1–7 have all pas
    first-opened window is closed, and the member is marked. Frames of a key without a window
    are dropped (with a rate-limited probe `hello`), and so are frames below the opening `n`.
    A `hello` from a key without an open window is answered under the same limit as probes:
-   once per `askTimeoutMs` per member and four a second in all. Afterwards the codec drops
+   once per `askTimeoutMs` per member and four a second in all. An answer the limit
+   suppresses is deferred: the member keeps, per sender, the `fresh` values of up to 8
+   suppressed `hello`s and sends one `hello` echoing them all when that sender's budget
+   reopens, so replayed old hellos delay a genuine new key by at most `askTimeoutMs` plus a
+   tick. (A burst of more than 8 replays within one `askTimeoutMs` can push the genuine
+   value out; its owner's next frame then recovers through the probe.) Afterwards the codec drops
    every cached key the machine does not know. The codec never evicts a key on its own, so
    its cache is always exactly the machine's open and candidate keys (the endpoint checks this
    after every frame in debug builds).
@@ -250,7 +255,23 @@ be stored before any later effect is carried out. `Unsent` means a frame could n
 (no delegation yet, delegation window passed, key retired, no epoch, oversize, this member
 not entitled, or a writer frame while this member may only read): to the protocol it is loss.
 
-## 6. What is wiped, and what is not
+## 6. Obligations on bindings
+
+- Use `Endpoint`, or call `Receiver::retain` after every raw `Receiver::open`: the standalone
+  receiver does not bound itself.
+- Never clone sender state (the session key and its counter `n`).
+- Serialize access to an endpoint: one call at a time.
+- Draw new randomness for the session key and the `fresh` seed on every process start.
+- Apply a verified account head (`set_account`) before delivering any frame received after it.
+- Honour `next_deadline`: call `tick` at or soon after it.
+- Preserve the order of effects; store `Persist` before carrying out any later effect.
+- Renew or replace delegated keys before they expire, and make a new key when the member's
+  session number changes.
+- Candidate throttling may delay or lose the first application frame of a new or reopened
+  key; continued traffic recovers.
+- Do not log application bodies or events that contain plaintext.
+
+## 7. What is wiped, and what is not
 
 Wiped by the core:
 
@@ -267,7 +288,7 @@ and in `Event`s; the `Debug` output of all of these types contains it. A host th
 application data out of logs does not log these values. The core never returns epoch keys,
 frame keys or the session key's scalar.
 
-## 7. What a carrier sees
+## 8. What a carrier sees
 
 A carrier, including a home, sees every outer field in the clear: `account`, `namespace`,
 `cell`, `from`, `to`, `key`, `n`, `epoch`, `retain`, frame sizes and timing, and the
@@ -281,7 +302,7 @@ delegation carries its own member signature, a replayed `(key, n)` is dropped, a
 key cannot be reopened without its owner answering a new challenge. This is the list §S9
 gives since revision 15.
 
-## 8. Decisions
+## 9. Decisions
 
 What the first implementation found open in revision 14, and what revisions 15–17 decided.
 
@@ -297,7 +318,7 @@ What the first implementation found open in revision 14, and what revisions 15�
 | 8 | Size headroom and `refuse.reason`. | `maxPayload` at most 8,192, checked with the largest frame at construction; `reason` at most 64 bytes of `a–z 0–9 -`. |
 | 9 | Sessions longer than a day. | A member may sign a new delegation for the same key; receivers keep its window. |
 | 10 | "Oldest" key, and eviction re-enabling replay. | Revision 17: at most 4 open windows per member, closing the first opened, and at most 4 candidates; nothing is kept for a closed key; an echo opens a window only of a `fresh` issued after the member's last close (revision 15's replay floors could lock a member out and were removed). |
-| 11 | What a carrier learns. | §S9 lists it (§7). |
+| 11 | What a carrier learns. | §S9 lists it (§8). |
 | 12 | A pass could be lost for good. | The passer resends the same `pass` until `ack {passed}`, on its timer and on frames from the asker (revision 16); the member a pass names gives its snapshot to the application and answers `ack` every time. |
 | 14 | A demoted holder could not release. | Revision 17: a reader's `bye` is honoured only when its claim equals the receiver's accepted claim and names the sender. |
 | 13 | "Suspended" members. | §S2 uses the 0.5 current-member rule. |

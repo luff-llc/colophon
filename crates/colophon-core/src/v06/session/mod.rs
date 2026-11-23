@@ -219,6 +219,11 @@ pub struct Session {
     /// that member's windows was last closed or its keys stopped being accepted. An echo from
     /// that member opens a window only for a `fresh` issued after it.
     closed_after: BTreeMap<MemberId, u64>,
+    /// Revision 17 hardening: per member, the `fresh` values of candidate `hello`s whose
+    /// answer the probe limit suppressed (at most [`MAX_ECHO`], newest last). One `hello`
+    /// echoing them all is sent when the member's budget reopens, so a genuine new key is not
+    /// left unanswered by replays of old ones.
+    deferred: BTreeMap<MemberId, VecDeque<Id>>,
     answered: BTreeMap<MemberId, Id>,
     to_echo: VecDeque<Id>,
 }
@@ -300,6 +305,7 @@ impl Session {
             window_order: BTreeMap::new(),
             candidates: BTreeMap::new(),
             closed_after: BTreeMap::new(),
+            deferred: BTreeMap::new(),
             probed: BTreeMap::new(),
             probe_times: VecDeque::new(),
             answered: BTreeMap::new(),
@@ -313,6 +319,7 @@ impl Session {
         self.windows.retain(|(m, _), _| m != member);
         self.window_order.remove(member);
         self.candidates.remove(member);
+        self.deferred.remove(member);
         self.answered.remove(member);
         // Revision 17: no echo of an earlier `fresh` reopens any of its keys.
         self.closed_after.insert(member.to_owned(), self.fresh_count);
@@ -379,6 +386,12 @@ impl Session {
             for sp in &self.sent_passes {
                 at(sp.last.saturating_add(sp.interval));
             }
+        }
+        for m in self.deferred.keys() {
+            let due = self.probed.get(m).map_or(0, |t| t.saturating_add(p.ask_timeout_ms));
+            // The global cap may push it a little later; ask again then.
+            let oldest = self.probe_times.front().map_or(0, |t| t.saturating_add(1_000));
+            at(due.max(if self.probe_times.len() >= PROBES_PER_SECOND { oldest } else { 0 }));
         }
         if self.sends_as_holder() {
             at(self.last_sent_all.map_or(0, |t| t.saturating_add(p.beat_ms)));
@@ -620,6 +633,7 @@ impl Session {
         }
         self.candidates.hash(h);
         self.closed_after.hash(h);
+        self.deferred.hash(h);
         self.entitled.hash(h);
         self.pending_join.hash(h);
         self.windows.hash(h);
@@ -1294,8 +1308,20 @@ impl Session {
         // Revision 17 (third review): a hello from a key without an open window (a candidate,
         // possibly an old key replayed) is answered under the probe limit, per member once per
         // askTimeoutMs and four a second in all.
-        let budget = open || !self.fixes.reopen_challenge || self.probe_budget(&f.from, now);
-        if budget && self.answered.get(&f.from) != Some(fresh) && (!answers_us || opened) {
+        let wants = self.answered.get(&f.from) != Some(fresh) && (!answers_us || opened);
+        let budget =
+            !wants || open || !self.fixes.reopen_challenge || self.probe_budget(&f.from, now);
+        if wants && !budget {
+            // Defer the answer to when this member's budget reopens (on a tick).
+            let d = self.deferred.entry(f.from.clone()).or_default();
+            if !d.contains(fresh) {
+                d.push_back(*fresh);
+                while d.len() > MAX_ECHO {
+                    d.pop_front();
+                }
+            }
+        }
+        if wants && budget {
             self.answered.insert(f.from.clone(), *fresh);
             let to = f.from.clone();
             self.send_hello_echo(out, Some(&to), false, vec![*fresh], now);
@@ -2104,6 +2130,17 @@ impl Session {
     fn on_tick(&mut self, now: u64, out: &mut Out) {
         if !self.joined {
             return;
+        }
+        // Deferred answers to candidate hellos, once each member's probe budget reopens.
+        let members: Vec<MemberId> = self.deferred.keys().cloned().collect();
+        for m in members {
+            if self.probe_budget(&m, now) {
+                let echo: Vec<Id> = self.deferred.remove(&m).map(Vec::from).unwrap_or_default();
+                if let Some(last) = echo.last() {
+                    self.answered.insert(m.clone(), *last);
+                }
+                self.send_hello_echo(out, Some(&m), false, echo, now);
+            }
         }
         // Beyond revision 15's text: an unacknowledged pass is also resent on a timer, at
         // most once per askTimeoutMs, since an asker that moved on and listens quietly may

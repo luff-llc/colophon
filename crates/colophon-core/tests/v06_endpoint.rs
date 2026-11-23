@@ -826,3 +826,61 @@ fn candidate_hellos_are_answered_under_the_probe_limit() {
     }
     assert_eq!(answers, 1, "once per askTimeoutMs for one member");
 }
+
+/// Fourth review hardening: a home replaying old candidate hellos of `a` every second, so
+/// that each takes a's probe slot, cannot keep b from answering a's genuine new key: the
+/// suppressed answer is deferred and sent when the slot reopens, and the new key's window
+/// opens within askTimeoutMs plus a tick even though its owner then only answers.
+#[test]
+fn replayed_candidate_hellos_cannot_starve_a_new_key() {
+    let w = world();
+    let view = w.view();
+    let ep = epochs();
+    let mut b = endpoint(&w.b, &view, 200, Policy::default());
+    b.command(Command::Join { state: None }, clock(0), &ep);
+    let old: Vec<Vec<u8>> = (0..12u8)
+        .flat_map(|i| {
+            let mut o = endpoint(&w.a, &view, 201 + i, Policy::default());
+            frames_of(o.command(Command::Join { state: None }, clock(0), &ep))
+        })
+        .collect();
+    let mut k = endpoint(&w.a, &view, 230, Policy::default());
+    let key = k.key_id().to_owned();
+    let start = 3_050;
+    let mut opened_at = None;
+    let mut to_k: Vec<Vec<u8>> = Vec::new();
+    let mut t = 1_000;
+    while t <= 12_000 && opened_at.is_none() {
+        let mut from_b = Vec::new();
+        if t % 1_000 == 0 {
+            let replay = &old[(t / 1_000) as usize % old.len()];
+            from_b.extend(frames_of(b.receive(replay, clock(t), &ep)));
+        }
+        if t == start {
+            for f in frames_of(k.command(Command::Join { state: None }, clock(t), &ep)) {
+                from_b.extend(frames_of(b.receive(&f, clock(t), &ep)));
+            }
+        }
+        if b.next_deadline().is_some_and(|d| d <= t) {
+            from_b.extend(frames_of(b.tick(clock(t), &ep)));
+        }
+        to_k.extend(from_b);
+        // k only answers what reaches it (b's frames to a); it sends nothing else.
+        if t >= start {
+            for f in to_k.drain(..) {
+                for back in frames_of(k.receive(&f, clock(t), &ep)) {
+                    b.receive(&back, clock(t), &ep);
+                    assert!(b.keys_consistent());
+                }
+            }
+        } else {
+            to_k.clear();
+        }
+        if b.machine().window_admits(&w.a.id, &key, u64::MAX) {
+            opened_at = Some(t);
+        }
+        t += 50;
+    }
+    let opened = opened_at.expect("the new key's window never opened");
+    assert!(opened - start <= 1_500 + 100, "opened after {} ms", opened - start);
+}
