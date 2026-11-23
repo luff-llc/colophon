@@ -1,6 +1,6 @@
 # Colophon 0.6: sessions
 
-**Status:** unfrozen draft, revision 14, 2026-11-23. Revision 2 adopted the findings of the
+**Status:** unfrozen draft, revision 15, 2026-11-23. Revision 2 adopted the findings of the
 reference machine (`docs/colophon-0.6-sessions-findings.md`, F1–F20); revision 3 added `via` to passed claims (F12, F21); revision 4 answers the first
 independent design review (R1–R9 in the findings document): evidence instead of hearsay,
 no silent loss of state, key bootstrap and freshness, bounded state; revision 5 adopts what
@@ -119,9 +119,11 @@ key when the envelope verifies, the member is a current member with a `records` 
 `namespace` at the verifier's accepted authority head, `session` equals the member's current
 session number, and the verifier's clock is within the window widened by 60 s; the window
 is checked again for every frame. A verifier
-that later accepts a history in which the member is revoked, suspended, expired, or has a
-higher session number MUST drop that member's session keys and every frame signed by them
-from then on.
+that later accepts a history in which the member is no longer a current member (0.5
+§8.5), no longer has the `records` entry, or has a higher session number MUST drop that
+member's session keys and every frame signed by them from then on. A member MAY sign a new
+delegation for the same session key before the old one expires; receivers keep that key's
+window.
 
 ## S3. Frames
 
@@ -152,12 +154,28 @@ from then on.
 - Signed `raw` by the session key over the canonical body. The encoded frame MUST be at
   most 16,384 bytes.
 
-A receiver MUST, in order: parse with closed field sets (0.5 §2.3); check `account`,
-`namespace` and `cell`; if `delegation` is present and names `(from, key)`, verify it under
-§S2 and remember the key; find an accepted session key for `(from, key)`, else drop the
-frame and send `hello` to `from`; verify the frame signature; check `n` and freshness
-(below); open the ciphertext. Any failure drops the frame silently. No failure changes
-session state.
+A frame is one canonical JSON object. Its `signature` field is a 0.5 §4 `raw` signature
+by the session key over the canonical JSON of every other field except `delegation`. The
+`delegation` field, when present, is the §S2 envelope as a JSON object.
+
+A receiver MUST, in order:
+
+1. parse with closed field sets (0.5 §2.3), refusing an encoded frame over 16,384 bytes
+   before parsing it;
+2. check `account`, `namespace` and `cell`;
+3. if `delegation` is present, require that it names exactly this frame's `(from, key)`
+   and verify it under §S2; a delegation that names another member or key drops the frame;
+4. find an accepted session key for `(from, key)`, or the one just verified; if there is
+   none, drop the frame, and if `from` is a member entitled to the namespace at the
+   receiver's accepted head, send `hello` to it, at most once per `askTimeoutMs` per member
+   and four times a second in all;
+5. verify the frame signature;
+6. check `n` against the window;
+7. open the ciphertext and parse the plaintext with closed field sets;
+8. apply the freshness rule below, which needs the plaintext `kind`.
+
+Any failure drops the frame silently and changes no state: in particular a key is
+remembered, and `n` recorded, only when steps 1–7 have all passed.
 
 **Freshness.** A carrier may replay old frames to a member that has restarted and lost its
 windows. Every `hello` carries `fresh`, 16 random bytes new for that `hello`, and `echo`,
@@ -176,8 +194,12 @@ lower `n` from that key are dropped. A member that drops a frame because the win
 its key is not open sends that key's member a `hello`, at most once per `askTimeoutMs`, so
 a lost `hello` or a lost answer does not leave the two unable to hear each other.
 
-A member keeps windows for at most 4 session keys per member, dropping the oldest, and
-drops every window of a member it no longer accepts (§S2).
+A member keeps open windows for at most 4 session keys per member, closing the one it
+accepted first. A closed window is not forgotten: for every key it has accepted the member
+keeps the highest `n` it accepted until that key's delegation expires, and a frame from
+that key with a lower or equal `n` is dropped even if the key is presented again. It keeps
+such floors for at most 64 keys per member, and while it holds 64 it accepts no new key
+from that member. It drops everything it holds for a member it no longer accepts (§S2).
 
 The plaintext is `{"kind": …, …}`. Kinds and their fields:
 
@@ -188,7 +210,7 @@ The plaintext is `{"kind": …, …}`. Kinds and their fields:
 | `beat` | holder | `claim`, `seq` | Liveness when the holder has nothing else to send. |
 | `msg` | holder | `claim`, `seq`, `origin`, `id`, `payload` | One ordered message. |
 | `submit` | writer | `id`, `payload` | Ask the holder to order a message. |
-| `refuse` | holder | `id`, `reason` | The holder declined a `submit`. |
+| `refuse` | holder | `id`, `reason` (at most 64 bytes of `a–z 0–9 -`) | The holder declined a `submit`. |
 | `presence` | any | `payload` | Latest value for this member. |
 | `ask` | writer | `claim` (the claim the asker believes current) | Ask the holder for the role. |
 | `pass` | holder | `claim` (current), `next` (`{term, rank:1, holder, via}`), `seq`, `snapshot` | Hand the role over. |
@@ -196,7 +218,7 @@ The plaintext is `{"kind": …, …}`. Kinds and their fields:
 | `take` | writer | `claim` (`{term, rank:0, holder}`) | Assume the role. |
 | `ping` / `pong` | any | `t` (sender ms); `pong` adds `echo`, `hold` | Round-trip and clock offset (§S7). |
 | `yielded` | former holder | `claim` (the claim it held), `seq`, `snapshot` | Sent to the new holder by a member that yields to a take (§S5). |
-| `ack` | holder | `yielded` (the claim named by the `yielded` it answers) | The holder has reported that `yielded` to its application. |
+| `ack` | writer | `yielded` or `passed` (the claim named by the `yielded` or the `next` of the `pass` it answers) | The sender's application has been given that state. |
 | `bye` | any | `claim` if the sender is or was the holder of it, `leaving` (bool) | A holder's `bye` releases the role. `leaving: true` also ends the sender's membership of the session. |
 
 `payload` and `snapshot` are application bytes (base64), opaque to this document, at most
@@ -217,11 +239,18 @@ no accepted claim, or whose holder said `bye`, has **no holder**.
 
 A member accepts a claim it meets in any frame when all of these hold:
 
-1. The frame passed §S3 and its sender is entitled (§S1).
+1. The frame passed §S3 and its sender is a **writer** at the member's accepted authority
+   head (§S1). A claim met in a frame from a member that may only read, in any field
+   (`claim`, `next`, `hello.seen`, `bye`, `yielded`), is ignored, and so is a claim that
+   names as holder a member that is not a writer. Readers take part in freshness, presence
+   and the ordered lane as listeners only.
 2. For rank 0, the frame is from `claim.holder` itself.
 3. For rank 1, the frame is from `claim.holder`, or is a `pass` from `claim.via` with
    `next` equal to this claim and `pass.claim.holder` equal to `claim.via`.
 4. It is greater than the member's accepted claim.
+
+A claim whose term is more than 1,048,576 above the member's accepted term is ignored, so
+one faulty writer cannot exhaust the term space in a step.
 
 Rule 3 does not defend against a member that breaks this document (it could take at any
 term); among members that follow it, a member claims rank 1 only after receiving a pass.
@@ -247,8 +276,12 @@ pass, the application first stops whatever the role controls; the holder persist
 its accepted claim; then
 the holder sends `pass` with `next = {term: current+1, rank: 1, holder: asker, via: self}`, the final
 `seq` and the final `snapshot`, to all members, and from that moment is not holder: it
-accepts `next` itself, with `snapshot` as its state. It resends the same `pass`, unchanged,
-when it next hears the asker speak under an older claim. The asker becomes holder on
+accepts `next` itself, with `snapshot` as its state. Until it receives an `ack`
+whose `passed` names `next`, it resends the same `pass`, unchanged, whenever it hears a
+frame from the asker, at most once per `askTimeoutMs`. A member that receives a `pass`
+naming it gives the snapshot to its application (as its starting state, or as a late pass
+if it has already moved to a greater claim) and answers `ack`, every time, so a passed
+state always reaches the application it was passed to. The asker becomes holder on
 receiving the `pass`; its state is exactly `snapshot`; its `seq` restarts at 0 for the new
 term. A holder that learns of a greater claim naming itself that it has not acted under (a
 pass that arrived after it took, or a second pass from another holder) reports that pass's
@@ -372,7 +405,9 @@ the same account that is entitled to the namespace and subscribed to the cell, w
 `(cell, from)` in memory for at most the cell's `retainMs` (or 60 s when it does not know
 the cell) and gives it to a member when that member subscribes. It checks only the outer
 fields, the size limit and its own caps. It learns the account, namespace, cell, sender,
-recipient and sizes, and nothing else. A home MAY refuse or drop a frame under its caps; to
+recipient, session key ID, counter `n`, epoch number, the `retain` flag, each delegation
+(member, session number, validity window, session public key), frame sizes and timing; the
+kind of a frame can often be guessed from its size. It learns no payload, claim or state. A home MAY refuse or drop a frame under its caps; to
 members that is loss, and a home that drops without limit keeps its group from being
 timely (§S0).
 
