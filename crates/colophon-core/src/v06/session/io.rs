@@ -31,7 +31,10 @@ pub enum Input {
 #[serde(tag = "command", rename_all = "camelCase")]
 pub enum Command {
     /// Join the session (also after a restart).
-    Join,
+    Join {
+        /// The application's state for the cell (a restarted holder retakes with it, §S6).
+        state: Option<Bytes>,
+    },
     /// Leave; a holder releases the role.
     Leave,
     /// Ask the holder for the role; takes by itself when §S5 allows.
@@ -51,7 +54,7 @@ pub enum Command {
     /// Take as soon as §S5 allows (at once if it does now).
     Take {
         /// The state to start from (the application's projection), else the core's state.
-        snapshot: Option<Bytes>,
+        state: Option<Bytes>,
     },
     /// Give up the role without passing (sends `bye` and stays joined).
     Release,

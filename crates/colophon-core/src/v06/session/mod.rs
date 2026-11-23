@@ -5,13 +5,10 @@
 //! from the caller. The type is `Clone + Eq + Hash` so explorers can deduplicate states, and
 //! [`Session::view`] / [`Session::digest`] give the protocol-visible state.
 //!
-//! Reference reading notes (also in `docs/colophon-0.6-sessions-findings.md`):
-//! - the passer accepts its own `next` at once (it is the "holder of the previous claim");
-//! - a holder that restarts with its own persisted claim, like an out-of-contact holder,
-//!   sends `hello {lapsed: true}`, sends no holder frame for `askTimeoutMs`, then retakes;
-//! - lapse time counts only while a link works: `max(last heard, link up)`;
-//! - submits are ordered automatically; the only refusal is `too-large`;
-//! - `release` sends a holder `bye` and stays joined.
+//! The machine follows revision 2 of the draft, which adopted the findings in
+//! `docs/colophon-0.6-sessions-findings.md`; [`Fixes::LITERAL`] reproduces revision 1.
+//! Choices still local to this layer: submits are ordered automatically (the only refusal
+//! is `too-large`), and the fold is the cell's `policy.fold`.
 
 pub mod clock;
 pub mod io;
@@ -20,7 +17,7 @@ pub mod types;
 pub use clock::{sample, Sample, Samples};
 pub use io::{Command, Event, Input, Output, Via};
 pub use types::{
-    Basis, Body, Bytes, Claim, Fixes, Frame, MemberId, Policy, Reducer, Seen, TakeRule, MAX_TERM,
+    Body, Bytes, Claim, Fixes, Fold, Frame, MemberId, Policy, Seen, TakeRule, MAX_TERM,
 };
 
 use serde::Serialize;
@@ -53,6 +50,8 @@ struct SentPass {
     next: Claim,
     seq: u64,
     snapshot: Bytes,
+    /// F21: already resent once to the new holder under `next`.
+    echoed: bool,
 }
 
 /// The protocol-visible state of a member, for digests and cross-implementation vectors.
@@ -91,6 +90,10 @@ pub struct Session {
     tail: VecDeque<(u64, Held)>,
     ordered: BTreeSet<Bytes>,
     sent_pass: Option<SentPass>,
+    /// The pass (passer's claim, snapshot) that made this member holder of its claim.
+    made_by: Option<(Claim, Bytes)>,
+    /// When the last gap `hello` was sent (§S8: at most one per second).
+    last_gap_hello: Option<u64>,
     want: Option<Want>,
     gate: Option<u64>,
     link_up: bool,
@@ -106,6 +109,9 @@ pub struct Session {
 }
 
 type Out = Vec<Output>;
+
+/// §S8: gap `hello`s at most once per second.
+pub const GAP_HELLO_MS: u64 = 1_000;
 
 impl Session {
     /// A member before `join`. `persisted` is the claim it stored with [`Output::Persist`].
@@ -136,6 +142,8 @@ impl Session {
             tail: VecDeque::new(),
             ordered: BTreeSet::new(),
             sent_pass: None,
+            made_by: None,
+            last_gap_hello: None,
             want: None,
             gate: None,
             link_up: true,
@@ -261,6 +269,10 @@ impl Session {
         self.tail.hash(h);
         self.ordered.hash(h);
         self.sent_pass.hash(h);
+        self.made_by.hash(h);
+        self.last_gap_hello
+            .map(|t| now.saturating_sub(t).min(GAP_HELLO_MS))
+            .hash(h);
         match &self.want {
             None => 0u8.hash(h),
             Some(w) => {
@@ -360,6 +372,17 @@ impl Session {
                 lapsed,
             },
         );
+    }
+    /// A gap `hello` (§S8), rate-limited to one per [`GAP_HELLO_MS`].
+    fn gap_hello(&mut self, out: &mut Out, to: &str, now: u64) {
+        if self
+            .last_gap_hello
+            .is_some_and(|t| now.saturating_sub(t) < GAP_HELLO_MS)
+        {
+            return;
+        }
+        self.last_gap_hello = Some(now);
+        self.send_hello(out, Some(to), false);
     }
     fn send_state(&mut self, out: &mut Out, to: Option<&str>, now: u64) {
         let Some(claim) = self.accepted.clone() else {
@@ -508,16 +531,12 @@ impl Session {
             Self::reject(out, "take", "term-exhausted");
             return;
         };
-        let basis = Basis {
-            term,
-            seq: self.seq,
-        };
         let claim = Claim::new(t, 0, &self.me);
         if let Some(s) = snapshot {
             self.state = s;
         }
         self.become_holder(claim.clone(), now, out);
-        self.send(out, None, false, Body::Take { claim, basis });
+        self.send(out, None, false, Body::Take { claim });
         self.send_state(out, None, now);
         let claim = self.accepted.clone().unwrap_or_else(|| Claim::new(t, 0, &self.me));
         Self::event(
@@ -530,6 +549,7 @@ impl Session {
         );
     }
     fn become_holder(&mut self, claim: Claim, now: u64, out: &mut Out) {
+        self.made_by = None;
         self.accepted = Some(claim.clone());
         self.released = false;
         self.gate = None;
@@ -562,7 +582,7 @@ impl Session {
     }
 
     fn apply(&mut self, seq: u64, h: Held, out: &mut Out) {
-        self.state = self.policy.reducer.apply(&self.state, &h.payload);
+        self.state = self.policy.fold.apply(&self.state, &h.payload);
         self.seq = seq;
         if let Some(claim) = self.accepted.clone() {
             Self::event(
@@ -638,17 +658,6 @@ impl Session {
         if holding_frame && f.body.claim().is_some_and(|c| c.holder == from) {
             self.heard_holding.insert(from.clone(), now);
         }
-        // F6: tell a sender holding under a lesser claim what this member accepted.
-        if self.fixes.answer_lesser
-            && holding_frame
-            && !self.is_holder()
-            && !matches!(f.body, Body::Pass { .. })
-            && f.body
-                .claim()
-                .is_some_and(|c| c.holder == from && self.is_lesser(c, &from))
-        {
-            self.send_hello(out, Some(&from), false);
-        }
         let alive = !self.fixes.liveness_holder_frames
             || (f.body.is_holder_frame()
                 && f.body.claim().is_none_or(|c| self.accepted.as_ref() == Some(c)));
@@ -657,8 +666,18 @@ impl Session {
             self.lapse_reported = false;
         }
         // §S5: resend the pass when the asker speaks under an older claim.
+        let echo = self.fixes.pass_echo
+            && f.body.is_holder_frame()
+            && self.sent_pass.as_ref().is_some_and(|p| {
+                !p.echoed && from == p.next.holder && f.body.claim() == Some(&p.next)
+            });
+        if echo {
+            if let Some(p) = &mut self.sent_pass {
+                p.echoed = true;
+            }
+        }
         if let Some(p) = &self.sent_pass {
-            if from == p.next.holder && f.body.claim().is_some_and(|c| *c < p.next) {
+            if from == p.next.holder && (echo || f.body.claim().is_some_and(|c| *c < p.next)) {
                 let body = Body::Pass {
                     claim: p.claim.clone(),
                     next: p.next.clone(),
@@ -669,6 +688,8 @@ impl Session {
             }
         }
         // F5: a lost `bye` is answered again.
+        let released_mine = self.released
+            && self.accepted.as_ref().is_some_and(|a| a.holder == self.me);
         if self.fixes.bye_resend
             && self.released
             && self.accepted.as_ref().is_some_and(|a| a.holder == self.me)
@@ -676,7 +697,27 @@ impl Session {
             && !matches!(f.body, Body::Bye { .. })
         {
             let claim = self.accepted.clone();
-            self.send(out, Some(&from), false, Body::Bye { claim });
+            self.send(
+                out,
+                Some(&from),
+                false,
+                Body::Bye {
+                    claim,
+                    leaving: false,
+                },
+            );
+        }
+        // F6: tell a sender holding under a lesser claim what this member accepted.
+        if self.fixes.answer_lesser
+            && holding_frame
+            && !self.is_holder()
+            && !(self.fixes.bye_resend && released_mine)
+            && !matches!(f.body, Body::Pass { .. })
+            && f.body
+                .claim()
+                .is_some_and(|c| c.holder == from && self.is_lesser(c, &from))
+        {
+            self.send_hello(out, Some(&from), false);
         }
         match f.body {
             Body::Hello { seen, .. } => self.on_hello(&from, seen, now, out),
@@ -708,11 +749,9 @@ impl Session {
             Body::Beat { claim, seq } => {
                 self.consider(&claim, &from, now, out);
                 if self.accepted.as_ref() == Some(&claim) && claim.holder == from {
-                    if !self.is_holder() && self.synced && seq > self.seq {
-                        // §S8 gap.
-                        self.send_hello(out, Some(&from), false);
-                    } else if !self.is_holder() && !self.synced {
-                        self.send_hello(out, Some(&from), false);
+                    if !self.is_holder() && (!self.synced || seq > self.seq) {
+                        // §S8 gap, or still no snapshot for this claim.
+                        self.gap_hello(out, &from, now);
                     }
                 } else {
                     self.stale(&claim, &from, now, out);
@@ -744,7 +783,7 @@ impl Session {
                         }
                         if self.synced && !fresh {
                             // §S8 gap.
-                            self.send_hello(out, Some(&from), false);
+                            self.gap_hello(out, &from, now);
                         }
                     }
                 } else {
@@ -810,7 +849,7 @@ impl Session {
                     self.stale(&claim, &from, now, out);
                 }
             }
-            Body::Take { claim, basis: _ } => {
+            Body::Take { claim } => {
                 if claim.rank != 0 || claim.holder != from {
                     return;
                 }
@@ -843,7 +882,7 @@ impl Session {
                     );
                 }
             }
-            Body::Bye { claim } => {
+            Body::Bye { claim, leaving: _ } => {
                 if self.presence.remove(&from).is_some() {
                     Self::event(
                         out,
@@ -857,7 +896,6 @@ impl Session {
                     if self.fixes.renew_wider
                         && self.sends_as_holder()
                         && c.holder == from
-                        && c.rank == 0
                         && self.accepted.as_ref().is_some_and(|a| c > *a)
                     {
                         // F7: a released claim has no holder; stay holder above it.
@@ -937,7 +975,7 @@ impl Session {
         // §S5 renewing.
         let other = s.claim.holder != self.me && !self.present(&s.claim.holder, now);
         let own_greater = self.fixes.renew_wider && s.claim.holder == self.me && s.claim > mine;
-        if s.claim.term >= mine.term && (other || own_greater) {
+        if s.claim >= mine && (other || own_greater) {
             self.renew(s.claim.term, now, out);
             return;
         }
@@ -967,6 +1005,19 @@ impl Session {
                 // §S4 3: from the holder of the member's previous accepted claim.
                 self.accepted.as_ref().is_some_and(|a| a.holder == from)
             };
+        if verified
+            && self.fixes.pass_conflict_renew
+            && self.sends_as_holder()
+            && self.accepted.as_ref() == Some(&next)
+            && self
+                .made_by
+                .as_ref()
+                .is_some_and(|(c, snap)| *c != claim || *snap != snapshot)
+        {
+            // F12: another holder passed to this member too; renew so one state prevails.
+            self.renew(next.term, now, out);
+            return;
+        }
         if !verified || self.accepted.as_ref().is_some_and(|a| next <= *a) {
             if verified {
                 self.stale(&next, from, now, out);
@@ -977,9 +1028,11 @@ impl Session {
             if !self.may_take() {
                 return;
             }
+            let made = (claim, snapshot.clone());
             let claim = next.clone();
             self.state = snapshot.clone();
             self.become_holder(next, now, out);
+            self.made_by = Some(made);
             Self::event(
                 out,
                 Event::BecameHolder {
@@ -1096,14 +1149,18 @@ impl Session {
     // Commands.
 
     fn on_command(&mut self, command: Command, now: u64, out: &mut Out) {
-        if !self.joined && command != Command::Join {
+        if !self.joined && !matches!(command, Command::Join { .. }) {
             Self::reject(out, "command", "not-joined");
             return;
         }
         match command {
-            Command::Join => {
+            Command::Join { state } => {
                 if self.joined {
                     return;
+                }
+                if let Some(st) = state {
+                    // §S6: the application's state, which a restarted holder retakes with.
+                    self.state = st;
                 }
                 self.joined = true;
                 self.link_since = now;
@@ -1121,7 +1178,7 @@ impl Session {
                 if claim.is_some() {
                     self.released = true;
                 }
-                self.send(out, None, false, Body::Bye { claim });
+                self.send(out, None, false, Body::Bye { claim, leaving: true });
                 self.joined = false;
                 self.want = None;
                 self.gate = None;
@@ -1134,7 +1191,7 @@ impl Session {
                 let claim = self.accepted.clone();
                 self.released = true;
                 self.gate = None;
-                self.send(out, None, false, Body::Bye { claim });
+                self.send(out, None, false, Body::Bye { claim, leaving: false });
             }
             Command::Ask => {
                 if !self.may_take() {
@@ -1157,7 +1214,7 @@ impl Session {
                 self.want = Some(w);
                 self.on_tick(now, out);
             }
-            Command::Take { snapshot } => {
+            Command::Take { state: snapshot } => {
                 if !self.may_take() {
                     Self::reject(out, "take", "not-allowed");
                     return;
@@ -1192,6 +1249,7 @@ impl Session {
                     next: next.clone(),
                     seq: self.seq,
                     snapshot: snapshot.clone(),
+                    echoed: false,
                 };
                 self.send(
                     out,

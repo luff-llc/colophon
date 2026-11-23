@@ -85,15 +85,6 @@ pub struct Seen {
     pub seq: Option<u64>,
 }
 
-/// `take.basis`: the taker's last known position.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct Basis {
-    /// The term of the taker's previous accepted claim (0 if none).
-    pub term: u64,
-    /// The last `seq` it applied in that claim.
-    pub seq: u64,
-}
-
 /// A plaintext frame body (§S3 table). Field names are the protocol's.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
@@ -181,8 +172,6 @@ pub enum Body {
     Take {
         /// `{term, rank: 0, holder: sender}`.
         claim: Claim,
-        /// The taker's last known position.
-        basis: Basis,
     },
     /// Round trip and offset (§S7).
     Ping {
@@ -198,10 +187,12 @@ pub enum Body {
         /// How long the responder held the ping, ms.
         hold: u64,
     },
-    /// Leaving; a holder's `bye` releases the role.
+    /// A holder's `bye` releases the role; `leaving` also ends the sender's membership.
     Bye {
-        /// The sender's claim if it is holder.
+        /// The sender's claim if it is or was the holder of it.
         claim: Option<Claim>,
+        /// The sender leaves the session (`false`: a release, it stays).
+        leaving: bool,
     },
 }
 impl Body {
@@ -216,7 +207,7 @@ impl Body {
             | Body::Pass { claim, .. }
             | Body::Decline { claim }
             | Body::Take { claim, .. } => Some(claim),
-            Body::Bye { claim } => claim.as_ref(),
+            Body::Bye { claim, .. } => claim.as_ref(),
             _ => None,
         }
     }
@@ -283,25 +274,21 @@ pub enum TakeRule {
     Reserved,
 }
 
-/// How the ordered state is folded from a snapshot and messages.
-///
-/// The holder must produce a `state` snapshot at any moment, so the core folds messages
-/// itself. `Latest` is the §S12 anchor rule; `Append` concatenates (order-sensitive; logs and
-/// tests).
+/// `policy.fold` (§S1): how ordered messages become state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum Reducer {
-    /// The state is the latest payload.
+pub enum Fold {
+    /// The state is the last payload (§S12 anchors).
     Latest,
-    /// The state is the snapshot followed by every payload.
+    /// The state is the list of payloads; here their concatenation after the snapshot.
     Append,
 }
-impl Reducer {
+impl Fold {
     /// Fold one message payload into a state.
     pub fn apply(self, state: &Bytes, payload: &Bytes) -> Bytes {
         match self {
-            Reducer::Latest => payload.clone(),
-            Reducer::Append => {
+            Fold::Latest => payload.clone(),
+            Fold::Append => {
                 let mut v = state.0.clone();
                 v.extend_from_slice(&payload.0);
                 Bytes(v)
@@ -328,10 +315,10 @@ pub struct Policy {
     pub tail: u64,
     /// Largest payload, bytes.
     pub max_payload: u64,
+    /// How ordered messages become state.
+    pub fold: Fold,
     /// Who may take.
     pub take: TakeRule,
-    /// The state fold.
-    pub reducer: Reducer,
 }
 impl Default for Policy {
     fn default() -> Self {
@@ -343,15 +330,16 @@ impl Default for Policy {
             retain_ms: 60_000,
             tail: 256,
             max_payload: 8_192,
+            fold: Fold::Latest,
             take: TakeRule::Free,
-            reducer: Reducer::Latest,
         }
     }
 }
 
 /// Departures from the draft text that the explorer showed necessary
 /// (`docs/colophon-0.6-sessions-findings.md`). [`Fixes::default`] is the reference reading;
-/// [`Fixes::LITERAL`] reproduces the draft so the counterexamples stay reproducible.
+/// [`Fixes::LITERAL`] reproduces the revision 1 draft so the counterexamples stay
+/// reproducible. Revision 2 of the draft adopts every fix except F21 (proposed).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Fixes {
@@ -382,9 +370,15 @@ pub struct Fixes {
     /// F10: a holder judges another holder "not present" for §S5 renewing only after its own
     /// link has worked for `holderTimeoutMs` (a returning member has heard nobody yet).
     pub renew_needs_contact: bool,
+    /// F12: a holder made by a pass that meets a different `pass` naming its own claim (two
+    /// partitioned holders both passed to it) renews, so one state prevails.
+    pub pass_conflict_renew: bool,
+    /// F21: a passer also resends its `pass`, once, on the first holder frame it gets from
+    /// the new holder under `next`, so a new holder made by another pass meets this one (F12).
+    pub pass_echo: bool,
 }
 impl Fixes {
-    /// The draft text as written.
+    /// The revision 1 draft as written.
     pub const LITERAL: Fixes = Fixes {
         rank1_from_holder: false,
         seen_unsynced: false,
@@ -394,6 +388,8 @@ impl Fixes {
         liveness_holder_frames: false,
         ask_resend: false,
         renew_needs_contact: false,
+        pass_conflict_renew: false,
+        pass_echo: false,
     };
     /// Every fix.
     pub const ALL: Fixes = Fixes {
@@ -405,6 +401,8 @@ impl Fixes {
         liveness_holder_frames: true,
         ask_resend: true,
         renew_needs_contact: true,
+        pass_conflict_renew: true,
+        pass_echo: true,
     };
 }
 impl Default for Fixes {
