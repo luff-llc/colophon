@@ -1815,21 +1815,22 @@ impl Account {
             None => crate::v06::session::keys::SessionAccount::new(self.id().as_str()),
         }
     }
-    /// A copy of the epoch keys this session holds for `namespace`, as the 0.6 session codec
-    /// reads them ([`EpochKeys`](crate::v06::session::codec::EpochKeys)); the copy is wiped
-    /// when it drops. Unlike the rest of this interface, the codec's trait returns key bytes
-    /// to its caller, so this table is as sensitive as the keys: hand it only to a session
-    /// endpoint, never to code that is not trusted with them. Take a new copy after an unlock
-    /// or a rekey.
-    pub fn session_epochs(&self, namespace: &str) -> crate::v06::session::codec::EpochTable {
+    /// The epoch keys this session holds for `namespace`, as an opaque capability for a 0.6
+    /// session endpoint ([`SessionEpochs`](crate::v06::session::codec::SessionEpochs)): a
+    /// wiped-on-drop copy from which nothing outside the crate can read a key. Take a new one
+    /// after an unlock or a rekey.
+    pub fn session_epochs(&self, namespace: &str) -> crate::v06::session::codec::SessionEpochs {
         let account = self.id();
-        self.d
+        let mut out = crate::v06::session::codec::SessionEpochs::new(namespace);
+        for k in self
+            .d
             .keys
             .of_namespace(namespace)
             .filter(|k| k.account() == account)
-            .fold(crate::v06::session::codec::EpochTable::new(), |t, k| {
-                t.with(namespace, k.epoch(), *k.expose())
-            })
+        {
+            out.insert(k.epoch(), k.expose());
+        }
+        out
     }
     /// Restrict which namespaces this session folds and unlocks (as 0.4's read scope).
     pub fn set_read_scope(&mut self, namespaces: Vec<String>) -> Result<Changes> {

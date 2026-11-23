@@ -56,16 +56,34 @@ impl CellId {
     }
 }
 
-/// Namespace epoch keys (0.5 §11.1), supplied by the host. Returned key bytes are wiped when
-/// the core drops them.
+/// One namespace epoch key as the codec receives it: opaque outside the crate. It can be made
+/// from bytes (a key flows inward), but nothing outside the crate can read the bytes back, and
+/// it has no `Debug`, `Clone` or serialization. Wiped on drop.
+pub struct EpochSecret(Zeroizing<[u8; 32]>);
+impl EpochSecret {
+    /// Wrap key bytes; the argument's copy is wiped.
+    pub fn new(mut key: [u8; 32]) -> Self {
+        let s = Self(Zeroizing::new(key));
+        key.zeroize();
+        s
+    }
+    /// The key bytes, for sealing and opening in this crate only.
+    pub(crate) fn bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+/// Namespace epoch keys (0.5 §11.1) for the codec. A key comes back as an opaque
+/// [`EpochSecret`], so no implementation of this trait lets a caller read key bytes.
 pub trait EpochKeys {
     /// The newest epoch of `namespace` this member holds; frames are sealed under it.
     fn current_epoch(&self, namespace: &str) -> Option<u64>;
-    /// The 32-byte key of `epoch` of `namespace`, if this member holds it.
-    fn epoch_key(&self, namespace: &str, epoch: u64) -> Option<Zeroizing<[u8; 32]>>;
+    /// The key of `epoch` of `namespace`, if this member holds it.
+    fn epoch_key(&self, namespace: &str, epoch: u64) -> Option<EpochSecret>;
 }
 
-/// A fixed table of epoch keys (tests and tools). Wiped on drop.
+/// A fixed table of epoch keys supplied as bytes (tests, tools and conformance vectors). Keys
+/// flow in only; wiped on drop.
 #[derive(Default)]
 pub struct EpochTable {
     keys: BTreeMap<(String, u64), [u8; 32]>,
@@ -77,7 +95,9 @@ impl EpochTable {
     }
     /// Add a key.
     pub fn with(mut self, namespace: &str, epoch: u64, key: [u8; 32]) -> Self {
+        let mut key = key;
         self.keys.insert((namespace.to_owned(), epoch), key);
+        key.zeroize();
         self
     }
 }
@@ -96,10 +116,58 @@ impl EpochKeys for EpochTable {
             .map(|(_, e)| *e)
             .max()
     }
-    fn epoch_key(&self, namespace: &str, epoch: u64) -> Option<Zeroizing<[u8; 32]>> {
+    fn epoch_key(&self, namespace: &str, epoch: u64) -> Option<EpochSecret> {
         self.keys
             .get(&(namespace.to_owned(), epoch))
-            .map(|k| Zeroizing::new(*k))
+            .map(|k| EpochSecret(Zeroizing::new(*k)))
+    }
+}
+
+/// The epoch keys an account holds for one namespace, as the account gives them to a session
+/// endpoint ([`crate::v05::account::Account::session_epochs`]): an opaque capability. It has no
+/// `Debug`, `Clone` or serialization, nothing outside the crate can read a key from it, and its
+/// keys are wiped on drop. Take a new one after an unlock or a rekey.
+pub struct SessionEpochs {
+    namespace: String,
+    keys: BTreeMap<u64, Zeroizing<[u8; 32]>>,
+}
+impl SessionEpochs {
+    pub(crate) fn new(namespace: &str) -> Self {
+        Self {
+            namespace: namespace.to_owned(),
+            keys: BTreeMap::new(),
+        }
+    }
+    /// Add a key, copied from crate-held bytes into a slot wiped on drop.
+    pub(crate) fn insert(&mut self, epoch: u64, key: &[u8; 32]) {
+        self.keys.insert(epoch, Zeroizing::new(*key));
+    }
+    /// The namespace.
+    pub fn namespace(&self) -> &str {
+        &self.namespace
+    }
+    /// How many epochs are held.
+    pub fn len(&self) -> usize {
+        self.keys.len()
+    }
+    /// Whether none is held.
+    pub fn is_empty(&self) -> bool {
+        self.keys.is_empty()
+    }
+}
+impl EpochKeys for SessionEpochs {
+    fn current_epoch(&self, namespace: &str) -> Option<u64> {
+        (namespace == self.namespace)
+            .then(|| self.keys.keys().next_back().copied())
+            .flatten()
+    }
+    fn epoch_key(&self, namespace: &str, epoch: u64) -> Option<EpochSecret> {
+        if namespace != self.namespace {
+            return None;
+        }
+        self.keys
+            .get(&epoch)
+            .map(|k| EpochSecret(Zeroizing::new(**k)))
     }
 }
 
@@ -400,7 +468,7 @@ impl Receiver {
         let epoch_key = epochs
             .epoch_key(&o.namespace, o.epoch)
             .ok_or(DropReason::NoEpoch(o.epoch))?;
-        let key = frame_key(&epoch_key, &self.cell, &o.key);
+        let key = frame_key(epoch_key.bytes(), &self.cell, &o.key);
         let plaintext = decrypt(&key, o.n, &o.aad(), &w.ciphertext).ok_or(DropReason::Open)?;
         let body = decode_body(&plaintext, max_payload)?;
 
@@ -623,7 +691,7 @@ impl Sender {
             epoch,
             retain,
         };
-        let key = frame_key(&epoch_key, &self.cell, self.key.id());
+        let key = frame_key(epoch_key.bytes(), &self.cell, self.key.id());
         let ciphertext = encrypt(&key, n, &outer.aad(), plaintext)
             .ok_or_else(|| SealError::Encode("AES-GCM".into()))?;
         let signature = self.key.sign(&outer.signed_body(&ciphertext));

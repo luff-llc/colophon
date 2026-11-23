@@ -1,12 +1,14 @@
 //! The account view and epoch keys an engine gives a 0.6 session endpoint
 //! (`Account::session_account`, `Account::session_epochs`): two members of one account, each on
 //! its own engine, seal and open each other's frames with only what their engines verified and
-//! unlocked. A table without the epoch opens nothing.
+//! unlocked; a table without the epoch opens nothing. The epoch capability is opaque: it is not
+//! `Debug`, `Clone` or serializable, and a key read through it is an `EpochSecret` with no
+//! public way to its bytes (checked at compile time below).
 #![allow(clippy::unwrap_used)]
 #[path = "v05_engine_support/mod.rs"]
 mod support;
 use colophon_core::v05::terms::Access;
-use colophon_core::v06::session::codec::{CellId, EpochKeys, EpochTable};
+use colophon_core::v06::session::codec::{CellId, EpochKeys, EpochSecret, EpochTable, SessionEpochs};
 use colophon_core::v06::session::endpoint::{Clock, Endpoint};
 use colophon_core::v06::session::{Command, Policy};
 use support::*;
@@ -39,10 +41,10 @@ fn member_engines_give_endpoints_that_open_each_others_frames() {
     );
     let epoch = ka.current_epoch(NS).unwrap();
     assert_eq!(kb.current_epoch(NS), Some(epoch));
-    assert_eq!(
-        *ka.epoch_key(NS, epoch).unwrap(),
-        *kb.epoch_key(NS, epoch).unwrap()
-    );
+    assert_eq!(ka.namespace(), NS);
+    // A key read through the capability is opaque: this compiles only because nothing is read.
+    let _opaque: EpochSecret = ka.epoch_key(NS, epoch).unwrap();
+    assert!(ka.epoch_key("other", epoch).is_none(), "one namespace only");
     assert!(a
         .account()
         .session_epochs("other")
@@ -84,4 +86,31 @@ fn member_engines_give_endpoints_that_open_each_others_frames() {
     );
     let got = pb.receive(&hello, clock, &kb);
     assert!(got.dropped.is_none(), "{:?}", got.dropped);
+}
+
+/// Compile-time proof that a type does not implement a trait: with the trait implemented, the
+/// `_` below has two candidates and the call is ambiguous, so this file would not compile.
+macro_rules! lacks {
+    ($t:ty, $tr:path) => {{
+        trait Ambiguous<A> {
+            fn check() {}
+        }
+        impl<T: ?Sized> Ambiguous<()> for T {}
+        #[allow(dead_code)]
+        struct Implemented;
+        impl<T: ?Sized + $tr> Ambiguous<Implemented> for T {}
+        <$t as Ambiguous<_>>::check()
+    }};
+}
+
+#[test]
+fn the_epoch_capability_and_its_keys_are_opaque() {
+    lacks!(SessionEpochs, std::fmt::Debug);
+    lacks!(SessionEpochs, Clone);
+    lacks!(SessionEpochs, serde::Serialize);
+    lacks!(EpochSecret, std::fmt::Debug);
+    lacks!(EpochSecret, Clone);
+    lacks!(EpochSecret, serde::Serialize);
+    lacks!(EpochTable, std::fmt::Debug);
+    lacks!(EpochTable, Clone);
 }
