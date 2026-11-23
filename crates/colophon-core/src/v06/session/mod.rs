@@ -676,7 +676,8 @@ impl Session {
         if self.fixes.bye_resend
             && self.released
             && self.accepted.as_ref().is_some_and(|a| a.holder == self.me)
-            && f.body.claim().is_some_and(|c| Some(c) <= self.accepted.as_ref())
+            && holding_frame
+            && f.body.claim().is_some_and(|c| Some(c) < self.accepted.as_ref())
             && !matches!(f.body, Body::Bye { .. })
         {
             let claim = self.accepted.clone();
@@ -732,8 +733,9 @@ impl Session {
             Body::Beat { claim, seq } => {
                 self.consider(&claim, &from, now, out);
                 if self.accepted.as_ref() == Some(&claim) && claim.holder == from {
-                    if !self.is_holder() && (!self.synced || seq > self.seq) {
-                        // §S8 gap, or still no snapshot for this claim.
+                    if !self.is_holder() && !self.synced {
+                        self.send_hello(out, Some(&from), false);
+                    } else if !self.is_holder() && seq > self.seq {
                         self.gap_hello(out, &from, now);
                     }
                 } else {
@@ -809,7 +811,6 @@ impl Session {
             Body::Ask { claim } => {
                 self.consider(&claim, &from, now, out);
                 if self.sends_as_holder() {
-                    self.stale(&claim, &from, now, out);
                     Self::event(out, Event::AskReceived { from });
                 }
             }
@@ -828,8 +829,6 @@ impl Session {
                             Self::event(out, Event::Declined { from });
                         }
                     }
-                } else {
-                    self.stale(&claim, &from, now, out);
                 }
             }
             Body::Take { claim } => {
@@ -1002,9 +1001,6 @@ impl Session {
             return;
         }
         if !verified || self.accepted.as_ref().is_some_and(|a| next <= *a) {
-            if verified {
-                self.stale(&next, from, now, out);
-            }
             return;
         }
         if next.holder == self.me {

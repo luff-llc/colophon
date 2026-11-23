@@ -4,7 +4,7 @@
 
 The reference machine implements the draft, and also the departures listed here. Each
 departure that changes behaviour has a switch in `Fixes`. `Fixes::default()` (= `ALL`) is the
-reference reading (= revision 2, plus the proposed F21), and `Fixes::LITERAL` is the revision 1 draft, so every counterexample below
+reference reading (= revision 3), and `Fixes::LITERAL` is the revision 1 draft, so every counterexample below
 can be reproduced. Evidence comes from three sources:
 
 - **Explorer:** `tests/v06_session_explore.rs`, an exhaustive BFS to depth 8 with fair
@@ -35,21 +35,22 @@ in the simulator.
 | F9 | A lost `ask` is never repaired | spec bug | playback 151/1000 |
 | F10 | Renewal by a member that has just returned steals the role | spec bug | playback 19/1000 |
 | F11 | G6 as worded is false | wording | analysis plus checked operational form |
-| F12 | Two passes can name the same `next` | spec bug | scripted test `f12_two_passes_to_one_asker` |
-| F21 | F12's renewal misses a lost second pass | spec bug (open in revision 2) | the same test, second half |
+| F12 | Two passes can name the same `next` | spec bug | revision 1/2 machine; now `two_passes_to_one_asker_explored` and `f12_f21_two_passes_to_one_asker` |
+| F21 | Revision 2's F12 renewal misses a lost second pass | spec bug | same tests |
 | F13–F20 | Smaller readings | ambiguity or choice | — |
 
-**Ablation rerun against revision 2 (2026-11-23, 1,000 seeds).** The simulator has changed since the first run: it models the 128-wide `n` window, its anchors use `ratePermille`, restarts supply state, and the workload now includes publish bursts. So the seed streams differ from those cited in the sections below. With each fix off, the seeds that fail are:
+**Ablation rerun against revision 3 (2026-11-23, 1,000 seeds; machine narrowed as below).** Since the first run, the simulator also models the 128-wide `n` window, uses `ratePermille` anchors, supplies state on restart and sends publish bursts, so seed streams differ from those cited in the sections below. With each fix off, the seeds that fail are:
 
 | Fix off | Random workload | Playback script |
 | --- | --- | --- |
-| Revision 1 draft (all fixes off) | 331/1000 | 345/1000 |
-| F1 | 113/1000 | 0/1000 |
-| F2 | 249/1000 | 42/1000 |
+| Revision 1 draft (all fixes off) | 333/1000 | 345/1000 |
+| F1 | 115/1000 | 0/1000 |
+| F2 | 264/1000 | 46/1000 |
 | F9 | 0/1000 | 90/1000 |
-| F10 | 0/1000 | 14/1000 |
+| F10 | 0/1000 | 13/1000 |
+| F5–F8 together | 1/1000 (seed 930, G4) | 0/1000 |
 
-With F5, F6, F7, F8, F12 or F21 off, alone or with F5–F8 off together, no seed fails. Seed 930 no longer reproduces with the new stream. F12 and F21 are shown by the scripted test.
+With F5, F6, F7 or F8 off alone, no seed fails. F12 and F21 have no switch since revision 3 (`Claim::via`); the explorer's two-holder start and the scripted loss test show them.
 
 The early-hold buffer now does real work: about 330 messages were applied from it per 300 seeds.
 
@@ -270,7 +271,7 @@ other, the other stops."
 
 ## F12. Two passes can name the same `next` (spec bug)
 
-**Status:** adopted in revision 2: §S5 (the conflicting-pass renewal); switch `pass_conflict_renew`. Now reproduced; but it is incomplete on its own, see F21.
+**Status:** superseded in revision 3: §S4 (claims carry `via`, rule 3), §S5 (a holder that learns of a greater claim naming itself that it has not acted under renews). Revision 2's one-shot rule (`pass_conflict_renew`) was reproduced by a scripted test and has been removed.
 
 **Scenario.**
 
@@ -286,7 +287,9 @@ Neither the explorer at its bounds nor the simulator produced one.
 **Proposal (now adopted).** A holder made by a pass renews when it meets a different `pass` naming its
 claim. Alternatively, put the passer's claim in rank-1 ordering.
 
-## F21. F12's renewal misses a lost second pass (spec bug, open in revision 2)
+## F21. Revision 2's F12 renewal misses a lost second pass (spec bug)
+
+**Status:** fixed at the root in revision 3 (§S4 `via`); the machine's interim `pass_echo` has been removed.
 
 **Spec (revision 2, §S5).** "A holder made by a pass that later meets a different `pass` naming its own claim … renews."
 
@@ -298,11 +301,27 @@ claim. Alternatively, put the passer's claim in rank-1 ordering.
 4. `a` accepted its own `next` with `A`. `x`'s beats carry `2.1.x` at seq 0, which `a` already holds, so nothing repairs it. `a` resends its pass only when `x` speaks under an older claim, and `x` never does.
 5. Result: G3 and G4 fail forever after the partition heals.
 
-**Fix applied (`pass_echo`, proposed).** A passer also resends its `pass` once, on the first holder frame it gets from the new holder under `next`. The new holder then meets the different pass and renews (F12). The echo is identical to the pass, so it falls under the G2 resend exemption.
+**Revision 3 fix.** The two passes now name different claims, `2.1.x.a` and `2.1.x.b`, ordered by `via`. Whoever holds the lesser one meets frames under the greater one and accepts it. Two cases:
 
-**Remaining weakness.** If the echo itself is lost, the case stays open. Two sturdier options are a repeated echo, or letting a `state` from the claim's holder replace a different state at the same `seq`.
+- The new holder `x` is on the lesser one. It meets the greater claim naming itself, in a `pass` or in the `hello` that a member sends to correct its lesser frames, and renews to `3.0.x` with its current state.
+- `x` is on the greater one. A member on the lesser one accepts `x`'s beats, has no snapshot for that claim, sends `hello`, and gets `state`.
 
-**Proposed spec text (§S5, after the pass-resend sentence).** "It also resends it once when it first accepts a holder frame from `next.holder` under `next`."
+No single frame is needed.
+
+**Evidence.**
+
+- The explorer starts from the two-holder state (`Start::TwoHolders`) and covers both passes in any order, with loss, a duplicate and a link change: 228,196 states at depth 7, with G1–G6 checked and G4/G5 by completion.
+- The scripted test runs three cases, and each ends in one claim (`2.1.x.b` or `3.0.x`) and one state:
+  - both passes delivered;
+  - `a`'s pass to `x` lost;
+  - 300 seeds that lose 30 % of the frames from the passes on, then deliver everything.
+
+**G3 under revision 3.** The checker still holds G3 on every transition, read as: "a member that becomes holder by a pass starts with exactly its snapshot". Two cases need that reading made explicit:
+
+- A pass whose claim loses to another pass names a "new holder" that never holds under it.
+- An asker that is already holder (it took after the ask timeout, or holds another pass) renews instead of starting from the snapshot.
+
+Proposed wording: "…and a member that becomes holder by that `pass` starts with exactly its snapshot."
 
 ## F13–F20. Smaller readings (ambiguity or implementation choice)
 
@@ -337,16 +356,16 @@ claim. Alternatively, put the passer's claim in rank-1 ordering.
   core folds messages itself. `Reducer::Latest` is the §S12 rule; `Reducer::Append` is for
   logs and tests. A cell's fold should be part of its declaration in §S1. (Spec gap.)
 
-## Where the machine and revision 2 still differ
+## Where the machine and the spec differed (resolved 2026-11-23)
 
-- **Correcting lesser claims (§S4).** The machine is broader than the text in two ways, without changing any outcome the explorer or simulator distinguishes:
-  - A holder answers a lesser claim with `state` in any claim-carrying frame (`hello`, `ask`, `decline`, `pass`, holder frames, `take`), not only in holder frames and `take`.
-  - A member that released answers with `bye` any claim-carrying frame under a claim *up to and including* its released claim. So the lapse `hello` of a member that missed the `bye` (naming the released claim itself) is answered too.
-- **Gap hellos (§S8).** The once-per-second limit also covers the repeated "still no snapshot" `hello` that a beat triggers. The first `hello` after a claim change is not limited.
-- **F21.** The pass echo is in the machine (`pass_echo`) but not in revision 2.
+Revision 2 was narrower than the machine in three places. Each was tested by narrowing the machine to the spec text and rerunning the whole explorer (including the two-holder start) and the simulator (1,000 random seeds and 1,000 playback seeds). Nothing failed in any of the three, so the machine has been narrowed to the spec text and the spec needs no widening:
+
+- **N1.** A holder now corrects a lesser claim with `state` only in holder frames and `take` (§S4). Previously it also did so in `ask`, `decline` and `pass`. (A `hello` is still answered under §S8, as before.)
+- **N2.** A member that released now resends `bye` only for a holder frame or `take` under a strictly lesser claim (§S4).
+- **N3.** The once-per-second limit now applies only to gap `hello`s (§S8). The repeated "no snapshot yet" `hello` that a beat triggers is no longer limited.
 - **Automatic ordering of submits (F18).** This remains a choice of this layer.
 
-Everything else in revision 2 is checked against the machine and matches exactly:
+Everything else in revisions 2 and 3 is checked against the machine and matches exactly, including revision 3's `via` and rule 3:
 - `seen.seq` is `null` (§S3).
 - Lapsing counts only holder frames under the accepted claim, from the later of the last such frame and the last link-up, and the listener then sends `hello` to all (§S6).
 - Ask resend (§S5).
