@@ -1313,6 +1313,23 @@ pub fn check_home_call_as_signer(
     home_request(envelope, view, cfg, &mut store, req, true).map(|_| ())
 }
 
+/// [`verify_home_request`] for `POST /records/batch` serving `paths` (record paths relative to
+/// `{base}/records/`). A batch must not reach further than single-record reads: besides the
+/// conditions on the batch's own `args`, the conditions of the member's terms and of every link
+/// must hold for the `args` a single `GET {base}/records/<path>` would carry
+/// ([`home_call_args`] with the empty body), for every path. Any path out of scope refuses the
+/// whole batch with `refused:outOfScope` at §12.3 step 7, reserving nothing.
+pub fn verify_home_batch(
+    envelope: &[u8],
+    view: &AccountView,
+    cfg: &CallConfig<'_>,
+    store: &mut dyn ReplayStore,
+    req: &HomeRequest<'_>,
+    paths: &[String],
+) -> Result<VerifiedCall> {
+    home_request_with(envelope, view, cfg, store, req, false, paths)
+}
+
 fn home_request(
     envelope: &[u8],
     view: &AccountView,
@@ -1320,6 +1337,18 @@ fn home_request(
     store: &mut dyn ReplayStore,
     req: &HomeRequest<'_>,
     signer: bool,
+) -> Result<VerifiedCall> {
+    home_request_with(envelope, view, cfg, store, req, signer, &[])
+}
+
+fn home_request_with(
+    envelope: &[u8],
+    view: &AccountView,
+    cfg: &CallConfig<'_>,
+    store: &mut dyn ReplayStore,
+    req: &HomeRequest<'_>,
+    signer: bool,
+    batch_paths: &[String],
 ) -> Result<VerifiedCall> {
     let bound = home_call_args(req.method, req.path, req.body_sha256);
     let purposes = home_purposes(req.method, req.path);
@@ -1339,6 +1368,7 @@ fn home_request(
             signer,
             purposes: Some(purposes),
             names_writes: false,
+            batch_paths,
         },
     )
 }
@@ -1378,6 +1408,9 @@ struct Mode<'a> {
     purposes: Option<&'a [&'a str]>,
     /// A home write must name what it writes (`malformed` otherwise), judged at the same point.
     names_writes: bool,
+    /// The record paths a batch read serves ([`verify_home_batch`]): the conditions of the
+    /// member's and every link's terms must also hold for the `args` a single `GET` of each.
+    batch_paths: &'a [String],
 }
 
 fn verify(
@@ -1585,9 +1618,20 @@ fn verify(
                         .iter()
                         .all(|l| l.terms.allows(&call.audience, &call.purpose)));
             require_refused(allowed, Reason::OutOfScope)?;
+            let on = |args: &Value| {
+                Truth::all(
+                    std::iter::once(m.terms.conditions_on(args))
+                        .chain(call.links.iter().map(|l| l.terms.conditions_on(args))),
+                )
+            };
+            // A batch read: each path as a single-record GET would carry it, too.
+            let empty = digest(b"");
             let truth = Truth::all(
-                std::iter::once(m.terms.conditions_on(&call.args))
-                    .chain(call.links.iter().map(|l| l.terms.conditions_on(&call.args))),
+                std::iter::once(on(&call.args)).chain(
+                    mode.batch_paths
+                        .iter()
+                        .map(|p| on(&home_call_args("GET", &format!("/records/{p}"), &empty))),
+                ),
             );
             require_refused(truth != Truth::False, Reason::OutOfScope)?;
             condition_unknown = truth == Truth::Unknown;

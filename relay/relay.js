@@ -471,7 +471,10 @@ async function serveBatch(res, slot, decisions) {
     if (refusal) { records.push(refusal); continue; }
     const max = slot.classify(p) === 'blob' ? slot.limits.blobBytes : slot.limits.recordBytes;
     if (entry.size > max) throw new HttpError(500, 'Stored record exceeds its limit');
-    const bytes = await slot.readFile(p);
+    // Indexed, so it must be there: a missing or unreadable file is a storage failure (500,
+    // naming no path), never a whole-request 404. The call is spent either way.
+    let bytes;
+    try { bytes = await slot.readFile(p); } catch { throw new HttpError(500, 'Stored record failed integrity check'); }
     if (bytes.length !== entry.size || sha256(bytes) !== entry.sha256) throw new HttpError(500, 'Stored record failed integrity check');
     records.push({ path: p, status: 200, etag: `"${entry.sha256}"`, bytes: bytes.toString('base64') });
   }
@@ -546,6 +549,16 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
     else throw new Error(`Library slot ${name} needs tokenSha256, a token of at least 16 characters, or open: true`);
   }
   for (const [name, e] of table.rows) if (!homeSlots.has(name)) homeSlots.set(name, { base: e.base, account: e.account });
+  // Replay tables are per slot: two slots serving one account at one base would each take the
+  // same captured call once. One account, one home slot per base.
+  const bases = new Map();
+  for (const [name, { base, account }] of homeSlots) {
+    let normal;
+    try { normal = new URL(base).href.replace(/\/+$/, ''); } catch { normal = base; }
+    const other = bases.get(`${account} ${normal}`);
+    if (other !== undefined) throw new Error(`Home slots ${other} and ${name} both serve account ${account} at base ${normal}: a base names one home slot per account`);
+    bases.set(`${account} ${normal}`, name);
+  }
   const configured = new Set(Object.keys(libraries ?? {}));
   // Gate "grant": the operator account is one of this home's own slots, and the door's audience
   // is its own. A slot named but not set up yet is not a start-up failure (every grant request is

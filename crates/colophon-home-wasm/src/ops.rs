@@ -10,8 +10,8 @@
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use colophon_core::v05::account::{Account, Identity};
 use colophon_core::v05::calls::{
-    home_purposes, home_record_writes, verify_call, verify_home_request, AccountView, Call,
-    CallConfig, CallSigner, HomeRequest, HomeWrite,
+    home_purposes, home_record_writes, verify_call, verify_home_batch, verify_home_request,
+    AccountView, Call, CallConfig, CallSigner, HomeRequest, HomeWrite,
 };
 use colophon_core::v05::descriptor::HistoryAccess;
 use colophon_core::v05::encoding::{bounds, canonical, digest, parse_date, strict_parse};
@@ -608,7 +608,15 @@ fn access(req: &Value) -> R<Value> {
         },
         writes,
     };
-    let vc = match verify_home_request(&call, &account_view, &cfg, &mut store, &request) {
+    // A batch reaches no further than single-record reads: the call's conditions must hold for
+    // each path as a single GET of it would carry them, or the whole batch is refused.
+    let verified = match &batch {
+        Some((_, paths)) => {
+            verify_home_batch(&call, &account_view, &cfg, &mut store, &request, paths)
+        }
+        None => verify_home_request(&call, &account_view, &cfg, &mut store, &request),
+    };
+    let vc = match verified {
         Ok(vc) => vc,
         Err(f) => return refuse(f.code()),
     };

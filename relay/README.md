@@ -56,7 +56,10 @@ An unappointed home returns 404 before checking credentials or parsing the body.
 An appointed home applies its per-address rate limit and checks for a Colophon
 authorization header and valid batch structure before taking the slot lock.
 It then verifies the bound call under its replay rules. Any current member
-calling with its own key may read ciphertext records in any namespace. E2EE
+calling with its own key may read ciphertext records in any namespace. A batch
+reaches no further than single GETs: the conditions of the member's terms and of
+every link must hold for each path as a single GET of it would carry them, or the
+whole batch is refused with `refused:outOfScope` before anything is reserved or read. E2EE
 epoch keys control who can decrypt those records.
 
 - Every home batch requires a `colophon.home.read` call, including batches of
@@ -72,7 +75,8 @@ with `Retry-After`. If the home's own head needs to be refreshed and cannot be
 signed, its entry returns 503.
 
 Records are checked against their indexed size and SHA-256 before serving; storage
-corruption fails the whole request with 500 and no per-item results. Clients can
+corruption, or an indexed record that is missing or unreadable, fails the whole request
+with 500, no path named and no per-item results. Clients can
 fall back to single-record GETs to fetch the unaffected paths. Answers carry `Cache-Control: no-store,
 no-transform` and the configured CORS headers. Each response has a strict 4 MiB
 encoded JSON/base64 budget, including response framing and per-record overhead.
@@ -122,7 +126,7 @@ home holds no account secret: no controller or member key, no PRF output, no see
 | Config file | `COLOPHON_RELAY_CONFIG` or `--config` | none |
 | Plain tokens | `COLOPHON_RELAY_TOKENS="slot=token,…"` (or `tokenSha256` in a config file) | none |
 | Token-free slots (tests only) | `COLOPHON_RELAY_OPEN="slot"` | none |
-| Home slots | `COLOPHON_RELAY_HOME_SLOTS="slot=<account ID>@<base URL>,…"` (config: `libraries.slot = {"home":true,"account":…,"base":…}`) | none |
+| Home slots | `COLOPHON_RELAY_HOME_SLOTS="slot=<account ID>@<base URL>,…"` (config: `libraries.slot = {"home":true,"account":…,"base":…}`). Two home slots for one account at one base (after normalizing case and trailing slashes) are refused at start-up: replay tables are per slot, so one captured call could be taken once in each | none |
 | Home key | `COLOPHON_HOME_KEY_FILE` (preferred) or `home.keyFile` in the config; `COLOPHON_HOME_KEY` (the JWK itself) is readable from the process environment, so prefer a file | required for a home |
 | Home module | `COLOPHON_HOME_WASM`, or `home.wasm` | required for a home |
 | Scheduler tick | `COLOPHON_RELAY_TICK_MS` or `tickMs` | `2000` |

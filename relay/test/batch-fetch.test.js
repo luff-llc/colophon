@@ -366,6 +366,56 @@ describe('home batch record fetch', { skip: existsSync(wasm) ? false : 'build co
     assert.deepEqual(await replay.json(), { result: 'refused:replay' });
   });
 
+  test('two home slots for one account at one base are refused at start-up', async () => {
+    const upper = fixture.base.replace(/^(https?:\/\/)([^/]+)/, (_, s, h) => s + h.toUpperCase());
+    for (const second of [fixture.base, `${fixture.base}/`, upper]) {
+      const other = await mkdtemp(path.join(tmpdir(), 'colophon-home-dup-'));
+      try {
+        await assert.rejects(startRelay({
+          port: 0, dataDir: other, clock: () => fixture.now, home: { wasm, key: fixture.key },
+          libraries: {
+            one: { home: true, base: fixture.base, account: fixture.account },
+            two: { home: true, base: second, account: fixture.account },
+          },
+        }), /Home slots one and two both serve account/);
+      } finally { await rm(other, { recursive: true, force: true }); }
+    }
+  });
+
+  test('an indexed record that is gone or unreadable fails the batch with a generic 500', async () => {
+    const expectStorageFailure = async (paths) => {
+      const body = batchBody(paths);
+      const authorization = await sign(body);
+      const res = await post(body, authorization);
+      assert.equal(res.status, 500);
+      const error = await res.text();
+      for (const p of paths) assert.equal(error.includes(p), false, `${p} leaked`);
+      assert.equal(JSON.parse(error).records, undefined);
+      const replay = await post(body, authorization);
+      assert.equal(replay.status, 403);
+      assert.deepEqual(await replay.json(), { result: 'refused:replay' });
+    };
+    // Deleted after indexing: still in the index, gone from disk.
+    const deleted = record('deleted');
+    await slot.putImmutable(deleted, Buffer.from('kept in the index'));
+    await unlink(path.join(slot.root, 'records', deleted));
+    assert.ok(slot.current.has(deleted));
+    await expectStorageFailure([history, deleted]);
+    // Deleted between the index lookup and the read, and any other read failure.
+    const raced = record('raced');
+    await slot.putImmutable(raced, Buffer.from('raced'));
+    const readFile = slot.readFile;
+    try {
+      slot.readFile = async function (p) {
+        if (p === raced) await unlink(path.join(this.root, 'records', p));
+        return readFile.call(this, p);
+      };
+      await expectStorageFailure([history, raced]);
+      slot.readFile = async (p) => { throw new Error(`EIO reading ${p}`); };
+      await expectStorageFailure([history]);
+    } finally { slot.readFile = readFile; }
+  });
+
   test('rate limits batch requests before reading or authenticating their bodies', async () => {
     slot.home.rate.perMinute = 1;
     try {
