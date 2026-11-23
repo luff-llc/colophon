@@ -26,3 +26,29 @@ steps = [
   "check rust: exit 0",
   "home 1be97435e6 to https://colophon.toolsperson.com: exit 1",
 ]
+
+[[entry]]
+id = "2026-11-23T10:43:47Z/staging-home/1339f1c98e/ffeb95ca"
+at = "2026-11-23T10:43:47Z"
+by = "claude"
+action = "deploy"
+product = "colophon"
+channel = "staging-home"
+tier = "staging"
+target = "https://colophon.toolsperson.com"
+ref = "main"
+commit = "1339f1c98eda99d4633b953241144e7c02b58c83"
+tree = "5c1d5d410213d010d5a39a0d03dd77c183e472a9"
+version = "0.6.0-dev"
+platform = "home"
+result = "ok"
+prev = "d56a0563c51123ea7eab936ee5739e73e9785b1df7b217f195ae457115a3e92f"
+receipt = "ffeb95cadfbbd84303f0006f8849fc1f"
+command = [
+  "home 1339f1c98e to https://colophon.toolsperson.com: {var.home_kit_script} release {commit}",
+]
+steps = [
+  "check rust: exit 0",
+  "home 1339f1c98e to https://colophon.toolsperson.com: exit 0",
+  "probe: exit 0",
+]
