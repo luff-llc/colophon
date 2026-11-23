@@ -119,7 +119,8 @@ A rollback therefore never delays anything past its configured duration.
    its body as a length. The `url` field itself carries the ticket, so the host must not log it
    or its own WebSocket URL.
 7. Use `subscribe`, `unsubscribe` and `session_frame` to build client frames for session cells.
-   They work only while the stream is live.
+   They work only while the stream is live. `session_frame` takes the session codec's frame
+   bytes as text and carries them verbatim as the message's `frame` value (stream §5.2).
 
 ### Behaviour
 

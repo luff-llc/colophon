@@ -137,7 +137,7 @@ fn ticket_hello_change_wakes_once_per_burst_and_persists_the_cursor() {
         2_000,
     );
     assert_eq!(s.next(2_250), StreamStep::Wake);
-    let sess = r#"{"type":"session","n":8,"frame":{"body":"e30=","signature":"AA=="}}"#;
+    let sess = r#"{"type":"session","n":8,"frame":{"account":"a","ciphertext":"AA==","signature":"AA=="}}"#;
     assert_eq!(
         s.on_frame(sess, 3_000),
         [StreamEvent::Session(sess.to_string())],
@@ -1278,4 +1278,39 @@ fn requests_never_show_their_authorization_in_debug() {
     let shown = format!("{req:?} {req:#?}");
     assert!(!shown.contains(&encoded["Colophon ".len()..]), "{shown}");
     assert!(shown.contains("<redacted>"));
+}
+
+#[test]
+fn a_session_frame_is_carried_byte_for_byte() {
+    let mut s = HomeStream::new("h", "https://home.example/", StreamConfig::default(), None);
+    // Not live yet: nothing to send on.
+    assert!(s.session_frame("{}", None).is_err());
+    connect(&mut s, 0, 1, "c.1");
+    // Real codec frames (the 0.6 session wire vectors), with and without a delegation.
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../conformance/0.6-sessions/wire/vectors.json");
+    let vectors: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    for (i, v) in vectors["frames"].as_array().unwrap().iter().enumerate() {
+        let frame = v["frame"].as_str().unwrap();
+        let id = format!("f{i}");
+        let msg = s.session_frame(frame, Some(&id)).unwrap();
+        assert_eq!(
+            msg,
+            format!("{{\"type\":\"session\",\"id\":\"{id}\",\"frame\":{frame}}}")
+        );
+        let parsed: Value = serde_json::from_str(&msg).unwrap();
+        assert_eq!(parsed["frame"], serde_json::from_str::<Value>(frame).unwrap());
+        let bare = s.session_frame(frame, None).unwrap();
+        assert_eq!(bare, format!("{{\"type\":\"session\",\"frame\":{frame}}}"));
+    }
+    // An id is escaped as a JSON string.
+    let quoted = s.session_frame("{}", Some("a\"b")).unwrap();
+    let parsed: Value = serde_json::from_str(&quoted).unwrap();
+    assert_eq!(parsed["id"], "a\"b");
+    // Not a strict JSON object: refused.
+    for bad in ["[]", "\"x\"", "{", r#"{"a":1,"a":2}"#, "{} {}"] {
+        assert!(s.session_frame(bad, None).is_err(), "{bad}");
+    }
+    let big = format!("{{\"a\":\"{}\"}}", "A".repeat(16_384));
+    assert!(s.session_frame(&big, None).is_err());
 }

@@ -21,6 +21,7 @@
 //! read here.
 use super::exchange::{Method, Request, Response};
 use super::{Engine, RecordSource};
+use crate::v05::encoding::strict_parse;
 use crate::v05::{malformed, require, Result};
 use serde_json::{json, Value};
 
@@ -990,29 +991,31 @@ impl HomeStream {
         }
         Ok(v.to_string())
     }
-    /// A `session` frame carrying `envelope` (the session layer's `{"body","signature"}` JSON,
-    /// at most 16,384 bytes) to send on the live socket. The envelope is not judged here.
-    pub fn session_frame(&self, envelope: &str, id: Option<&str>) -> Result<String> {
+    /// A `session` message carrying `frame` (the session codec's frame: one canonical JSON
+    /// object, at most 16,384 bytes) to send on the live socket. The frame must be a strict JSON
+    /// object and is otherwise not judged here; its text is carried verbatim, so the home and
+    /// every receiver see the bytes the codec produced.
+    pub fn session_frame(&self, frame: &str, id: Option<&str>) -> Result<String> {
         require(
             self.status() == StreamStatus::Live,
             "the stream is not live",
         )?;
         require(
-            envelope.len() <= MAX_SESSION_FRAME,
+            frame.len() <= MAX_SESSION_FRAME,
             "a session frame is at most 16,384 bytes",
         )?;
         require(
             id.is_none_or(|i| i.len() <= 64),
             "an id is at most 64 characters",
         )?;
-        let frame: Value = serde_json::from_str(envelope)
-            .map_err(|_| malformed("the session envelope is not JSON"))?;
-        require(frame.is_object(), "the session envelope is an object")?;
-        let mut v = json!({"type": "session", "frame": frame});
-        if let Some(i) = id {
-            v["id"] = json!(i);
-        }
-        Ok(v.to_string())
+        let parsed = strict_parse(frame.as_bytes())
+            .map_err(|_| malformed("the session frame is not strict JSON"))?;
+        require(parsed.is_object(), "the session frame is an object")?;
+        let id = match id {
+            Some(i) => format!(",\"id\":{}", Value::from(i)),
+            None => String::new(),
+        };
+        Ok(format!("{{\"type\":\"session\"{id},\"frame\":{frame}}}"))
     }
 
     // ---------------------------------------------------------------------------------------
