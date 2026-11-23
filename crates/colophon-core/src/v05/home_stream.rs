@@ -9,10 +9,9 @@
 //! inside the frame. Notice routes are host configuration, not account objects: who may change
 //! one, how many a principal may hold, and what an address may look like are decided here so
 //! that every home applies one rule.
-use super::encoding::{hex, strict_parse};
+use super::encoding::{canonical, hex, strict_parse};
 use super::records::is_member_id;
 use super::terms::{valid_namespace, Access, Terms};
-use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use serde_json::Value;
 
 /// The protocol of a session frame body (§S3).
@@ -49,7 +48,7 @@ pub fn stream_namespaces(terms: &Terms) -> Vec<(String, Access)> {
 /// code is a diagnostic for the sending connection only.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FrameRefusal {
-    /// Not a raw envelope over a JSON body with well-formed outer fields.
+    /// Not the codec's frame: strict canonical JSON with exactly the §S3 fields, well formed.
     Malformed(&'static str),
     /// Larger than [`SESSION_FRAME_BYTES`].
     TooLarge,
@@ -90,13 +89,40 @@ pub struct SessionOuter {
     pub retain: bool,
 }
 
+/// The top-level fields of a session frame (sessions §S3; `docs/colophon-0.6-sessions-wire.md`
+/// §3.1). A frame with any other field is refused.
+pub const SESSION_FRAME_FIELDS: [&str; 13] = [
+    "account",
+    "cell",
+    "ciphertext",
+    "delegation",
+    "epoch",
+    "from",
+    "key",
+    "n",
+    "namespace",
+    "protocol",
+    "retain",
+    "signature",
+    "to",
+];
+/// The largest `n` or `epoch` a frame carries: 2^53 − 1 (§S3).
+const MAX_FRAME_INT: u64 = (1 << 53) - 1;
+
 /// Check a session frame a member sent on its stream (§S3 outer fields, §S9 home carrier).
-/// `encoded` is the frame exactly as it will be forwarded: a raw envelope
-/// `{"body":"<base64>","signature":"<base64>"}` whose body is the frame's JSON. Only `protocol`,
-/// `account`, `namespace`, `cell`, `from`, `to` and `retain` are read; every other field
-/// (`key`, `n`, `epoch`, `nonce`, `ciphertext`, the signature) is opaque. `member` is the
-/// member the connection authenticated as, `entitled` the namespaces it holds `records` entries
-/// for, as [`stream_namespaces`] gives them at the home's committed history.
+///
+/// `encoded` is the frame exactly as it will be forwarded: the session codec's frame, one
+/// canonical JSON object with the §S3 fields and no others. The check is strict: the bytes are
+/// strict JSON (no duplicate names, no lone surrogates, nesting at most 64), an object, and
+/// identical to their canonical encoding, so what the home forwards is always bytes a receiver's
+/// codec can parse. An unknown top-level field is refused, as a receiver refuses it.
+///
+/// Only `protocol`, `account`, `namespace`, `cell`, `from`, `to` and `retain` are read. `key`,
+/// `n`, `epoch`, `ciphertext`, `signature` and `delegation` are opaque: each must be present
+/// (`delegation` only when given) with its §S3 JSON type (strings; integers from 1 to 2^53 − 1;
+/// an object), and nothing more is decoded, verified or kept. `member` is the member the
+/// connection authenticated as, `entitled` the namespaces it holds `records` entries for, as
+/// [`stream_namespaces`] gives them at the home's committed history.
 pub fn check_session_frame(
     encoded: &[u8],
     account: &str,
@@ -106,27 +132,17 @@ pub fn check_session_frame(
     if encoded.len() > SESSION_FRAME_BYTES {
         return Err(FrameRefusal::TooLarge);
     }
-    let envelope =
+    let frame =
         strict_parse(encoded).map_err(|_| FrameRefusal::Malformed("frame is not strict JSON"))?;
-    let Value::Object(env) = &envelope else {
-        return Err(FrameRefusal::Malformed("frame is not an envelope"));
+    let Value::Object(f) = &frame else {
+        return Err(FrameRefusal::Malformed("frame is not an object"));
     };
-    // A raw-signed object's envelope carries exactly `body` and `signature` (0.5 §4.1).
-    if env.len() != 2 || !env.get("signature").is_some_and(Value::is_string) {
-        return Err(FrameRefusal::Malformed(
-            "frame envelope is not body and signature",
-        ));
+    if canonical(&frame).ok().as_deref() != Some(encoded) {
+        return Err(FrameRefusal::Malformed("frame is not canonical JSON"));
     }
-    let body = env
-        .get("body")
-        .and_then(Value::as_str)
-        .and_then(|b| B64.decode(b).ok())
-        .ok_or(FrameRefusal::Malformed("frame body is not base64"))?;
-    let body = strict_parse(&body)
-        .map_err(|_| FrameRefusal::Malformed("frame body is not strict JSON"))?;
-    let Value::Object(f) = &body else {
-        return Err(FrameRefusal::Malformed("frame body is not an object"));
-    };
+    if f.keys().any(|k| !SESSION_FRAME_FIELDS.contains(&k.as_str())) {
+        return Err(FrameRefusal::Malformed("frame has an unknown field"));
+    }
     let text = |k: &'static str| f.get(k).and_then(Value::as_str);
     if text("protocol") != Some(SESSION_PROTOCOL) {
         return Err(FrameRefusal::Malformed(
@@ -153,6 +169,31 @@ pub fn check_session_frame(
         Some(Value::Bool(true)) => true,
         Some(_) => return Err(FrameRefusal::Malformed("retain is only true")),
     };
+    // The opaque fields: present and of their type, never decoded.
+    for k in ["key", "ciphertext", "signature"] {
+        if text(k).is_none() {
+            return Err(FrameRefusal::Malformed(match k {
+                "key" => "key is not a string",
+                "ciphertext" => "ciphertext is not a string",
+                _ => "signature is not a string",
+            }));
+        }
+    }
+    let counter = |k: &'static str| {
+        f.get(k)
+            .filter(|v| !v.is_f64())
+            .and_then(Value::as_u64)
+            .is_some_and(|x| (1..=MAX_FRAME_INT).contains(&x))
+    };
+    if !counter("n") {
+        return Err(FrameRefusal::Malformed("n is not an integer from 1"));
+    }
+    if !counter("epoch") {
+        return Err(FrameRefusal::Malformed("epoch is not an integer from 1"));
+    }
+    if f.get("delegation").is_some_and(|d| !d.is_object()) {
+        return Err(FrameRefusal::Malformed("delegation is not an object"));
+    }
     if frame_account != account {
         return Err(FrameRefusal::Account);
     }
@@ -378,22 +419,31 @@ pub fn route_change(
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 
     const ACCOUNT: &str = "1b420a5e226586586d53eab23862f233e12dce1a5532f36e4b1d578fa0edfb6a";
     const A: &str = "7f5be46131fa76b0fb7050f5779a5a21";
     const B: &str = "3959fc4d14735eaf9b9751593d868541";
 
+    /// The frame's canonical bytes, as the session codec emits them.
     fn frame(body: Value) -> Vec<u8> {
-        let body = B64.encode(serde_json::to_vec(&body).unwrap());
-        serde_json::to_vec(&serde_json::json!({"body": body, "signature": "AAAA"})).unwrap()
+        canonical(&body).unwrap()
     }
+    /// A frame in the codec's form. The home never opens the ciphertext or checks the
+    /// signature, so both are placeholders of the right type.
     fn body() -> Value {
         serde_json::json!({"protocol": SESSION_PROTOCOL, "account": ACCOUNT, "namespace": "notes",
-            "cell": "now-playing", "from": A, "key": "k", "n": 1, "epoch": 1,
-            "nonce": "AAAAAAAAAAAAAAAA", "ciphertext": "AAAA"})
+            "cell": "now-playing", "from": A, "key": "2bad0fd610d99eae443e932a26142bca", "n": 1,
+            "epoch": 1, "ciphertext": "AAAAAAAAAAAAAAAAAAAAAA==", "signature": "AAAA"})
     }
     fn notes() -> Vec<String> {
         vec!["notes".to_string()]
+    }
+    fn malformed(bytes: &[u8]) -> bool {
+        matches!(
+            check_session_frame(bytes, ACCOUNT, A, &notes()),
+            Err(FrameRefusal::Malformed(_))
+        )
     }
 
     #[test]
@@ -401,6 +451,7 @@ mod tests {
         let mut b = body();
         b["to"] = B.into();
         b["retain"] = true.into();
+        b["delegation"] = serde_json::json!({"body": "e30=", "signature": "AAAA"});
         let outer = check_session_frame(&frame(b), ACCOUNT, A, &notes()).unwrap();
         assert_eq!(
             outer,
@@ -417,13 +468,43 @@ mod tests {
     }
 
     #[test]
-    fn opaque_fields_are_not_judged() {
+    fn opaque_fields_are_typed_but_not_judged() {
+        // Values no receiver would accept still pass: the home does not decode them.
         let mut b = body();
-        b["n"] = "not a number".into();
-        b["ciphertext"] = serde_json::json!({"anything": [1, 2]});
-        b.as_object_mut().unwrap().remove("nonce");
-        b["future"] = true.into();
+        b["key"] = "not a key id".into();
+        b["ciphertext"] = "!!".into();
+        b["signature"] = "".into();
+        b["delegation"] = serde_json::json!({"anything": [1, 2]});
+        b["n"] = MAX_FRAME_INT.into();
         assert!(check_session_frame(&frame(b), ACCOUNT, A, &notes()).is_ok());
+        // Absent or wrongly typed, they are refused.
+        for (field, value) in [
+            ("key", None),
+            ("key", Some(Value::from(7))),
+            ("n", None),
+            ("n", Some(Value::from("1"))),
+            ("n", Some(Value::from(0))),
+            ("n", Some(Value::from(MAX_FRAME_INT + 1))),
+            ("n", Some(Value::from(1.5))),
+            ("n", Some(Value::from(-1))),
+            ("epoch", None),
+            ("epoch", Some(Value::from(0))),
+            ("ciphertext", None),
+            ("ciphertext", Some(serde_json::json!({"anything": [1, 2]}))),
+            ("signature", None),
+            ("signature", Some(Value::Null)),
+            ("delegation", Some(Value::from("e30="))),
+            ("delegation", Some(Value::Null)),
+        ] {
+            let mut b = body();
+            match value {
+                Some(v) => b[field] = v,
+                None => {
+                    b.as_object_mut().unwrap().remove(field);
+                }
+            }
+            assert!(malformed(&frame(b)), "{field}");
+        }
     }
 
     #[test]
@@ -443,7 +524,7 @@ mod tests {
     }
 
     #[test]
-    fn malformed_outer_fields_and_envelopes_are_refused() {
+    fn malformed_outer_fields_are_refused() {
         for (field, value) in [
             ("protocol", Value::from("colophon/session/5")),
             ("cell", Value::from("Now Playing")),
@@ -451,31 +532,63 @@ mod tests {
             ("namespace", Value::from("Notes")),
             ("from", Value::from("not-an-id")),
             ("to", Value::from(7)),
+            ("to", Value::from("not-an-id")),
             ("retain", Value::from(false)),
+            ("account", Value::from(1)),
         ] {
             let mut b = body();
             b[field] = value;
-            assert!(
-                matches!(
-                    check_session_frame(&frame(b), ACCOUNT, A, &notes()),
-                    Err(FrameRefusal::Malformed(_))
-                ),
-                "{field}"
-            );
+            assert!(malformed(&frame(b)), "{field}");
         }
-        let bad_envelopes: [&[u8]; 5] = [
-            b"[]",
-            b"{\"body\":\"e30=\"}",
-            b"{\"body\":\"e30=\",\"signature\":\"x\",\"assertion\":{}}",
-            b"{\"body\":\"!!\",\"signature\":\"x\"}",
-            b"{\"body\":\"e30=\",\"body\":\"e30=\",\"signature\":\"x\"}",
-        ];
-        for env in bad_envelopes {
-            assert!(matches!(
-                check_session_frame(env, ACCOUNT, A, &notes()),
-                Err(FrameRefusal::Malformed(_))
-            ));
+        for field in ["protocol", "account", "namespace", "cell", "from"] {
+            let mut b = body();
+            b.as_object_mut().unwrap().remove(field);
+            assert!(malformed(&frame(b)), "{field}");
         }
+    }
+
+    #[test]
+    fn only_the_codec_form_is_accepted() {
+        // Unknown top-level fields, as a receiver's codec refuses them.
+        for extra in ["nonce", "future", "body"] {
+            let mut b = body();
+            b[extra] = "AAAA".into();
+            assert!(malformed(&frame(b)), "{extra}");
+        }
+        // The former envelope over a base64 body is refused, whatever the body holds.
+        let inner = String::from_utf8(frame(body())).unwrap();
+        let envelope = serde_json::json!({"body": B64.encode(inner), "signature": "AAAA"});
+        assert!(malformed(&frame(envelope)));
+        // Not an object, not strict JSON, or not canonical.
+        let canonical_text = String::from_utf8(frame(body())).unwrap();
+        let spaced = canonical_text.replacen(':', ": ", 1);
+        let reordered = serde_json::to_string(&body())
+            .unwrap()
+            .replacen("{\"account\"", "{\"zz\":0,\"account\"", 1);
+        let duplicate = canonical_text.replacen("{", "{\"account\":\"x\",", 1);
+        let escaped = canonical_text.replacen("now-playing", "now\\u002dplaying", 1);
+        let float = canonical_text.replacen("\"n\":1", "\"n\":1.0", 1);
+        for bad in [
+            "[]".to_string(),
+            "\"frame\"".to_string(),
+            "{".to_string(),
+            format!("{canonical_text} "),
+            spaced,
+            reordered,
+            duplicate,
+            escaped,
+            float,
+        ] {
+            assert!(malformed(bad.as_bytes()), "{bad}");
+        }
+        // Keys out of byte order are not canonical either.
+        let swapped = canonical_text.replacen(
+            &format!("\"account\":\"{ACCOUNT}\",\"cell\":\"now-playing\""),
+            &format!("\"cell\":\"now-playing\",\"account\":\"{ACCOUNT}\""),
+            1,
+        );
+        assert_ne!(swapped, canonical_text);
+        assert!(malformed(swapped.as_bytes()));
     }
 
     #[test]
@@ -489,6 +602,13 @@ mod tests {
             Err(FrameRefusal::TooLarge)
         );
         assert_eq!(FrameRefusal::TooLarge.code(), "tooLarge");
+        // Exactly at the limit is accepted.
+        let mut b = body();
+        let base = frame(b.clone()).len() - "AAAAAAAAAAAAAAAAAAAAAA==".len();
+        b["ciphertext"] = "A".repeat(SESSION_FRAME_BYTES - base).into();
+        let edge = frame(b);
+        assert_eq!(edge.len(), SESSION_FRAME_BYTES);
+        assert!(check_session_frame(&edge, ACCOUNT, A, &notes()).is_ok());
     }
 
     #[test]

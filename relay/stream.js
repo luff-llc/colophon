@@ -392,6 +392,13 @@ export class HomeStream {
     if (!conn.member) { conn.refused += 1; this.counters.refused += 1; this.error(conn, 'notEntitled', ref); return; }
     const { frame } = msg;
     if (!frame || typeof frame !== 'object' || Array.isArray(frame)) { this.error(conn, 'badFrame', ref); return; }
+    // The frame is the session codec's: one canonical JSON object (sessions §S3). The module
+    // checks this serialisation and refuses it unless it is canonical. A codec frame holds only
+    // strings, `true`, integers up to 2^53 − 1 and objects of those (the delegation), which
+    // JSON.parse and JSON.stringify carry without loss and, for keys already in byte order and
+    // none of them integer-like, in the same order: so `encoded` is the sender's exact bytes.
+    // The object is never changed after this, and `send` serialises it with the same function,
+    // so every receiver, live or by retained replay, gets `encoded` byte for byte.
     const encoded = JSON.stringify(frame);
     const r = this.home.wasm.call({ op: 'session_frame', frame: encoded, account: this.home.account, member: conn.member, entitled: conn.namespaces });
     if (!r.allowed) {
