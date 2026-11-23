@@ -485,6 +485,10 @@ impl State {
             })
             .collect()
     }
+    /// The highest seq `home` is known to hold of the verified history (0 when unknown).
+    pub(crate) fn acked(&self, home: &str) -> u64 {
+        self.homes.get(home).map_or(0, |h| h.acked)
+    }
     pub(crate) fn import(&mut self, saved: BTreeMap<String, SavedHome>, verified_seq: u64) {
         for (k, h) in saved.into_iter().take(16) {
             let e = self.homes.entry(k).or_default();

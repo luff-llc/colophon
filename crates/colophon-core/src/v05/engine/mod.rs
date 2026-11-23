@@ -44,6 +44,7 @@ pub mod exchange;
 pub mod live;
 pub mod paths;
 pub mod seal;
+pub mod stream;
 
 use paths::Kind;
 
