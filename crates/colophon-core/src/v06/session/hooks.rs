@@ -20,6 +20,17 @@ impl Session {
         if !self.joined || from == self.me {
             return out;
         }
+        if self.probe_budget(from, now) {
+            self.fresh_now = now;
+            self.send_hello_echo(&mut out, Some(from), false, Vec::new(), now);
+        }
+        out
+    }
+
+    /// Spend the probe budget for a `hello` to `from`: at most once per `askTimeoutMs` per
+    /// member and [`PROBES_PER_SECOND`] in all. Unknown-key hellos and answers to hellos of
+    /// keys without an open window share it.
+    pub(super) fn probe_budget(&mut self, from: &str, now: u64) -> bool {
         let ask = self.policy.ask_timeout_ms;
         let due = self
             .probed
@@ -32,14 +43,13 @@ impl Session {
         {
             self.probe_times.pop_front();
         }
-        if due && self.probe_times.len() < PROBES_PER_SECOND {
-            self.fresh_now = now;
-            self.probed.retain(|_, t| now.saturating_sub(*t) < ask);
-            self.probed.insert(from.to_owned(), now);
-            self.probe_times.push_back(now);
-            self.send_hello_echo(&mut out, Some(from), false, Vec::new(), now);
+        if !due || self.probe_times.len() >= PROBES_PER_SECOND {
+            return false;
         }
-        out
+        self.probed.retain(|_, t| now.saturating_sub(*t) < ask);
+        self.probed.insert(from.to_owned(), now);
+        self.probe_times.push_back(now);
+        true
     }
 
     /// `member`'s session key `key` stopped being accepted (§S2: its delegation no longer

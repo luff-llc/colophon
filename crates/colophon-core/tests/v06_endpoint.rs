@@ -127,6 +127,7 @@ impl Net {
                     continue;
                 }
                 let s = self.eps[f.to].receive(&f.bytes, clock(self.now), &epochs());
+                assert!(self.eps[f.to].keys_consistent(), "codec and machine key sets differ");
                 self.post(f.to, s);
             }
             for i in 0..self.eps.len() {
@@ -556,6 +557,7 @@ fn exchange(a: &mut Endpoint, b: &mut Endpoint, frames: Vec<Vec<u8>>, t: u64) ->
         for f in wire.drain(..) {
             sent.push(f.clone());
             back.extend(b.receive(&f, clock(t), &ep).frames().map(<[u8]>::to_vec).collect::<Vec<_>>());
+            assert!(b.keys_consistent());
         }
         for f in back {
             wire.extend(a.receive(&f, clock(t), &ep).frames().map(<[u8]>::to_vec).collect::<Vec<_>>());
@@ -592,7 +594,8 @@ fn a_closed_key_reopens_only_through_a_new_challenge() {
             first = sent;
             assert!(b.machine().window_admits(&w.a.id, a.key_id(), u64::MAX));
         }
-        t += 10;
+        // Restarts at least askTimeoutMs apart: answers to new keys share the probe limit.
+        t += 2_000;
     }
     let k1 = keys[0].key_id().to_owned();
     assert!(!b.machine().knows_key(&w.a.id, &k1), "the fifth key closed the first");
@@ -618,6 +621,7 @@ fn a_closed_key_reopens_only_through_a_new_challenge() {
     f.extend(frames_of(keys[0].link_up(clock(t), &ep)));
     exchange(&mut keys[0], &mut b, f, t);
     assert!(!b.machine().window_admits(&w.a.id, &k1, u64::MAX));
+    t += 2_000;
     let p1 = frames_of(keys[0].command(Command::Publish { id: id("p1"), payload: bytes("p1") }, clock(t), &ep));
     exchange(&mut keys[0], &mut b, p1, t);
     assert!(b.machine().window_admits(&w.a.id, &k1, u64::MAX), "the owner reopened it");
@@ -758,4 +762,67 @@ fn policies_are_checked_at_construction() {
         let e = Endpoint::new(cell(), &w.a.id, p.clone(), None, w.view(), &mut [1; 32], [1; 16], clock(0));
         assert!(matches!(e, Err(EndpointError::Policy(_))), "{p:?}");
     }
+}
+
+/// Third review: with four open keys and four candidates of `a`, a ninth authentic candidate
+/// `hello` must not cost an open key its replay window. The machine drops a candidate; the
+/// codec follows it exactly; a replay of an open key's old frame is still a replay.
+#[test]
+fn a_ninth_key_never_evicts_an_open_keys_replay_window() {
+    let w = world();
+    let view = w.view();
+    let ep = epochs();
+    let mut b = endpoint(&w.b, &view, 170, Policy::default());
+    b.command(Command::Join { state: None }, clock(0), &ep);
+    let mut keys: Vec<Endpoint> = (0..9).map(|i| endpoint(&w.a, &view, 171 + i, Policy::default())).collect();
+    let mut presence = None;
+    for (i, a) in keys.iter_mut().enumerate().take(4) {
+        let t = 10 + 2_000 * i as u64;
+        let f = frames_of(a.command(Command::Join { state: None }, clock(t), &ep));
+        exchange(a, &mut b, f, t);
+        if i == 0 {
+            let p = frames_of(a.command(Command::Presence { payload: bytes("here") }, clock(t), &ep));
+            for x in &p {
+                let s = b.receive(x, clock(t), &ep);
+                assert!(s.events().any(|e| matches!(e, Event::PresenceChanged { .. })));
+            }
+            presence = p.into_iter().next();
+        }
+    }
+    assert_eq!(b.machine().windows_for(&w.a.id), 4);
+    // Four candidates: hellos whose answers never reach them (the probe limit spaces them).
+    for (i, a) in keys.iter_mut().enumerate().skip(4) {
+        let t = 10_000 + 2_000 * i as u64;
+        for x in frames_of(a.command(Command::Join { state: None }, clock(t), &ep)) {
+            b.receive(&x, clock(t), &ep);
+            assert!(b.keys_consistent());
+        }
+    }
+    assert_eq!(b.machine().candidates_for(&w.a.id), 4);
+    assert_eq!(b.receiver().keys_for(&w.a.id), 8);
+    // (The ninth key arrived last: the previous codec dropped the oldest cached key, an open
+    // one, while the machine dropped a candidate.)
+    let replay = presence.unwrap();
+    let s = b.receive(&replay, clock(30_000), &ep);
+    assert_eq!(s.dropped.map(|d| d.reason), Some(DropReason::Replay), "the open key kept its window");
+    assert!(b.keys_consistent());
+    assert_eq!(b.machine().windows_for(&w.a.id), 4);
+}
+
+/// Third review: old candidate hellos are answered only under the probe limit.
+#[test]
+fn candidate_hellos_are_answered_under_the_probe_limit() {
+    let w = world();
+    let view = w.view();
+    let ep = epochs();
+    let mut b = endpoint(&w.b, &view, 190, Policy::default());
+    b.command(Command::Join { state: None }, clock(0), &ep);
+    let mut answers = 0;
+    for i in 0..20u8 {
+        let mut old = endpoint(&w.a, &view, 191 + i, Policy::default());
+        for x in frames_of(old.command(Command::Join { state: None }, clock(10), &ep)) {
+            answers += b.receive(&x, clock(10), &ep).frames().count();
+        }
+    }
+    assert_eq!(answers, 1, "once per askTimeoutMs for one member");
 }

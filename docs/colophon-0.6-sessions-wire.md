@@ -197,7 +197,11 @@ state: a key is remembered, and `n` recorded, only when steps 1–7 have all pas
    its keys, opens its window at that `hello`'s `n`. Beyond four open windows the member's
    first-opened window is closed, and the member is marked. Frames of a key without a window
    are dropped (with a rate-limited probe `hello`), and so are frames below the opening `n`.
-   Afterwards the codec drops every cached key the machine does not know.
+   A `hello` from a key without an open window is answered under the same limit as probes:
+   once per `askTimeoutMs` per member and four a second in all. Afterwards the codec drops
+   every cached key the machine does not know. The codec never evicts a key on its own, so
+   its cache is always exactly the machine's open and candidate keys (the endpoint checks this
+   after every frame in debug builds).
 
 **Why closed keys need no memory.** A closed key's old frames are authentic; what stops a
 carrier from replaying them is that opening a window needs an echo of a `fresh` issued after
@@ -235,6 +239,11 @@ The façade takes everything from the host, so it is deterministic given its inp
 | Epoch keys | `current_epoch(namespace)` (frames are sealed under it) and `epoch_key(namespace, epoch)`, per call. Returned key bytes are wiped after use. |
 | Clocks | With every call: monotonic ms (all session timers) and wall-clock ms (delegation windows, member expiry). |
 | Ticks | At `next_deadline`, within 250 ms (§S11 G5). |
+
+**What a binding must guarantee.** Every process start draws new randomness for both the
+session key and the `fresh` seed, and never reuses either across starts. The replay argument
+above depends on it: a restarted member's new key and new challenges are what keep old
+frames, and old echoes of old challenges, from being accepted.
 
 Each call returns the effects in order (`Send`, `Persist`, `Event`, `Unsent`); `Persist` must
 be stored before any later effect is carried out. `Unsent` means a frame could not be sealed

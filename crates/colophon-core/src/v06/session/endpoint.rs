@@ -278,6 +278,11 @@ impl Endpoint {
     pub fn last_n(&self) -> u64 {
         self.sender.key().last_n()
     }
+    /// The invariant between the layers (revision 17): the codec caches exactly the keys the
+    /// machine has open or as candidates.
+    pub fn keys_consistent(&self) -> bool {
+        self.receiver.key_set() == self.machine.known_keys()
+    }
     /// Whether this member holds a `records` entry for the namespace (it may send).
     pub fn entitled(&self) -> bool {
         self.entitled
@@ -415,6 +420,7 @@ impl Endpoint {
                 // receiver caches nothing for any other.
                 let machine = &self.machine;
                 self.receiver.retain(|m, k| machine.knows_key(m, k));
+                debug_assert!(self.keys_consistent(), "codec and machine key sets differ");
                 Step {
                     effects: self.run(outs, clock, epochs),
                     dropped: None,

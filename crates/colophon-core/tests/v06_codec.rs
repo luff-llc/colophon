@@ -609,24 +609,23 @@ fn sender_window(m: &Member, view: &SessionAccount, random: u8, nb: i64, ex: i64
 
 /// The reviewer's attack: five rapid keys close the first; a carrier then replays the first
 /// key's delegation and old frames (its `hello` included). Every one is dropped at the floor.
-/// Revision 17: the receiver caches at most 8 keys per member and nothing for keys it
-/// dropped; replaying frames from a hundred old keys cannot grow it.
+/// Revision 17 (third review): the receiver never evicts on its own; the caller (the
+/// machine, through the endpoint) decides, and `retain` applies exactly that.
 #[test]
-fn the_receiver_cache_is_bounded_per_member() {
+fn the_receiver_never_evicts_on_its_own() {
     let w = world();
     let view = w.view();
     let ep = epochs();
     let mut rx = Receiver::new(cell(), &w.b.id);
-    for i in 0..100u8 {
+    for i in 0..20u8 {
         let mut s = sender_window(&w.a, &view, 20 + i, t0(), t0() + 86_400_000);
         let f = s.seal(&frame(&w.a, Body::Ping { t: 1 }), &ep, t0()).unwrap();
         rx.open(&f, &view, t0(), &ep, MAXP).unwrap();
-        assert!(rx.keys_for(&w.a.id) <= CACHED_PER_MEMBER);
+        assert_eq!(rx.len(), i as usize + 1, "nothing else was dropped");
     }
-    assert_eq!(rx.len(), CACHED_PER_MEMBER);
-    // What the machine does not know is dropped.
     rx.retain(|_, _| false);
     assert!(rx.is_empty());
+    assert_eq!(CACHED_PER_MEMBER, 8);
 }
 
 #[test]

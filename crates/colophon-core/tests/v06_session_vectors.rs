@@ -539,25 +539,26 @@ fn scenarios() -> Vec<Script> {
     let mut k1_answer = None;
     for k in 1..=5u64 {
         let key = format!("k{k}");
-        let outs = s.step("b", 10 * k, keyed_in(hello(&format!("a{k}"), vec![]), &key, 1));
+        // Keys at least askTimeoutMs apart: answers to new keys share the probe limit.
+        let outs = s.step("b", 2_000 * k, keyed_in(hello(&format!("a{k}"), vec![]), &key, 1));
         let challenge = fresh_of(&outs);
         let answer = hello(&format!("a{k}'"), vec![challenge]);
         if k == 1 {
             k1_answer = Some(answer.clone());
         }
-        s.step("b", 10 * k + 1, keyed_in(answer, &key, 2));
+        s.step("b", 2_000 * k + 1, keyed_in(answer, &key, 2));
         assert!(s.session("b").window_admits("a", &key, 3));
     }
     assert!(!s.session("b").window_admits("a", "k1", 3), "the fifth key closed k1");
-    s.step("b", 100, keyed_in(k1_answer.unwrap(), "k1", 2));
-    s.step("b", 101, keyed_in(Body::Take { claim: Claim::new(1, 0, "a") }, "k1", 3));
+    s.step("b", 11_000, keyed_in(k1_answer.unwrap(), "k1", 2));
+    s.step("b", 11_001, keyed_in(Body::Take { claim: Claim::new(1, 0, "a") }, "k1", 3));
     assert!(!s.session("b").window_admits("a", "k1", 3));
     assert_eq!(s.session("b").accepted(), None);
-    let outs = s.step("b", 200, keyed_in(hello("a1-again", vec![]), "k1", 4));
+    let outs = s.step("b", 14_000, keyed_in(hello("a1-again", vec![]), "k1", 4));
     let challenge = fresh_of(&outs);
-    s.step("b", 201, keyed_in(hello("a1-answer", vec![challenge]), "k1", 5));
+    s.step("b", 14_001, keyed_in(hello("a1-answer", vec![challenge]), "k1", 5));
     assert!(s.session("b").window_admits("a", "k1", 6));
-    s.step("b", 202, keyed_in(Body::Take { claim: Claim::new(1, 0, "a") }, "k1", 6));
+    s.step("b", 14_002, keyed_in(Body::Take { claim: Claim::new(1, 0, "a") }, "k1", 6));
     assert_eq!(s.session("b").accepted(), Some(&Claim::new(1, 0, "a")));
     v.push(s);
 

@@ -31,7 +31,8 @@ use zeroize::{Zeroize, Zeroizing};
 pub const FRAME_KEY_INFO: &str = "colophon/session-frame/6";
 /// Width of the replay window (§S3).
 pub const WINDOW: u64 = 128;
-/// Session keys cached per member: 4 with open windows and 4 candidates (§S3, revision 17).
+/// Session keys the machine keeps per member, and so the codec caches after every frame: 4
+/// with open windows and 4 candidates (§S3, revision 17).
 pub const CACHED_PER_MEMBER: usize = 8;
 
 /// A cell: `(account, namespace, cell)` (§S1).
@@ -214,8 +215,6 @@ impl ReplayWindow {
 struct Known {
     delegation: Delegation,
     window: ReplayWindow,
-    /// Acceptance order, for the per-member cap.
-    since: u64,
 }
 
 /// A frame that passed every §S3 check, with the inputs the state machine expects.
@@ -265,14 +264,13 @@ pub struct Forgotten {
 /// The receiving side of one member in one cell: the cached delegations and replay windows
 /// of other members' session keys. It keeps nothing for a key the state machine does not
 /// know (revision 17: no replay floors); [`Receiver::retain`] drops what the machine has
-/// closed or never opened. Without a machine it holds at most [`CACHED_PER_MEMBER`] keys per
-/// member.
+/// closed or never opened. It never evicts on its own (the machine's key state is
+/// authoritative); a caller without a machine bounds it with [`Receiver::retain`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Receiver {
     cell: CellId,
     me: MemberId,
     keys: BTreeMap<(MemberId, String), Known>,
-    counter: u64,
 }
 impl Receiver {
     /// A receiver for `me` in `cell`, knowing no keys.
@@ -281,7 +279,6 @@ impl Receiver {
             cell,
             me: me.to_owned(),
             keys: BTreeMap::new(),
-            counter: 0,
         }
     }
     /// The number of session keys of `member` this receiver caches.
@@ -425,8 +422,10 @@ impl Receiver {
         })
     }
 
-    /// Cache an accepted frame's key: a new or renewed delegation and the window, at most
-    /// [`CACHED_PER_MEMBER`] keys per member (the first accepted dropped).
+    /// Cache an accepted frame's key: a new or renewed delegation and the window. The
+    /// receiver never evicts on its own: the machine decides which keys it keeps, and the
+    /// caller then applies exactly that with [`Receiver::retain`] (the endpoint does so after
+    /// every frame, so the cache holds at most one key more than the machine, transiently).
     fn accept(&mut self, slot: (MemberId, String), fresh: Option<Delegation>, window: ReplayWindow) {
         if let Some(k) = self.keys.get_mut(&slot) {
             if let Some(d) = fresh {
@@ -436,32 +435,14 @@ impl Receiver {
             k.window = window;
             return;
         }
-        let Some(d) = fresh else {
-            return;
-        };
-        self.counter += 1;
-        self.keys.insert(
-            slot.clone(),
-            Known {
-                delegation: d,
-                window,
-                since: self.counter,
-            },
-        );
-        while self.keys_for(&slot.0) > CACHED_PER_MEMBER {
-            let first = self
-                .keys
-                .iter()
-                .filter(|((m, _), _)| *m == slot.0)
-                .min_by_key(|(_, k)| k.since)
-                .map(|(s, _)| s.clone());
-            match first {
-                Some(f) => {
-                    self.keys.remove(&f);
-                }
-                None => break,
-            }
+        if let Some(d) = fresh {
+            self.keys.insert(slot, Known { delegation: d, window });
         }
+    }
+
+    /// The cached `(member, key)` pairs.
+    pub fn key_set(&self) -> std::collections::BTreeSet<(MemberId, String)> {
+        self.keys.keys().cloned().collect()
     }
 }
 

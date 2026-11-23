@@ -317,6 +317,14 @@ impl Session {
         // Revision 17: no echo of an earlier `fresh` reopens any of its keys.
         self.closed_after.insert(member.to_owned(), self.fresh_count);
     }
+    /// Every `(member, key)` with an open window or a candidate (revision 17).
+    pub fn known_keys(&self) -> BTreeSet<(MemberId, String)> {
+        let mut out: BTreeSet<(MemberId, String)> = self.windows.keys().cloned().collect();
+        for (m, c) in &self.candidates {
+            out.extend(c.iter().map(|k| (m.clone(), k.clone())));
+        }
+        out
+    }
     /// Whether this member holds anything for `member`'s session key `key`: an open window
     /// or a candidate (revision 17). The codec keeps keys only while this holds.
     pub fn knows_key(&self, member: &str, key: &str) -> bool {
@@ -1283,7 +1291,11 @@ impl Session {
         // through a window that was already open (finding R4a: otherwise the two members
         // answer each other's answers forever).
         let answers_us = echo.iter().any(|e| self.honours(e, now, &f.from));
-        if self.answered.get(&f.from) != Some(fresh) && (!answers_us || opened) {
+        // Revision 17 (third review): a hello from a key without an open window (a candidate,
+        // possibly an old key replayed) is answered under the probe limit, per member once per
+        // askTimeoutMs and four a second in all.
+        let budget = open || !self.fixes.reopen_challenge || self.probe_budget(&f.from, now);
+        if budget && self.answered.get(&f.from) != Some(fresh) && (!answers_us || opened) {
             self.answered.insert(f.from.clone(), *fresh);
             let to = f.from.clone();
             self.send_hello_echo(out, Some(&to), false, vec![*fresh], now);
