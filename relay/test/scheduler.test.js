@@ -42,11 +42,20 @@ describe('scheduler quiet', { skip: ready ? false : 'module not built' }, () => 
       home: { wasm, key: fixture.key }, limits: { requestsPerMinute: 0 },
     });
     slot = await running.relay.slot('home');
+    // Unappointed: quiet until its state changes, which the first upload does.
+    await tick(fixture.now);
+    assert.equal(slot.home.quiet?.until, Infinity, 'an unappointed slot is quiet');
+    calls.clear();
+    await tick(fixture.now + 500);
+    assert.deepEqual([...calls.keys()].filter((op) => op !== 'lease'), [], 'and asks nothing');
     const res = await fetch(`http://127.0.0.1:${running.port}/v1/libraries/home/authority`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ from: 1, entries: fixture.entries, receipts: [] }),
     });
     assert.equal(res.status, 200, await res.text());
+    calls.clear();
+    await tick(fixture.now + 900);
+    assert.ok(asked('record_due') >= 1, 'the first upload ends the quiet');
     // Settle: the first passes sign the head over the uploaded history.
     for (let i = 1; i <= 3; i++) await tick(fixture.now + i * 1_000);
   });
@@ -69,6 +78,19 @@ describe('scheduler quiet', { skip: ready ? false : 'module not built' }, () => 
     await tick(quiet.until);
     assert.ok(asked('record_due') >= 1 && asked('head_request') >= 1, `asked again at the wake time: ${JSON.stringify([...calls])}`);
     assert.equal(await headIssued(), issued + headMaxAge * 500, 'the head is signed at exactly its time');
+  });
+
+  test('a head read while quiet asks nothing of the scheduler; a large clock jump wakes it', async () => {
+    for (let i = 1; i <= 3; i++) await tick(now + 1_000);
+    assert.ok(slot.home.isQuiet());
+    calls.clear();
+    const r = await fetch(`http://127.0.0.1:${running.port}/v1/libraries/home/head`);
+    assert.equal(r.status, 200);
+    assert.equal(asked('record_due') + asked('head_request'), 0, `a read settles through the quiet: ${JSON.stringify([...calls])}`);
+    const jump = now + 30 * 24 * 3_600_000;
+    await tick(jump);
+    assert.ok(asked('record_due') >= 1, 'a jump past the wake time asks again');
+    assert.equal(await headIssued(), jump, 'and the head is signed at once');
   });
 
   test('a state change, or a clock that went back, ends the quiet', async () => {
