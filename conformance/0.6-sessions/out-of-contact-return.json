@@ -1,0 +1,691 @@
+{
+  "description": "a has no link for 20 s; on link-up it sends hello lapsed:true, sends no holder frame for askTimeoutMs, then retakes at term + 1 (§S6).",
+  "final": [
+    {
+      "digest": "3767f7ba6f76f99b1e585497dfdf8ab877b95d8046815b3e159a4815eb2e4304",
+      "member": "a",
+      "view": {
+        "accepted": {
+          "holder": "a",
+          "rank": 0,
+          "term": 2
+        },
+        "gated": false,
+        "holder": "a",
+        "holding": true,
+        "seq": 0,
+        "state": "czA=",
+        "synced": true
+      }
+    },
+    {
+      "digest": "f90ffab2d40b4bbc65f114c8466b364368911ef33c7b78bc44b9b140b06e7670",
+      "member": "b",
+      "view": {
+        "accepted": {
+          "holder": "a",
+          "rank": 0,
+          "term": 2
+        },
+        "gated": false,
+        "holder": "a",
+        "holding": false,
+        "seq": 0,
+        "state": "czA=",
+        "synced": true
+      }
+    }
+  ],
+  "fixes": {
+    "answerLesser": true,
+    "askResend": true,
+    "byeResend": true,
+    "livenessHolderFrames": true,
+    "rank1FromHolder": true,
+    "renewNeedsContact": true,
+    "renewWider": true,
+    "seenUnsynced": true
+  },
+  "format": "colophon/session-vectors/6",
+  "members": [
+    {
+      "canWrite": true,
+      "id": "a",
+      "persisted": null
+    },
+    {
+      "canWrite": true,
+      "id": "b",
+      "persisted": null
+    }
+  ],
+  "name": "out-of-contact-return",
+  "policy": {
+    "askTimeoutMs": 1500,
+    "beatMs": 5000,
+    "holderTimeoutMs": 15000,
+    "maxPayload": 8192,
+    "presenceTimeoutMs": 15000,
+    "reducer": "latest",
+    "retainMs": 60000,
+    "tail": 256,
+    "take": "free"
+  },
+  "steps": [
+    {
+      "at": 0,
+      "input": {
+        "command": {
+          "command": "join"
+        },
+        "input": "app"
+      },
+      "member": "a",
+      "outputs": [
+        {
+          "frame": {
+            "body": {
+              "kind": "hello",
+              "lapsed": false,
+              "seen": null,
+              "sessionKey": ""
+            },
+            "from": "a"
+          },
+          "output": "send"
+        }
+      ]
+    },
+    {
+      "at": 0,
+      "input": {
+        "command": {
+          "command": "join"
+        },
+        "input": "app"
+      },
+      "member": "b",
+      "outputs": [
+        {
+          "frame": {
+            "body": {
+              "kind": "hello",
+              "lapsed": false,
+              "seen": null,
+              "sessionKey": ""
+            },
+            "from": "b"
+          },
+          "output": "send"
+        }
+      ]
+    },
+    {
+      "at": 0,
+      "input": {
+        "frame": {
+          "body": {
+            "kind": "hello",
+            "lapsed": false,
+            "seen": null,
+            "sessionKey": ""
+          },
+          "from": "a"
+        },
+        "input": "frame",
+        "writer": true
+      },
+      "member": "b",
+      "outputs": []
+    },
+    {
+      "at": 0,
+      "input": {
+        "frame": {
+          "body": {
+            "kind": "hello",
+            "lapsed": false,
+            "seen": null,
+            "sessionKey": ""
+          },
+          "from": "b"
+        },
+        "input": "frame",
+        "writer": true
+      },
+      "member": "a",
+      "outputs": []
+    },
+    {
+      "at": 10,
+      "input": {
+        "command": {
+          "command": "take",
+          "snapshot": "czA="
+        },
+        "input": "app"
+      },
+      "member": "a",
+      "outputs": [
+        {
+          "claim": {
+            "holder": "a",
+            "rank": 0,
+            "term": 1
+          },
+          "output": "persist"
+        },
+        {
+          "frame": {
+            "body": {
+              "basis": {
+                "seq": 0,
+                "term": 0
+              },
+              "claim": {
+                "holder": "a",
+                "rank": 0,
+                "term": 1
+              },
+              "kind": "take"
+            },
+            "from": "a"
+          },
+          "output": "send"
+        },
+        {
+          "frame": {
+            "body": {
+              "claim": {
+                "holder": "a",
+                "rank": 0,
+                "term": 1
+              },
+              "kind": "state",
+              "seq": 0,
+              "snapshot": "czA="
+            },
+            "from": "a",
+            "retain": true
+          },
+          "output": "send"
+        },
+        {
+          "event": {
+            "claim": {
+              "holder": "a",
+              "rank": 0,
+              "term": 1
+            },
+            "event": "becameHolder",
+            "snapshot": "czA=",
+            "via": "take"
+          },
+          "output": "event"
+        }
+      ]
+    },
+    {
+      "at": 20,
+      "input": {
+        "frame": {
+          "body": {
+            "basis": {
+              "seq": 0,
+              "term": 0
+            },
+            "claim": {
+              "holder": "a",
+              "rank": 0,
+              "term": 1
+            },
+            "kind": "take"
+          },
+          "from": "a"
+        },
+        "input": "frame",
+        "writer": true
+      },
+      "member": "b",
+      "outputs": [
+        {
+          "claim": {
+            "holder": "a",
+            "rank": 0,
+            "term": 1
+          },
+          "output": "persist"
+        },
+        {
+          "event": {
+            "claim": {
+              "holder": "a",
+              "rank": 0,
+              "term": 1
+            },
+            "event": "holderChanged"
+          },
+          "output": "event"
+        },
+        {
+          "frame": {
+            "body": {
+              "kind": "hello",
+              "lapsed": false,
+              "seen": {
+                "holder": "a",
+                "rank": 0,
+                "seq": null,
+                "term": 1
+              },
+              "sessionKey": ""
+            },
+            "from": "b",
+            "to": "a"
+          },
+          "output": "send"
+        }
+      ]
+    },
+    {
+      "at": 20,
+      "input": {
+        "frame": {
+          "body": {
+            "claim": {
+              "holder": "a",
+              "rank": 0,
+              "term": 1
+            },
+            "kind": "state",
+            "seq": 0,
+            "snapshot": "czA="
+          },
+          "from": "a",
+          "retain": true
+        },
+        "input": "frame",
+        "writer": true
+      },
+      "member": "b",
+      "outputs": [
+        {
+          "event": {
+            "claim": {
+              "holder": "a",
+              "rank": 0,
+              "term": 1
+            },
+            "event": "snapshot",
+            "seq": 0,
+            "snapshot": "czA="
+          },
+          "output": "event"
+        }
+      ]
+    },
+    {
+      "at": 20,
+      "input": {
+        "frame": {
+          "body": {
+            "kind": "hello",
+            "lapsed": false,
+            "seen": {
+              "holder": "a",
+              "rank": 0,
+              "seq": null,
+              "term": 1
+            },
+            "sessionKey": ""
+          },
+          "from": "b",
+          "to": "a"
+        },
+        "input": "frame",
+        "writer": true
+      },
+      "member": "a",
+      "outputs": [
+        {
+          "frame": {
+            "body": {
+              "claim": {
+                "holder": "a",
+                "rank": 0,
+                "term": 1
+              },
+              "kind": "state",
+              "seq": 0,
+              "snapshot": "czA="
+            },
+            "from": "a",
+            "retain": true,
+            "to": "b"
+          },
+          "output": "send"
+        }
+      ]
+    },
+    {
+      "at": 20,
+      "input": {
+        "frame": {
+          "body": {
+            "claim": {
+              "holder": "a",
+              "rank": 0,
+              "term": 1
+            },
+            "kind": "state",
+            "seq": 0,
+            "snapshot": "czA="
+          },
+          "from": "a",
+          "retain": true,
+          "to": "b"
+        },
+        "input": "frame",
+        "writer": true
+      },
+      "member": "b",
+      "outputs": []
+    },
+    {
+      "at": 1000,
+      "input": {
+        "input": "linkDown"
+      },
+      "member": "a",
+      "outputs": []
+    },
+    {
+      "at": 21000,
+      "input": {
+        "input": "linkUp"
+      },
+      "member": "a",
+      "outputs": [
+        {
+          "frame": {
+            "body": {
+              "kind": "hello",
+              "lapsed": true,
+              "seen": {
+                "holder": "a",
+                "rank": 0,
+                "seq": 0,
+                "term": 1
+              },
+              "sessionKey": ""
+            },
+            "from": "a"
+          },
+          "output": "send"
+        }
+      ]
+    },
+    {
+      "at": 21010,
+      "input": {
+        "frame": {
+          "body": {
+            "kind": "hello",
+            "lapsed": true,
+            "seen": {
+              "holder": "a",
+              "rank": 0,
+              "seq": 0,
+              "term": 1
+            },
+            "sessionKey": ""
+          },
+          "from": "a"
+        },
+        "input": "frame",
+        "writer": true
+      },
+      "member": "b",
+      "outputs": []
+    },
+    {
+      "at": 22000,
+      "input": {
+        "input": "tick"
+      },
+      "member": "a",
+      "outputs": []
+    },
+    {
+      "at": 22600,
+      "input": {
+        "input": "tick"
+      },
+      "member": "a",
+      "outputs": [
+        {
+          "claim": {
+            "holder": "a",
+            "rank": 0,
+            "term": 2
+          },
+          "output": "persist"
+        },
+        {
+          "frame": {
+            "body": {
+              "basis": {
+                "seq": 0,
+                "term": 1
+              },
+              "claim": {
+                "holder": "a",
+                "rank": 0,
+                "term": 2
+              },
+              "kind": "take"
+            },
+            "from": "a"
+          },
+          "output": "send"
+        },
+        {
+          "frame": {
+            "body": {
+              "claim": {
+                "holder": "a",
+                "rank": 0,
+                "term": 2
+              },
+              "kind": "state",
+              "seq": 0,
+              "snapshot": "czA="
+            },
+            "from": "a",
+            "retain": true
+          },
+          "output": "send"
+        },
+        {
+          "event": {
+            "claim": {
+              "holder": "a",
+              "rank": 0,
+              "term": 2
+            },
+            "event": "becameHolder",
+            "snapshot": "czA=",
+            "via": "take"
+          },
+          "output": "event"
+        }
+      ]
+    },
+    {
+      "at": 22610,
+      "input": {
+        "frame": {
+          "body": {
+            "basis": {
+              "seq": 0,
+              "term": 1
+            },
+            "claim": {
+              "holder": "a",
+              "rank": 0,
+              "term": 2
+            },
+            "kind": "take"
+          },
+          "from": "a"
+        },
+        "input": "frame",
+        "writer": true
+      },
+      "member": "b",
+      "outputs": [
+        {
+          "claim": {
+            "holder": "a",
+            "rank": 0,
+            "term": 2
+          },
+          "output": "persist"
+        },
+        {
+          "event": {
+            "claim": {
+              "holder": "a",
+              "rank": 0,
+              "term": 2
+            },
+            "event": "holderChanged"
+          },
+          "output": "event"
+        },
+        {
+          "frame": {
+            "body": {
+              "kind": "hello",
+              "lapsed": false,
+              "seen": {
+                "holder": "a",
+                "rank": 0,
+                "seq": null,
+                "term": 2
+              },
+              "sessionKey": ""
+            },
+            "from": "b",
+            "to": "a"
+          },
+          "output": "send"
+        }
+      ]
+    },
+    {
+      "at": 22610,
+      "input": {
+        "frame": {
+          "body": {
+            "claim": {
+              "holder": "a",
+              "rank": 0,
+              "term": 2
+            },
+            "kind": "state",
+            "seq": 0,
+            "snapshot": "czA="
+          },
+          "from": "a",
+          "retain": true
+        },
+        "input": "frame",
+        "writer": true
+      },
+      "member": "b",
+      "outputs": [
+        {
+          "event": {
+            "claim": {
+              "holder": "a",
+              "rank": 0,
+              "term": 2
+            },
+            "event": "snapshot",
+            "seq": 0,
+            "snapshot": "czA="
+          },
+          "output": "event"
+        }
+      ]
+    },
+    {
+      "at": 22610,
+      "input": {
+        "frame": {
+          "body": {
+            "kind": "hello",
+            "lapsed": false,
+            "seen": {
+              "holder": "a",
+              "rank": 0,
+              "seq": null,
+              "term": 2
+            },
+            "sessionKey": ""
+          },
+          "from": "b",
+          "to": "a"
+        },
+        "input": "frame",
+        "writer": true
+      },
+      "member": "a",
+      "outputs": [
+        {
+          "frame": {
+            "body": {
+              "claim": {
+                "holder": "a",
+                "rank": 0,
+                "term": 2
+              },
+              "kind": "state",
+              "seq": 0,
+              "snapshot": "czA="
+            },
+            "from": "a",
+            "retain": true,
+            "to": "b"
+          },
+          "output": "send"
+        }
+      ]
+    },
+    {
+      "at": 22610,
+      "input": {
+        "frame": {
+          "body": {
+            "claim": {
+              "holder": "a",
+              "rank": 0,
+              "term": 2
+            },
+            "kind": "state",
+            "seq": 0,
+            "snapshot": "czA="
+          },
+          "from": "a",
+          "retain": true,
+          "to": "b"
+        },
+        "input": "frame",
+        "writer": true
+      },
+      "member": "b",
+      "outputs": []
+    }
+  ]
+}

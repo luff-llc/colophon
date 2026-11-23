@@ -1,0 +1,221 @@
+{
+  "bestOfLast8": [
+    {
+      "best": {
+        "error": 25,
+        "offset": 40025,
+        "rtt": 50
+      },
+      "echo": 9950,
+      "hold": 0,
+      "now": 10000,
+      "t": 50000
+    },
+    {
+      "best": {
+        "error": 20,
+        "offset": 40021,
+        "rtt": 40
+      },
+      "echo": 10960,
+      "hold": 0,
+      "now": 11000,
+      "t": 51001
+    },
+    {
+      "best": {
+        "error": 20,
+        "offset": 40021,
+        "rtt": 40
+      },
+      "echo": 11940,
+      "hold": 0,
+      "now": 12000,
+      "t": 52002
+    },
+    {
+      "best": {
+        "error": 20,
+        "offset": 40023,
+        "rtt": 40
+      },
+      "echo": 12960,
+      "hold": 0,
+      "now": 13000,
+      "t": 53003
+    },
+    {
+      "best": {
+        "error": 20,
+        "offset": 40023,
+        "rtt": 40
+      },
+      "echo": 13930,
+      "hold": 0,
+      "now": 14000,
+      "t": 54004
+    },
+    {
+      "best": {
+        "error": 20,
+        "offset": 40023,
+        "rtt": 40
+      },
+      "echo": 14920,
+      "hold": 0,
+      "now": 15000,
+      "t": 55005
+    },
+    {
+      "best": {
+        "error": 20,
+        "offset": 40023,
+        "rtt": 40
+      },
+      "echo": 15910,
+      "hold": 0,
+      "now": 16000,
+      "t": 56006
+    },
+    {
+      "best": {
+        "error": 20,
+        "offset": 40023,
+        "rtt": 40
+      },
+      "echo": 16900,
+      "hold": 0,
+      "now": 17000,
+      "t": 57007
+    },
+    {
+      "best": {
+        "error": 20,
+        "offset": 40023,
+        "rtt": 40
+      },
+      "echo": 17890,
+      "hold": 0,
+      "now": 18000,
+      "t": 58008
+    },
+    {
+      "best": {
+        "error": 20,
+        "offset": 40023,
+        "rtt": 40
+      },
+      "echo": 18880,
+      "hold": 0,
+      "now": 19000,
+      "t": 59009
+    },
+    {
+      "best": {
+        "error": 20,
+        "offset": 40023,
+        "rtt": 40
+      },
+      "echo": 19870,
+      "hold": 0,
+      "now": 20000,
+      "t": 60010
+    },
+    {
+      "best": {
+        "error": 35,
+        "offset": 40039,
+        "rtt": 70
+      },
+      "echo": 20860,
+      "hold": 0,
+      "now": 21000,
+      "t": 61011
+    }
+  ],
+  "cases": [
+    {
+      "echo": 1000,
+      "error": 50,
+      "hold": 0,
+      "now": 1100,
+      "offset": 4000,
+      "rtt": 100,
+      "t": 5050
+    },
+    {
+      "echo": 1000,
+      "error": 35,
+      "hold": 30,
+      "now": 1100,
+      "offset": 3985,
+      "rtt": 70,
+      "t": 5050
+    },
+    {
+      "echo": 1000,
+      "error": 51,
+      "hold": 0,
+      "now": 1101,
+      "offset": 3999,
+      "rtt": 101,
+      "t": 5050
+    },
+    {
+      "echo": 1000,
+      "error": 0,
+      "hold": 0,
+      "now": 1000,
+      "offset": 4050,
+      "rtt": 0,
+      "t": 5050
+    },
+    {
+      "echo": 1010,
+      "error": 0,
+      "hold": 0,
+      "now": 1000,
+      "offset": 4050,
+      "rtt": 0,
+      "t": 5050
+    },
+    {
+      "echo": 900,
+      "error": 0,
+      "hold": 200,
+      "now": 1000,
+      "offset": 4050,
+      "rtt": 0,
+      "t": 5050
+    },
+    {
+      "echo": 9999000,
+      "error": 495,
+      "hold": 10,
+      "now": 10000000,
+      "offset": -9999503,
+      "rtt": 990,
+      "t": 2
+    },
+    {
+      "echo": 1,
+      "error": 1,
+      "hold": 0,
+      "now": 2,
+      "offset": 9999998,
+      "rtt": 1,
+      "t": 10000000
+    },
+    {
+      "echo": 0,
+      "error": 9223372036854775808,
+      "hold": 0,
+      "now": 18446744073709551615,
+      "offset": -9223372036854775808,
+      "rtt": 18446744073709551615,
+      "t": 0
+    }
+  ],
+  "format": "colophon/session-offset-vectors/6",
+  "formula": "rtt = max(0, (now - echo) - hold); offset = t - now + floor(rtt / 2); error = ceil(rtt / 2); best = smallest rtt of the last 8, the latest among equals"
+}
