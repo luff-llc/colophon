@@ -282,7 +282,8 @@ reorder frames and partition members for any time:
 - **G2.** A member never sends a holder frame under a claim less than its accepted claim,
   other than a resend of a `pass` it already sent.
 - **G3.** After a `pass` is sent, the passing member sends no other holder frame under the
-  old claim, and the new holder's initial state equals the pass snapshot.
+  old claim, and a member that becomes holder by that `pass` starts with exactly its
+  snapshot.
 - **G4.** While a holder is live, if frames between two members are eventually delivered
   both ways, they eventually hold the same accepted claim and, for that claim, the same
   ordered state. With no live holder, members may hold different dead claims until the next
