@@ -1,13 +1,14 @@
 # Colophon 0.6: sessions
 
-**Status:** unfrozen draft, revision 8, 2026-11-23. Revision 2 adopted the findings of the
+**Status:** unfrozen draft, revision 9, 2026-11-23. Revision 2 adopted the findings of the
 reference machine (`docs/colophon-0.6-sessions-findings.md`, F1–F20); revision 3 added `via` to passed claims (F12, F21); revision 4 answers the first
 independent design review (R1–R9 in the findings document): evidence instead of hearsay,
 no silent loss of state, key bootstrap and freshness, bounded state; revision 5 adopts what
 the rebuilt harness found wrong in revision 4 (R1c–R4a); revision 6 adopted R1f–R1h. Revision 7 answers the second design review by separating
 two layers: carriers make every connected group of members fully reachable (§S9
 bridging), and the session rules above them assume that and are simpler for it. Revision 8 states
-what a bridge checks and how loss beyond the first hop is repaired (B1–B4). Additive to `colophon-0.5.md`; nothing here changes a
+what a bridge checks and how loss beyond the first hop is repaired (B1–B4); revision 9
+makes the freshness exchange retry (B5). Additive to `colophon-0.5.md`; nothing here changes a
 0.5 object, verdict or path. A 0.5 host that ignores this document stays conformant with 0.5.
 
 The words MUST, SHOULD and MAY are used as in 0.5 §0. "0.5 §N" refers to `colophon-0.5.md`.
@@ -138,7 +139,9 @@ after at most four hellos. Until a member has accepted, from a given key, a
 `hello` whose `echo` contains the `fresh` of one of the member's own hellos sent since it
 started, it accepts only `hello` frames from that key and takes from them only the
 delegation, `fresh` and `echo`. That echoing frame's `n` opens the window: frames with a
-lower `n` from that key are dropped.
+lower `n` from that key are dropped. A member that drops a frame because the window for
+its key is not open sends that key's member a `hello`, at most once per `askTimeoutMs`, so
+a lost `hello` or a lost answer does not leave the two unable to hear each other.
 
 A member keeps windows for at most 4 session keys per member, dropping the oldest, and
 drops every window of a member it no longer accepts (§S2).
