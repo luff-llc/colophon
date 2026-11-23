@@ -204,7 +204,10 @@ freshness, not memory: for each member it records when it last closed one of tha
 windows, or stopped accepting the member's keys under §S2, and it honours an echo from
 that member only of a `fresh` value it issued after that moment. A closed key can
 therefore be opened again only by its owner, answering a new challenge, and its window
-then starts at that answer's `n`. It drops everything it holds for a member it no longer
+then starts at that answer's `n`. When the owner does not know its key was closed, its next
+frame that is not a `hello` is dropped and draws the receiver's `hello` (step 4 applies to
+a closed key as to an unknown one), and the exchange follows; reopening so costs one
+frame. It drops everything it holds for a member it no longer
 accepts (§S2).
 
 The plaintext is `{"kind": …, …}`. Kinds and their fields:
