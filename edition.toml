@@ -112,9 +112,18 @@ trust_group_writable = ["/opt/homebrew/bin"]
 # Path to colophon-home.sh, the home deployment kit, on this machine. It is printed by
 # name and never recorded.
 home_kit_script = ""
+# Absolute paths to the kit's settings files for the staging and production homes.
+staging_site = ""
+production_site = ""
+# The operator's ssh-agent socket: the kit reaches the host over ssh, and commands run
+# with a cleared environment.
+ssh_auth_sock = ""
+# Where cargo puts build output for checks, so a shared build cache can be used.
+cargo_target_dir = ""
 
 [checks.rust]
 run = ["cargo", "test", "--workspace", "--locked"]
+env = { CARGO_TARGET_DIR = "{var.cargo_target_dir}" }
 
 [checks.relay]
 run = ["bun", "test"]
@@ -141,7 +150,7 @@ platform = "home"
 target = "https://colophon.toolsperson.com"
 checks = ["rust"]
 run = ["{var.home_kit_script}", "release", "{commit}"]
-env = { COLOPHON_HOME_SITE = "staging.env" }
+env = { COLOPHON_HOME_SITE = "{var.staging_site}", SSH_AUTH_SOCK = "{var.ssh_auth_sock}" }
 probe = ["curl", "-fsS", "https://colophon.toolsperson.com/healthz"]
 
 # prod: a final vX.Y.Z tag on release/X.Y, on the remote. The home kit additionally
@@ -155,5 +164,5 @@ target = "https://colophon.luff.works"
 approval = "owner"
 checks = ["rust"]
 run = ["{var.home_kit_script}", "release", "{commit}"]
-env = { COLOPHON_HOME_SITE = "production.env" }
+env = { COLOPHON_HOME_SITE = "{var.production_site}", SSH_AUTH_SOCK = "{var.ssh_auth_sock}" }
 probe = ["curl", "-fsS", "https://colophon.luff.works/healthz"]
