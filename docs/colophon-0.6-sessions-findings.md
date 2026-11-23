@@ -1,10 +1,10 @@
 # Colophon 0.6 sessions: findings from the reference machine
 
-**Date:** 2026-11-22, updated 2026-11-23. **Against:** `spec/colophon-0.6-sessions.md`, revisions 1–10 (revision 10: `996f537`). **Code:** `crates/colophon-core/src/v06/session/`.
+**Date:** 2026-11-22, updated 2026-11-23. **Against:** `spec/colophon-0.6-sessions.md`, revisions 1–12 (revision 12: `b8c5319`). **Code:** `crates/colophon-core/src/v06/session/`.
 
 The reference machine implements the draft, and also the departures listed here. Each
 departure that changes behaviour has a switch in `Fixes`. `Fixes::default()` (= `ALL`) is the
-reference reading (revision 10; `Fixes::REV7` down to `REV3` are earlier drafts as written), and `Fixes::LITERAL` is the revision 1 draft, so every counterexample below
+reference reading (revision 12; `Fixes::REV7` down to `REV3` are earlier drafts as written), and `Fixes::LITERAL` is the revision 1 draft, so every counterexample below
 can be reproduced. Evidence comes from three sources:
 
 - **Explorer:** `tests/v06_session_explore.rs`, an exhaustive BFS to depth 8 with fair
@@ -672,13 +672,13 @@ every frame to every member, as the home carrier does.
 | G1 | every input in the explorer, simulator and carriers harness; restarts in the simulator; every output prefix in `crash_prefixes` | any (loss, duplication, reordering, partitions; adversarial delay in carriers) | more than 3 members exhaustively |
 | G2 | as G1 (`check_step`, including the pass-resend exemption) | any | as G1 |
 | G3 | as G1 (ghost of passes and snapshots) | any | as G1 |
-| G4 | explorer completions (FIFO, LIFO, rotate) at depth 8; simulator at the end (lossless, healed); carriers after a timely phase | timely: delivery within beatMs once stable (carriers); healed and lossless (simulator); fair schedules (explorer) | non-timely networks (shown to fail, as allowed); more than 6 members |
-| G5 | explorer (strict, askTimeoutMs plus a tick); simulator ask and take timings | timely | carriers harness (asks not scripted there) |
+| G4 | carriers: `check_timely_end` asks the timely oracle (§V) for T and asserts G4 in the final window only when T + 30 s precedes it; explorer completions (FIFO, LIFO, rotate) at depth 8; simulator at the end (lossless, healed) | carriers: §S0 revision 12 conditions 1–3, decided per run by the oracle from the delivery log; simulator: healed and lossless; explorer: fair schedules | runs the oracle rejects (only safety is asserted there); the oracle in the explorer and simulator; more than 6 members |
+| G5 | carriers `g5_exact_bounds`: askTimeoutMs + 250 ms after asking and holderTimeoutMs + 250 ms after the last accepted holder frame, exactly, with timers fired at `next_deadline` plus 0–250 ms dispatch, and every 250 ms; simulator playback: the same bounds on the member's clock (±500 ppm); explorer: abstract ticks (askTimeoutMs plus one tick) | holder cut off (no frames to judge by the oracle) | the explorer's bound is in abstract ticks; clock stalls (only in random simulator seeds, where G5 is not timed) |
 | G6 | every accepted frame in explorer, simulator and carriers (U1) | any | — |
 | G7 | by construction: frames are not records; the bridge stores no payload beyond its windows | — | the encrypted carrier itself (out of this layer) |
-| G8 | host-level (the machine takes `writer` per frame and `Entitled`); vector `pass-not-entitled` | — | authority-history replay (host layer) |
+| G8 | host-level (the machine takes `writer` per frame and `Entitled`, failing closed until it has one); vectors `pass-not-entitled`, `entitlement-after-restart` | — | authority-history replay (host layer) |
 | G9 | the machine is a pure function of its inputs (`handle(input, now)`); vectors replay exact outputs; explorer hashing | — | other implementations beyond the vectors |
-| G10 | explorer completions; carriers final window (no claim change for 60–80 s) | timely (carriers); fair schedules (explorer) | the simulator (its network is complete and healed at the end; checked only as G4) |
+| G10 | carriers: no claim change in the final 60–80 s window when the oracle finds the run timely early enough; `consecutive_lost_beats`; explorer completions | timely by the oracle (carriers); fair schedules (explorer) | runs the oracle rejects; the simulator (checked only as G4) |
 | G11 | ledger of owed reports in explorer completions, simulator and carriers (`owed` must empty) | displaced member keeps running, eventual delivery | members that crash (excluded by G11) |
 | G12 | `crash_prefixes` (every output prefix, 2 and 3 members); simulator restarts | any | crashes in the carriers harness |
 
@@ -686,6 +686,74 @@ Not checked anywhere: the simulator does not run the real freshness exchange (it
 carry no key; the carriers harness and `v06_bridge` do); clock drift and stalls are only in
 the simulator; bridging over the home and direct links together appears only in the hybrid
 topology test.
+
+## V. Fourth independent design review and revision 12
+
+The fourth review judged the design sound after fixes: no safety break in the claim
+ordering. It found that "timely" was not defined precisely enough (two lost beats, the next
+arriving late, satisfied the wording yet let two members take from each other forever),
+that entitlement failed open in the machine, that G5's bound did not account for timer
+dispatch, and that the bridge's rate-limit arithmetic could overflow. Revision 12 defines
+timely by three conditions (§S0), makes entitlement fail closed (§S1) and states G5 on the
+member's own clock plus at most 250 ms of timer dispatch.
+
+**Machine.** Until the host supplies the entitled set, nobody is entitled: a `join` waits
+for the set (it takes effect when the set arrives), no frame is accepted as a writer's,
+and no pass is made. `Session::next_deadline()` returns the earliest time a timer input
+can act (presence expiry, submit retry, the restart gate, the next beat, the lapse, the ask
+timeout), so a host schedules one timer instead of polling. The bridge's token bucket uses
+saturating arithmetic throughout.
+
+**The timely oracle.** `Net::timely_from` in `v06_session_carriers.rs` reads the run's
+delivery log and returns the earliest T from which (1) membership does not change, (2)
+in every interval of holderTimeoutMs − beatMs (10 s) every member accepts a holder frame
+(`take` included) from each member acting as holder throughout it, and (3) every `hello`,
+`state`, `take`, `pass`, `yielded`, `ack` and `bye` sent from T is accepted by each member
+it concerns within 10 s of its first send. `yielded`, `pass` and `bye` are resent by rule,
+so a resend counts as the same frame; every other send stands alone. Intervals reaching past
+the end of the run are not judged. `check_timely_end` now checks the premise: it asserts G4,
+G10 and G11 only when T + 30 s precedes the final window, and otherwise only safety.
+
+| Check | Result |
+| --- | --- |
+| Home profile (2–5 members, 1–3 holding groups, D 0–5 s, 20 seeds; 880 runs per loss model) | no loss: 880/880 timely, all converge. 10 % random loss: 267 timely. One holder frame lost in a row between every pair: 120 timely. Two in a row: 0 timely. Every timely run converges; every run is safe. |
+| `consecutive_lost_beats` (2 and 3 members, the others wanting the role, 10 seeds) | one lost in a row, no jitter: 10/10 timely, all converge. Two in a row: 0/10 timely; with no jitter, 2 members take from each other in every run (the review's cycle). Three in a row: 0/10 timely; the cycle in 10/10 (no jitter) and 7/10 (1 s jitter) runs with 2 members. Safety holds throughout. |
+| `chains_with_bridging` | 100 ms per hop: timely by the oracle on every topology, converges. Up to 5 s per hop: across two or more hops the oracle rejects some runs; they converge anyway. |
+| `g5_exact_bounds` (40 seeds per timer mode) | worst 1,744 ms after asking (bound 1,750) and 15,246 ms after the last holder frame (bound 15,250) with dispatch up to 250 ms; 1,500 and 15,000 ms with none. |
+| `next_deadline` | every tick in every carriers run that produced an output was due by the deadline computed before it; `deadline_ticks_converge` runs the home profile with deadline timers only. |
+| Entitlement | vector `entitlement-after-restart`: after the asker loses its entitlement and the holder restarts before its host has the new set, the join waits, the pass is refused as `not-joined`, and once the set arrives the retaken holder's pass is refused as `not-entitled`. |
+
+No trace the oracle accepts as timely failed to converge. The explorer (21 tests) and the simulator (2,000 random and 2,000 playback seeds, now with the exact G5 bounds) pass; the ablation counts are those of §U.
+
+### V1. "Two beats lost in a row are within the condition" contradicts condition 2 (wording)
+
+**Trace.** `consecutive_lost_beats`, 2 members, holder frames lost two in a row, no jitter.
+The holder's beats are 5 s apart, so the listener accepts one every 15 s. At the instant the
+third beat is sent, the listener's timer reaches holderTimeoutMs since the last accepted
+frame and fires first: the holder is lapsed and the listener takes. The same losses apply to
+the new holder, and the two take from each other for the rest of the run (10 of 10 seeds).
+This is the review's trace. Condition 2 rejects it: 15 s without an accepted holder frame is
+more than holderTimeoutMs − beatMs = 10 s. With one beat lost in a row the gap is 10 s,
+which condition 2 accepts, and every such run converges.
+
+**Proposed text (§S0).** "Loss is allowed as long as these hold: one beat lost in a row is
+within the condition, two are not."
+
+### V2. The lapse boundary (checked; no change)
+
+§S6 lapses a holder when the listener "has accepted no holder frame ... for
+holderTimeoutMs", that is at `now − last ≥ holderTimeoutMs`, which the machine uses.
+`lapse_boundary`: one ms before the deadline the holder is live; at the deadline a timer
+input lapses it, and a holder frame accepted at the same instant before the timer input
+keeps it live (G9: the member's own input order decides). Under condition 2 a timely
+listener never comes within beatMs of this boundary.
+
+### V3. Condition 2 is sufficient, not tight (observation)
+
+With one beat lost in a row and up to 1 s of jitter, some gaps exceed 10 s and the oracle
+rejects the run, yet every such run converges; likewise up to 5 s per hop across bridges.
+Convergence needs a listener never silent for holderTimeoutMs; condition 2 keeps beatMs in
+hand.
 
 ## Where the machine and the spec differed (resolved 2026-11-23)
 
