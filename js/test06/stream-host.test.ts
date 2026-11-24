@@ -200,6 +200,56 @@ describe('the stream host', () => {
     r.host.stop();
   });
 
+  test('Waiting arms the timer from wake_at: a call never signed counts as failed after the core\'s timeout', async () => {
+    let calls = 0;
+    const r = rig({ streamCall: () => { calls++; return new Promise<Uint8Array>(() => {}); } });
+    r.host.start();
+    await settle();
+    expect(r.host.status.kind).toBe(glue.StreamStatusKind.Connecting);
+    await r.clock.advance(59_000);
+    expect(r.host.status.kind).toBe(glue.StreamStatusKind.Connecting);
+    await r.clock.advance(1_100);
+    expect(calls).toBe(1);
+    expect(r.host.status.kind).toBe(glue.StreamStatusKind.Backoff);
+    r.host.stop();
+  });
+
+  test('stop from a listener: no ticket-bearing socket is left open, kept or opened afterwards', async () => {
+    const r = rig();
+    r.host.on(e => { if (e.type === 'connect') r.host.stop(); });
+    r.host.start();
+    await settle();
+    expect(r.sockets.all.length).toBe(1);
+    expect(r.sockets.last.closedWith).toBe(1000);
+    await r.clock.advance(120_000);
+    expect(r.sockets.all.length).toBe(1);
+
+    // Stopped from inside the socket factory's own callback, before the factory returned.
+    const s = rig();
+    const inner = s.sockets.factory;
+    let made: { closedWith?: number } | undefined;
+    const host = new HomeStreamHost({ account: s.account, home: 'h', transport: s.transport, clock: s.clock,
+      socket: (url, handlers) => { const socket = inner(url, handlers); made = socket as unknown as { closedWith?: number }; host.stop(); return socket; },
+      client: new glue.HomeStream('h', BASE, glue.stream_default_config(), undefined) });
+    const events: string[] = [];
+    host.on(e => events.push(e.type));
+    host.start();
+    await settle();
+    expect(made?.closedWith).toBe(1000);
+    expect(events).not.toContain('connect');
+  });
+
+  test('listeners that call back into the host from every event do not break the loop', async () => {
+    const r = rig();
+    r.host.on(() => { void r.host.status; void r.host.polling; r.host.historyChanged(); });
+    r.host.start();
+    await r.live();
+    await r.clock.advance(250);
+    expect(r.host.live).toBe(true);
+    expect(r.passes.length).toBeGreaterThan(0);
+    r.host.stop();
+  });
+
   test('cursors are saved and presented on reconnect', async () => {
     const r = rig({ cursor: 'i1.3' });
     r.host.start();

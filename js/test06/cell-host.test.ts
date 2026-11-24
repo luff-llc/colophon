@@ -3,7 +3,7 @@
 // durable write, inputs kept and commands held while a write is in progress, a failed write retried, a stale view
 // replaced, a backwards clock recovered from the stored claim, and frames handed on as their own text.
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
-import { accountOf, sessionFrameText, SessionCellHost, type CellCarrier, type CellHostEvent, type StreamCell } from '../src/hosts/index.js';
+import { accountOf, CellHostError, sessionFrameText, SessionCellHost, type CellCarrier, type CellHostEvent, type CellHostOptions, type StreamCell } from '../src/hosts/index.js';
 import { init } from '../src/session/index.js';
 import { approveByScan, Device } from '../test05/support.ts';
 import { ManualClock, settle, TestStore } from './fakes.ts';
@@ -52,12 +52,12 @@ beforeAll(async () => {
 });
 afterAll(() => { first.close(); second.close(); });
 
-async function pair(clock = new ManualClock()) {
+async function pair(clock = new ManualClock(), extra: Partial<CellHostOptions> = {}) {
   const carrier = new LoopCarrier();
   const stores = { a: new TestStore(undefined, (run, ms) => { clock.setTimer(run, ms); }), b: new TestStore(undefined, (run, ms) => { clock.setTimer(run, ms); }) };
   const logs = { a: [] as CellHostEvent[], b: [] as CellHostEvent[] };
   const open = (device: Device, which: 'a' | 'b'): Promise<SessionCellHost> => SessionCellHost.open({ account: accountOf(device.session), carrier: carrier.for(), namespace: NS, cell: CELL,
-    store: stores[which], clock }, e => logs[which].push(e));
+    store: stores[which], clock, ...(which === 'a' ? extra : {}) }, e => logs[which].push(e));
   const a = await open(first, 'a'); const b = await open(second, 'b');
   await settle();
   return { clock, carrier, stores, logs, a, b, open, close: () => { a.close(); b.close(); } };
@@ -190,4 +190,129 @@ describe('the cell host', () => {
     expect(r.b.stats.drops).toBe(drops + 1);
     r.close();
   });
+
+  test('listeners that call back into the host from every event never re-enter the endpoint', async () => {
+    const r = await pair();
+    let lastFrame: string | undefined;
+    let calls = 0;
+    r.a.on(e => {
+      // Everything a listener can do, synchronously, from every event: each becomes a later job.
+      calls++;
+      if (e.type === 'sent') lastFrame = e.frame;
+      r.a.accountChanged();
+      r.a.linkUp();
+      if (lastFrame && calls < 200) r.b.deliver(lastFrame);
+      if (calls < 20) void r.a.command('presence', { command: 'presence', payload: btoa('{}') }).catch(() => {});
+      if (e.type === 'persist' && e.phase === 'started') {
+        // A backwards clock and an input while the write is under way: the rebuild waits for that write.
+        r.clock.jump(r.clock.mono - 1_000);
+        r.a.deliver(lastFrame ?? '{}');
+      }
+    });
+    r.stores.a.hold = true;
+    await r.a.command('take', { command: 'take', state: btoa('anchor-0') });
+    await settle();
+    expect(r.a.writePending).toBe(true);
+    expect(r.logs.a.some(e => e.type === 'rebuilt')).toBe(true);
+    // Rebuilt only once the write completes, and from the claim it stored.
+    expect(r.a.current).toBeUndefined();
+    r.stores.a.release();
+    await new Promise(resolve => setTimeout(resolve, 100));
+    await settle();
+    expect(r.a.state).toBe('open');
+    expect(JSON.parse(r.a.storedClaim!).claim.holder).toBe(first.session.memberId);
+    expect(JSON.parse(r.a.current!.claim_json()!).holder).toBe(first.session.memberId);
+    expect(r.logs.a.filter(e => e.type === 'error')).toEqual([]);
+    r.close();
+  });
+
+  test('a delegation that cannot be signed: open fails, and nothing stays attached or allocated', async () => {
+    const carrier = new LoopCarrier();
+    const account = { ...accountOf(first.session), signRaw: async () => { throw new Error('the key is unavailable'); } };
+    let failed: unknown;
+    try { await SessionCellHost.open({ account, carrier, namespace: NS, cell: CELL, store: new TestStore(), clock: new ManualClock() }); } catch (error) { failed = error; }
+    expect(failed).toBeInstanceOf(Error);
+    expect(carrier.cells.size).toBe(0);
+  });
+
+  test('a rebuild that fails leaves the cell failed: held and new commands are refused, not left waiting', async () => {
+    const clock = new ManualClock();
+    let signing = true;
+    const r = await pair(clock);
+    const real = accountOf(first.session);
+    // The next delegation (the rebuild's) cannot be signed.
+    (r.a as unknown as { account: typeof real }).account = { ...real, signRaw: async body => { if (signing) throw new Error('the key is unavailable'); return real.signRaw(body); } };
+    r.clock.jump(r.clock.mono - 1_000);
+    const held = r.a.command('presence', { command: 'presence', payload: btoa('{}') }).then(() => undefined, (error: CellHostError) => error.code);
+    await new Promise(resolve => setTimeout(resolve, 50));
+    await settle();
+    expect(r.logs.a.some(e => e.type === 'failed' && e.reason === 'rebuild')).toBe(true);
+    expect(r.a.state).toBe('failed');
+    expect(await held).toBe('failed');
+    let code: string | undefined;
+    try { await r.a.command('ask', { command: 'ask' }); } catch (error) { code = (error as CellHostError).code; }
+    expect(code).toBe('failed');
+    expect(r.carrier.cells.has(r.a)).toBe(false);
+    signing = false;
+    r.close();
+  });
+
+  test('a store that keeps failing fails the cell: it stops acting and says so', async () => {
+    const r = await pair(new ManualClock(), { persistAttempts: 3 });
+    r.stores.a.failures = 1_000;
+    await r.a.command('take', { command: 'take', state: null });
+    const waiting = r.a.command('publish', { command: 'publish', id: 'AAAAAAAAAAAAAAAAAAAAAA', payload: btoa('x') }).then(() => undefined, (error: CellHostError) => error.code);
+    await settle();
+    await r.clock.advance(250);
+    await r.clock.advance(250);
+    expect(r.logs.a.filter(e => e.type === 'persist' && e.phase === 'failed').length).toBe(3);
+    expect(r.logs.a.some(e => e.type === 'failed' && e.reason === 'store')).toBe(true);
+    expect(r.logs.a.some(e => e.type === 'sent' && e.kind === 'take')).toBe(false);
+    expect(await waiting).toBe('failed');
+    expect(r.a.current).toBeUndefined();
+    r.close();
+  });
+
+  test('command admission is bounded and keeps the order of what it accepted', async () => {
+    const r = await pair(new ManualClock(), { maxCommands: 2 });
+    r.stores.a.hold = true;
+    await r.a.command('take', { command: 'take', state: null });
+    const one = r.a.command('publish', { command: 'publish', id: 'AAAAAAAAAAAAAAAAAAAAAA', payload: btoa('1') });
+    const two = r.a.command('publish', { command: 'publish', id: 'AQAAAAAAAAAAAAAAAAAAAA', payload: btoa('2') });
+    let code: string | undefined;
+    try { await r.a.command('publish', { command: 'publish', id: 'AgAAAAAAAAAAAAAAAAAAAA', payload: btoa('3') }); } catch (error) { code = (error as CellHostError).code; }
+    expect(code).toBe('commandQueueFull');
+    r.stores.a.release();
+    await one; await two;
+    await settle();
+    const messages = r.logs.a.filter(e => e.type === 'session' && e.event.event === 'message').map(e => (e as unknown as { event: { payload: string } }).event.payload);
+    expect(messages).toEqual([btoa('1'), btoa('2')]);
+    r.close();
+  });
+
+  // The receiver's side of revocation, at unit level: the end-to-end test shows the same over the home's wire.
+  test('after a new head that removes a member, its frames are dropped and change nothing', async () => {
+    const r = await pair();
+    const third = await Device.make({ medium: first.medium, namespaces: [NS] });
+    await third.session.restore();
+    await approveByScan(third.session, first.session);
+    await third.session.refresh();
+    await second.session.refresh();
+    const thirdHost = await SessionCellHost.open({ account: accountOf(third.session), carrier: r.carrier.for(), namespace: NS, cell: CELL, store: new TestStore(), clock: r.clock });
+    await settle();
+    await first.session.revoke(third.session.memberId!);
+    await second.session.refresh();
+    r.b.accountChanged();
+    await settle();
+    const drops = r.b.stats.drops;
+    const view = r.b.current!.view_json();
+    await thirdHost.command('presence', { command: 'presence', payload: btoa('{"label":"Old phone"}') });
+    await settle();
+    expect(r.b.stats.drops).toBeGreaterThan(drops);
+    expect(r.b.current!.view_json()).toBe(view);
+    expect(r.logs.b.some(e => e.type === 'session' && e.event.event === 'presenceChanged' && e.event.member === third.session.memberId)).toBe(false);
+    thirdHost.close(); third.close();
+    r.close();
+  });
 });
+

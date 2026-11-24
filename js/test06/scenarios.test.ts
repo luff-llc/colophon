@@ -131,34 +131,41 @@ test('restart, offline past the timeout, a slow store during a pass, and revocat
     a.store.delayMs = 0; b.store.delayMs = 0;
     await sleep(300);
 
-    // 4. B revokes A mid-session (A holds the cell). B installs the new head; A's frames are refused by B; A, which
-    //    has not seen it yet, keeps going until its next pass brings the revocation in: then its endpoint reports the
-    //    stale view and, with the new one installed, A is no longer entitled.
+    // 4. B revokes A mid-session (A holds the cell), by a real authority change on B's device. Nothing is injected:
+    //    a. B holds the new head before the home does. A, which has not seen it, still sends over its socket; the home
+    //       still carries the frame (it does not hold the revocation yet), and B's endpoint, under the new head, drops
+    //       it on arrival, changing nothing.
+    //    b. Once the home holds the revocation it ends A's stream: A's frames no longer leave the device.
+    //    c. A's own poll brings the revocation in: its endpoint reports the stale view and, with the new one
+    //       installed, A is no longer entitled.
     const revoking = performance.now();
     await b.device.session.revoke(a.id);
-    expect(await settle(b.device)).toBe(true);
     b.cell.host.accountChanged();
     const bAccount = b.log.find(l => l.at >= revoking && l.event.type === 'account');
     expect(bAccount).toBeDefined();
-    // A frame A seals after the revocation, delivered to B as any carrier would: dropped, changing nothing.
-    const revokedAt = performance.now();
-    await a.cell.publish(anchor({ ...first, positionMs: 95_000, at: Math.floor(performance.now()) }));
-    const afterRevoke = a.log.find(l => l.at >= revokedAt && (l.event.type === 'sent' || (l.event.type === 'unsent' && l.event.frame !== undefined)));
-    expect(afterRevoke).toBeDefined();
-    const frame = (afterRevoke!.event as { frame: string }).frame;
+    expect(a.stream.live).toBe(true);
     const dropsBefore = b.cell.host.stats.drops;
     const viewBefore = b.cell.host.current!.view_json();
-    b.cell.host.deliver(frame);
-    expect(b.cell.host.stats.drops).toBe(dropsBefore + 1);
-    const refusal = b.log.filter(l => l.event.type === 'drop').pop()!.event as { reason: string };
+    const overTheWire = performance.now();
+    const late = anchor({ ...first, positionMs: 95_000, at: Math.floor(performance.now()) });
+    await a.cell.publish(late);
+    const carried = a.log.find(l => l.at >= overTheWire && l.event.type === 'sent' && l.event.kind === 'msg');
+    expect(carried).toBeDefined();
+    await b.when('B drops A\'s frame', () => b.cell.host.stats.drops > dropsBefore, 10_000);
+    const refusal = b.log.filter(l => l.at >= overTheWire && l.event.type === 'drop').map(l => (l.event as { reason: string }).reason);
     expect(b.cell.host.current!.view_json()).toBe(viewBefore);
-    // The home ends A's stream (its access ended) once it holds the revocation.
+    expect(b.events.some(e => e.at >= overTheWire && e.event.event === 'message')).toBe(false);
+    // b. The home learns the revocation and ends A's stream.
+    expect(await settle(b.device)).toBe(true);
     await a.when('A\'s stream stops being live', () => !a.stream.live, 15_000);
     const streamStatus = a.stream.status;
-    // A's poll (the app's own timer; the stream is not live) brings the revocation in.
+    const afterHome = performance.now();
+    await a.cell.publish(anchor({ ...first, positionMs: 97_000, at: Math.floor(performance.now()) }));
+    expect(a.log.filter(l => l.at >= afterHome && l.event.type === 'sent').length).toBe(0);
+    expect(a.log.some(l => l.at >= afterHome && l.event.type === 'unsent' && l.event.reason === 'carrier')).toBe(true);
+    // c. A's poll (the app's own timer; the stream is not live) brings the revocation in.
     const polled = performance.now();
     await a.device.session.syncNow();
-    a.stream.historyChanged();
     await a.cell.publish(anchor({ ...first, positionMs: 99_000, at: Math.floor(performance.now()) })).catch(() => undefined);
     const stale = a.log.find(l => l.at >= polled && l.event.type === 'stale');
     const account = a.log.find(l => l.at >= polled && l.event.type === 'account');
@@ -167,7 +174,7 @@ test('restart, offline past the timeout, a slow store during a pass, and revocat
     expect(account!.at).toBeGreaterThanOrEqual(stale!.at);
     expect((account!.event as { entitled: boolean }).entitled).toBe(false);
     expect(a.cell.state.entitled).toBe(false);
-    console.log(`revocation: B refused A's frame (${refusal.reason}); A's stream ${glue.StreamStatusKind[streamStatus.kind]}${streamStatus.blocked !== undefined ? `/${glue.StreamBlockedKind[streamStatus.blocked]}` : ''}; A reported stale, then entitled=${(account!.event as { entitled: boolean }).entitled}`);
+    console.log(`revocation: A's frame crossed the home and B dropped it (${refusal.join(',')}); then the home ended A's stream (${glue.StreamStatusKind[streamStatus.kind]}${streamStatus.blocked !== undefined ? `/${glue.StreamBlockedKind[streamStatus.blocked]}` : ''}); A reported stale, then entitled=${(account!.event as { entitled: boolean }).entitled}`);
   } finally {
     await w.stop();
   }

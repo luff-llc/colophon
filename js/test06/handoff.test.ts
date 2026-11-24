@@ -70,10 +70,10 @@ test('handoff on now-playing: B takes over from A at A\'s position, A yields and
     const playingOnB = { ...resumed!, playing: true, at: Math.floor(performance.now()) };
     b.appState = anchor(playingOnB);
     await b.cell.publish(b.appState);
-    // A follows B's anchor and projects B's position on its own clock.
+    // A follows B's anchor and projects B's position on its own clock, within the offset's error bound.
     const followed = await a.until('message', seen.at, 10_000, e => readAnchor(e.payload)?.playing === true);
     expect(readAnchor(followed.event.payload)!.positionMs).toBe(resumed!.positionMs);
-    expect(project(readAnchor(followed.event.payload)!, Math.floor(performance.now()), -offset.offset)).toBeGreaterThanOrEqual(resumed!.positionMs);
+    expect(project(readAnchor(followed.event.payload)!, Math.floor(performance.now()), -offset.offset)).toBeGreaterThanOrEqual(resumed!.positionMs - 2 * (offset.error + 1));
 
     // A is no longer holder and acts as none: no holder frame after it passed, other than resending its pass.
     expect(a.cell.state.isHolder).toBe(false);
