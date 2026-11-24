@@ -10,8 +10,9 @@
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use colophon_core::v05::account::{Account, Identity};
 use colophon_core::v05::calls::{
-    home_purposes, home_record_writes, verify_call, verify_home_batch, verify_home_request,
-    AccountView, Call, CallConfig, CallSigner, HomeRequest, HomeWrite,
+    home_purposes, home_record_writes, verify_call_parsed, verify_home_batch_parsed,
+    verify_home_request_parsed, AccountView, Call, CallConfig, CallSigner, HomeRequest, HomeWrite,
+    ParsedCall,
 };
 use colophon_core::v05::descriptor::{HistoryAccess, Role};
 use colophon_core::v05::encoding::{bounds, canonical, digest, parse_date, strict_parse};
@@ -21,7 +22,9 @@ use colophon_core::v05::history::envelope::AuthEnvelope;
 use colophon_core::v05::history::home::{
     admit, admit_first_with, admit_pending_batch_notices, admit_predecessor, admit_with, stage_predecessor, FirstUpload, HomeState, ReceiptToSign, Refusal,
 };
-use colophon_core::v05::history::{verify_history, Claim, Objects, Persisted, Principal, State, Stop};
+use colophon_core::v05::history::{
+    verify_history, Claim, Objects, Persisted, Principal, State, Stop, Verdict,
+};
 use colophon_core::v05::home_stream::{
     self, check_session_frame, check_subscription, parse_route, stream_namespaces, FrameRefusal,
     RouteVerdict,
@@ -91,7 +94,7 @@ fn run(input: &[u8]) -> R<Value> {
             Ok(_) => json!({"allowed": true}),
             Err(response) => response,
         }),
-        "access" => access(&req),
+        "access" => access(&req).map(|answer| with_kind(&req, answer)),
         "stream_standing" => stream_standing(&req),
         "session_frame" => session_frame(&req),
         "subscription" => subscription(&req),
@@ -255,6 +258,8 @@ fn limits() -> Value {
         "retentionMs": RETENTION_MS,
         "firstUploadEntries": MAX_FIRST_UPLOAD,
         "replayRows": DEFAULT_REPLAY_ROWS,
+        // `access` takes a principal's replay rows as `signerLive` and `signerOldest` too.
+        "replayCounts": true,
         "authorityPage": 64, "pendingPage": 64, "pendingBatch": 16,
         "authorityBody": bounds::AUTHORITY_BODY,
         "transitionEnvelope": bounds::TRANSITION_ENVELOPE,
@@ -271,9 +276,11 @@ struct View {
     /// The seq of the unresolved fork the history stops at (§8.6 rule 3), if any.
     fork: Option<u64>,
     stopped: bool,
+    /// The verdict the view was read from, its state moved to `state`.
+    verdict: Verdict,
 }
 fn view(h: &HomeState, now_ms: i64) -> R<View> {
-    let (persisted, v) = h.verified_history(now_ms).map_err(|e| e.to_string())?;
+    let (persisted, mut v) = h.verified_history(now_ms).map_err(|e| e.to_string())?;
     let stopped = v.is_stopped();
     let fork = match &v.stop {
         None => None,
@@ -281,8 +288,28 @@ fn view(h: &HomeState, now_ms: i64) -> R<View> {
         Some(_) if stopped => None,
         Some(_) => return Err(format!("history: {}", v.code())),
     };
-    let state = v.state.ok_or("no verified history")?;
-    Ok(View { persisted, state, fork, stopped })
+    let state = v.state.take().ok_or("no verified history")?;
+    Ok(View { persisted, state, fork, stopped, verdict: v })
+}
+impl View {
+    /// The objects the home holds (its checkpoint's).
+    fn held(&self) -> Objects {
+        self.persisted.objects().cloned().unwrap_or_default()
+    }
+    /// The verdict over the held objects at `now_ms` (the view's own clock), as
+    /// `verify_history(held, checkpoint, now_ms)` gives it, for a call's view of the account.
+    /// Without a recorded stop the view was verified at `now_ms` from the same checkpoint, and
+    /// the held objects are exactly the checkpoint's (so they add nothing to it and leave its
+    /// resumption as it is): that verdict is this one, and the history is not verified again.
+    fn held_verdict(&self, objects: &Objects, now_ms: i64) -> Verdict {
+        if self.persisted.stop_floor().is_none() && self.persisted.stopped().is_none() {
+            let mut v = self.verdict.clone();
+            v.state = Some(self.state.clone());
+            v
+        } else {
+            verify_history(objects, &self.persisted, now_ms)
+        }
+    }
 }
 
 fn status(req: &Value) -> R<Value> {
@@ -373,7 +400,11 @@ fn resume(req: &Value) -> R<Value> {
 /// The kind of a file in a home slot, by the engine's path grammar, or `null`: the host's
 /// storage scan and log replay use it, so the slot's grammar is the module's.
 fn classify(req: &Value) -> R<Value> {
-    let kind = paths::classify(str_of(req, "path")?).and_then(|k| match k {
+    Ok(json!({"kind": kind_of(str_of(req, "path")?)}))
+}
+/// [`classify`]'s answer for one path.
+fn kind_of(path: &str) -> Option<&'static str> {
+    paths::classify(path).and_then(|k| match k {
         Kind::Authority(_) => Some("authority"),
         Kind::Predecessor(_) => Some("predecessor"),
         Kind::Pending => Some("pending"),
@@ -384,8 +415,7 @@ fn classify(req: &Value) -> R<Value> {
         Kind::History => Some("history"),
         Kind::Blob(_) => Some("blob"),
         Kind::Request => None,
-    });
-    Ok(json!({"kind": kind}))
+    })
 }
 
 /// What a request reads or writes.
@@ -599,14 +629,14 @@ fn access(req: &Value) -> R<Value> {
     // method and path (the core's rule, checked again in `verify_home_request`: only a path that
     // serves the history takes `colophon.history.read`), is refused at once.
     let path = str_of(req, "path")?;
-    match Call::parse(&call) {
-        Ok(c) if home_purposes(method, path).contains(&c.purpose.as_str()) => {}
+    let call = match ParsedCall::parse(&call) {
+        Ok(c) if home_purposes(method, path).contains(&c.call().purpose.as_str()) => c,
         Ok(_) => return refuse("refused:outOfScope".into()),
         Err(f) => return refuse(f.code()),
-    }
+    };
     let base = str_of(req, "base")?.to_string();
-    let objects = held(h)?;
-    let verdict = verify_history(&objects, &v.persisted, now_ms);
+    let objects = v.held();
+    let verdict = v.held_verdict(&objects, now_ms);
     let account_view = AccountView::from_history_verifier(&verdict, &objects, now_ms)
         .map_err(|e| e.to_string())?;
     let existing = req.get("existing").filter(|e| !e.is_null()).map(|e| {
@@ -646,9 +676,9 @@ fn access(req: &Value) -> R<Value> {
     // each path as a single GET of it would carry them, or the whole batch is refused.
     let verified = match &batch {
         Some((_, paths)) => {
-            verify_home_batch(&call, &account_view, &cfg, &mut store, &request, paths)
+            verify_home_batch_parsed(call, &account_view, &cfg, &mut store, &request, paths)
         }
-        None => verify_home_request(&call, &account_view, &cfg, &mut store, &request),
+        None => verify_home_request_parsed(call, &account_view, &cfg, &mut store, &request),
     };
     let vc = match verified {
         Ok(vc) => vc,
@@ -659,23 +689,7 @@ fn access(req: &Value) -> R<Value> {
     }
     // The replay table (§12.4): this principal's live rows, against its share of the table.
     let signer = signer_text(&vc.call.signer);
-    let mut live = 0usize;
-    let mut oldest: Option<i64> = None;
-    let mut drop = Vec::new();
-    for row in req
-        .get("signerRows")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-    {
-        let at = row["at"].as_i64().unwrap_or(i64::MIN);
-        if retained(at, now_ms) {
-            live += 1;
-            oldest = Some(oldest.map_or(at, |o| o.min(at)));
-        } else {
-            drop.push(row["key"].clone());
-        }
-    }
+    let (live, oldest, drop) = signer_rows(req, now_ms);
     let capacity = req
         .get("replayRows")
         .and_then(Value::as_u64)
@@ -701,7 +715,7 @@ fn access(req: &Value) -> R<Value> {
         // The verified home read also meets the call requirement for members-only history.
         answer["records"] = json!(paths
             .into_iter()
-            .map(|path| json!({"path": path, "status": 200}))
+            .map(|path| json!({"path": path, "status": 200, "kind": kind_of(&path)}))
             .collect::<Vec<_>>());
     }
     if matches!(class, Class::StreamTicket) {
@@ -726,6 +740,48 @@ fn access(req: &Value) -> R<Value> {
         });
     }
     Ok(answer)
+}
+
+/// The principal's replay rows, as the host gives them: `(live, oldest, drop)`, how many are
+/// retained at `now_ms`, the oldest `at` among those, and the keys of the rest, which the host
+/// drops. Either `signerRows` (every row, `{"key","at"}`), or the two numbers the host counted
+/// itself by [`retained`]: `signerLive` and `signerOldest` (null when none is live). A host that
+/// counts drops the rows it found not retained whenever an answer carries `drop`.
+fn signer_rows(req: &Value, now_ms: i64) -> (usize, Option<i64>, Vec<Value>) {
+    if let Some(live) = req.get("signerLive").and_then(Value::as_u64) {
+        let oldest = req.get("signerOldest").and_then(Value::as_i64);
+        return (usize::try_from(live).unwrap_or(usize::MAX), oldest, Vec::new());
+    }
+    let mut live = 0usize;
+    let mut oldest: Option<i64> = None;
+    let mut drop = Vec::new();
+    for row in req
+        .get("signerRows")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let at = row["at"].as_i64().unwrap_or(i64::MIN);
+        if retained(at, now_ms) {
+            live += 1;
+            oldest = Some(oldest.map_or(at, |o| o.min(at)));
+        } else {
+            drop.push(row["key"].clone());
+        }
+    }
+    (live, oldest, drop)
+}
+
+/// An allowed record request's answer with the record's `kind` ([`classify`]'s), so the host
+/// serving the file need not ask for it again.
+fn with_kind(req: &Value, mut answer: Value) -> Value {
+    let rest = req.get("rest").and_then(Value::as_str);
+    if answer["allowed"] == true && req.get("section").and_then(Value::as_str) == Some("records") {
+        if let Some(kind) = rest.filter(|p| *p != "batch").and_then(kind_of) {
+            answer["kind"] = json!(kind);
+        }
+    }
+    answer
 }
 
 /// One stream principal's standing at the committed history (`null`: it may no longer stream):
@@ -1085,10 +1141,16 @@ fn files_of(objects: &Objects, now_ms: i64) -> R<BTreeMap<String, Vec<u8>>> {
     // state, `authority_page`).
     let mut by_seq: BTreeMap<u64, Vec<(String, &Vec<u8>)>> = BTreeMap::new();
     for e in &objects.entries {
-        let d = AuthEnvelope::parse(e, bounds::AUTHORITY_BODY, bounds::AUTHORITY_BODY * 2, false)
-            .map_err(|e| e.to_string())?
-            .digest;
-        let at = by_seq.entry(entry_seq(e)?).or_default();
+        // Parsed once for its digest and its seq ([`entry_seq`] parses it the same way).
+        let env = AuthEnvelope::parse(e, bounds::AUTHORITY_BODY, bounds::AUTHORITY_BODY * 2, false)
+            .map_err(|e| e.to_string())?;
+        let seq = env
+            .value
+            .get("seq")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| "entry without seq".to_string())?;
+        let d = env.digest;
+        let at = by_seq.entry(seq).or_default();
         if !at.iter().any(|(x, _)| *x == d) {
             at.push((d, e));
         }
@@ -1583,22 +1645,24 @@ fn own_latest_head(objects: &Objects, home: &str) -> Option<(u64, String, i64)> 
         .max_by_key(|(_, _, i)| *i)
 }
 
-/// Whether a head is due, and if so its body to sign, after the §13.3 guard.
+/// Whether a head is due, and if so its body to sign, after the §13.3 guard, with the state that
+/// records the drafted head. An answer with nothing to sign changes nothing and carries no
+/// `state`: the host keeps the one it gave.
 fn head_request(req: &Value) -> R<Value> {
     let mut l = load(req)?;
     let now_ms = i64_of(req, "now")?;
     let Some(h) = l.home.take() else {
-        return Ok(json!({"sign": null, "due": false, "why": "not appointed", "state": req["state"]}));
+        return Ok(json!({"sign": null, "due": false, "why": "not appointed"}));
     };
     let v = view(&h, now_ms)?;
     if v.stopped {
-        return Ok(json!({"sign": null, "due": true, "why": "the home is stopped; update it", "state": req["state"]}));
+        return Ok(json!({"sign": null, "due": true, "why": "the home is stopped; update it"}));
     }
     if v.fork.is_some() {
         // §8.6 rule 3: until a `resolve` activates, the home's verified history is the prefix
         // before the fork; it signs no head (a head over the prefix would be behind its own),
         // and so has no head it may serve (§13.3: a due head it cannot produce fails the read).
-        return Ok(json!({"sign": null, "due": true, "why": "the history stops at an unresolved fork", "state": req["state"]}));
+        return Ok(json!({"sign": null, "due": true, "why": "the history stops at an unresolved fork"}));
     }
     let st = &v.state;
     let seq = st.history().len() as u64;
@@ -1634,8 +1698,7 @@ fn head_request(req: &Value) -> R<Value> {
             _ => i64::MAX,
         };
         let why = if is_home { "fresh" } else { "not a current home" };
-        return Ok(json!({"sign": null, "due": false, "why": why, "state": req["state"],
-                         "wakeAt": wake.min(NEVER_MS)}));
+        return Ok(json!({"sign": null, "due": false, "why": why, "wakeAt": wake.min(NEVER_MS)}));
     }
     // §13.3: heads have strictly increasing `issued`, and `issued` is the home's clock. A clock
     // that has not passed this home's latest head (an entry in the same millisecond, a clock
@@ -1663,7 +1726,7 @@ fn head_request(req: &Value) -> R<Value> {
         }
         // The guard says no (an `issued` that would not increase, a second digest at a seq): not
         // an error; the home signs nothing, says why, and the head stays due.
-        Err(e) => Ok(json!({"sign": null, "due": true, "why": e.to_string(), "state": req["state"]})),
+        Err(e) => Ok(json!({"sign": null, "due": true, "why": e.to_string()})),
     }
 }
 
@@ -2031,11 +2094,11 @@ fn record_due(req: &Value) -> R<Value> {
     let now_ms = i64_of(req, "now")?;
     let now = format_date(now_ms);
     let Some(mut h) = l.home.take() else {
-        return Ok(json!({"entries": [], "state": req["state"], "store": [], "sign": []}));
+        return Ok(json!({"entries": [], "store": [], "sign": []}));
     };
     let v = view(&h, now_ms)?;
     if v.stopped {
-        return Ok(json!({"state": req["state"], "store": [], "sign": [],
+        return Ok(json!({"store": [], "sign": [],
             "result": "newerFormat", "note": "the home is stopped; update it", "settled": true}));
     }
     let objects = held(&h)?;
@@ -2151,10 +2214,10 @@ fn record_due(req: &Value) -> R<Value> {
     }
     // Nothing recorded and nothing refused: no admission ran that changed the state (only an
     // admitted entry or a refusal does), so the state is the one given and there is nothing new
-    // to store. It is returned as given rather than encoded again.
+    // to store. The answer carries no `state`: the host keeps the one it gave.
     if recorded == 0 && result == "ok" {
         return Ok(json!({
-            "state": req["state"], "store": [], "sign": sign, "notify": notify,
+            "store": [], "sign": sign, "notify": notify,
             "result": result, "note": note, "settled": settled, "wakeAt": wake,
         }));
     }
@@ -2180,7 +2243,14 @@ const NEVER_MS: i64 = 9_007_199_254_740_991;
 /// current at the window's entry receipts the genesis once, within the window), as a signing
 /// request the host answers through `finish_receipt` like any other.
 fn genesis_receipt_request(h: &HomeState, home: &str, now_ms: i64) -> R<Option<Value>> {
-    if h.is_stopped(now_ms).map_err(|e| e.to_string())? {
+    let (_, v) = h.verified_history(now_ms).map_err(|e| e.to_string())?;
+    if v.is_stopped() {
+        return Ok(None);
+    }
+    // An account with no predecessor owes no genesis receipt: whether it has one is its genesis's
+    // (the succession is set there, never later), so the verified view says it as a replay of
+    // the held objects would, and the replay is not run (it would fail with "no predecessor").
+    if v.state.as_ref().is_some_and(|s| succession_status(s).is_none()) {
         return Ok(None);
     }
     let objects = held(h)?;
@@ -2265,7 +2335,14 @@ fn check_record(req: &Value) -> R<Value> {
     let path = str_of(req, "path")?;
     let bytes = bytes_of(req, "bytes")?;
     let refuse = |code: &str| Ok(json!({"allowed": false, "code": code}));
-    if l.home.as_ref().map(|h| h.is_stopped(now_ms)).transpose().map_err(|e| e.to_string())?.unwrap_or(false) {
+    // A stopped home takes nothing (the checkpoint is read once, for this and for the held entries).
+    let verified = l
+        .home
+        .as_ref()
+        .map(|h| h.verified_history(now_ms))
+        .transpose()
+        .map_err(|e| e.to_string())?;
+    if verified.as_ref().is_some_and(|(_, v)| v.is_stopped()) {
         return refuse("unavailable");
     }
     let Some(kind) = paths::classify(path) else {
@@ -2279,8 +2356,11 @@ fn check_record(req: &Value) -> R<Value> {
             Ok(json!({"allowed": true}))
         }
         Kind::Op { .. } | Kind::Live { .. } | Kind::History => {
-            let h = l.home.as_ref().ok_or("no home state")?;
-            let objects = held(h)?;
+            let (persisted, _) = verified.as_ref().ok_or("no home state")?;
+            // Who may write is decided by a replay of the held entries from genesis, not by the
+            // fold the checkpoint carries: that fold is local memory, which a verifier under other
+            // rules (or one that kept an inconsistent copy) may have written.
+            let objects = persisted.objects().cloned().unwrap_or_default();
             let ra = RecordAuthority::from_objects(&objects, now_ms).map_err(|e| e.to_string())?;
             let Ok((header, env)) = OperationHeader::parse(&bytes) else {
                 return refuse("malformed");
@@ -2443,10 +2523,11 @@ fn provision_access(req: &Value) -> R<Value> {
     let refuse = |code: String| Ok(json!({"allowed": false, "status": 403, "result": code}));
     let unavailable = || Ok(json!({"allowed": false, "status": 503, "result": "unavailable"}));
     let call_bytes = bytes_of(req, "call")?;
-    let call = match Call::parse(&call_bytes) {
+    let parsed = match ParsedCall::parse(&call_bytes) {
         Ok(c) => c,
         Err(f) => return refuse(f.code()),
     };
+    let call = parsed.call();
     if let Err(f) = call.verify_possession() {
         return refuse(f.code());
     }
@@ -2520,8 +2601,8 @@ fn provision_access(req: &Value) -> R<Value> {
     if v.stopped {
         return unavailable();
     }
-    let objects = held(h)?;
-    let verdict = verify_history(&objects, &v.persisted, now_ms);
+    let objects = v.held();
+    let verdict = v.held_verdict(&objects, now_ms);
     let Ok(account_view) = AccountView::from_history_verifier(&verdict, &objects, now_ms) else {
         return unavailable();
     };
@@ -2541,7 +2622,7 @@ fn provision_access(req: &Value) -> R<Value> {
         controller_purposes: &[],
         home_endpoints: &[],
     };
-    let vc = match verify_call(&call_bytes, &account_view, &cfg, &mut store) {
+    let vc = match verify_call_parsed(parsed, &account_view, &cfg, &mut store) {
         Ok(vc) => vc,
         Err(f) if f.code() == "unavailable" => return unavailable(),
         Err(f) => return refuse(f.code()),

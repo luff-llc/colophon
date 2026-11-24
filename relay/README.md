@@ -531,6 +531,12 @@ The module is pure: the host passes the time and the state, signs only what a re
 under `sign` (receipt bodies, head bodies) and gives each signature back. It never sees a private
 key. A module that traps is dropped and a new instance serves the next request.
 
+The relay and the module ship together, and some answers rely on that: an answer that changes
+nothing (`record_due`, `head_request`) carries no `state` (the host keeps its own); an allowed
+record `access` names the record's `kind`; and `access` takes a principal's replay rows as two
+counts (`signerLive`, `signerOldest`, answering `drop: []`) only from a host whose module says
+`replayCounts: true` in `limits`. A host with an older module sends every row as before.
+
 ## Tests
 
 ```sh

@@ -75,6 +75,21 @@ describe('settling a pass', () => {
     });
   }
 
+  test('no-op answers that carry no state leave the state as it was, and the pass quiet', async () => {
+    const answers = quietAnswers();
+    const h = slot({
+      ...answers,
+      record_due: (req) => { const { state, ...rest } = answers.record_due(req); assert.equal(state, req.state); return rest; },
+      head_request: (req) => { const { state, ...rest } = answers.head_request(req); assert.equal(state, req.state); return rest; },
+    });
+    assert.equal(await h.settle(), 'fresh');
+    assert.equal(h.state, 's1');
+    assert.ok(h.isQuiet(), 'quiet as with the state given back');
+    h.asked = [];
+    assert.equal(await h.settle(), 'fresh');
+    assert.deepEqual(h.asked, []);
+  });
+
   test('a module error leaves no quiet', async () => {
     const h = slot({ ...quietAnswers(), record_due: () => { throw new ModuleError('history: unavailable'); } });
     await assert.rejects(h.settle(), ModuleError);

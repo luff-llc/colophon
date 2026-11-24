@@ -215,7 +215,14 @@ describe('home batch record fetch', { skip: existsSync(wasm) ? false : 'build co
     await slot.putImmutable(otherNamespace, otherBytes);
 
     const body = JSON.stringify({ paths: [op, missing, otherNamespace, history, otherMissing, blob, head] }, null, 2);
-    const res = await post(body, await sign(body), { headers: { origin: 'https://client.example' } });
+    // The access decision names each record's kind: serving asks the module for none.
+    const asked = [];
+    const call = slot.home.wasm.call;
+    slot.home.wasm.call = function (request) { asked.push(request.op); return call.call(this, request); };
+    const authorization = await sign(body);
+    let res;
+    try { res = await post(body, authorization, { headers: { origin: 'https://client.example' } }); } finally { slot.home.wasm.call = call; }
+    assert.ok(asked.includes('access') && !asked.includes('classify'), asked.join(','));
     assert.equal(res.status, 200, res.status === 200 ? undefined : await res.text());
     assert.equal(res.headers.get('cache-control'), 'no-store, no-transform');
     assert.equal(res.headers.get('access-control-allow-origin'), 'https://client.example');
@@ -226,7 +233,12 @@ describe('home batch record fetch', { skip: existsSync(wasm) ? false : 'build co
     ], truncated: false });
     const path = `/records/${otherNamespace}`;
     for (const method of ['GET', 'HEAD']) {
-      const single = await fetch(base + path, { method, headers: { authorization: await sign('', { method, path }) } });
+      const authorization = await sign('', { method, path });
+      asked.length = 0;
+      slot.home.wasm.call = function (request) { asked.push(request.op); return call.call(this, request); };
+      let single;
+      try { single = await fetch(base + path, { method, headers: { authorization } }); } finally { slot.home.wasm.call = call; }
+      assert.ok(asked.includes('access') && !asked.includes('classify'), `${method}: ${asked.join(',')}`);
       assert.equal(single.status, 200);
       assert.equal(single.headers.get('etag'), `"${sha256(otherBytes)}"`);
       assert.deepEqual(Buffer.from(await single.arrayBuffer()), method === 'GET' ? otherBytes : Buffer.alloc(0));

@@ -35,10 +35,19 @@ function colophonCall(req) {
   return match ? b64(Buffer.from(match[1], 'base64url')) : null;
 }
 
+/** The module's replay retention rule, `retained(at, now)`: kept while `now - at <= retentionMs`
+ * (inclusive; a row from a clock that later stepped back is kept). `at` is read as the module
+ * reads it from JSON: anything but an integer in the 64-bit signed range is never retained. */
+export function retainedAt(at, now, retentionMs) {
+  return Number.isInteger(at) && at >= -(2 ** 63) && at < 2 ** 63 && now - at <= retentionMs;
+}
+
 const ROUTE_BODY_BYTES = 4096;
-/** The kinds of the history's own files (§13.4), read as the history pages are: judged and
- * selected under the slot's lock. */
-const HISTORY_FILES = new Set(['authority', 'pending', 'receipt', 'predecessor']);
+/** The directories the history's own files (§13.4) lie in, by the module's path grammar
+ * (authority, predecessor, pending and receipt files): a read under one is judged and selected
+ * under the slot's lock, as the history pages are. A path there that is not a history file is
+ * refused by the module either way, so no module call is needed to choose. */
+const HISTORY_DIRS = new Set(['authority', 'predecessor', 'transitions', 'vetoes', 'receipts']);
 const NOTICE_COMMIT = 'notice-commit.json';
 
 // Forwarding (§13.1), per peer: each request's own time limit, a pass's wall-time budget, how many
@@ -730,7 +739,8 @@ export class HomeSlot {
   // -------------------------------------------------------------------------------------------
   // Who may do what (§13.4, §14): the module's `access` decision, all of it.
 
-  async access(req, section, rest, effect, body, call = colophonCall(req)) {
+  /** `digest`: the SHA-256 of `body`, when the caller has it already. */
+  async access(req, section, rest, effect, body, call = colophonCall(req), digest = null) {
     const { HttpError } = this.deps;
     return this.replayLock(async () => {
       let existing = null; let signerRows = [];
@@ -742,15 +752,20 @@ export class HomeSlot {
           signerRows = [...(this.bySigner.get(k.signer) ?? [])].map((key) => ({ key, at: this.rows.get(key).at }));
         }
       }
+      // One clock reading, after the call's key and rows are looked up, for the count and the call.
+      const now = this.clock();
+      const share = this.signerShare(signerRows, now);
       const r = this.wasm.call({
-        op: 'access', state: this.state, now: this.clock(), method: req.method, section, rest,
-        call, existing, signerRows, replayRows: this.limits.replayRows, base: this.base,
+        op: 'access', state: this.state, now, method: req.method, section, rest,
+        call, existing, ...(share ? { signerLive: share.live, signerOldest: share.oldest } : { signerRows }),
+        replayRows: this.limits.replayRows, base: this.base,
         path: this.relativePath(req),
         ...(section === 'records' && rest === 'batch'
           ? { batchBody: b64(body) }
-          : { bodySha256: sha(body ?? Buffer.alloc(0)) }),
+          : { bodySha256: digest ?? sha(body ?? Buffer.alloc(0)) }),
       });
-      this.dropRows(r.drop);
+      // With counts, the module answers `drop` where it would have listed the expired rows.
+      if (r.drop) this.dropRows(share ? [...r.drop, ...share.expired] : r.drop);
       if (r.allowed) {
         if (r.reserve) await this.reserve(r.reserve, effect);
         return r;
@@ -765,6 +780,22 @@ export class HomeSlot {
         default: throw new HttpError(r.status ?? 404, 'Not found');
       }
     });
+  }
+
+  /** A principal's replay rows (`{key, at}`) as the module counts them at `now` (§12.4): how many
+   * are retained, the oldest `at` among those, and the keys of the rest. Null when the rows must
+   * be sent as they are: the loaded module does not say it takes counts (`limits.replayCounts`),
+   * or the clock or a row's time is an integer JavaScript cannot subtract exactly. */
+  signerShare(rows, now) {
+    this.replayLimits ??= this.wasm.call({ op: 'limits' });
+    const { retentionMs, replayCounts } = this.replayLimits;
+    if (replayCounts !== true || !Number.isSafeInteger(now)) return null;
+    let live = 0; let oldest = null; const expired = [];
+    for (const { key, at } of rows) {
+      if (Number.isInteger(at) && !Number.isSafeInteger(at)) return null;
+      if (retainedAt(at, now, retentionMs)) { live += 1; if (oldest === null || at < oldest) oldest = at; } else expired.push(key);
+    }
+    return { live, oldest, expired };
   }
 
   /** The request's path and query relative to the slot's base, exactly as sent: what a call's
@@ -791,7 +822,8 @@ export class HomeSlot {
     }
   }
 
-  async handle(req, res, url, section, rest) {
+  /** `work` is the relay's record of this request: an allowed read of a record gets its `kind`. */
+  async handle(req, res, url, section, rest, work) {
     const { HttpError, send, readBody, clampInt } = this.deps;
     await this.rateGate(req, section, rest);
     if (section === 'routes') {
@@ -850,14 +882,14 @@ export class HomeSlot {
     // judged and selected over one state.
     const historyFile = (method === 'GET' || method === 'HEAD') && (section === 'predecessor'
       || (section === 'records' && typeof rest === 'string' && rest !== `heads/${this.key.memberId}.json` && !url.search
-        && HISTORY_FILES.has(this.slot.classify(rest))));
+        && HISTORY_DIRS.has(rest.split('/')[0])));
     if (historyFile || section === 'changes' || (section === 'authority' && method === 'GET') || (section === 'pending' && method !== 'POST')) {
       await this.lockedRead(req, res, url, section, rest);
       return true;
     }
     // Heads (anyone may forward one; the module checks it) record their own effect, or none.
     const effect = writing ? { path: rest, prior: this.slot.current.get(rest)?.sha256 ?? null } : null;
-    await this.access(req, section ?? '', rest ?? null, effect, null);
+    const allowed = await this.access(req, section ?? '', rest ?? null, effect, null);
     await this.deps.reach?.(`access ${section ?? ''}`); // a test hook (traced builds only)
     if (!section) return false;
     if (section === 'head') { await this.serveOwnHead(res); return true; }
@@ -881,7 +913,7 @@ export class HomeSlot {
     if (section === 'predecessor') { await this.servePredecessor(req, res, rest); return true; }
     if (section === 'records') {
       if (!writing && rest === `heads/${this.key.memberId}.json` && (method === 'GET' || method === 'HEAD')) { await this.serveOwnHead(res); return true; }
-      if (!writing) return false; // a read the module allowed: the relay serves the file
+      if (!writing) { if (work) work.kind = allowed.kind; return false; } // a read the module allowed: the relay serves the file
       if (url.search) throw new HttpError(400, 'Record URLs take no query');
       await this.putHead(req, res, rest);
       return true;
@@ -952,7 +984,8 @@ export class HomeSlot {
     await this.lock(async () => {
       const effectPath = section === 'predecessor' ? `predecessor/${rest}` : rest;
       const effect = { path: effectPath, prior: this.slot.current.get(effectPath)?.sha256 ?? null };
-      const allowed = await this.access(req, section, rest, effect, body);
+      const digest = sha(body); // once, for the call, the index and the ETag
+      const allowed = await this.access(req, section, rest, effect, body, colophonCall(req), digest);
       await this.deps.reach?.(`access ${section}`); // a test hook (traced builds only)
       const key = allowed.reserve?.key;
       let ended = false;
@@ -964,12 +997,12 @@ export class HomeSlot {
           if (r.outcome === 'conflict') send(res, 412, { result: 'conflict' });
           else if (r.outcome !== 'ok') await this.answerOutcome(res, r);
           else {
-            res.writeHead(r.created ? 201 : 200, { etag: `"${sha(body)}"`, 'content-length': 0 });
+            res.writeHead(r.created ? 201 : 200, { etag: `"${digest}"`, 'content-length': 0 });
             res.end();
           }
         } else {
           if (url.search) throw new HttpError(400, 'Record URLs take no query');
-          await this.putRecord(req, res, rest, body);
+          await this.putRecord(req, res, rest, body, digest);
         }
         ended = true;
       } finally {
@@ -1041,11 +1074,10 @@ export class HomeSlot {
   }
 
   /** Store a record write the module allowed. Under the lock (see lockedWrite). */
-  async putRecord(req, res, recordPath, body) {
+  async putRecord(req, res, recordPath, body, digest = sha(body)) {
     const { HttpError, send } = this.deps;
     const check = this.wasm.call({ op: 'check_record', state: this.state, now: this.clock(), path: recordPath, bytes: b64(body) });
     if (!check.allowed) { send(res, 422, { result: check.code }); return; }
-    const digest = sha(body); // once, for the index and the ETag
     const conditional = req.headers['if-none-match'];
     let status;
     if (conditional === '*') status = await this.slot.putImmutable(recordPath, body, digest);

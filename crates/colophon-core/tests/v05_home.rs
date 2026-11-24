@@ -858,3 +858,38 @@ fn a_remaining_home_receipts_a_full_set_that_revokes_the_other_as_usual() {
         Err(Refusal::Late)
     );
 }
+
+/// A home state read from its bytes keeps its decoded checkpoint for its own reads, and every
+/// change to the checkpoint replaces it. Through an admission from a read state, a refusal, a
+/// receipt and restarts, each state serves the checkpoint its own bytes decode to, and reading
+/// it changes none of its bytes.
+#[test]
+fn a_home_state_serves_the_checkpoint_its_bytes_hold() {
+    let t = fixture("t-remove-after-delay", "objects/transition.json");
+    let at = time(&t);
+    let check = |h: &HomeState, now: i64| {
+        let bytes = h.to_bytes().unwrap();
+        let read = HomeState::from_bytes(&bytes).unwrap();
+        assert_eq!(read.to_bytes().unwrap(), bytes, "the decoded copy is never stored");
+        let (a, b) = (read.persisted().unwrap(), h.persisted().unwrap());
+        assert_eq!(a.to_bytes().unwrap(), b.to_bytes().unwrap(), "the checkpoint its bytes hold");
+        assert_eq!(a.objects().map(|o| o.pending.len()), b.objects().map(|o| o.pending.len()));
+        let (va, vb) = (read.verified_history(now).unwrap().1, h.verified_history(now).unwrap().1);
+        assert_eq!((va.branch, va.stop, va.stopped), (vb.branch, vb.stop, vb.stopped));
+    };
+    let home = restore(&setup("t-remove-after-delay", false, always(), at));
+    check(&home, at);
+    let early = admit(&home, &t, &stamp(at - 1));
+    assert_eq!(early.result, Err(Refusal::Early));
+    check(&early.state, at);
+    let admitted = admit(&restore(&early.state), &t, &stamp(at));
+    assert_eq!(admitted.result, Ok(()));
+    check(&admitted.state, at);
+    let before = restore(&early.state).persisted().unwrap().objects().unwrap().pending.len();
+    let after = admitted.state.persisted().unwrap().objects().unwrap().pending.len();
+    assert_eq!((before, after), (0, 1), "the admitted state serves its new checkpoint, not the one it was read with");
+    let receipt = signed(&serde_json::from_slice::<Value>(&admitted.receipts[0].body).unwrap());
+    let home = finish_receipt(&restore(&admitted.state), &admitted.receipts[0].object, &receipt, &stamp(at + 1)).unwrap();
+    check(&home, at + 1);
+    assert_eq!(home.persisted().unwrap().objects().unwrap().pending.len(), 2);
+}
