@@ -1196,3 +1196,64 @@ fn call_op(req: Value) -> Value {
 fn kind_of(path: &str) -> Value {
     call(json!({"op": "classify", "path": path}))["kind"].clone()
 }
+
+/// Writes a per-request benchmark's input to `$COLOPHON_REQUEST_BENCH`: a home slot whose history
+/// holds over a hundred entries (members approved and revoked one by one), and the module requests one
+/// authenticated record `GET` and one record `PUT` make (`access`, then `check_record`), as the
+/// relay sends them. Test keys only: they protect nothing.
+#[test]
+#[ignore = "writes the per-request benchmark's input; run with COLOPHON_REQUEST_BENCH=<file>"]
+fn write_request_bench_input() {
+    let Ok(out) = std::env::var("COLOPHON_REQUEST_BENCH") else { return };
+    let mut f = create_with(&[NS], "members", 1);
+    let writer = f.host.identity(31);
+    admit(&mut f, &writer, "Writer", "device", terms_for(&[(NS, "write")]), terms_for(&[(NS, "write")]));
+    // 80 devices approved, then 40 of them revoked: 120 entries.
+    for i in 0..120u32 {
+        let id = f.host.identity(130 + (i % 80) as u8);
+        // Spaced out, within the signer's rate.
+        let next = f.account.now_ms() + 3 * HOUR;
+        f.account.advance(next).unwrap();
+        if i >= 80 {
+            let revoke = f.account.begin_revoke(&id, &RevokeKeep::Nothing, &[f.d.clone()], [i as u8; 32]).unwrap();
+            run(&mut f.account, &f.host, revoke);
+        } else {
+            admit(&mut f, &id, "Device", "device", terms_for(&[(NS, "read")]), terms_for(&[(NS, "read")]));
+        }
+    }
+    let keys = HomeKeys::new(0x77);
+    appoint_homes(&mut f, &[(&keys, BASE_A)]);
+    let now = f.account.now_ms() + 1_000;
+    let mut home = Home::new(keys, f.account.id().as_str());
+    let all = entries_json(&f);
+    for chunk in all.chunks(64) {
+        let values: Vec<Value> = chunk.iter().map(|(_, e)| e.clone()).collect();
+        let r = home.authority(chunk[0].0, &values, now);
+        assert_eq!(r["outcome"], "ok", "{r}");
+    }
+    assert!(home.head(now).is_some());
+    let src = MemSource::new();
+    src.store_account(&f.account);
+    let mut host = std::mem::replace(&mut f.host, Host::new());
+    let mut e = member_engine(&f, &host, &src, &writer, now);
+    let w = engine_write(&mut e, &mut host, &src, NS, "follow", json!({"id": "show", "url": "https://example.org/feed", "title": "Show"}));
+    f.host = host;
+    let (rest, bytes) = w.stores.into_iter().find(|(p, _)| p.starts_with("ops/")).unwrap();
+    let path = format!("/records/{rest}");
+    let signed = |method: &str, body: &[u8], n: u8, purpose: &str| {
+        b(&call_as(&f.host, &f.account, "member", &writer, BASE_A, purpose,
+                   home_call_args(method, &path, &digest(body)), now, [n; 32]))
+    };
+    let get = json!({"op": "access", "state": home.state, "now": now, "base": BASE_A, "method": "GET",
+                     "section": "records", "rest": rest, "path": path, "bodySha256": digest(b""),
+                     "call": signed("GET", b"", 1, "colophon.home.read"), "existing": null, "replayRows": 65_536});
+    let put = json!({"op": "access", "state": home.state, "now": now, "base": BASE_A, "method": "PUT",
+                     "section": "records", "rest": rest, "path": path, "bodySha256": digest(&bytes),
+                     "call": signed("PUT", &bytes, 2, "colophon.home.write"), "existing": null, "replayRows": 65_536});
+    assert_eq!(call(get.clone())["allowed"], true);
+    assert_eq!(call(put.clone())["allowed"], true);
+    let check = json!({"op": "check_record", "state": home.state, "now": now, "path": rest, "bytes": b(&bytes)});
+    assert_eq!(call(check.clone())["allowed"], true);
+    let entries = call(json!({"op": "status", "state": home.state, "now": now}))["seq"].clone();
+    std::fs::write(&out, json!({"entries": entries, "stateBytes": home.state.len(), "get": get, "put": put, "check": check}).to_string()).unwrap();
+}
