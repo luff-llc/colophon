@@ -1623,22 +1623,24 @@ fn own_latest_head(objects: &Objects, home: &str) -> Option<(u64, String, i64)> 
         .max_by_key(|(_, _, i)| *i)
 }
 
-/// Whether a head is due, and if so its body to sign, after the §13.3 guard.
+/// Whether a head is due, and if so its body to sign, after the §13.3 guard, with the state that
+/// records the drafted head. An answer with nothing to sign changes nothing and carries no
+/// `state`: the host keeps the one it gave.
 fn head_request(req: &Value) -> R<Value> {
     let mut l = load(req)?;
     let now_ms = i64_of(req, "now")?;
     let Some(h) = l.home.take() else {
-        return Ok(json!({"sign": null, "due": false, "why": "not appointed", "state": req["state"]}));
+        return Ok(json!({"sign": null, "due": false, "why": "not appointed"}));
     };
     let v = view(&h, now_ms)?;
     if v.stopped {
-        return Ok(json!({"sign": null, "due": true, "why": "the home is stopped; update it", "state": req["state"]}));
+        return Ok(json!({"sign": null, "due": true, "why": "the home is stopped; update it"}));
     }
     if v.fork.is_some() {
         // §8.6 rule 3: until a `resolve` activates, the home's verified history is the prefix
         // before the fork; it signs no head (a head over the prefix would be behind its own),
         // and so has no head it may serve (§13.3: a due head it cannot produce fails the read).
-        return Ok(json!({"sign": null, "due": true, "why": "the history stops at an unresolved fork", "state": req["state"]}));
+        return Ok(json!({"sign": null, "due": true, "why": "the history stops at an unresolved fork"}));
     }
     let st = &v.state;
     let seq = st.history().len() as u64;
@@ -1674,8 +1676,7 @@ fn head_request(req: &Value) -> R<Value> {
             _ => i64::MAX,
         };
         let why = if is_home { "fresh" } else { "not a current home" };
-        return Ok(json!({"sign": null, "due": false, "why": why, "state": req["state"],
-                         "wakeAt": wake.min(NEVER_MS)}));
+        return Ok(json!({"sign": null, "due": false, "why": why, "wakeAt": wake.min(NEVER_MS)}));
     }
     // §13.3: heads have strictly increasing `issued`, and `issued` is the home's clock. A clock
     // that has not passed this home's latest head (an entry in the same millisecond, a clock
@@ -1703,7 +1704,7 @@ fn head_request(req: &Value) -> R<Value> {
         }
         // The guard says no (an `issued` that would not increase, a second digest at a seq): not
         // an error; the home signs nothing, says why, and the head stays due.
-        Err(e) => Ok(json!({"sign": null, "due": true, "why": e.to_string(), "state": req["state"]})),
+        Err(e) => Ok(json!({"sign": null, "due": true, "why": e.to_string()})),
     }
 }
 
@@ -2071,11 +2072,11 @@ fn record_due(req: &Value) -> R<Value> {
     let now_ms = i64_of(req, "now")?;
     let now = format_date(now_ms);
     let Some(mut h) = l.home.take() else {
-        return Ok(json!({"entries": [], "state": req["state"], "store": [], "sign": []}));
+        return Ok(json!({"entries": [], "store": [], "sign": []}));
     };
     let v = view(&h, now_ms)?;
     if v.stopped {
-        return Ok(json!({"state": req["state"], "store": [], "sign": [],
+        return Ok(json!({"store": [], "sign": [],
             "result": "newerFormat", "note": "the home is stopped; update it", "settled": true}));
     }
     let objects = held(&h)?;
@@ -2191,10 +2192,10 @@ fn record_due(req: &Value) -> R<Value> {
     }
     // Nothing recorded and nothing refused: no admission ran that changed the state (only an
     // admitted entry or a refusal does), so the state is the one given and there is nothing new
-    // to store. It is returned as given rather than encoded again.
+    // to store. The answer carries no `state`: the host keeps the one it gave.
     if recorded == 0 && result == "ok" {
         return Ok(json!({
-            "state": req["state"], "store": [], "sign": sign, "notify": notify,
+            "store": [], "sign": sign, "notify": notify,
             "result": result, "note": note, "settled": settled, "wakeAt": wake,
         }));
     }
@@ -2220,7 +2221,14 @@ const NEVER_MS: i64 = 9_007_199_254_740_991;
 /// current at the window's entry receipts the genesis once, within the window), as a signing
 /// request the host answers through `finish_receipt` like any other.
 fn genesis_receipt_request(h: &HomeState, home: &str, now_ms: i64) -> R<Option<Value>> {
-    if h.is_stopped(now_ms).map_err(|e| e.to_string())? {
+    let (_, v) = h.verified_history(now_ms).map_err(|e| e.to_string())?;
+    if v.is_stopped() {
+        return Ok(None);
+    }
+    // An account with no predecessor owes no genesis receipt: whether it has one is its genesis's
+    // (the succession is set there, never later), so the verified view says it as a replay of
+    // the held objects would, and the replay is not run (it would fail with "no predecessor").
+    if v.state.as_ref().is_some_and(|s| succession_status(s).is_none()) {
         return Ok(None);
     }
     let objects = held(h)?;

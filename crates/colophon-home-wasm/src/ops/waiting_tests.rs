@@ -5,7 +5,7 @@
 //! settled transitions and vetoes and a few pending ones, and check the note against the
 //! original builder, which tried every held object and verified the history for each.
 #![allow(clippy::unwrap_used)]
-use super::{handle, held, load, view, waiting};
+use super::{genesis_receipt_request, handle, held, load, view, waiting};
 use crate::support::{
     controller_engine, engine_finish, pending_path, Fixture, Host, MemSource, HOUR, T0,
 };
@@ -392,12 +392,12 @@ fn wake_at_is_never_later_than_what_the_clock_makes_due() {
         };
         bounded += 1;
         assert!(wake > now, "a wake time after the reading: {wake} at {now}");
-        assert_eq!(r["state"], json!(home.state), "nothing recorded leaves the state byte for byte");
+        assert!(r.get("state").is_none(), "nothing recorded leaves the state as given, and none is sent back");
         assert_eq!(r["sign"], json!([]));
         let last = wake.min(now + 30 * 24 * HOUR) - 1;
         for t in [now + 1, now + (last - now) / 2, last] {
             let again = call(json!({"op": "record_due", "state": home.state, "now": t}));
-            assert_eq!(again["state"], json!(home.state), "nothing becomes due at {t}, before {wake}");
+            assert!(again.get("state").is_none(), "nothing becomes due at {t}, before {wake}");
             assert_eq!(again["sign"], json!([]), "at {t}");
             assert_eq!(again["result"], "ok", "at {t}");
         }
@@ -407,7 +407,7 @@ fn wake_at_is_never_later_than_what_the_clock_makes_due() {
         let verified = VerifiedObjects::new(&objects, now);
         if verified.next_due_ms() == Some(wake) && wake < now + 30 * 24 * HOUR {
             let at = call(json!({"op": "record_due", "state": home.state, "now": wake}));
-            if at["state"] != json!(home.state) {
+            if at.get("state").is_some_and(|s| *s != json!(home.state)) {
                 exact += 1;
             }
         }
@@ -455,4 +455,28 @@ fn a_transition_due_long_ago_with_nothing_appended_since_is_still_due() {
     assert_eq!(verified.next_due_ms(), None, "due and not recorded: no wake bound");
     let r = w.home.due(late);
     assert_eq!(r["wakeAt"], Value::Null, "{}", r["result"]);
+}
+
+/// An account with no predecessor owes no genesis receipt, and finding that out reads the home's
+/// verified view once: no replay of the held history from genesis, on every `record_due` and
+/// every upload. A no-op `record_due` and `head_request` send no state back.
+#[test]
+fn a_home_without_a_succession_asks_for_no_genesis_receipt_and_replays_nothing() {
+    let mut w = World::new();
+    w.round(0, at(0), true, &mut |_, _| {});
+    let (h, _) = w.home.held();
+    for now in [at(1), at(1) + 7 * 24 * HOUR] {
+        work::reset();
+        let r = genesis_receipt_request(&h, h.home_id(), now).unwrap();
+        assert!(r.is_none());
+        assert_eq!(work::get().verifications, 1, "one verification, of the view");
+    }
+    let now = at(1);
+    let quiet = call(json!({"op": "record_due", "state": w.home.state, "now": now}));
+    assert_eq!((quiet["result"].as_str(), quiet["store"].clone()), (Some("ok"), json!([])), "{quiet}");
+    assert!(quiet.get("state").is_none(), "{quiet}");
+    w.home.head(now);
+    let fresh = call(json!({"op": "head_request", "state": w.home.state, "now": now + 1}));
+    assert_eq!((fresh["due"].clone(), fresh["sign"].clone()), (json!(false), Value::Null), "{fresh}");
+    assert!(fresh.get("state").is_none(), "{fresh}");
 }
