@@ -199,30 +199,49 @@ import Observation
     /// and the failing command's own error. If the store refuses the batch, nothing of it is durable and that error is
     /// thrown as for a single write. An empty batch writes nothing and returns no receipts. Claimed dates are not taken
     /// here; write those with `perform(_:observed:claimed:)`.
+    ///
+    /// Once the batch is durable its receipts are returned, or carried by the `BatchInterruption`, whatever happens next:
+    /// a snapshot that cannot be built afterwards is reported in `lastError` and followed by a refresh, and a session that
+    /// moved to another library meanwhile still returns the receipts of the one it wrote to. The engine's clock advances
+    /// before each command, as between separate writes, so a grant that expires during the batch refuses the commands
+    /// after it. Reads (`query`, `view`) wait while the batch holds signed commands that are not yet stored.
     @discardableResult public func perform(_ commands: [DomainCommand], observed: ObservedRevision) async throws -> [WriteReceipt] {
         await restore()
         guard observed.context == context else { throw SessionError.destinationChanged }
         guard commands.count <= Self.maximumBatchCount else { throw SessionError.invalidCommand }
         guard !commands.isEmpty else { return [] }
         do {
-            let (receipts, snapshot) = try await worker.write(commands, observed: observed.revision)
-            guard observed.context == context else { throw SessionError.destinationChanged }
-            apply(snapshot)
-            if homesConfigured { requestSync() }
-            return receipts
+            let written = try await worker.write(commands, observed: observed.revision)
+            publishAfterBatch(written.snapshot, lease: observed.context)
+            return written.receipts
         } catch let refusal as SessionRefusal {
             if observed.context == context { apply(refusal.snapshot); lastError = refusal.error.localizedDescription }
             throw refusal.error
         } catch let stop as BatchStop {
-            if observed.context == context {
-                if let snapshot = stop.snapshot { apply(snapshot); if homesConfigured { requestSync() } }
-                handleCommandError(stop.error)
-            }
+            if let snapshot = stop.snapshot { publishAfterBatch(snapshot, lease: observed.context) }
+            if observed.context == context { handleCommandError(stop.error) }
             throw BatchInterruption(receipts: stop.receipts, index: stop.index, error: stop.error)
         } catch {
             if observed.context == context { handleCommandError(error) }
             throw error
         }
+    }
+    /// After a durable batch: publishes its snapshot and asks for a sync. A snapshot that could not be built is reported
+    /// in `lastError` and a refresh publishes the next one; it never turns the durable batch into a failure. A session that
+    /// moved to another library meanwhile publishes nothing.
+    private func publishAfterBatch(_ snapshot: Result<SessionSnapshot, any Error>, lease: UUID) {
+        guard lease == context else { return }
+        switch snapshot {
+        case .success(let snapshot): apply(snapshot)
+        case .failure(let error):
+            lastError = error.localizedDescription
+            let generation = lockGeneration
+            refusalRefresh = Task { [weak self] in
+                guard let self, canPublish(lease, generation) else { return }
+                await refresh()
+            }
+        }
+        if homesConfigured { requestSync() }
     }
     /// Approves a member's request with the owner controller (a passkey owner is asked to confirm), spending
     /// `pairing`: confirmed on this device for exactly this request's key (spec §9.1), by the six-digit code
