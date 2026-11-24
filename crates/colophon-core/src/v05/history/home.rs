@@ -139,9 +139,9 @@ pub struct HomeState {
     home: String,
     /// The verifier checkpoint. Its pending objects are exactly `pending` and its heads are
     /// pruned to what the guard and the verifier need ([`refresh_checkpoint`]), so it is never
-    /// stale and does not grow with every head.
-    #[serde(with = "b64_bytes")]
-    checkpoint: Vec<u8>,
+    /// stale and does not grow with every head. Written only by [`HomeState::set_checkpoint`].
+    #[serde(rename = "checkpoint", with = "b64_bytes")]
+    checkpoint_bytes: Vec<u8>,
     pending: Vec<PendingObject>,
     next_cursor: u64,
     facts: BTreeMap<String, Fact>,
@@ -155,6 +155,11 @@ pub struct HomeState {
     /// without freeing these slots. The standing entry is retained in addition to these slots.
     #[serde(default)]
     candidate_slots: BTreeMap<u64, BTreeMap<String, String>>,
+    /// `Persisted::from_bytes(checkpoint_bytes)`, decoded when the state was read
+    /// ([`HomeState::from_bytes`]) and dropped whenever the checkpoint is replaced: a memo of the
+    /// bytes, never stored.
+    #[serde(skip)]
+    parsed: Option<Persisted>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct ObservedReceipt {
@@ -255,7 +260,7 @@ impl HomeState {
         let mut state = Self {
             version: STATE_VERSION,
             home,
-            checkpoint: Persisted::checkpoint(objects, &Persisted::default(), now_ms).to_bytes()?,
+            checkpoint_bytes: Persisted::checkpoint(objects, &Persisted::default(), now_ms).to_bytes()?,
             pending: Vec::new(),
             next_cursor: 1,
             facts: BTreeMap::new(),
@@ -264,6 +269,7 @@ impl HomeState {
             unmatched_receipts: Vec::new(),
             signed_heads: Vec::new(),
             candidate_slots: BTreeMap::new(),
+            parsed: None,
         };
         refresh_checkpoint(&mut state, None, now_ms)?;
         Ok(state)
@@ -311,7 +317,16 @@ impl HomeState {
     /// changes the pending objects or the heads replaces the checkpoint's copy of them.
     /// Read-only: nothing here admits anything.
     pub fn persisted(&self) -> Result<Persisted> {
-        Persisted::from_bytes(&self.checkpoint)
+        match &self.parsed {
+            Some(p) => Ok(p.clone()),
+            None => Persisted::from_bytes(&self.checkpoint_bytes),
+        }
+    }
+    /// Replace the checkpoint (the only way it is written), dropping the decoded copy of the
+    /// previous one.
+    fn set_checkpoint(&mut self, bytes: Vec<u8>) {
+        self.checkpoint_bytes = bytes;
+        self.parsed = None;
     }
     /// A permanent format stop, derived from the stored history and stop floor on open (§13.6).
     pub fn is_stopped(&self, now_ms: i64) -> Result<bool> {
@@ -341,12 +356,12 @@ impl HomeState {
     }
     /// Restore trusted local state, including admission decisions and cursor allocation.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        let state: Self = serde_json::from_slice(bytes).map_err(|e| malformed(e.to_string()))?;
+        let mut state: Self = serde_json::from_slice(bytes).map_err(|e| malformed(e.to_string()))?;
         require(
             state.version == STATE_VERSION,
             "unknown home checkpoint version",
         )?;
-        Persisted::from_bytes(&state.checkpoint)?;
+        state.parsed = Some(Persisted::from_bytes(&state.checkpoint_bytes)?);
         check_intervals(&state.serving)?;
         require(
             state.next_cursor > 0
@@ -1298,7 +1313,7 @@ fn admit_full(
     // can store a late transition too), so `persisted()` is never stale.
     let changed = admitted_head.is_some()
         || next.pending.len() != home.pending.len()
-        || next.checkpoint != home.checkpoint;
+        || next.checkpoint_bytes != home.checkpoint_bytes;
     if changed || result.is_ok() {
         let refreshed = date(now, "home clock")
             .and_then(|now_ms| refresh_checkpoint(&mut next, admitted_head.as_deref(), now_ms));
@@ -1407,7 +1422,7 @@ fn verification_clock(p: &Persisted, now_ms: i64) -> i64 {
 }
 
 fn refresh_checkpoint(next: &mut HomeState, new_head: Option<&[u8]>, now_ms: i64) -> Result<()> {
-    let mut p = Persisted::from_bytes(&next.checkpoint)?;
+    let mut p = next.persisted()?;
     let now_ms = verification_clock(&p, now_ms);
     let before = p.objects().cloned().unwrap_or_default();
     let mut heads = before.heads.clone();
@@ -1431,7 +1446,7 @@ fn refresh_checkpoint(next: &mut HomeState, new_head: Option<&[u8]>, now_ms: i64
     let heads = kept_heads(&heads, settled, &branch);
     let pending: Vec<Vec<u8>> = next.pending.iter().map(|o| o.envelope.clone()).collect();
     if heads == before.heads && pending == before.pending {
-        next.checkpoint = p.to_bytes()?;
+        next.set_checkpoint(p.to_bytes()?);
         return Ok(());
     }
     let objects = Objects {
@@ -1449,7 +1464,7 @@ fn refresh_checkpoint(next: &mut HomeState, new_head: Option<&[u8]>, now_ms: i64
     if lower {
         rebuilt.high_water = p.high_water.clone();
     }
-    next.checkpoint = rebuilt.to_bytes()?;
+    next.set_checkpoint(rebuilt.to_bytes()?);
     Ok(())
 }
 
@@ -1540,7 +1555,7 @@ fn admit_entry(
         if verdict.stopped == Some(entry.seq)
             && verdict.state.as_ref().is_some_and(|s| s.history() == st.history())
         {
-            next.checkpoint = persisted.clone().with_stop_floor(entry.seq, None).to_bytes()?;
+            next.set_checkpoint(persisted.clone().with_stop_floor(entry.seq, None).to_bytes()?);
         }
         // The entry making a layout raise final is verified and retained. The next entry
         // will be refused by the stopped-home gate, including in the same upload.
@@ -1570,7 +1585,7 @@ fn admit_entry(
         }
     }
     objects.pending = next.pending.iter().map(|p| p.envelope.clone()).collect();
-    next.checkpoint = Persisted::checkpoint(&objects, persisted, now_ms).to_bytes()?;
+    next.set_checkpoint(Persisted::checkpoint(&objects, persisted, now_ms).to_bytes()?);
     Ok(suspend_notice(&entry, st).into_iter().collect())
 }
 
@@ -1854,7 +1869,7 @@ fn admit_candidate(
                 }
             }
         }
-        next.checkpoint = p.to_bytes()?;
+        next.set_checkpoint(p.to_bytes()?);
         return Ok(notices);
     }
     // Non-standing evidence consumes one durable slot of a current covering home; the
@@ -1869,7 +1884,7 @@ fn admit_candidate(
         }
     }
     if stored_as_evidence {
-        next.checkpoint = Persisted::checkpoint(&objects, persisted, now_ms).to_bytes()?;
+        next.set_checkpoint(Persisted::checkpoint(&objects, persisted, now_ms).to_bytes()?);
     }
     if fork.is_some() || (stored_as_evidence && forks) {
         return Err(Failure::Refused(crate::v05::Reason::Fork).into());
@@ -2019,7 +2034,7 @@ pub fn admit_predecessor(
         return Err(stop_failure(stop).into());
     }
     let mut next = home.clone();
-    next.checkpoint = Persisted::checkpoint(&objects, &persisted, now_ms).to_bytes()?;
+    next.set_checkpoint(Persisted::checkpoint(&objects, &persisted, now_ms).to_bytes()?);
     Ok(next)
 }
 
@@ -2484,7 +2499,7 @@ mod visible_tests {
         let home = HomeState {
             version: STATE_VERSION,
             home: String::new(),
-            checkpoint: Vec::new(),
+            checkpoint_bytes: Vec::new(),
             next_cursor: pending.len() as u64 + 1,
             pending,
             facts: BTreeMap::new(),
@@ -2493,6 +2508,7 @@ mod visible_tests {
             unmatched_receipts: Vec::new(),
             signed_heads: Vec::new(),
             candidate_slots: BTreeMap::new(),
+            parsed: None,
         };
         let targets = home.receipted_targets();
         let mut compared = 0;
