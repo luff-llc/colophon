@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, statSync, symlinkSync, utimesSync, writeFileSync, mkdirSync } from 'node:fs';
+import { promises as fsp } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -152,6 +153,11 @@ describe('the volume', { skip: ready ? false : `build the module first (${wasm})
   });
 });
 
+const until = async (fn) => {
+  for (let i = 0; i < 1000; i++) { if (fn()) return; await new Promise((resolve) => setImmediate(resolve)); }
+  throw new Error('Timed out waiting for condition');
+};
+
 describe('the container lock', () => {
   let root;
   before(async () => { root = await mkdtemp(path.join(tmpdir(), 'colophon-lock-')); });
@@ -185,6 +191,48 @@ describe('the container lock', () => {
     a.release();
     assert.ok(existsSync(b.file));
     b.release();
+  });
+  test('the heartbeat is asynchronous, one beat at a time, and reports its health', async () => {
+    // The beats are driven by hand: `schedule` holds the next one until the test fires it.
+    let next = null;
+    const schedule = (fn) => { assert.equal(next, null, 'one beat scheduled at a time'); next = fn; return () => { next = null; }; };
+    const fire = () => { const fn = next; next = null; assert.ok(fn, 'a beat is scheduled'); return fn(); };
+    const utimes = fsp.utimes;
+    let calls = 0; let release;
+    const stall = new Promise((resolve) => { release = resolve; });
+    fsp.utimes = async (...args) => {
+      calls += 1;
+      if (calls === 1) await stall; // the first beat stalls (a slow disk)
+      return utimes.apply(fsp, args);
+    };
+    let t = Date.now();
+    const a = acquireContainerLock(root, { beatMs: 5_000, schedule, now: () => t, onLost: () => assert.fail('lost') });
+    try {
+      t += 5_000;
+      const beat = fire();
+      await until(() => calls === 1);
+      assert.equal(next, null, 'no beat is scheduled while one is in flight');
+      release();
+      await beat;
+      assert.equal(calls, 1, 'the beat touches the lock through the asynchronous API');
+      assert.ok(next, 'the next beat is scheduled once this one ends');
+      assert.deepEqual(a.health(), { ok: true, lastBeatAt: t, failures: 0, error: null });
+      // A beat that fails is counted and reported, and the next beat tries again.
+      fsp.utimes = async () => { throw Object.assign(new Error('read-only file system'), { code: 'EROFS' }); };
+      t += 5_000;
+      await fire();
+      const h = a.health();
+      assert.equal(h.ok, false);
+      assert.equal(h.failures, 1);
+      assert.equal(h.lastBeatAt, t - 5_000);
+      assert.match(h.error, /read-only/);
+      assert.ok(next, 'a failed beat is tried again');
+      fsp.utimes = utimes;
+      t += 5_000;
+      await fire();
+      assert.equal(a.health().ok, true);
+    } finally { fsp.utimes = utimes; a.release(); }
+    assert.equal(next, null, 'release stops the beats');
   });
   test('its own earlier run\'s lock is stale after two missed beats; another container\'s only after staleMs', () => {
     const opts = { staleMs: 30_000, beatMs: 5_000 };

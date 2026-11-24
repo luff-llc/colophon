@@ -21,7 +21,7 @@
 //   bun container-entry.js identity <key file>   print {"member": "<home ID>"} for a key (used at start)
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { closeSync, constants as fsc, fsyncSync, lchownSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, utimesSync, writeSync, chmodSync, existsSync } from 'node:fs';
+import { closeSync, constants as fsc, fsyncSync, lchownSync, linkSync, lstatSync, mkdirSync, openSync, promises as fsp, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeSync, chmodSync, existsSync } from 'node:fs';
 import { hostname } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -244,7 +244,7 @@ export function prepare(dataRoot, env) {
  * container (restarted after a hard stop): no other container has its host name. A live holder
  * beats every `beatMs`, so such a lock is stale after two missed beats rather than `staleMs`.
  */
-export function acquireContainerLock(dataRoot, { staleMs = 30_000, beatMs = 5_000, now = Date.now, onLost, host = hostname(), pid = process.pid } = {}) {
+export function acquireContainerLock(dataRoot, { staleMs = 30_000, beatMs = 5_000, now = Date.now, onLost, host = hostname(), pid = process.pid, schedule = later } = {}) {
   const file = path.join(dataRoot, '.container.lock');
   // Each lock file carries a random ID: a file system may give a new file a removed one's inode
   // number at once (Linux does), so the inode cannot say whose lock a file is.
@@ -289,21 +289,46 @@ export function acquireContainerLock(dataRoot, { staleMs = 30_000, beatMs = 5_00
     unlinkSync(aside);
   }
   if (!taken) throw new Error(`could not take ${file}`);
-  let lost = false;
+  let lost = false; let stopped = false; let cancel = null;
   const mine = () => idOf(file) === id;
-  const timer = setInterval(() => {
-    if (!mine()) { lost = true; clearInterval(timer); (onLost ?? (() => { console.error(`colophon-home: ${file} was taken by another container; stopping at once`); process.exit(70); }))(); return; }
+  // The beats run off the event loop's thread (asynchronous file calls), one at a time: the next
+  // is scheduled only when this one has ended, so a slow disk delays beats and never stacks them.
+  const health = { lastBeatAt: now(), failures: 0, error: null };
+  const beat = async () => {
+    cancel = null;
+    let held = null;
+    try { held = JSON.parse(await fsp.readFile(file, 'utf8'))?.id ?? null; } catch { held = null; }
+    if (stopped) return;
+    if (held !== id) { lost = true; (onLost ?? (() => { console.error(`colophon-home: ${file} was taken by another container; stopping at once`); process.exit(70); }))(); return; }
     const t = new Date(now());
-    try { utimesSync(file, t, t); } catch (e) { console.error(`colophon-home: heartbeat failed: ${e.message}`); }
-  }, beatMs);
-  timer.unref?.();
+    try {
+      await fsp.utimes(file, t, t);
+      Object.assign(health, { lastBeatAt: t.getTime(), failures: 0, error: null });
+    } catch (e) {
+      if (stopped) return;
+      health.failures += 1; health.error = e.message;
+      console.error(`colophon-home: heartbeat failed: ${e.message}`);
+    }
+    if (!stopped) cancel = schedule(beat, beatMs);
+  };
+  cancel = schedule(beat, beatMs);
   return {
     file,
+    /** `ok` while the last beat succeeded; when it last did, and the failures since. */
+    health() { return { ok: health.failures === 0, ...health }; },
     release() {
-      clearInterval(timer);
+      stopped = true;
+      cancel?.(); cancel = null;
       if (!lost && mine()) { try { unlinkSync(file); } catch { /* already gone */ } }
     },
   };
+}
+
+/** `fn` after `ms`, on a timer that does not keep the process alive; returns its cancel. */
+function later(fn, ms) {
+  const timer = setTimeout(fn, ms);
+  timer.unref?.();
+  return () => clearTimeout(timer);
 }
 
 /** Removes a relay lock left by a container that is gone (call only while holding the container lock). */
