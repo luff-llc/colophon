@@ -70,8 +70,6 @@ in 0.5.x or in a host.
 - Libraries of the shipped Swift apps move to 0.5 by a verified succession (`SwiftMove` in
   `ColophonMigration`); there is no Kotlin or JS equivalent.
 - The Gradle build has no dependency verification metadata yet ([release packaging](release-packaging.md)).
-- The AAR built by `scripts/build-android.sh` keeps an old file name
-  (`colophon-android-0.3.0.aar`); the release package is named by version.
 
 ## Tests
 
