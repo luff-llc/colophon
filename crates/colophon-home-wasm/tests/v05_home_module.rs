@@ -1115,6 +1115,66 @@ fn an_authenticated_read_verifies_the_history_once_and_keeps_its_refusal_order()
         "the purpose is judged before the signature"
     );
     assert_eq!(refused(&signed("colophon.home.write", 4)), (json!(403), json!("refused:outOfScope")));
+    // The replay share (§12.4): the host may send every row of the principal (`signerRows`) or
+    // the two numbers it counted by the module's `retained` (`signerLive`, `signerOldest`). Both
+    // give the same answer; with the rows the module lists the ones to drop, with the counts the
+    // host drops what it found expired wherever the answer has `drop`.
+    use colophon_core::v05::replay::{retained, RETENTION_MS};
+    let good = signed("colophon.home.read", 5);
+    let mut forged = ask(&forge_signature(&good));
+    let mut cases = Vec::new();
+    for n in [0usize, 3, 63, 64, 70] {
+        let rows: Vec<Value> = (0..n)
+            .map(|i| {
+                let at = match i % 5 {
+                    0 => NOW - RETENTION_MS,
+                    1 => NOW - RETENTION_MS - 1,
+                    2 => NOW + 60_000,
+                    3 => NOW - (i as i64) * 1_000,
+                    _ => NOW - 2 * RETENTION_MS,
+                };
+                json!({"key": format!("k{i}"), "at": at})
+            })
+            .collect();
+        cases.push(rows);
+    }
+    cases.push(vec![json!({"key": "f", "at": 1.5}), json!({"key": "s", "at": "1"}), json!({"key": "m"})]);
+    // Over the share: 64 live (one at the boundary, one from a clock that stepped back), 6 not.
+    cases.push((0..70).map(|i| json!({"key": format!("o{i}"), "at": match i {
+        0 => NOW - RETENTION_MS, 1 => NOW + 5_000, 64.. => NOW - RETENTION_MS - 1 - i, _ => NOW - i * 7_000 }})).collect());
+    let mut windows = 0;
+    for rows in cases {
+        let live: Vec<i64> = rows.iter().filter_map(|r| r["at"].as_i64()).filter(|at| retained(*at, NOW)).collect();
+        let expired: Vec<Value> = rows.iter().filter(|r| !r["at"].as_i64().is_some_and(|at| retained(at, NOW))).map(|r| r["key"].clone()).collect();
+        for (replay_rows, base) in [(65_536u64, ask(&good)), (1, ask(&good)), (1, forged.clone())] {
+            let mut by_rows = base.clone();
+            by_rows["replayRows"] = json!(replay_rows);
+            by_rows["signerRows"] = json!(rows);
+            let mut by_count = base.clone();
+            by_count["replayRows"] = json!(replay_rows);
+            by_count["signerLive"] = json!(live.len());
+            by_count["signerOldest"] = json!(live.iter().min());
+            let (mut a, mut c) = (call_op(by_rows), call_op(by_count));
+            if a.get("drop").is_some() {
+                assert_eq!(a["drop"], json!(expired), "the rows list what is not retained");
+                assert_eq!(c["drop"], json!([]), "the counts leave the dropping to the host");
+                a["drop"] = json!(null);
+                c["drop"] = json!(null);
+            } else {
+                assert!(c.get("drop").is_none(), "{c}");
+            }
+            assert_eq!(a, c, "{} rows, table {replay_rows}", rows.len());
+            if replay_rows == 1 && live.len() >= 64 && base == ask(&good) {
+                assert_eq!(a["status"], 429, "{a}");
+                assert_eq!(a["result"], "refused:window");
+                windows += 1;
+            }
+        }
+    }
+    assert_eq!(windows, 1, "the share was reached once");
+    forged["call"] = json!(null);
+    assert_eq!(call_op(forged)["status"], 401);
+
     // Open routes: allowed whatever the state holds, and nothing of it is decoded.
     for (method, section, rest) in [("GET", "", Value::Null), ("POST", "authority", Value::Null),
                                     ("POST", "pending", Value::Null),

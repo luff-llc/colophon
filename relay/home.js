@@ -25,6 +25,13 @@ function colophonCall(req) {
   return match ? b64(Buffer.from(match[1], 'base64url')) : null;
 }
 
+/** The module's replay retention rule, `retained(at, now)`: kept while `now - at <= retentionMs`
+ * (inclusive; a row from a clock that later stepped back is kept). `at` is read as the module
+ * reads it from JSON: anything but an integer in the 64-bit signed range is never retained. */
+export function retainedAt(at, now, retentionMs) {
+  return Number.isInteger(at) && at >= -(2 ** 63) && at < 2 ** 63 && now - at <= retentionMs;
+}
+
 const ROUTE_BODY_BYTES = 4096;
 const NOTICE_COMMIT = 'notice-commit.json';
 
@@ -652,24 +659,26 @@ export class HomeSlot {
   async access(req, section, rest, effect, body, call = colophonCall(req)) {
     const { HttpError } = this.deps;
     return this.replayLock(async () => {
-      let existing = null; let signerRows = [];
+      const now = this.clock();
+      let existing = null; let share = { live: 0, oldest: null, expired: [] };
       if (call) {
         const k = this.wasm.call({ op: 'call_key', call });
         if (k.parsed) {
           const row = this.rows.get(k.key);
           existing = row ? { at: row.at, digest: row.digest } : null;
-          signerRows = [...(this.bySigner.get(k.signer) ?? [])].map((key) => ({ key, at: this.rows.get(key).at }));
+          share = this.signerShare(k.signer, now);
         }
       }
       const r = this.wasm.call({
-        op: 'access', state: this.state, now: this.clock(), method: req.method, section, rest,
-        call, existing, signerRows, replayRows: this.limits.replayRows, base: this.base,
+        op: 'access', state: this.state, now, method: req.method, section, rest,
+        call, existing, signerLive: share.live, signerOldest: share.oldest, replayRows: this.limits.replayRows, base: this.base,
         path: this.relativePath(req),
         ...(section === 'records' && rest === 'batch'
           ? { batchBody: b64(body) }
           : { bodySha256: sha(body ?? Buffer.alloc(0)) }),
       });
-      this.dropRows(r.drop);
+      // The module answers `drop` where it would have listed the rows no longer retained.
+      if (r.drop) this.dropRows([...r.drop, ...share.expired]);
       if (r.allowed) {
         if (r.reserve) await this.reserve(r.reserve, effect);
         return r;
@@ -684,6 +693,18 @@ export class HomeSlot {
         default: throw new HttpError(r.status ?? 404, 'Not found');
       }
     });
+  }
+
+  /** A principal's replay rows as the module counts them at `now` (§12.4): how many are retained,
+   * the oldest `at` among those, and the keys of the rest. */
+  signerShare(signer, now) {
+    this.retentionMs ??= this.wasm.call({ op: 'limits' }).retentionMs;
+    let live = 0; let oldest = null; const expired = [];
+    for (const key of this.bySigner.get(signer) ?? []) {
+      const at = this.rows.get(key).at;
+      if (retainedAt(at, now, this.retentionMs)) { live += 1; if (oldest === null || at < oldest) oldest = at; } else expired.push(key);
+    }
+    return { live, oldest, expired };
   }
 
   /** The request's path and query relative to the slot's base, exactly as sent: what a call's

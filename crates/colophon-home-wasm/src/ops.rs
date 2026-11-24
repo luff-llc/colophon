@@ -685,23 +685,7 @@ fn access(req: &Value) -> R<Value> {
     }
     // The replay table (§12.4): this principal's live rows, against its share of the table.
     let signer = signer_text(&vc.call.signer);
-    let mut live = 0usize;
-    let mut oldest: Option<i64> = None;
-    let mut drop = Vec::new();
-    for row in req
-        .get("signerRows")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-    {
-        let at = row["at"].as_i64().unwrap_or(i64::MIN);
-        if retained(at, now_ms) {
-            live += 1;
-            oldest = Some(oldest.map_or(at, |o| o.min(at)));
-        } else {
-            drop.push(row["key"].clone());
-        }
-    }
+    let (live, oldest, drop) = signer_rows(req, now_ms);
     let capacity = req
         .get("replayRows")
         .and_then(Value::as_u64)
@@ -752,6 +736,36 @@ fn access(req: &Value) -> R<Value> {
         });
     }
     Ok(answer)
+}
+
+/// The principal's replay rows, as the host gives them: `(live, oldest, drop)`, how many are
+/// retained at `now_ms`, the oldest `at` among those, and the keys of the rest, which the host
+/// drops. Either `signerRows` (every row, `{"key","at"}`), or the two numbers the host counted
+/// itself by [`retained`]: `signerLive` and `signerOldest` (null when none is live). A host that
+/// counts drops the rows it found not retained whenever an answer carries `drop`.
+fn signer_rows(req: &Value, now_ms: i64) -> (usize, Option<i64>, Vec<Value>) {
+    if let Some(live) = req.get("signerLive").and_then(Value::as_u64) {
+        let oldest = req.get("signerOldest").and_then(Value::as_i64);
+        return (usize::try_from(live).unwrap_or(usize::MAX), oldest, Vec::new());
+    }
+    let mut live = 0usize;
+    let mut oldest: Option<i64> = None;
+    let mut drop = Vec::new();
+    for row in req
+        .get("signerRows")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let at = row["at"].as_i64().unwrap_or(i64::MIN);
+        if retained(at, now_ms) {
+            live += 1;
+            oldest = Some(oldest.map_or(at, |o| o.min(at)));
+        } else {
+            drop.push(row["key"].clone());
+        }
+    }
+    (live, oldest, drop)
 }
 
 /// One stream principal's standing at the committed history (`null`: it may no longer stream):
