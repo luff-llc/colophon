@@ -24,14 +24,20 @@ struct ListingBaseline {
         self.init(engine: engine, entries: entries, missing: Set(missing))
     }
 
+    /// The longest listing a full refresh accepts (the bindings' list bound, `MAX_LIST`, below the engine's own
+    /// `MAX_LISTING`). A longer listing always refreshes in full, which refuses it.
+    static let maximumListing = 262_144
+
     static func isOrdered(_ entries: [MediumEntry]) -> Bool {
         zip(entries, entries.dropFirst()).allSatisfy { $0.path < $1.path }
     }
 
     /// The entries of `new` that `old` (strictly in path order) does not hold with the same version, or nil when a full
     /// refresh must judge the listing: a path of `old` is absent from `new`, an entry has no version (the engine reads
-    /// a path without one again on every refresh), or `new` is not strictly in path order.
+    /// a path without one again on every refresh), `new` is not strictly in path order, or `new` is longer than a full
+    /// refresh accepts.
     static func delta(from old: [MediumEntry], to new: [MediumEntry]) -> [MediumEntry]? {
+        guard new.count <= maximumListing else { return nil }
         var changed: [MediumEntry] = []
         var index = old.startIndex
         var previous: String?

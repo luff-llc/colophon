@@ -82,6 +82,49 @@ import ColophonSavedKit
         #expect(replacementFull == 1)
     }
 
+    /// A path whose read failed (an iCloud eviction between the listing and the read) is not held. The next reconcile
+    /// refreshes in full and reads it, even though the listing has not changed since.
+    @Test func aDeltaPathWhoseReadFailedIsReadAgainByTheNextReconcile() async throws {
+        let first = Device()
+        await first.session.create()
+        let second = Device(medium: first.medium)
+        await second.session.restore()
+        try await approveByScan(joining: second.session, approving: first.session)
+        await second.session.refresh()
+        #expect(second.session.phase == .ready)
+
+        let worker = SessionWorker(configuration: first.configuration)
+        _ = try await worker.restore()
+        await second.session.refresh()
+        try await second.session.perform(try link("outside"), observed: second.session.observedRevision)
+
+        first.medium.setFault(.throwOnRead("iCloud download pending"))
+        let incrementalBefore = await worker.incrementalRefreshes
+        _ = try? await worker.refresh()
+        first.medium.setFault(.none)
+        let incrementalAfter = await worker.incrementalRefreshes
+        #expect(incrementalAfter == incrementalBefore + 1, "the new operation reached the engine through the incremental path")
+        let missed = String(decoding: try await worker.query(namespace: "reading.saved", name: "items", arguments: Data("{}".utf8)), as: UTF8.self)
+        #expect(!missed.contains(#""id":"outside""#), "the failed read held nothing")
+
+        let fullBefore = await worker.fullRefreshes
+        _ = try await worker.refresh()
+        let fullAfter = await worker.fullRefreshes
+        #expect(fullAfter == fullBefore + 1, "an unconfirmed read leaves no baseline: the next reconcile refreshes in full")
+        let items = String(decoding: try await worker.query(namespace: "reading.saved", name: "items", arguments: Data("{}".utf8)), as: UTF8.self)
+        #expect(items.contains(#""id":"outside""#), "the operation is read again once the medium answers")
+    }
+
+    @Test func aListingOverTheFullRefreshBoundHasNoDelta() {
+        let limit = ListingBaseline.maximumListing
+        let entries = (0...limit).map { MediumEntry(path: String(format: "ops/a/b/%012d-x.json", $0), version: "1") }
+        let atBound = Array(entries.prefix(limit))
+        let fits = ListingBaseline.delta(from: Array(atBound.dropLast()), to: atBound)
+        #expect(fits?.count == 1)
+        let over = ListingBaseline.delta(from: atBound, to: entries)
+        #expect(over == nil, "a listing longer than a full refresh accepts refreshes in full, which refuses it")
+    }
+
     @Test func theDeltaIsWhatWasAddedOrChangedAndNilForEverythingElse() {
         func entries(_ pairs: [(String, String?)]) -> [MediumEntry] { pairs.map { MediumEntry(path: $0.0, version: $0.1) } }
         let old = entries([("a", "1"), ("b", "1"), ("c", "1")])
