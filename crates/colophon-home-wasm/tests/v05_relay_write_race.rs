@@ -2,7 +2,9 @@
 //! Bun, the home module in WebAssembly). The write's call is judged against the committed state
 //! under the slot's lock: a write that waits for an upload revoking its writer is judged after
 //! that upload commits, and refused. Every clock is the relay's test clock; the interleaving is
-//! forced with the relay's trace pause, not with timing.
+//! forced with the relay's trace pause, not with timing. A long poll of the change feed, judged
+//! once when it arrived, ends with an empty page when the authority changes, so its caller is
+//! judged again on its next poll.
 #![allow(
     dead_code,
     clippy::unwrap_used,
@@ -197,5 +199,154 @@ fn a_write_waiting_behind_its_writers_revocation_is_judged_after_it_and_refused(
             "the {what} was stored after its writer's revocation"
         );
     }
+    drop(relay);
+}
+
+/// The headers of a `GET` of `path` with a read call signed by `member`.
+fn read_headers(f: &Fixture, member: &str, path: &str, now: i64) -> Vec<(String, String)> {
+    let call = call_as(
+        &f.host,
+        &f.account,
+        "member",
+        member,
+        BASE_A,
+        "colophon.home.read",
+        json!({"method": "GET", "path": path, "body": sha_hex(b"")}),
+        now,
+        fresh_request_id(),
+    );
+    vec![(
+        "Authorization".to_string(),
+        format!("Colophon {}", URL_SAFE_NO_PAD.encode(&call)),
+    )]
+}
+
+#[test]
+fn a_long_poll_ends_empty_when_the_authority_changes_and_serves_no_later_entry() {
+    if prerequisites().is_none() {
+        return;
+    }
+    let keys = HomeKeys::new(0x5c);
+    let mut f = create_v(&[NS], 7);
+    appoint_home_keys(&mut f, &keys, BASE_A);
+    let m = f.host.identity(43);
+    let other = f.host.identity(44);
+    admit(&mut f, &m, "Reader", "app", terms("write"), terms("write"));
+    admit(
+        &mut f,
+        &other,
+        "Writer",
+        "app",
+        terms("write"),
+        terms("write"),
+    );
+    let scratch = Scratch::new("long-poll-revoke");
+    let now = f.account.now_ms() + 1_000;
+    let account = f.account.id().as_str().to_string();
+    let mut setup = Relay::start_with(
+        &keys,
+        &account,
+        BASE_A,
+        scratch.path(),
+        now,
+        &[],
+        0,
+        json!({"tickMs": 0}),
+    );
+    first_upload(&setup, &f, now);
+    setup.stop();
+    drop(setup);
+    // Traced (for the "changes waiting" marker); the pause point is never reached.
+    let (relay, rx) = Relay::start_paused(
+        &keys,
+        &account,
+        BASE_A,
+        scratch.path(),
+        now,
+        "never reached",
+    );
+    let port = relay.port;
+
+    // M lists the feed, then long-polls after its cursor.
+    let (s, _, b) = http(
+        port,
+        "GET",
+        "/v1/libraries/home/changes",
+        &read_headers(&f, &m, "/changes", now),
+        &[],
+    );
+    assert_eq!(s, 200, "{}", String::from_utf8_lossy(&b));
+    let cursor = serde_json::from_slice::<Value>(&b).unwrap()["cursor"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let path = format!("/changes?after={cursor}&wait=20");
+    let poll = send(
+        port,
+        "GET",
+        &path,
+        read_headers(&f, &m, &path, now),
+        Vec::new(),
+    );
+    trace_marker(&rx, &["changes waiting"]);
+
+    // Calls by the other member over the history before the revocation.
+    let (op_path, op_bytes) = op_record(&f, &other, now);
+    let op_headers = write_headers(&f, &other, &op_path, &op_bytes, now);
+    // M is revoked while its poll waits.
+    f.account.advance(now).unwrap();
+    let from = entries_json(&f).last().unwrap().0 + 1;
+    let action = f
+        .account
+        .begin_revoke(&m, &RevokeKeep::Nothing, &[f.d.clone()], [9; 32])
+        .unwrap();
+    run(&mut f.account, &f.host, action);
+    let entry = entries_json(&f)
+        .into_iter()
+        .find(|(s, _)| *s == from)
+        .unwrap()
+        .1;
+    let body = json!({"from": from, "entries": [entry], "receipts": []}).to_string();
+    let (s, _, b) = http(
+        port,
+        "POST",
+        "/v1/libraries/home/authority",
+        &[("Content-Type".into(), "application/json".into())],
+        body.as_bytes(),
+    );
+    assert_eq!(s, 200, "the revocation: {}", String::from_utf8_lossy(&b));
+    // Another member's record after it.
+    let (s, b) = send(port, "PUT", &op_path, op_headers, op_bytes)
+        .join()
+        .unwrap();
+    assert_eq!(s, 201, "{}", String::from_utf8_lossy(&b));
+
+    let (s, b) = poll.join().unwrap();
+    assert_eq!(s, 200, "{}", String::from_utf8_lossy(&b));
+    let page: Value = serde_json::from_slice(&b).unwrap();
+    assert_eq!(
+        page["entries"],
+        json!([]),
+        "a poll judged before the revocation served what came after it"
+    );
+    assert_eq!(
+        page["cursor"].as_str(),
+        Some(cursor.as_str()),
+        "the cursor did not move"
+    );
+    // Its next poll is judged again: M is revoked.
+    let (s, _, b) = http(
+        port,
+        "GET",
+        &format!("/v1/libraries/home{path}"),
+        &read_headers(&f, &m, &path, now),
+        &[],
+    );
+    assert_eq!(
+        (s, result(&b).as_str()),
+        (403, "refused:revoked"),
+        "{}",
+        String::from_utf8_lossy(&b)
+    );
     drop(relay);
 }

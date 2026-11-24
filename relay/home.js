@@ -164,6 +164,7 @@ export class HomeSlot {
     this.said = new Map();
     this.routes = new Map();
     this.noticeSeq = 0;
+    this.commits = 0; // committed state changes, for long polls judged before one
     this.lastHead = null;
     this.stream = new HomeStream(this, o.stream ?? {});
   }
@@ -316,6 +317,9 @@ export class HomeSlot {
     }
     await this.writeJson('home-state.json', state);
     this.state = state;
+    // A long poll of the change feed was judged against the state before: it ends now.
+    this.commits += 1;
+    for (const waiter of [...this.slot.waiters ?? []]) waiter.wake();
     await this.flushNotices();
     // Every authority commit re-checks every open stream (§S9: only current, entitled members)
     // and the owners of notice routes.
