@@ -35,6 +35,8 @@ ENV PORT=8080 COLOPHON_DATA=/data NODE_ENV=production
 # by name. Without a mount, what the home keeps is lost with the container.
 EXPOSE 8080
 STOPSIGNAL SIGTERM
-HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+# Each check starts a short Bun process (about 16 MiB, for a few milliseconds): once a minute.
+# /healthz answers 503 while the container lock's heartbeat fails.
+HEALTHCHECK --interval=60s --timeout=5s --start-period=30s --retries=3 \
   CMD ["/usr/local/bin/bun", "-e", "fetch('http://127.0.0.1:'+(process.env.PORT||8080)+'/healthz').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
 ENTRYPOINT ["/usr/local/bin/bun", "/app/container-entry.js"]

@@ -386,6 +386,10 @@ async function main() {
     privateDir(dataRoot);
     lock = acquireContainerLock(dataRoot);
     process.on('exit', () => lock.release());
+    // /healthz answers 503 while the lock's heartbeat fails: another container could take the
+    // volume over once the lock looks stale.
+    const { addHealthCheck } = await import('./health.js');
+    addHealthCheck('container lock', () => lock.health());
     prepared = prepare(dataRoot, process.env);
   } catch (error) {
     console.error(`colophon-home: ${error.message}`);

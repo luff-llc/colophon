@@ -5,6 +5,7 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { constants as fsc, promises as fsp, writeSync } from 'node:fs';
 import http from 'node:http';
 import https from 'node:https';
+import { failingChecks } from './health.js';
 import { HomeKey, HomeModule, HomeSlot, ModuleError, moduleMemoryBytes } from './home.js';
 import { streamOptions } from './stream.js';
 import {
@@ -827,7 +828,10 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
   async function handle(req, res, work) {
     if (closing) throw new HttpError(503, 'Relay is closing');
     const url = new URL(req.url, 'http://relay.invalid');
-    if (url.pathname === '/healthz' && req.method === 'GET') return send(res, 200, { ok: true });
+    if (url.pathname === '/healthz' && req.method === 'GET') {
+      const failing = failingChecks();
+      return failing.length ? send(res, 503, { ok: false, failing }) : send(res, 200, { ok: true });
+    }
     if (provisioning.enabled && url.pathname === '/v1/provision') return door(req, res);
     const route = /^\/v1\/libraries\/([^/]+)(?:\/(changes|records|head|authority|pending|predecessor|routes|stream)(?:\/(.*))?)?$/.exec(url.pathname);
     if (!route) throw new HttpError(404, 'Not found');
