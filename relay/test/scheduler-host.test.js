@@ -20,8 +20,6 @@ function slot(answers) {
   h.lock = async (f) => f();
   h.note = () => {};
   h.trace = () => {};
-  h.stream = { notice() {}, revalidate() {}, head() {} };
-  h.routes = new Map();
   h.writeJson = async () => {};
   let t = 1_000_000;
   h.clock = () => (t += 1); // every reading is later than the last
@@ -39,7 +37,7 @@ function slot(answers) {
 
 const quietAnswers = (record = {}, head = {}) => ({
   status: () => ({ appointed: true, peers: [] }),
-  record_due: (req) => ({ state: req.state, store: [], sign: [], notify: [], result: 'ok', settled: true, wakeAt: req.now + 60_000, ...record }),
+  record_due: (req) => ({ state: req.state, store: [], sign: [], result: 'ok', settled: true, wakeAt: req.now + 60_000, ...record }),
   head_request: (req) => ({ state: req.state, sign: null, due: false, wakeAt: req.now + 30_000, ...head }),
 });
 
@@ -182,7 +180,7 @@ describe('forwarding while quiet', () => {
     h.clock = () => (t += 1);
     h.wasm.call = ((call) => (req) => (req.op === 'status' || req.op === 'record_due' || req.op === 'head_request'
       ? ({ status: { appointed: true, peers: [{ id: PEER, endpoints: ['https://peer.example/'] }] },
-        record_due: { state: req.state, store: [], sign: [], notify: [], result: 'ok', settled: true, wakeAt: req.now + 60_000 },
+        record_due: { state: req.state, store: [], sign: [], result: 'ok', settled: true, wakeAt: req.now + 60_000 },
         head_request: { state: req.state, sign: null, due: false, wakeAt: req.now + 30_000 } })[req.op]
       : call(req)))(h.wasm.call);
     await h.settle();
