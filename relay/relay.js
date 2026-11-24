@@ -267,8 +267,13 @@ class Slot {
     const file = path.join(this.root, 'log.jsonl');
     const st = await fsp.lstat(file).catch((e) => { if (e.code !== 'ENOENT') throw e; });
     if (st && !st.isFile()) throw new Error('Relay log must be a regular file');
+    // A part of a line that could not be cut back: no row may follow it (the next open finds the
+    // log damaged at that line, and starts a new instance, as for any inconsistent log).
+    if (this.logBroken) throw this.logBroken;
     const handle = await fsp.open(file, fsc.O_WRONLY | fsc.O_APPEND | fsc.O_CREAT | fsc.O_NOFOLLOW, 0o600);
-    try { await appendLines(handle, JSON.stringify(e) + '\n', true); } finally { await handle.close(); }
+    try { await appendLines(handle, JSON.stringify(e) + '\n', true); }
+    catch (error) { if (error.unrepaired) this.logBroken = error; throw error; }
+    finally { await handle.close(); }
     this.indexEntry(e);
     this.onEntry?.(this.entries.length - 1); // a home's stream pushes the same entry and cursor
     for (const waiter of [...this.waiters]) {
