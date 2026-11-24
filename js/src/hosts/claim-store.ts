@@ -1,80 +1,101 @@
 /**
- * Where a cell's persisted claim lives, fenced so that a save can never overwrite a newer one.
+ * Where a cell's persisted claim lives, fenced so that no save can overwrite a newer one, whichever client makes it.
  *
- * Every save carries a fence `{generation, seq}`, compared in that order. A host instance takes its generation from
- * what the store holds when it opens (one more than the held generation) and reserves it at once, by saving the claim
- * it loaded under `{generation, 0}`, before anything else; it then numbers its saves within that generation (and moves
- * to a new generation when it rebuilds its endpoint, after its last save has settled). A store refuses (`stale`) a save
- * whose fence is not greater than the one it holds, so the held fence never goes back. Because every instance's
- * generation is in the store before it saves a claim, each later instance starts above every earlier one, and a save
- * from an earlier instance (or an earlier attempt) that settles late is refused instead of replacing what a later one
- * stored. The fence is stored with the claim, so it survives restarts.
+ * Every save carries a fence `{generation, seq}` (safe integers, compared in that order) and the fence its caller last
+ * saw held. The store applies it as one linearizable compare-and-set across every client of the same underlying
+ * storage: it writes only if the fence it holds is exactly the expected one and the new fence is greater. A host
+ * instance takes its generation, when it opens and when it rebuilds its endpoint, by such a save (the claim it holds
+ * under `{generation + 1, 0}`), and numbers its later saves within that generation. Two instances that read the same
+ * held fence cannot both reserve the next generation: the first save changes the held fence, so the second's
+ * comparison fails and it is `stale`. The held fence therefore never goes back and changes only by a save made from
+ * exactly the previous one, so a save from an older instance or attempt that settles late finds a fence it did not
+ * expect and changes nothing. The fence is stored with the claim, so it survives restarts.
  *
- * The rule needs one live host per cell and store at a time: an instance whose reservation is refused does not open.
+ * A store that reads, compares and writes in separate steps is incorrect: two clients can both read fence F, both
+ * pass the comparison, and both write, so two hosts would believe they own the cell and a stale claim could be
+ * written over a newer one. The comparison and the write must be one atomic step against every other client.
  */
+import type { AtomicPrivateStore } from '../session/private.js';
 
-/** A save's fencing value: compared by `generation`, then `seq`. */
+/** A save's fencing value: two non-negative safe integers, compared by `generation`, then `seq`. */
 export interface Fence { generation: number; seq: number }
 /** A claim (the `Persist` effect's `persisted_json`, or none yet) with the fence it was saved under. */
 export interface StoredClaim { claim: string | null; fence: Fence }
 
 /**
- * The store contract. `load` returns what was last stored. `save` resolves only once the record is durable
- * (`stored`), or with `stale` when the store already holds a fence not lower than the record's (nothing is written);
- * it rejects when the write failed. The host never has two saves in flight for one cell.
+ * The store contract. `load` returns what is held. `save(record, expected)` is a linearizable compare-and-set across
+ * every client of the same storage: if the held fence equals `expected` (none: nothing is held) and `record.fence` is
+ * greater, the record is written durably and it resolves `stored`; otherwise nothing is written and it resolves
+ * `stale`. It rejects when the write failed (and then it may or may not have been written: the host reads again).
  */
 export interface ClaimStore {
   load(): Promise<StoredClaim | undefined>;
-  save(record: StoredClaim): Promise<'stored' | 'stale'>;
+  save(record: StoredClaim, expected: Fence | undefined): Promise<'stored' | 'stale'>;
 }
 
-/** Whether fence `a` comes after `b`. */
-export function fenceAfter(a: Fence, b: Fence): boolean { return a.generation !== b.generation ? a.generation > b.generation : a.seq > b.seq; }
+/** Whether `f` is a fence: two non-negative safe integers. */
+export function isFence(f: unknown): f is Fence {
+  const v = f as Partial<Fence> | null;
+  return typeof v === 'object' && v !== null && Number.isSafeInteger(v.generation) && Number.isSafeInteger(v.seq)
+    && (v.generation as number) >= 0 && (v.seq as number) >= 0;
+}
+function checked(f: Fence): Fence {
+  if (!isFence(f)) throw new RangeError('a fence is two non-negative safe integers');
+  return f;
+}
+/** Whether fence `a` comes after `b` (both checked). */
+export function fenceAfter(a: Fence, b: Fence): boolean {
+  checked(a); checked(b);
+  return a.generation !== b.generation ? a.generation > b.generation : a.seq > b.seq;
+}
+const sameFence = (a: Fence | undefined, b: Fence | undefined): boolean => a === undefined || b === undefined ? a === b : a.generation === b.generation && a.seq === b.seq;
+
+/** The compare-and-set every store applies: the record to write, or none. */
+export function compareAndSet(held: StoredClaim | undefined, record: StoredClaim, expected: Fence | undefined): StoredClaim | undefined {
+  checked(record.fence);
+  if (expected !== undefined) checked(expected);
+  if (record.claim !== null && typeof record.claim !== 'string') throw new TypeError('a claim is a string or null');
+  if (!sameFence(held?.fence, expected)) return undefined;
+  if (held && !fenceAfter(record.fence, held.fence)) return undefined;
+  return { claim: record.claim, fence: { generation: record.fence.generation, seq: record.fence.seq } };
+}
 
 /**
- * A `ClaimStore` over any `read`/`write` of the whole record, with the fence check: reads and writes are serialised,
- * and a save is written only when its fence is greater than the one held. Subclass it, or use the two below.
+ * A claim store in memory: every client that shares this object shares the record, and `save` compares and writes in
+ * one synchronous step (tests, previews).
  */
-export class FencedClaimStore implements ClaimStore {
-  private tail: Promise<unknown> = Promise.resolve();
-  constructor(private readonly read: () => Promise<StoredClaim | undefined>, private readonly write: (record: StoredClaim) => Promise<void>) {}
-  load(): Promise<StoredClaim | undefined> { return this.serial(() => this.read()); }
-  save(record: StoredClaim): Promise<'stored' | 'stale'> {
-    return this.serial(async () => {
-      const held = await this.read();
-      if (held && !fenceAfter(record.fence, held.fence)) return 'stale';
-      await this.write({ claim: record.claim, fence: { ...record.fence } });
-      return 'stored';
-    });
-  }
-  private serial<T>(body: () => Promise<T>): Promise<T> {
-    const run = this.tail.then(body, body);
-    this.tail = run.catch(() => {});
-    return run;
-  }
-}
-
-/** A fenced claim store in memory (tests, previews). */
-export class MemoryClaimStore extends FencedClaimStore {
+export class MemoryClaimStore implements ClaimStore {
   private record: StoredClaim | undefined;
-  constructor() {
-    super(async () => this.record && { claim: this.record.claim, fence: { ...this.record.fence } }, async record => { this.record = record; });
+  async load(): Promise<StoredClaim | undefined> { return this.record && { claim: this.record.claim, fence: { ...this.record.fence } }; }
+  async save(record: StoredClaim, expected: Fence | undefined): Promise<'stored' | 'stale'> {
+    const next = compareAndSet(this.record, record, expected);
+    if (!next) return 'stale';
+    this.record = next;
+    return 'stored';
   }
 }
 
+const decode = (bytes: Uint8Array | undefined, name: string): StoredClaim | undefined => {
+  if (!bytes) return undefined;
+  const v = JSON.parse(new TextDecoder().decode(bytes)) as StoredClaim;
+  if ((v.claim !== null && typeof v.claim !== 'string') || !isFence(v.fence)) throw new Error(`${name} is not a stored claim`);
+  return v;
+};
+
 /**
- * A fenced claim store in one file of a session's `PrivateStore` (`IndexedDBPrivateStore` in a browser,
- * `MemoryPrivateStore` in tests): `{claim, fence}` as JSON under `name`.
+ * A claim store in one file of an `AtomicPrivateStore` (`IndexedDBPrivateStore`, `FilePrivateStore`,
+ * `MemoryPrivateStore`): `{claim, fence}` as JSON under `name`, saved through the store's `update`, so the comparison
+ * and the write are one atomic step against every client of the same database or folder.
  */
-export function privateClaimStore(store: { read(name: string): Promise<Uint8Array | undefined>; write(name: string, bytes: Uint8Array): Promise<void> }, name: string): ClaimStore {
-  return new FencedClaimStore(
-    async () => {
-      const bytes = await store.read(name);
-      if (!bytes) return undefined;
-      const v = JSON.parse(new TextDecoder().decode(bytes)) as StoredClaim;
-      if ((v.claim !== null && typeof v.claim !== 'string') || typeof v.fence?.generation !== 'number' || typeof v.fence.seq !== 'number') throw new Error(`${name} is not a stored claim`);
-      return v;
+export function privateClaimStore(store: AtomicPrivateStore, name: string): ClaimStore {
+  return {
+    load: async () => decode(await store.read(name), name),
+    save: async (record, expected) => {
+      const wrote = await store.update(name, current => {
+        const next = compareAndSet(decode(current, name), record, expected);
+        return next ? new TextEncoder().encode(JSON.stringify(next)) : undefined;
+      });
+      return wrote ? 'stored' : 'stale';
     },
-    record => store.write(name, new TextEncoder().encode(JSON.stringify(record))),
-  );
+  };
 }

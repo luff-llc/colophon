@@ -20,7 +20,7 @@
  */
 import { isAccountFault, glue, plain } from '../session/wasm.js';
 import type { HostAccount } from './account.js';
-import type { ClaimStore, StoredClaim } from './claim-store.js';
+import { isFence, type ClaimStore, type Fence, type StoredClaim } from './claim-store.js';
 import { Deadline, systemClock, type HostClock } from './clock.js';
 import { frameBytes, frameText } from './frames.js';
 import type { StreamCell } from './stream-host.js';
@@ -112,7 +112,7 @@ export interface CellHostOptions {
 
 /** A command the host refused or could not run. */
 export class CellHostError extends Error {
-  constructor(readonly code: 'closed' | 'failed' | 'commandQueueFull' | 'notRun' | 'timeout', message: string) { super(message); this.name = 'CellHostError'; }
+  constructor(readonly code: 'closed' | 'failed' | 'commandQueueFull' | 'notRun' | 'timeout' | 'superseded', message: string) { super(message); this.name = 'CellHostError'; }
 }
 
 interface HeldCommand { name: string; json: string; resolve(): void; reject(error: unknown): void }
@@ -152,6 +152,10 @@ export class SessionCellHost implements StreamCell {
   /** This instance's fencing generation (above what the store held when it opened or rebuilt) and its save count. */
   private generation = 1;
   private seq = 0;
+  /** The fence this instance last saw held: what every save it makes expects (compare-and-set). */
+  private heldFence: Fence | undefined;
+  /** How often it checks that the held fence is still its own (the policy's `beatMs`). */
+  private readonly watchMs: number;
   /** Cancels every retry and deadline timer that is waiting (on close and on failure). */
   private readonly waits = new Set<() => void>();
   /** Commands admitted and not yet settled (bounded by `maxCommands`). */
@@ -184,6 +188,9 @@ export class SessionCellHost implements StreamCell {
     this.persistAttempts = Math.max(1, options.persistAttempts ?? 20);
     this.persistTimeoutMs = Math.max(1, options.persistTimeoutMs ?? 10_000);
     this.maxCommands = Math.max(1, options.maxCommands ?? 64);
+    let beat = 5_000;
+    try { const b = (JSON.parse(this.policy) as { beatMs?: unknown }).beatMs; if (typeof b === 'number' && b > 0) beat = b; } catch { /* the endpoint refuses a bad policy */ }
+    this.watchMs = beat;
     this.random = options.random ?? (n => crypto.getRandomValues(new Uint8Array(n)));
     this.tickTimer = new Deadline(this.clock, () => this.enqueue(() => this.whenOpen(() => this.run('tick', (e, engine, clock) => e.tick(engine, clock), 'tick'))));
     this.renewTimer = new Deadline(this.clock, () => this.enqueue(() => this.whenOpen(() => this.renew())));
@@ -199,9 +206,11 @@ export class SessionCellHost implements StreamCell {
     if (listener) host.on(listener);
     try {
       const held = await host.store.load();
+      if (held && !isFence(held.fence)) throw new CellHostError('failed', 'the store holds a fence that is not two safe integers');
       host.lastStored = held?.claim ?? undefined;
-      host.generation = (held?.fence.generation ?? 0) + 1;
-      // Reserve this instance's generation before any claim is saved under it (see claim-store.ts).
+      host.heldFence = held?.fence;
+      host.generation = held?.fence.generation ?? 0;
+      // Reserve this instance's generation by compare-and-set before any claim is saved under it (claim-store.ts).
       await host.reserve(held?.claim ?? null);
       await host.build();
       if (host.phase !== 'opening') throw new CellHostError('closed', 'the cell host was closed while it opened');
@@ -210,6 +219,7 @@ export class SessionCellHost implements StreamCell {
       host.carrier.attach(host);
       host.stopPassListener = host.carrier.onPass?.(() => host.accountChanged());
       host.armTick(host.endpoint?.next_deadline());
+      host.watch();
       await host.command('join', { command: 'join', state: host.stateValue() });
     } catch (error) {
       host.close();
@@ -449,11 +459,19 @@ export class SessionCellHost implements StreamCell {
             break;
           }
           if ('error' in result) {
+            // A failed write may still have been written: what is held now is read before the next attempt.
+            await this.adopt();
             if (failed(result.error)) return;
             if (await this.timer(this.persistRetryMs).done === 'cancelled') return;
             continue;
           }
-          if (result.status === 'stale') { this.enqueue(() => { this.writing = undefined; this.fail('superseded'); }); return; }
+          if (result.status === 'stale') {
+            // Stale against this instance's own earlier save (one it could not see complete) is adopted and saved
+            // again; anything else means another instance holds the cell.
+            if (await this.adopt()) continue;
+            this.enqueue(() => { this.writing = undefined; this.fail('superseded'); });
+            return;
+          }
           if (late) continue;
           break;
         }
@@ -472,18 +490,55 @@ export class SessionCellHost implements StreamCell {
       }
     })();
   }
-  /** Saves `claim` under `{generation, 0}`: this instance's fence is in the store before it saves anything else. */
+  /**
+   * Takes the next generation by compare-and-set from the fence last seen held, saving `claim` under
+   * `{generation, 0}`. Another instance that reserved first makes it `stale`: `superseded`.
+   */
   private async reserve(claim: string | null): Promise<void> {
+    const generation = this.generation + 1;
+    if (!Number.isSafeInteger(generation)) throw new CellHostError('failed', 'the fence generation is exhausted');
+    this.generation = generation; this.seq = 0;
     const deadline = this.timer(this.persistTimeoutMs);
-    const r = await Promise.race([this.save({ claim, fence: { generation: this.generation, seq: 0 } }), deadline.done]);
+    const r = await Promise.race([this.save({ claim, fence: { generation, seq: 0 } }), deadline.done]);
     deadline.cancel();
     if (r === 'fired' || r === 'cancelled') throw new CellHostError('timeout', 'the store did not reserve this host\'s fence in time');
     if ('error' in r) throw r.error;
-    if (r.status === 'stale') throw new CellHostError('failed', 'another instance of this cell holds a newer fence (superseded)');
+    if (r.status === 'stale') throw new CellHostError('superseded', 'another instance of this cell reserved the fence first');
   }
-  /** One save; never rejects. */
+  /** One compare-and-set save from the fence last seen held; never rejects. A stored save moves that fence. */
   private save(record: StoredClaim): Promise<{ status: 'stored' | 'stale' } | { error: unknown }> {
-    return Promise.resolve().then(() => this.store.save(record)).then(status => ({ status }), (error: unknown) => ({ error }));
+    return Promise.resolve().then(() => this.store.save(record, this.heldFence)).then(
+      status => { if (status === 'stored') this.heldFence = record.fence; return { status }; },
+      (error: unknown) => ({ error }));
+  }
+  /**
+   * Reads the held fence after a save this instance could not see complete. True when it is one of this instance's own
+   * (adopted as the fence to expect); false when another instance's.
+   */
+  private async adopt(): Promise<boolean> {
+    let now: StoredClaim | undefined;
+    try { now = await this.store.load(); } catch { return true; }
+    const f = now?.fence;
+    if (f && isFence(f) && f.generation === this.generation && f.seq <= this.seq) { this.heldFence = f; return true; }
+    return f === undefined ? this.heldFence === undefined : f.generation === this.heldFence?.generation && f.seq === this.heldFence.seq;
+  }
+  /**
+   * Checks, every beat, that the store still holds this instance's fence. Another instance that reserved the cell
+   * makes this one fail with `superseded` within one beat, whether or not it saves again.
+   */
+  private watch(): void {
+    void (async () => {
+      while (!this.over) {
+        if (await this.timer(this.watchMs).done === 'cancelled') return;
+        if (this.phase !== 'open' || this.writing) continue;
+        let now: StoredClaim | undefined;
+        try { now = await this.store.load(); } catch { continue; }
+        if (this.over || this.writing) continue;
+        const f = now?.fence;
+        const mine = f !== undefined && this.heldFence !== undefined && f.generation === this.heldFence.generation && f.seq === this.heldFence.seq;
+        if (!mine) { this.enqueue(() => { if (!this.writing) this.fail('superseded'); }); return; }
+      }
+    })();
   }
   /** A timer that close and failure cancel. */
   private timer(ms: number): { done: Promise<'fired' | 'cancelled'>; cancel(): void } {
@@ -618,16 +673,17 @@ export class SessionCellHost implements StreamCell {
     this.tickTimer.clear(); this.renewTimer.clear();
     const old = this.endpoint; this.endpoint = undefined;
     try { old?.free(); } catch { /* freed */ }
-    // The new endpoint saves under a new generation, above every save this instance has issued.
-    this.generation++; this.seq = 0;
     const writing = this.writing;
     void (async () => {
       try {
         await writing;
         if (this.phase !== 'rebuilding') return;
+        // The new endpoint takes a new generation by compare-and-set, like an open.
+        await this.reserve(this.lastStored ?? null);
         await this.build();
       } catch (error) {
-        this.enqueue(() => { if (this.phase === 'rebuilding') this.fail('rebuild', error); });
+        const superseded = error instanceof CellHostError && error.code === 'superseded';
+        this.enqueue(() => { if (this.phase === 'rebuilding') this.fail(superseded ? 'superseded' : 'rebuild', error); });
         return;
       }
       this.enqueue(() => {

@@ -12,5 +12,5 @@ export {
   base64, base64url, CellHostError, SessionCellHost, unbase64,
   type CellCarrier, type CellHostEvent, type CellHostOptions, type FailReason, type RebuildReason, type SessionEffectValue, type SessionStepValue,
 } from './cell-host.js';
-export { fenceAfter, FencedClaimStore, MemoryClaimStore, privateClaimStore, type ClaimStore, type Fence, type StoredClaim } from './claim-store.js';
+export { compareAndSet, fenceAfter, isFence, MemoryClaimStore, privateClaimStore, type ClaimStore, type Fence, type StoredClaim } from './claim-store.js';
 export { CellSession, cellEvent, type CellEvent, type CellState, type Claim } from './cell.js';
