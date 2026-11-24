@@ -127,8 +127,34 @@ is meant for one operator's own tools. Do not ship it in an app; see the relay R
 
 ## Back up, restore, update
 
-The home is consistent on disk only while no relay is writing to it. To back it up, stop the
-container, archive the volume, then start it again:
+**Copying files out of a running home is not a backup.** A change touches several files in
+turn (the slot's `home-state.json`, then its records and `log.jsonl`; `replay.log` before a
+write), and a copy made file by file takes each at a different moment. Restored, such a copy
+can make every client list the slot again from the start, forget calls the home already took
+(so they could be presented again), or hold a record its state does not match, which stops the
+slot from opening. `tar`, `rsync` or `docker cp` against a running container all copy this way.
+
+Two kinds of copy are consistent:
+
+- **A copy of a stopped home.** `docker stop` lets the relay finish what is in flight and
+  release its locks; a copy made then is exact.
+- **An atomic snapshot of the whole volume**, taken in one instant while it runs (a ZFS or Btrfs
+  snapshot, an LVM snapshot, a cloud disk snapshot). Restored, it is what a power cut at that
+  instant would have left, and the home recovers from that at start-up as it does from any
+  crash. Every file must be in the one snapshot: separate snapshots of parts of the volume are
+  not consistent.
+
+A snapshot of a running home holds its locks: `/data/.container.lock` and
+`/data/records-dir/.relay.lock` (and `.relay.lock.reclaim`, if present). The container takes
+over a stale container lock on its own after 30 seconds (11 for the same container) and removes
+the relay lock then; delete these files from the restored copy, before anything runs on it, to
+start at once, and always before running the relay outside the container on it, where an old
+relay lock can name a process ID that is now another process.
+
+A restored home is the home as it was when the copy was made: what it took, signed or stored
+since is not in it.
+
+To back it up by stopping it, stop the container, archive the volume, then start it again:
 
 ```sh
 docker stop colophon-home
