@@ -500,13 +500,29 @@ impl HomeState {
         });
         Ok(())
     }
-    fn visible(&self, object: &PendingObject, state: &State, now_ms: i64) -> bool {
-        !state.recorded.contains(if object.kind == "receipt" {
-            self.pending
-                .iter()
-                .find(|p| p.kind != "receipt" && p.digest == object.target)
-                .map(|p| &p.target)
-                .unwrap_or(&object.target)
+    /// The target of the first stored object that is not a receipt, by digest: what a receipt of
+    /// that object is listed by. Built once for a pass over every stored object, so the pass is
+    /// not quadratic in what the home stores.
+    fn receipted_targets(&self) -> BTreeMap<&str, &str> {
+        let mut out = BTreeMap::new();
+        for p in self.pending.iter().filter(|p| p.kind != "receipt") {
+            out.entry(p.digest.as_str()).or_insert(p.target.as_str());
+        }
+        out
+    }
+    /// Whether `object` is still listed: its target not recorded (a receipt's, the target of
+    /// the object it receipts, when the home stores that object) not in `recorded` (the verified
+    /// state's recorded transitions) and not expired. `targets` is
+    /// [`HomeState::receipted_targets`] of this state.
+    fn visible(
+        &self,
+        object: &PendingObject,
+        recorded: &BTreeSet<String>,
+        now_ms: i64,
+        targets: &BTreeMap<&str, &str>,
+    ) -> bool {
+        !recorded.contains(if object.kind == "receipt" {
+            targets.get(object.target.as_str()).copied().unwrap_or(&object.target)
         } else {
             &object.target
         }) && object.expires_ms.is_none_or(|end| now_ms <= end)
@@ -515,10 +531,11 @@ impl HomeState {
     pub fn pending_page(&self, after: u64, limit: usize, now_ms: i64) -> Result<PendingPage> {
         require((1..=64).contains(&limit), "pending page limit must be 1–64")?;
         let (_, state, _) = self.context_any(now_ms)?;
+        let targets = self.receipted_targets();
         let mut iter = self
             .pending
             .iter()
-            .filter(|p| p.seq > after && p.kind != "succession" && self.visible(p, &state, now_ms));
+            .filter(|p| p.seq > after && p.kind != "succession" && self.visible(p, &state.recorded, now_ms, &targets));
         let objects = iter.by_ref().take(limit).cloned().collect();
         Ok(PendingPage {
             objects,
@@ -528,10 +545,11 @@ impl HomeState {
     /// GET pending/digest, with every held receipt, or absent. The caller authorizes the read.
     pub fn pending_object(&self, digest: &str, now_ms: i64) -> Result<Option<PendingDetail>> {
         let (_, state, _) = self.context_any(now_ms)?;
+        let targets = self.receipted_targets();
         let Some(object) = self
             .pending
             .iter()
-            .find(|p| p.digest == digest && p.kind != "receipt" && self.visible(p, &state, now_ms))
+            .find(|p| p.digest == digest && p.kind != "receipt" && self.visible(p, &state.recorded, now_ms, &targets))
         else {
             return Ok(None);
         };
@@ -939,7 +957,8 @@ fn admit_full(
                 let active: Vec<_> = next
                     .pending
                     .iter()
-                    .filter(|p| p.kind == "transition" && next.visible(p, &st, now_ms))
+                    // Not receipts: their listing needs no receipted targets.
+                    .filter(|p| p.kind == "transition" && next.visible(p, &st.recorded, now_ms, &BTreeMap::new()))
                     .collect();
                 // The proposer is the primary signer's unit; cosigners are not charged (§13.1).
                 if active
@@ -1040,7 +1059,7 @@ fn admit_full(
                     .pending
                     .iter()
                     .filter(|p| {
-                        p.kind == "veto" && p.target == target && next.visible(p, &st, now_ms)
+                        p.kind == "veto" && p.target == target && next.visible(p, &st.recorded, now_ms, &BTreeMap::new())
                     })
                     .collect();
                 if vetoes.len() >= 8 || vetoes.iter().any(|p| !p.units.is_disjoint(&units)) {
@@ -1246,10 +1265,11 @@ fn admit_full(
                 }
                 // §14: the admission caps bound a listing at 10,368 objects. Only what is still
                 // listed counts: settled (recorded) and expired objects do not.
+                let targets = next.receipted_targets();
                 let live = next
                     .pending
                     .iter()
-                    .filter(|p| p.kind != "succession" && next.visible(p, &st, now_ms))
+                    .filter(|p| p.kind != "succession" && next.visible(p, &st.recorded, now_ms, &targets))
                     .count();
                 if live >= 10_368 {
                     return Err(Failure::Unavailable("home pending storage full".into()).into());
@@ -2406,4 +2426,90 @@ pub fn admit_pending_batch_notices(
     }
     results.extend(by_index.into_iter().map(|r| r.unwrap_or(Err(Refusal::Conflict))));
     Ok((next, results, receipts, notices))
+}
+
+#[cfg(test)]
+mod visible_tests {
+    use super::*;
+
+    fn object(seq: u64, digest: &str, kind: &str, target: &str, expires_ms: Option<i64>) -> PendingObject {
+        PendingObject {
+            seq,
+            digest: digest.into(),
+            kind: kind.into(),
+            envelope: Vec::new(),
+            target: target.into(),
+            units: BTreeSet::new(),
+            expires_ms,
+        }
+    }
+
+    /// The listing rule as it was first written: a receipt is looked up by a scan of every
+    /// stored object, so a pass over all of them was quadratic.
+    fn listed_by_scan(home: &HomeState, object: &PendingObject, recorded: &BTreeSet<String>, now_ms: i64) -> bool {
+        !recorded.contains(if object.kind == "receipt" {
+            home.pending
+                .iter()
+                .find(|p| p.kind != "receipt" && p.digest == object.target)
+                .map(|p| &p.target)
+                .unwrap_or(&object.target)
+        } else {
+            &object.target
+        }) && object.expires_ms.is_none_or(|end| now_ms <= end)
+    }
+
+    /// Transitions (one recorded), vetoes naming them, receipts of each, of a receipt, of an
+    /// object the home never stored, two stored objects under one digest (the first one's target
+    /// counts), and expiries on both sides of the clock: the one-pass map lists exactly what the
+    /// scan listed.
+    #[test]
+    fn the_receipted_targets_map_lists_what_the_scan_listed() {
+        let pending = vec![
+            object(1, "t1", "transition", "t1", None),
+            object(2, "t2", "transition", "t2", Some(1_000)),
+            object(3, "v1", "veto", "t1", None),
+            object(4, "v2", "veto", "t2", None),
+            object(5, "r1", "receipt", "t1", None),
+            object(6, "r2", "receipt", "t2", Some(500)),
+            object(7, "r3", "receipt", "v1", None),
+            object(8, "r4", "receipt", "v2", Some(2_000)),
+            object(9, "r5", "receipt", "unknown", None),
+            object(10, "r6", "receipt", "r1", None),
+            object(11, "d", "transition", "t1", None),
+            object(12, "d", "veto", "t2", None),
+            object(13, "r7", "receipt", "d", None),
+            object(14, "s", "succession", "g", None),
+            object(15, "r8", "receipt", "s", None),
+        ];
+        let home = HomeState {
+            version: STATE_VERSION,
+            home: String::new(),
+            checkpoint: Vec::new(),
+            next_cursor: pending.len() as u64 + 1,
+            pending,
+            facts: BTreeMap::new(),
+            drafts: BTreeMap::new(),
+            serving: Vec::new(),
+            unmatched_receipts: Vec::new(),
+            signed_heads: Vec::new(),
+            candidate_slots: BTreeMap::new(),
+        };
+        let targets = home.receipted_targets();
+        let mut compared = 0;
+        for recorded in [vec![], vec!["t1"], vec!["t2"], vec!["t1", "t2", "unknown", "g"]] {
+            let recorded: BTreeSet<String> = recorded.into_iter().map(String::from).collect();
+            for now_ms in [0, 500, 501, 1_000, 1_001, 2_001] {
+                for o in &home.pending {
+                    assert_eq!(
+                        home.visible(o, &recorded, now_ms, &targets),
+                        listed_by_scan(&home, o, &recorded, now_ms),
+                        "{} at {now_ms} with {recorded:?}",
+                        o.digest
+                    );
+                    compared += 1;
+                }
+            }
+        }
+        assert_eq!(compared, 4 * 6 * 15);
+    }
 }
