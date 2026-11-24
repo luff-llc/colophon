@@ -811,3 +811,64 @@ fn clock_retries_future_genesis_and_immediate_entry_at_sixty_second_boundary() {
         );
     }
 }
+
+/// `verify_history` answers from an unchanged checkpoint without parsing the held objects
+/// (`resumes_unchanged`). Its verdict must be the full verifier's, field for field and state
+/// for state, wherever it is taken. Over every history vector (ordinary, held, forked, stopped by
+/// a format or a final raise, upgraded in place from `/4`, successors of `/5` and Swift
+/// predecessors), each checkpointed at several clock readings, resumed from an earlier
+/// checkpoint, and with a high-water mark ahead of the branch, the verdict at clock readings
+/// before, at and 30 days after the checkpoint's is the full verifier's.
+#[test]
+fn an_unchanged_checkpoint_gives_the_full_verdict() {
+    use colophon_core::v05::history::{resumes_unchanged, verify_history_in_full, Stop};
+    const DAY: i64 = 86_400_000;
+    let mut all: Vec<(PathBuf, Objects, i64)> =
+        cases().into_iter().map(|(d, now)| (d.clone(), objects_of(&d), now)).collect();
+    all.extend(other_cases());
+    let (mut compared, mut resumed) = (0usize, 0usize);
+    let mut seen = std::collections::BTreeSet::new();
+    for (dir, objects, now) in &all {
+        let none = Objects::default();
+        let cold = verify_history(objects, &Persisted::default(), *now);
+        seen.insert(match &cold.stop {
+            None => "ok",
+            Some(Stop::Held { .. }) => "held",
+            Some(Stop::Fork { .. }) => "fork",
+            Some(Stop::Failed { .. }) if cold.stopped.is_some() => "stopped",
+            Some(Stop::Failed { .. }) => "failed",
+        });
+        if cold.state.as_ref().is_some_and(|s| s.upgrade_seq.is_some()) {
+            seen.insert("upgraded");
+        }
+        if cold.state.as_ref().is_some_and(|s| colophon_core::v05::history::succession_status(s).is_some()) {
+            seen.insert("successor");
+        }
+        let mut checkpoints = Vec::new();
+        for at in [*now - 60_000, *now + 7 * DAY] {
+            let p = Persisted::checkpoint(objects, &Persisted::default(), at);
+            checkpoints.push((at, Persisted::checkpoint(objects, &p, at + 1_000)));
+            if let Some(d) = cold.branch.last() {
+                let ahead = Persisted::high_water(cold.branch.len() as u64 + 1, d.clone());
+                checkpoints.push((at, Persisted::checkpoint(objects, &ahead, at)));
+            }
+            checkpoints.push((at, p));
+        }
+        for (at, p) in &checkpoints {
+            for t in [at - 1, *at, at + 30 * DAY] {
+                let got = full(&verify_history(&none, p, t));
+                let want = full(&verify_history_in_full(&none, p, t));
+                assert_eq!(got, want, "{} checkpointed at {at}, verified at {t}", dir.display());
+                compared += 1;
+                resumed += usize::from(resumes_unchanged(&none, p, t));
+            }
+            // Anything coming in takes the full path.
+            assert!(!resumes_unchanged(objects, p, *at) || objects.entries.is_empty());
+        }
+    }
+    eprintln!("{compared} verdicts compared, {resumed} from an unchanged checkpoint; histories: {seen:?}");
+    for kind in ["ok", "held", "fork", "stopped", "failed", "upgraded", "successor"] {
+        assert!(seen.contains(kind), "no {kind} history among the vectors: {seen:?}");
+    }
+    assert!(resumed * 8 > compared, "the shortcut was taken for {resumed} of {compared}");
+}
