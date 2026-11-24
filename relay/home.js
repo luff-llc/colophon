@@ -14,6 +14,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { constants as fsc, promises as fsp, writeSync } from 'node:fs';
 import path from 'node:path';
+import { readLogRows, replayRow } from './files.js';
 
 const b64 = (bytes) => Buffer.from(bytes).toString('base64');
 const unb64 = (text) => Buffer.from(text, 'base64');
@@ -419,15 +420,11 @@ export class HomeSlot {
   // recovery at start-up from the effect's own record.
 
   async openReplay() {
-    const file = this.file('replay.log');
-    let text = '';
-    try { text = await fsp.readFile(file, 'utf8'); } catch { text = ''; }
-    const end = text.lastIndexOf('\n');
-    if (end !== text.length - 1) text = text.slice(0, end + 1); // a torn last line
+    // Fails closed: a log that cannot be read, or holds a damaged complete line, is never
+    // compacted as if it were empty (the calls it holds would become new again).
+    const entries = await readLogRows(this.file('replay.log'), replayRow((e) => typeof e.path === 'string'), 'The replay log');
     const pending = new Map();
-    for (const line of text.split('\n')) {
-      if (!line) continue;
-      let e; try { e = JSON.parse(line); } catch { continue; }
+    for (const e of entries) {
       this.logLines += 1;
       if (e.r) {
         this.addRow(e.r, { digest: e.d, at: e.at, signer: e.s });
