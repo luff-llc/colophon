@@ -28,6 +28,10 @@ async function syncDir(dir) {
   try { await handle.sync(); } finally { await handle.close(); }
 }
 
+/** The kinds of the history's own files (§13.4), read as the history pages are: judged and
+ * selected under the slot's lock. */
+const HISTORY_FILES = new Set(['authority', 'pending', 'receipt', 'predecessor']);
+
 // Forwarding (§13.1), per peer: each request's own time limit, a pass's wall-time budget, how many
 // newly listed objects and how many backlog objects one pass offers, and how soon the same
 // entries are offered again while the peer's head lags. PASS_MS bounds all network request
@@ -590,8 +594,12 @@ export class HomeSlot {
       await this.lockedWrite(req, res, url, section, rest, body);
       return true;
     }
-    // Reads of the change feed and of the history: judged and selected over one state.
-    if (section === 'changes' || (section === 'authority' && method === 'GET') || (section === 'pending' && method !== 'POST')) {
+    // Reads of the change feed and of the history (pages, and the history's own files):
+    // judged and selected over one state.
+    const historyFile = (method === 'GET' || method === 'HEAD') && (section === 'predecessor'
+      || (section === 'records' && typeof rest === 'string' && rest !== `heads/${this.key.memberId}.json` && !url.search
+        && HISTORY_FILES.has(this.slot.classify(rest))));
+    if (historyFile || section === 'changes' || (section === 'authority' && method === 'GET') || (section === 'pending' && method !== 'POST')) {
       await this.lockedRead(req, res, url, section, rest);
       return true;
     }
@@ -618,15 +626,7 @@ export class HomeSlot {
       await this.lock(() => this.postPending(res, body));
       return true;
     }
-    if (section === 'predecessor') {
-      const file = `predecessor/${rest}`;
-      const entry = this.slot.current.get(file);
-      if (!entry) throw new HttpError(404, 'Not found');
-      const bytes = await this.slot.readFile(file);
-      res.writeHead(200, { 'content-type': 'application/json', 'content-length': bytes.length, etag: `"${entry.sha256}"`, 'cache-control': 'no-store' });
-      res.end(method === 'HEAD' ? undefined : bytes);
-      return true;
-    }
+    if (section === 'predecessor') { await this.servePredecessor(req, res, rest); return true; }
     if (section === 'records') {
       if (!writing && rest === `heads/${this.key.memberId}.json` && (method === 'GET' || method === 'HEAD')) { await this.serveOwnHead(res); return true; }
       if (!writing) return false; // a read the module allowed: the relay serves the file
@@ -635,6 +635,17 @@ export class HomeSlot {
       return true;
     }
     throw new HttpError(404, 'Not found');
+  }
+
+  /** `GET`/`HEAD {base}/predecessor/<path>`: the stored predecessor file. */
+  async servePredecessor(req, res, rest) {
+    const { HttpError } = this.deps;
+    const file = `predecessor/${rest}`;
+    const entry = this.slot.current.get(file);
+    if (!entry) throw new HttpError(404, 'Not found');
+    const bytes = await this.slot.readFile(file);
+    res.writeHead(200, { 'content-type': 'application/json', 'content-length': bytes.length, etag: `"${entry.sha256}"`, 'cache-control': 'no-store' });
+    res.end(req.method === 'HEAD' ? undefined : bytes);
   }
 
   /** `GET {base}/changes`, `GET {base}/authority`, `GET {base}/pending[/<digest>]`. The call is
@@ -651,6 +662,8 @@ export class HomeSlot {
         judged = { commits: this.commits, page: this.deps.firstChanges(req, url, rest, this.slot) };
         return;
       }
+      if (section === 'records') { await this.deps.serveRecord(req, res, this.slot, rest); return; }
+      if (section === 'predecessor') { await this.servePredecessor(req, res, rest); return; }
       const after = () => clampInt(url.searchParams.get('after'), 0, 0, Number.MAX_SAFE_INTEGER);
       const limit = () => clampInt(url.searchParams.get('limit'), 64, 1, 64);
       if (section === 'authority') {
