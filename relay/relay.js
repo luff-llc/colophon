@@ -772,6 +772,8 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
     // Counted from here until the response has ended and this handler has settled.
     if (closing || s.closing || s.releasing || s.released) throw notProvisioned();
     enter(s); work.slot = s;
+    // A home's commits so far: a long poll judged by the home ends once the authority changes.
+    const commits = s.home?.commits;
     if (s.home && await s.home.handle(req, res, url, section, recordPath)) return undefined;
     if (section === 'records' && recordPath === 'batch') {
       // Home authorization and rate limiting run before any batch parsing/classification.
@@ -823,10 +825,17 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
       const namespaces = url.searchParams.getAll('namespace').filter((n) => n.length > 0);
       let page = s.changes(after, limit, namespaces);
       const deadline = Date.now() + wait * 1000;
-      while (page.entries.length === 0 && Date.now() < deadline) {
-        await s.waitForEntry(deadline - Date.now(), res, namespaces);
+      // A home judged the call once, before the wait. When its state changes during the wait
+      // (a revocation, among others) the poll ends with the page it has (empty, the same
+      // cursor), so the caller is judged again on its next poll.
+      const changed = () => Boolean(s.home) && s.home.commits !== commits;
+      while (page.entries.length === 0 && Date.now() < deadline && !changed()) {
+        const waiting = s.waitForEntry(deadline - Date.now(), res, namespaces);
+        await reach('changes waiting'); // a test hook (traced builds only)
+        await waiting;
         if (res.destroyed) return undefined;
         if (s.closing || s.releasing) throw notProvisioned(); // woken by a release
+        if (changed()) break;
         page = s.changes(page.cursor, limit, namespaces);
       }
       return send(res, 200, page);

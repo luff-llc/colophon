@@ -152,6 +152,7 @@ export class HomeSlot {
     this.forward = { peers: {} };
     this.rate = new RateLimit(o.limits.requestsPerMinute);
     this.said = new Map();
+    this.commits = 0; // committed state changes, for long polls judged before one
   }
 
   file(name) { return path.join(this.slot.root, name); }
@@ -264,6 +265,9 @@ export class HomeSlot {
     if (!state || state === this.state) return;
     await this.writeJson('home-state.json', state);
     this.state = state;
+    // A long poll of the change feed was judged against the state before: it ends now.
+    this.commits += 1;
+    for (const waiter of [...this.slot.waiters ?? []]) waiter.wake();
   }
 
   /** Store the files the module listed. A path the module marks `replace` (a head; an entry
