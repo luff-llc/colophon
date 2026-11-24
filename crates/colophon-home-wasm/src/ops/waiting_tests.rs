@@ -372,3 +372,87 @@ fn the_waiting_note_is_the_original_without_parts_about_settled_transitions() {
     assert!(notes > 0, "some readings have something waiting");
     assert!(dropped > 0, "some readings had parts about settled transitions");
 }
+
+/// `wakeAt` (`record_due`, `head_request`) is sound and on time over the kill loop's schedule:
+/// at every reading where the scheduler runs `record_due`, when it records nothing and gives a
+/// time, the same state at any reading from then until just before that time records nothing,
+/// asks for nothing and leaves the state as it was (so the relay may skip those passes); a head
+/// that is not due stays not due until its `wakeAt` and is due then. A transition receipted and
+/// not vetoed gives exactly its due time, and is activated at it.
+#[test]
+fn wake_at_is_never_later_than_what_the_clock_makes_due() {
+    use colophon_core::v05::write::authority::VerifiedObjects;
+    let mut w = World::new();
+    let (mut bounded, mut unbounded, mut exact) = (0usize, 0usize, 0usize);
+    let mut check = |home: &Home, now: i64| {
+        let r = call(json!({"op": "record_due", "state": home.state, "now": now}));
+        let Some(wake) = r["wakeAt"].as_i64() else {
+            unbounded += 1;
+            return;
+        };
+        bounded += 1;
+        assert!(wake > now, "a wake time after the reading: {wake} at {now}");
+        assert_eq!(r["state"], json!(home.state), "nothing recorded leaves the state byte for byte");
+        assert_eq!(r["sign"], json!([]));
+        let last = wake.min(now + 30 * 24 * HOUR) - 1;
+        for t in [now + 1, now + (last - now) / 2, last] {
+            let again = call(json!({"op": "record_due", "state": home.state, "now": t}));
+            assert_eq!(again["state"], json!(home.state), "nothing becomes due at {t}, before {wake}");
+            assert_eq!(again["sign"], json!([]), "at {t}");
+            assert_eq!(again["result"], "ok", "at {t}");
+        }
+        // The earliest due time among the held transitions is the wake time when it is the
+        // nearest thing waiting, and the transition is activated at it.
+        let (_, objects) = home.held();
+        let verified = VerifiedObjects::new(&objects, now);
+        if verified.next_due_ms() == Some(wake) && wake < now + 30 * 24 * HOUR {
+            let at = call(json!({"op": "record_due", "state": home.state, "now": wake}));
+            if at["state"] != json!(home.state) {
+                exact += 1;
+            }
+        }
+        // A head not due stays so until its wake time, and is due at it.
+        let h = call(json!({"op": "head_request", "state": home.state, "now": now}));
+        if let Some(hw) = h["wakeAt"].as_i64() {
+            assert_eq!(h["due"], false);
+            if hw < now + 30 * 24 * HOUR {
+                let before = call(json!({"op": "head_request", "state": home.state, "now": hw - 1}));
+                assert_eq!(before["due"], false, "no head due just before {hw}");
+                let then = call(json!({"op": "head_request", "state": home.state, "now": hw}));
+                assert_eq!(then["due"], true, "a head due at {hw}");
+            }
+        }
+    };
+    for k in 0..7 {
+        w.round(k, at(k), true, &mut check);
+    }
+    w.round(7, at(7), false, &mut check);
+    w.round(8, at(7) + 600_000, false, &mut check);
+    check(&w.home, at(7) + 720_000);
+    eprintln!("wakeAt: {bounded} readings bounded, {unbounded} not (asked again next pass), {exact} exactly on a due time");
+    assert!(bounded > 0 && exact > 0, "some readings wait for a due time and it comes exactly then");
+}
+
+/// The 7-day bound on an `activate` is on its determined `issued` (the later of the last entry's
+/// `issued` and the due time), not on the clock: a receipted transition left alone for 8 days
+/// after its due time, with nothing appended since, can still be built, so it is not a
+/// transition that never comes due: no wake bound, ask again every pass. (This home then refuses
+/// its own late `activate` by the home's clock rule, `refused:late`, and gives no wake time
+/// either: every pass asks again, as before.)
+#[test]
+fn a_transition_due_long_ago_with_nothing_appended_since_is_still_due() {
+    use colophon_core::v05::write::authority::VerifiedObjects;
+    let mut w = World::new();
+    let digest = w.round(0, at(0), false, &mut |_, _| {});
+    let (_, objects) = w.home.held();
+    let early = VerifiedObjects::new(&objects, at(0) + 120_000);
+    let due = early.next_due_ms().expect("a receipted transition has a due time");
+    assert!(due > at(0) + 120_000 && due < at(0) + 2 * HOUR, "due within the delay: {due}");
+    let late = due + 8 * 24 * HOUR;
+    let verified = VerifiedObjects::new(&objects, late);
+    assert!(verified.state().unwrap().last_issued_ms() <= due, "nothing appended since");
+    assert!(verified.prepare_activate(&digest).is_ok(), "still activatable 8 days after its due time");
+    assert_eq!(verified.next_due_ms(), None, "due and not recorded: no wake bound");
+    let r = w.home.due(late);
+    assert_eq!(r["wakeAt"], Value::Null, "{}", r["result"]);
+}

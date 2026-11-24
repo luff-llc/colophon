@@ -1330,6 +1330,10 @@ pub struct VerifiedObjects<'a> {
     now_ms: i64,
     fork: bool,
     head: Result<State>,
+    /// The verdict's [`crate::v05::history::Verdict::held_until`].
+    held_until: Option<i64>,
+    /// The verdict decided a conflict (§8.6).
+    conflicts: bool,
 }
 
 impl<'a> VerifiedObjects<'a> {
@@ -1337,6 +1341,8 @@ impl<'a> VerifiedObjects<'a> {
     pub fn new(objects: &'a Objects, now_ms: i64) -> Self {
         let verdict = verify_history(objects, &Persisted::default(), now_ms);
         let fork = matches!(verdict.stop, Some(Stop::Fork { .. }));
+        let held_until = verdict.held_until;
+        let conflicts = !verdict.conflicts.is_empty();
         let head = stop_to_error(&verdict.stop).and_then(|()| {
             verdict
                 .state
@@ -1347,6 +1353,8 @@ impl<'a> VerifiedObjects<'a> {
             now_ms,
             fork,
             head,
+            held_until,
+            conflicts,
         }
     }
     /// The objects it verified.
@@ -1383,6 +1391,109 @@ impl<'a> VerifiedObjects<'a> {
     pub fn prepare_final(&self, activation_seq: u64) -> Result<PendingBatch> {
         crate::v05::history::work::prepare();
         final_over(self, activation_seq)
+    }
+
+    /// The earliest clock reading after [`VerifiedObjects::now_ms`] at which these same objects
+    /// could give a recording entry (§8.6, §8.7) or a verdict that they do not give now: what a
+    /// home's scheduler may wait for when nothing it holds changes (§13.1). Every rule below is
+    /// one by which the clock alone changes an answer of [`VerifiedObjects::prepare_activate`],
+    /// [`VerifiedObjects::prepare_vetoed`], [`VerifiedObjects::prepare_final`] or of the verifier:
+    ///
+    /// - the verifier judges a candidate held at a decided seq again at `held_until` (§8.1);
+    /// - an `activate` is held until its transition's due time (§8.7 "Times"): the due time of
+    ///   each held transition not recorded on the branch whose held receipts decide its timing.
+    ///   A transition whose timing they do not decide waits for an object, not for the clock;
+    ///   one whose `activate` would be issued more than 7 days after its due time (the last
+    ///   entry's `issued` is later than that) can never be activated;
+    /// - a head more than 60 s ahead of the clock is not used for a `final` (§13.3) until it is
+    ///   no longer: each such head's `issued` less 60 s, while an activation is provisional.
+    ///
+    /// `None` when no bound is given here, so the caller asks again at its next clock reading:
+    /// whenever the verifier stopped (a held or failed entry, a fork) or decided a conflict; a
+    /// predecessor's objects, a succession or a `successor` (whose windows are not bounded
+    /// here); a held veto of a transition not recorded, or of a provisional activation (a
+    /// `vetoed` is not timed here); and a transition already due, within its 7 days, and not
+    /// recorded and still activatable; and a bound not after the clock. `Some(i64::MAX)` when
+    /// nothing held waits on the clock.
+    pub fn next_due_ms(&self) -> Option<i64> {
+        const DAY: i64 = 86_400 * SEC;
+        let now_ms = self.now_ms;
+        let state = self.head.as_ref().ok()?;
+        if self.fork
+            || self.conflicts
+            || !self.objects.predecessor.is_empty()
+            || crate::v05::history::succession_status(state).is_some()
+            || state.names_successor()
+        {
+            return None;
+        }
+        let mut due = self.held_until.unwrap_or(i64::MAX);
+        let mut vetoed: BTreeSet<String> = BTreeSet::new();
+        let mut transitions: Vec<(String, &Vec<u8>)> = Vec::new();
+        for bytes in &self.objects.pending {
+            if let Ok(env) = AuthEnvelope::parse(bytes, bounds::VETO_BODY, bounds::VETO_ENVELOPE, true) {
+                if env.value.get("protocol").and_then(Value::as_str) == Some("colophon/veto/5") {
+                    if let Some(t) = env.value.get("transition").and_then(Value::as_str) {
+                        vetoed.insert(t.to_string());
+                    }
+                    continue;
+                }
+            }
+            if let Ok(env) = AuthEnvelope::parse(
+                bytes,
+                bounds::TRANSITION_ENVELOPE,
+                bounds::TRANSITION_ENVELOPE,
+                true,
+            ) {
+                if env.value.get("protocol").and_then(Value::as_str) == Some("colophon/transition/5")
+                    && !state.is_recorded(&env.digest)
+                {
+                    transitions.push((env.digest, bytes));
+                }
+            }
+        }
+        for (digest, bytes) in &transitions {
+            if vetoed.contains(digest) {
+                return None;
+            }
+            let Ok(receipts) = choose_transition_receipts(state, &self.objects.pending, bytes) else {
+                continue;
+            };
+            let Ok(timing) = transition_timing(state, bytes, &receipts) else {
+                continue;
+            };
+            if timing.due_ms > now_ms {
+                due = due.min(timing.due_ms);
+            } else if state.last_issued_ms() <= timing.due_ms.saturating_add(7 * DAY) {
+                // Due and not recorded, and still activatable: the verifier bounds the
+                // `activate`'s determined `issued`, max(last issued, due), to 7 days after the
+                // due time, whatever the clock reads.
+                return None;
+            }
+        }
+        let provisional: Vec<_> = state.activations().iter().filter(|a| !a.final_).collect();
+        if provisional.iter().any(|a| vetoed.contains(&a.transition)) {
+            return None;
+        }
+        if !provisional.is_empty() {
+            for bytes in &self.objects.heads {
+                let Ok(env) = RawEnvelope::parse(bytes, bounds::HEAD_BODY, true) else {
+                    continue;
+                };
+                let Some(issued) = env.value.get("issued").and_then(Value::as_str).and_then(parse_date) else {
+                    continue;
+                };
+                if issued > now_ms.saturating_add(60 * SEC) {
+                    due = due.min(issued.saturating_sub(60 * SEC));
+                }
+            }
+        }
+        // A time not after the clock bounds nothing (the verifier's `held_until` for a held
+        // `activate` can be its `issued` less 60 s, before its due time): ask again next pass.
+        if due <= now_ms {
+            return None;
+        }
+        Some(due)
     }
 }
 
