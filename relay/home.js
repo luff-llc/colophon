@@ -17,7 +17,8 @@ import path from 'node:path';
 import { appendLines, readLogRows, replayRow, writeAll } from './files.js';
 import { HomeStream } from './stream.js';
 
-const b64 = (bytes) => Buffer.from(bytes).toString('base64');
+// A Buffer is encoded as it is; anything else is viewed as bytes first (no copy of a Buffer).
+const b64 = (bytes) => (Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes)).toString('base64');
 const unb64 = (text) => Buffer.from(text, 'base64');
 const sha = (bytes) => createHash('sha256').update(bytes).digest('hex');
 
@@ -82,18 +83,21 @@ export class HomeModule {
   call(request) {
     this.instance ??= new WebAssembly.Instance(this.module, {});
     const { colophon_alloc: alloc, colophon_free: free, colophon_home: home, memory } = this.instance.exports;
-    const input = Buffer.from(JSON.stringify(request));
+    const text = JSON.stringify(request);
+    const size = Buffer.byteLength(text);
     try {
-      const inPtr = alloc(input.length);
-      new Uint8Array(memory.buffer, inPtr, input.length).set(input);
+      const inPtr = alloc(size);
+      // Encoded straight into the module's memory (`alloc` may grow it: the view is taken after).
+      Buffer.from(memory.buffer, inPtr, size).write(text, 'utf8');
       let outPtr;
-      try { outPtr = home(inPtr, input.length); } finally { free(inPtr, input.length); }
+      try { outPtr = home(inPtr, size); } finally { free(inPtr, size); }
       const length = new DataView(memory.buffer).getUint32(outPtr, true);
-      const text = Buffer.from(new Uint8Array(memory.buffer, outPtr + 4, length)).toString('utf8');
+      // Decoded straight from the module's memory (a view, not a copy), before it is freed.
+      const answer = Buffer.from(memory.buffer, outPtr + 4, length).toString('utf8');
       free(outPtr, length + 4);
       // A page of memory that grew for one big request is not kept for ever.
       if (memory.buffer.byteLength > this.resetBytes) { this.instance = null; this.resets += 1; }
-      const out = JSON.parse(text);
+      const out = JSON.parse(answer);
       if (!out.ok) throw new ModuleError(out.error);
       return out;
     } catch (error) {
