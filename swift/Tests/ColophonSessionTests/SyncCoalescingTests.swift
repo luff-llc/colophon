@@ -139,6 +139,42 @@ import ColophonSavedKit
         #expect(try await SavedStore(session: session).load(ItemsQuery(limit: 10)).get().total == 1)
     }
 
+    /// A record the engine could not read when it was listed is not covered by the folder mark: the next hint, with the
+    /// folder unchanged, reconciles and reads it.
+    @Test(.timeLimit(.minutes(1)))
+    func aReadTheEngineDroppedIsReadByTheNextHint() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let medium = CountingMedium(hints: false)
+        let member = SoftwareKeys(), owner = SoftwareKeys()
+        func open(_ name: String) -> ColophonSession {
+            ColophonSession(configuration: .init(memberLabel: "Device", namespaces: ["reading.saved"], location: .medium(medium),
+                privateContainer: root.appendingPathComponent(name), keys: member, ownerController: owner, createWithoutHome: true,
+                deviceSecrets: MemoryDeviceSecrets()))
+        }
+        let session = open("a")
+        defer { session.stopSync() }
+        await session.create()
+        try #require(session.phase == .ready)
+        let other = open("b")
+        defer { other.stopSync() }
+        await other.restore()
+        try #require(other.phase == .ready)
+        try await other.perform(try .saveLink(id: "elsewhere", url: URL(string: "https://example.org/e")!, title: "E"), observed: other.observedRevision)
+
+        let worker = session.worker
+        medium.inner.setFault(.throwOnRead("not downloaded yet"))
+        let first = try? await worker.refreshIfStale()
+        medium.inner.setFault(.none)
+        let reconciles = await worker.markedReconciles
+        let second = try await worker.refreshIfStale()
+        #expect(second != nil, "the folder is unchanged, but the engine dropped a read: the hint reconciles (first: \(first != nil))")
+        #expect(await worker.markedReconciles == reconciles + 1)
+        if let second { #expect(second.phase == .ready) }
+        await session.refresh()
+        #expect(try await SavedStore(session: session).load(ItemsQuery(limit: 10)).get().total == 1)
+    }
+
     /// Holds the first request of either home until released, and names the home it held.
     actor FirstRequest {
         nonisolated let started: AsyncStream<String>

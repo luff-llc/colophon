@@ -120,7 +120,9 @@ import Observation
         await restore()
         guard canPublish(lease, lockEpoch), !Task.isCancelled else { return }
         let failureRevision = commandFailureRevision
-        let marked = phase == .ready
+        // A hint's refresh that starts while another is in flight never re-marks: that would make the one in flight
+        // stale and drop a snapshot its caller awaits. Both finish; the later one (behind it in the worker gate) applies.
+        let marked = phase == .ready && !(coalescing && refreshWaiters.count > 1)
         if marked { phase = .refreshing; refreshMark &+= 1 }
         // This refresh's generation. A refresh that a newer one has since re-marked is stale: its outcome (snapshot or
         // error) is dropped and the phase follows the newer one.

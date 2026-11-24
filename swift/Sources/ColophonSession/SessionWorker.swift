@@ -1501,10 +1501,11 @@ actor SessionWorker {
     /// error) the outcome is unknown, and the error is `StorageError.unavailable` saying the write may have been recorded.
     private func persistWrite(_ stores: [Store]) async throws {
         guard !stores.isEmpty else { return }
-        do { try storage().write(stores.map { MediumWrite(path: $0.path, bytes: $0.bytes) }) }
+        do { try storage().write(stores.map { MediumWrite(path: $0.path, bytes: $0.bytes) }); noteOwnWrites(stores) }
         catch {
             let outcome = readBack(stores)
-            if outcome == .durable { return }
+            // Durable: the folder holds exactly these bytes, which the engine wrote.
+            if outcome == .durable { noteOwnWrites(stores); return }
             await engine?.discard(); engine = nil
             if outcome == .absent { throw error }
             throw StorageError.unavailable("The write may have been recorded; the next refresh settles it (\(error.localizedDescription))")
@@ -1630,12 +1631,15 @@ actor SessionWorker {
 
     // MARK: Coalesced refreshes
 
-    /// What an engine last read from the folder: the listing it was refreshed with, and that engine.
+    /// What an engine last read from the folder: the listing it was refreshed with, that engine, and the counters of
+    /// paths it may have dropped (`ListingBaseline.Drops`) when it held every path of that listing. A mark exists only
+    /// for a listing the engine took in full; either counter moving since, or an unread path, retires it.
     private struct FolderMark {
         weak var engine: ColophonEngine?
         var versions: [String: String?]
-        init(engine: ColophonEngine, entries: [MediumEntry]) {
-            self.engine = engine
+        let drops: ListingBaseline.Drops
+        init(engine: ColophonEngine, entries: [MediumEntry], drops: ListingBaseline.Drops) {
+            self.engine = engine; self.drops = drops
             versions = Dictionary(entries.map { ($0.path, $0.version) }, uniquingKeysWith: { first, _ in first })
         }
     }
@@ -1672,8 +1676,11 @@ actor SessionWorker {
     /// Whether `entries` hold nothing `engine` has not already read or written itself: every path is as the mark listed
     /// it, or is one this worker wrote since (a replaceable one still holding the bytes it wrote). A deleted path, a new
     /// path from elsewhere, a version this worker did not write or a replaceable path with no version is a change.
-    private func engineHasRead(_ entries: [MediumEntry], _ engine: ColophonEngine) -> Bool {
-        guard let mark = folderMark, mark.engine === engine else { return false }
+    /// The engine must also still hold every path of the mark: no read it could not confirm and no live slot refused as
+    /// stale since, and no path it retries (`unreadPaths`). A path it may have dropped is read again only by a refresh.
+    private func engineHasRead(_ entries: [MediumEntry], _ engine: ColophonEngine) async -> Bool {
+        guard let mark = folderMark, mark.engine === engine, await drops(engine) == mark.drops,
+              (try? await engine.run({ try $0.stats() }).unreadPaths) == 0 else { return false }
         var seen = 0
         for entry in entries {
             if let listed = mark.versions[entry.path] {
@@ -1690,12 +1697,14 @@ actor SessionWorker {
         return seen == mark.versions.count
     }
 
-    /// The engine read `entries` (an exchange's own refresh): they become the mark. A change the mark did not hold is
-    /// unpublished until the exchange's caller refreshes.
-    private func markRead(_ entries: [MediumEntry], by engine: ColophonEngine) {
-        if !engineHasRead(entries, engine) { unpublished = true }
-        folderMark = FolderMark(engine: engine, entries: entries)
+    /// The engine was refreshed with `entries` (an exchange's own refresh), the drop counters `before` it: they become
+    /// the mark when the refresh dropped nothing. A change the old mark did not hold is unpublished until the exchange's
+    /// caller refreshes.
+    private func markRead(_ entries: [MediumEntry], by engine: ColophonEngine, covered: Bool, before: ListingBaseline.Drops?) async {
+        if !covered { unpublished = true }
         ownWrites = [:]
+        if let before, await drops(engine) == before { folderMark = FolderMark(engine: engine, entries: entries, drops: before) }
+        else { folderMark = nil }
     }
 
     /// One listing, then a full reconcile only when the folder holds something the engine has not read, or the engine
@@ -1707,7 +1716,7 @@ actor SessionWorker {
             do {
                 try loadJournal()
                 let entries = try storage().listing()
-                if let engine, !locked, !journal.left, phaseIsReady, exchanges > 0 || !unpublished, engineHasRead(entries, engine) {
+                if let engine, !locked, !journal.left, phaseIsReady, exchanges > 0 || !unpublished, await engineHasRead(entries, engine) {
                     if unpublished { deferredHint = true }
                     coalescedRefreshes += 1
                     return nil
@@ -1726,7 +1735,10 @@ actor SessionWorker {
         folderMark = nil; ownWrites = [:]
         let snapshot = try await reconcile(listing: entries)
         markedReconciles += 1
-        if let engine { folderMark = FolderMark(engine: engine, entries: entries) }
+        // Marked only when the reconcile kept a listing baseline for exactly this listing: the engine held every path.
+        if let engine, let baseline = listingBaseline, baseline.engine === engine, baseline.entries == entries {
+            folderMark = FolderMark(engine: engine, entries: entries, drops: baseline.drops)
+        }
         unpublished = false; deferredHint = false
         return snapshot
     }
@@ -1791,9 +1803,11 @@ actor SessionWorker {
                 guard self.engine === engine else { throw SessionError.destinationChanged }
                 let entries = try storage().listing()
                 try await advance(engine, to: nowMs)
-                if !laterHome || !engineHasRead(entries, engine) {
+                let covered = await engineHasRead(entries, engine)
+                if !laterHome || !covered {
+                    let before = await drops(engine)
                     try await refresh(engine, listing: listed(entries))
-                    markRead(entries, by: engine)
+                    await markRead(entries, by: engine, covered: covered, before: before)
                     if laterHome { laterHomeRefreshes += 1 }
                 }
                 try await unlockIfPossible()
