@@ -1824,7 +1824,7 @@ fn record_due(req: &Value) -> R<Value> {
     if recorded == 0 && note.is_null() {
         let verified = VerifiedObjects::new(&objects, now_ms);
         note = waiting_over(&h, &objects, &verified, now_ms);
-        if result == "ok" && sign.is_empty() && notify.is_empty() {
+        if result == "ok" && sign.is_empty() {
             wake = verified.next_due_ms().map_or(Value::Null, |t| json!(t.min(NEVER_MS)));
         }
     }
@@ -1833,7 +1833,7 @@ fn record_due(req: &Value) -> R<Value> {
     // to store. It is returned as given rather than encoded again.
     if recorded == 0 && result == "ok" {
         return Ok(json!({
-            "state": req["state"], "store": [], "sign": sign, "notify": notify,
+            "state": req["state"], "store": [], "sign": sign,
             "result": result, "note": note, "settled": settled, "wakeAt": wake,
         }));
     }
