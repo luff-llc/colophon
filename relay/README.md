@@ -364,6 +364,8 @@ pass `Authorization`, `If-None-Match`, `If-Match` and `Content-Length`, do not b
 
 A container image configured by environment variables, with its key, token and data on one
 volume, is described in [`docs/self-hosting/docker.md`](../docs/self-hosting/docker.md).
+Running a home on a Mac without Docker, as a background service under a user of its own, is
+described in [`docs/self-hosting/macos.md`](../docs/self-hosting/macos.md).
 
 ## What a home serves
 
