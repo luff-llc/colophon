@@ -100,9 +100,39 @@ and never prints a token.
   was printed to its log: treat it as known. Make a new one (`bun relay/server.js token`), set its
   hash, restart, and give the new token to your tools. The old one stops working at that restart.
 - **Keep the private listener off the network.** Prefer a Unix socket on a volume the
-  provisioner's container also mounts (`COLOPHON_PRIVATE_LISTEN=unix:/run/colophon/private.sock`;
-  the socket is mode 0600, so run the provisioner as the same user, 65532), or loopback, or an
-  address on a container-internal network only the provisioner joins. Never publish its port.
+  provisioner's container also mounts (below), or loopback, or an address on a container-internal
+  network only the provisioner joins. Never publish its port.
+
+**The shared socket.** The image runs as UID and GID 65532 (`USER 65532:65532`, the distroless
+`nonroot` user) and has `/run/colophon`, owned by 65532:65532 with mode 0700. Mount one named
+volume at `/run/colophon` in both the home and the provisioner, set
+`COLOPHON_PRIVATE_LISTEN=unix:/run/colophon/private.sock` on the home, and run the provisioner as
+`65532:65532` too: the home makes the socket mode 0600, so only that user can connect. A new
+named volume starts with the image directory's owner and mode; a volume made otherwise (a bind
+mount, or a volume first used by another image) must be given to 65532:65532 first. On a platform
+that starts the container as root (see "Railway and similar platforms"), the entry point gives
+`/data` to 65532 and becomes that user before the socket is made; `/run/colophon` must already be
+65532's.
+
+```yaml
+services:
+  home:
+    image: colophon-home
+    user: "65532:65532"
+    environment:
+      COLOPHON_PUBLIC_URL: https://home.example.org
+      COLOPHON_HOSTED: "1"
+      COLOPHON_PRIVATE_LISTEN: unix:/run/colophon/private.sock
+      COLOPHON_PROVISION_TOKEN_SHA256: ${COLOPHON_PROVISION_TOKEN_SHA256}
+    volumes: [colophon-home:/data, colophon-run:/run/colophon]
+  provisioner:
+    image: your-provisioner   # it calls the home at unix:/run/colophon/private.sock
+    user: "65532:65532"
+    volumes: [colophon-run:/run/colophon]
+volumes:
+  colophon-home:
+  colophon-run:
+```
 
 For a home of your own:
 
