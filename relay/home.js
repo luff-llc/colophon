@@ -1086,7 +1086,7 @@ export class HomeSlot {
     // otherwise wait on one another), and each peer has its own pass: the tick starts them and
     // does not wait, so one slow or silent peer delays neither this home's settling nor its
     // forwarding to any other peer. (Shutdown waits for the start: quiesce.)
-    this.forwarding = this.forwardAll();
+    this.forwarding = this.forwardAll().catch((error) => this.note('forward', `forwarding could not start: ${error.message}`));
   }
 
   /** Start a forwarding pass to every peer that has none running (§13.1). */

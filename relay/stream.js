@@ -251,6 +251,7 @@ export class HomeStream {
   }
 
   drop(conn) {
+    conn.live = false; // a message already queued for it is not taken
     clearTimeout(conn.timer);
     this.conns.delete(conn);
     if (!this.conns.size) this.stopTimers();
@@ -336,7 +337,7 @@ export class HomeStream {
 
   receive(conn, data, isBinary) {
     conn.lastSeen = Date.now();
-    if (!conn.live) return;
+    if (!conn.live || !this.conns.has(conn)) return;
     const size = data.length ?? data.byteLength ?? 0;
     // Over the rate: dropped and counted, never queued. The sender hears of it at most once a
     // second, with its running total.
@@ -597,8 +598,12 @@ export function nestingOver(bytes, max) {
 export function frameText(frame) {
   const { type, ...rest } = frame;
   const keys = Object.keys(rest);
-  if (keys.some((k) => k === 'n' || k === 'type' || /^(0|[1-9][0-9]*)$/.test(k))) {
-    return (n) => JSON.stringify({ type, n, ...rest });
+  const whole = (n) => JSON.stringify({ type, n, ...rest });
+  // The splice holds for the frames the stream makes: a string type, plain keys, no toJSON of
+  // the frame's own, and a finite receiver number. Anything else is serialised whole.
+  if (typeof type !== 'string' || typeof frame.toJSON === 'function'
+      || keys.some((k) => k === 'n' || k === 'type' || /^(0|[1-9][0-9]*)$/.test(k))) {
+    return whole;
   }
   let head; let tail;
   return (n) => {
@@ -607,7 +612,7 @@ export function frameText(frame) {
       const body = JSON.stringify(rest);
       tail = body === '{}' ? '}' : `,${body.slice(1)}`;
     }
-    return `${head}${n}${tail}`;
+    return Number.isFinite(n) ? `${head}${n}${tail}` : whole(n);
   };
 }
 

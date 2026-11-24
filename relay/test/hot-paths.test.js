@@ -33,6 +33,27 @@ describe('a stream frame', () => {
     }
   });
 
+  test('is still exactly the whole serialisation outside the frames the stream makes', () => {
+    const odd = [{}, { type: undefined, x: 1 }, { type: 7 }, { type: 'x', toJSON() { return { y: 1 }; } }];
+    for (const frame of odd) {
+      for (const n of [1, Number.NaN, Infinity]) {
+        const { type, ...rest } = frame;
+        assert.equal(frameText(frame)(n), JSON.stringify({ type, n, ...rest }), `${JSON.stringify(frame)} at ${n}`);
+      }
+    }
+  });
+
+  test('a dropped connection is not live and takes no more messages', () => {
+    const s = Object.create(HomeStream.prototype);
+    s.conns = new Set();
+    s.stopTimers = () => {};
+    const conn = { live: true, timer: null, frames: { take: () => assert.fail('a message was taken') } };
+    s.conns.add(conn);
+    s.drop(conn);
+    assert.equal(conn.live, false);
+    s.receive(conn, Buffer.from('{"type":"ping"}'), false);
+  });
+
   test('is serialised once for every receiver of a broadcast', () => {
     const s = Object.create(HomeStream.prototype);
     s.o = { bufferedBytes: 1 << 20 };

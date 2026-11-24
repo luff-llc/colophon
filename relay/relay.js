@@ -1231,7 +1231,7 @@ async function enableStreams(server, relay) {
  * `GET /metrics`). Returns the digest's bytes, or null when metrics are off. */
 function metricsConfig(metrics) {
   if (metrics === undefined || metrics === null) return null;
-  if (typeof metrics !== 'object' || Array.isArray(metrics) || !HEX64.test(metrics.tokenSha256 ?? '')) {
+  if (typeof metrics !== 'object' || Array.isArray(metrics) || typeof metrics.tokenSha256 !== 'string' || !HEX64.test(metrics.tokenSha256)) {
     throw new Error('metrics.tokenSha256 must be the 64-hex SHA-256 of the token that may read GET /metrics');
   }
   return Buffer.from(metrics.tokenSha256, 'hex');

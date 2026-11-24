@@ -73,6 +73,20 @@ describe('a home at shutdown (host side)', () => {
     assert.equal(started, 1);
   });
 
+  test('a forwarding start that fails is noted, and never an unhandled rejection', async () => {
+    const h = peered();
+    const notes = [];
+    h.note = (topic, message) => { if (message) notes.push([topic, message]); };
+    h.lock = async (f) => f();
+    h.settle = async () => 'fresh';
+    h.keepLease = async () => {};
+    h.resolve = () => ({ 'https://peer.example': 5 }); // not a URL: the start throws
+    await h.tickOnce();
+    await h.forwarding; // resolves: the failure is the note's
+    assert.ok(notes.some(([topic]) => topic === 'forward'), JSON.stringify(notes));
+    await h.quiesce();
+  });
+
   test('quiesce waits for a forward.json write and the work queued on the locks', async () => {
     const h = peered();
     let release; let order = [];

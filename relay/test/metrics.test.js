@@ -28,6 +28,7 @@ describe('metrics', () => {
     const dir = await mkdtemp(path.join(tmpdir(), 'colophon-metrics-'));
     try {
       await assert.rejects(startRelay({ port: 0, dataDir: dir, libraries: { a: { open: true } }, metrics: { tokenSha256: 'nope' } }), /metrics.tokenSha256/);
+      await assert.rejects(startRelay({ port: 0, dataDir: dir, libraries: { a: { open: true } }, metrics: { tokenSha256: [sha(TOKEN)] } }), /metrics.tokenSha256/);
     } finally { await rm(dir, { recursive: true, force: true }); }
   });
 
