@@ -43,6 +43,10 @@ pub const DAY_MS: i64 = 86_400_000;
 pub const CLOSE_PROTOCOL: u16 = 1002;
 /// Close code this client sends when the connection went silent past `idleMs`.
 pub const CLOSE_IDLE: u16 = 1001;
+/// How long a ticket call handed out by [`StreamStep::NeedTicketCall`] may stay unanswered (no
+/// [`HomeStream::ticket_request`] or [`HomeStream::ticket_call_failed`]) before it counts as a
+/// failed call and the stream backs off.
+pub const SIGN_TIMEOUT_MS: i64 = 60_000;
 
 /// The host's choices for one stream. `Default` gives the documented values.
 #[derive(Clone, Debug)]
@@ -275,6 +279,9 @@ enum Conn {
     Backoff(i64),
     /// A ticket call is needed.
     NeedTicket,
+    /// A ticket call was handed out at this time and is being built or signed: no second one is
+    /// handed out until it is answered or [`SIGN_TIMEOUT_MS`] passes.
+    Signing(i64),
     /// The ticket request is out.
     Minting,
     /// A ticket, minted at this time.
@@ -451,6 +458,7 @@ impl HomeStream {
                 }
                 // A ticket's age can no longer be told: it is not presented.
                 Conn::Ticket(_, at) => *at = i64::MIN,
+                Conn::Signing(at) => clamp(at),
                 _ => {}
             }
         }
@@ -507,7 +515,11 @@ impl HomeStream {
     pub fn status(&self) -> StreamStatus {
         match &self.conn {
             Conn::Backoff(t) => StreamStatus::Backoff(*t),
-            Conn::NeedTicket | Conn::Minting | Conn::Ticket(..) | Conn::Opening => {
+            Conn::NeedTicket
+            | Conn::Signing(_)
+            | Conn::Minting
+            | Conn::Ticket(..)
+            | Conn::Opening => {
                 StreamStatus::Connecting
             }
             Conn::Open { hello: true } => StreamStatus::Live,
@@ -522,6 +534,43 @@ impl HomeStream {
     /// Whether the host's ordinary poll timer should run: always, unless the stream is live.
     pub fn polling(&self) -> bool {
         self.status() != StreamStatus::Live
+    }
+
+    /// When the host should call [`HomeStream::next`] again at the latest (monotonic ms), even
+    /// if nothing happens meanwhile: the earliest of a coalesced wake, a backoff or budget
+    /// window ending, a ticket call timing out, and, on an open socket, the idle check, the ping,
+    /// the safety poll and the stability mark. `Some(now)`-or-earlier means at once (a ticket
+    /// call or a connect is due); `None` means only an event (an answer, a frame, a close) or a
+    /// change of history moves the stream.
+    pub fn wake_at(&self) -> Option<i64> {
+        let state = match &self.conn {
+            Conn::Backoff(t) | Conn::Throttled(t) | Conn::Suspended(t) => Some(*t),
+            Conn::NeedTicket => Some(i64::MIN),
+            Conn::Signing(at) => Some(at.saturating_add(SIGN_TIMEOUT_MS)),
+            Conn::Ticket(..) => Some(i64::MIN),
+            Conn::Closing(_, false) => Some(i64::MIN),
+            Conn::Open { hello } => {
+                let idle = self.last_rx.saturating_add(self.idle_ms).saturating_add(1);
+                if *hello {
+                    let ping = self
+                        .last_ping
+                        .max(self.last_rx)
+                        .saturating_add(self.ping_ms);
+                    let safety = self.last_wake.saturating_add(self.config.safety_poll_ms);
+                    let stable = self
+                        .live_since
+                        .map_or(i64::MAX, |t| t.saturating_add(self.config.stable_ms));
+                    Some(idle.min(ping).min(safety).min(stable))
+                } else {
+                    Some(idle)
+                }
+            }
+            Conn::Minting | Conn::Opening | Conn::Closing(_, true) | Conn::Blocked(..) => None,
+        };
+        match (state, self.wake_at) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
     }
 
     /// The next thing to do at `now` (milliseconds on the host's clock).
@@ -560,6 +609,14 @@ impl HomeStream {
                 until: soonest(Some(t)),
             },
             Conn::NeedTicket => self.ticket_step(now, wake),
+            Conn::Signing(at) if now.saturating_sub(at) >= SIGN_TIMEOUT_MS => {
+                // The call was never answered: a signature may have been made, so it counts
+                // like a mint, and the stream backs off.
+                self.record_mint(now);
+                let _ = self.down(now, None);
+                self.next(now)
+            }
+            Conn::Signing(_) => StreamStep::Waiting,
             Conn::Closing(why, false) => {
                 self.conn = Conn::Closing(why, true);
                 StreamStep::Close {
@@ -627,7 +684,7 @@ impl HomeStream {
     pub fn ticket_request(&mut self, call: &[u8], now: i64) -> Result<Request> {
         let now = self.observe(now);
         require(
-            self.conn == Conn::NeedTicket,
+            matches!(self.conn, Conn::NeedTicket | Conn::Signing(_)),
             "the stream is not waiting for a ticket call",
         )?;
         require(!call.is_empty() && call.len() <= 16_384, "a call is small")?;
@@ -653,7 +710,7 @@ impl HomeStream {
     /// The stream backs off and asks again.
     pub fn ticket_call_failed(&mut self, now: i64) -> Vec<StreamEvent> {
         let now = self.observe(now);
-        if self.conn != Conn::NeedTicket {
+        if !matches!(self.conn, Conn::NeedTicket | Conn::Signing(_)) {
             return Vec::new();
         }
         // A signature may have been asked for: it counts like a mint.
@@ -1068,7 +1125,8 @@ impl HomeStream {
                 until: Some(wake.map_or(until, |w| w.min(until))),
             };
         }
-        self.conn = Conn::NeedTicket;
+        // One ticket call at a time: until it is answered `next` waits.
+        self.conn = Conn::Signing(now);
         StreamStep::NeedTicketCall
     }
 

@@ -1314,3 +1314,44 @@ fn a_session_frame_is_carried_byte_for_byte() {
     let big = format!("{{\"a\":\"{}\"}}", "A".repeat(16_384));
     assert!(s.session_frame(&big, None).is_err());
 }
+
+#[test]
+fn one_ticket_call_at_a_time_with_a_timeout_and_a_wake_while_signing() {
+    use colophon_core::v05::engine::stream::SIGN_TIMEOUT_MS;
+    // Handed out once: further calls wait for the answer, however many.
+    let mut s = HomeStream::new("h", BASE, StreamConfig::default(), None);
+    assert_eq!(s.next(0), StreamStep::NeedTicketCall);
+    for t in 1..1_000 {
+        assert_eq!(s.next(t), StreamStep::Waiting, "no second call at {t}");
+    }
+    assert_eq!(s.wake_at(), Some(SIGN_TIMEOUT_MS), "ask again when the call times out");
+    assert_eq!(s.unstable_mints(), 0, "nothing counted while the call is out");
+    s.ticket_request(b"c", 1_000).unwrap();
+    assert_eq!(s.unstable_mints(), 1);
+
+    // Unanswered past the timeout: a failed call, counted, backing off.
+    let mut s = HomeStream::new("h", BASE, StreamConfig::default(), None);
+    assert_eq!(s.next(0), StreamStep::NeedTicketCall);
+    let step = s.next(SIGN_TIMEOUT_MS);
+    assert!(matches!(step, StreamStep::Sleep { until: Some(_) }), "{step:?}");
+    assert!(matches!(s.status(), StreamStatus::Backoff(_)));
+    assert_eq!(s.unstable_mints(), 1);
+    assert!(s.ticket_request(b"c", SIGN_TIMEOUT_MS + 1).is_err(), "a late answer is refused");
+
+    // A wake that falls due while a call is being signed is reported on time.
+    let cfg = StreamConfig {
+        backoff_base_ms: 1,
+        backoff_cap_ms: 1,
+        ..StreamConfig::default()
+    };
+    let mut s = HomeStream::new("h", BASE, cfg, None);
+    connect(&mut s, 0, 1, "c.1");
+    let _ = settle(&mut s, 300); // the first connection's catch-up wake
+    s.on_frame(&change(2, "c.2"), 1_000);
+    s.on_closed(Some(1011), 1_001);
+    assert_eq!(s.next(1_010), StreamStep::NeedTicketCall);
+    assert_eq!(s.wake_at(), Some(1_250), "the coalesced wake comes first");
+    assert_eq!(s.next(1_100), StreamStep::Waiting);
+    assert_eq!(s.next(1_250), StreamStep::Wake, "reported while the call is signed");
+    assert_eq!(s.next(1_251), StreamStep::Waiting, "and still one call");
+}
