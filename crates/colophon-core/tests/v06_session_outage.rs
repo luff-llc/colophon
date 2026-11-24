@@ -121,3 +121,27 @@ fn an_outage_while_already_down_keeps_the_earlier_start() {
     assert_eq!(a, b);
     assert!(b.view().gated, "down since 50 s: lapsed");
 }
+
+#[test]
+fn an_outage_reported_while_down_starts_at_the_earlier_start() {
+    // The machine went down at 90 s; an outage reported as 30 s long at 100 s began at 70 s:
+    // one continuous outage from 70 s.
+    let mut m = member(true);
+    m.handle(Input::LinkDown, 90_000);
+    m.handle(
+        Input::Outage {
+            down_ms: 30_000,
+            ended: false,
+        },
+        NOW,
+    );
+    assert_eq!(m.link_down_since(), Some(70_000));
+    m.handle(
+        Input::Outage {
+            down_ms: 1_000,
+            ended: true,
+        },
+        NOW,
+    );
+    assert!(m.view().gated, "30 s from 70 s: lapsed");
+}

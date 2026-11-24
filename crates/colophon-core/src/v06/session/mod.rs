@@ -716,11 +716,15 @@ impl Session {
                 }
             }
             Input::Outage { down_ms, ended } => {
-                // What `LinkDown` at `now - down_ms` does (only when the link was up: an outage
-                // already under way keeps its own start), then `LinkUp` at `now`.
+                // What `LinkDown` at `now - down_ms` does, then `LinkUp` at `now`. An outage
+                // already under way is one continuous outage: it starts at the earlier of its
+                // own start and `now - down_ms`.
+                let start = now.saturating_sub(down_ms);
                 if self.link_up {
                     self.link_up = false;
-                    self.link_down_since = Some(now.saturating_sub(down_ms));
+                    self.link_down_since = Some(start);
+                } else {
+                    self.link_down_since = Some(self.link_down_since.map_or(start, |d| d.min(start)));
                 }
                 if ended {
                     self.on_link_up(now, &mut out);
