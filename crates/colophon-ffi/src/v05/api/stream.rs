@@ -72,6 +72,7 @@ fn step_out(s: cs::StreamStep) -> StreamStep {
         text: None,
         code: None,
         until: None,
+        wake_at: None,
     };
     match s {
         cs::StreamStep::Wake => {}
@@ -293,7 +294,12 @@ impl HomeStream {
 impl HomeStream {
     /// What to do at `now_ms` (monotonic milliseconds on the host's clock).
     pub fn next(&self, now_ms: i64) -> Result<StreamStep, AccountError> {
-        guard(|| Ok(step_out(self.s.lock()?.next(now_ms))))
+        guard(|| {
+            let mut s = self.s.lock()?;
+            let mut o = step_out(s.next(now_ms));
+            o.wake_at = s.wake_at().map(|w| w.max(now_ms));
+            Ok(o)
+        })
     }
     /// The ticket request for the call the host signed (`stream_begin_call`, then `finish`,
     /// whose `artifact` this is): `POST {base}/stream/ticket` with no body. Refused unless a
@@ -436,11 +442,7 @@ impl HomeStream {
     /// endpoint produced it (a `Send` effect's bytes, at most 16,384), to send on the live
     /// socket. The frame is carried verbatim: the message is `{"type":"session",["id":…,]"frame":`
     /// followed by those bytes and `}`.
-    pub fn session_frame(
-        &self,
-        frame: String,
-        id: Option<String>,
-    ) -> Result<String, AccountError> {
+    pub fn session_frame(&self, frame: String, id: Option<String>) -> Result<String, AccountError> {
         guard(|| {
             bytes_ok(frame.as_bytes(), cs::MAX_SESSION_FRAME, "a session frame")?;
             Ok(self.s.lock()?.session_frame(&frame, id.as_deref())?)

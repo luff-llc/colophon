@@ -14,17 +14,23 @@ in 0.5.x or in a host.
   the no-theft-safety warning for a separate recovery unit and no home (`recoveryKeys`, which
   `create()` accepts with `createWithoutHome`) is not given by the sessions at all, so the app
   gives both.
-- The Kotlin session's refresh after a refused command can leave the phase at `refreshing`
-  until the next refresh; the Swift and JS sessions do not show this.
 - **A revoke keeps only what this device holds.** Keeping everything a revoked member wrote
   names that member's heads in each namespace the revoking device holds. An app syncs only its
   `libraryNamespaces`, so a revoke made from an app with a narrower library, on its own storage,
   drops what the member wrote in the namespaces it does not hold. Revoke from an app or device
   that holds every namespace the member wrote in when keeping matters; making the revoking engine
   fetch every namespace first is a 0.5.x change (no format changes).
-- A member whose grant names no namespaces (a service or identity-only member) may be reported
-  `ready` without its grant's expiry being checked: the sessions judge readiness by asking for
-  each library namespace, and skip the ones the member was never granted.
+- **Fixed on `main` for 0.6** (not in any 0.5.x release):
+  - a member whose grant names no namespaces (a service or identity-only member), or none of the
+    app's `libraryNamespaces`, could be reported `ready` without its expiry, revocation or
+    provisional standing being checked, because readiness was judged only by asking for each
+    library namespace. The Swift, Kotlin and JS sessions now judge the member first, as the core
+    does (spec §10.1): a missing, revoked, provisional or expired member is `denied` before any
+    namespace is considered (expiry is inclusive), and a denial reason the SDK does not know is
+    `denied`;
+  - the Kotlin session's refresh after a refused command could leave the phase at `refreshing`
+    until the next refresh. `RefreshPhaseTest` now holds that refresh and checks that it restores
+    `ready` on its own.
 - **Fixed in 0.5.0** (in its final commit, before any package was published):
   - a session whose `libraryNamespaces` was wider than its member's grant came out `denied`, right
     after `create()` or after an approval that granted fewer namespaces than requested (Swift,
@@ -64,8 +70,6 @@ in 0.5.x or in a host.
 - Libraries of the shipped Swift apps move to 0.5 by a verified succession (`SwiftMove` in
   `ColophonMigration`); there is no Kotlin or JS equivalent.
 - The Gradle build has no dependency verification metadata yet ([release packaging](release-packaging.md)).
-- The AAR built by `scripts/build-android.sh` keeps an old file name
-  (`colophon-android-0.3.0.aar`); the release package is named by version.
 
 ## Tests
 
@@ -83,7 +87,5 @@ in 0.5.x or in a host.
 - `scripts/test-js.sh` fails a run whose tests all passed when it finds a relay or browser
   process left behind; on 19 November 2026 two of four runs on a Mac were failed that way and
   the next was clean. The leftovers looked like the headless browser's helpers outliving the run.
-- Not yet covered by a test: a granted namespace whose epoch key is not held staying
-  `unavailable`, and a provisional member being `denied`.
 - Several homes per account are experimental; their open issues are in
   [multi-home-open-issues.md](multi-home-open-issues.md).

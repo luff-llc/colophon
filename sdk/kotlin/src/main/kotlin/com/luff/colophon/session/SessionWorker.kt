@@ -5,6 +5,7 @@ import com.luff.colophon.AccountException
 import com.luff.colophon.AccountIdentity
 import com.luff.colophon.AccountIdentityKind
 import com.luff.colophon.AccountMember
+import com.luff.colophon.AccountDenial
 import com.luff.colophon.AccountRequest
 import com.luff.colophon.AccountDenialReason
 import com.luff.colophon.AccountCreation
@@ -81,6 +82,31 @@ internal data class SessionSnapshot(
     val duties: HostDuties = HostDuties(),
 ) {
     val usable: Boolean get() = phase.usable
+}
+
+/**
+ * A member's readiness, judged as the core judges a member current (spec §10.1): a member that is missing, revoked,
+ * provisional or past its expiry (inclusive: denied only once `nowMs > expiresMs`) is `Denied` before any namespace is
+ * asked about, so a service or identity-only grant, or one with no namespace in [namespaces], cannot come out `Ready`.
+ * Then each library namespace: a `NOT_GRANTED` one its verified grant does not name is skipped (a wider library, or an
+ * approval that narrowed the request, is not a loss of access); a missing epoch key is `Unavailable`; any other
+ * reason, including one this SDK does not know, is `Denied`.
+ */
+internal suspend fun memberReadiness(member: AccountMember?, nowMs: Long, namespaces: List<String>,
+                                     access: suspend (String) -> AccountDenial?): Pair<SessionPhase, List<String>> {
+    if (member == null || member.revokedAt != null || member.provisional || member.expiresMs?.let { nowMs > it } == true)
+        return SessionPhase.Denied to emptyList()
+    val granted = member.grant?.namespaces ?: emptyList()
+    val readable = ArrayList<String>()
+    for (namespace in namespaces) {
+        val denial = access(namespace)
+        if (denial == null) { readable.add(namespace); continue }
+        if (denial.reason == AccountDenialReason.NOT_GRANTED && namespace !in granted) continue
+        val phase = if (denial.reason == AccountDenialReason.NOT_READABLE || denial.reason == AccountDenialReason.UNAVAILABLE)
+            SessionPhase.Unavailable(denial.detail) else SessionPhase.Denied
+        return phase to emptyList()
+    }
+    return SessionPhase.Ready to readable
 }
 
 /** A refusal that carries the fresh snapshot so the facade shows what the person must now see. */
@@ -331,23 +357,11 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
             }
             StandingKind.CONTROLLER -> phase = SessionPhase.Failed(SessionFailure.Other("this identity is a controller, not a member"))
             StandingKind.MEMBER -> {
-                if (standing.member?.revokedAt != null) phase = SessionPhase.Denied
-                else {
-                    // Denied only when this member lost access it was granted, never for a library namespace it was never
-                    // granted (`libraryNamespaces` wider than its grant, or an approval that narrowed its request):
-                    // `notGranted` on a namespace its verified grant does not name, while it is not provisional, is skipped.
-                    phase = SessionPhase.Ready
-                    val granted = standing.member?.grant?.namespaces ?: listOf()
-                    val provisional = standing.member?.provisional ?: false
-                    for (namespace in configuration.libraryNamespaces) {
-                        val denial = engine.run { it.access(namespace) }
-                        if (denial == null) { readable.add(namespace); continue }
-                        if (denial.reason == AccountDenialReason.NOT_GRANTED && !provisional && namespace !in granted) continue
-                        phase = if (denial.reason == AccountDenialReason.NOT_READABLE || denial.reason == AccountDenialReason.UNAVAILABLE)
-                            SessionPhase.Unavailable(denial.detail) else SessionPhase.Denied
-                        break
-                    }
+                val readiness = memberReadiness(standing.member, nowMs, configuration.libraryNamespaces) { namespace ->
+                    engine.run { it.access(namespace) }
                 }
+                phase = readiness.first
+                readable.addAll(readiness.second)
             }
         }
         val revisions = HashMap<String, ULong>()

@@ -2006,6 +2006,29 @@ public protocol AccountEngineProtocol: AnyObject, Sendable {
      */
     func versionPaths(listing: [String]) throws  -> [String]
     
+    /**
+     * The session view of the verified history at `at_ms` (wall clock) for an endpoint of
+     * `namespace`: every member current then, with its session number and `records` entries,
+     * stamped with this engine, the account, the namespace and the authority head.
+     */
+    func sessionAccount(namespace: String, atMs: Int64) throws  -> SessionAccountView
+    
+    /**
+     * Prepare the `colophon.home.stream` call that mints a ticket at `home`, signed by this
+     * session's own `key`. 32 bytes of entropy (the request ID). `finish` judges it by the home's
+     * own rule and returns the envelope as `artifact`, for `HomeStream.ticket_request`. Before
+     * the first pass with the home this is `Unavailable` (no fresh head): call
+     * `ticket_call_failed`.
+     */
+    func streamBeginCall(home: String, key: Data, entropy: Data) throws  -> AccountAction
+    
+    /**
+     * A stream client for `home`, at the home's first endpoint, resuming from `cursor`; the
+     * safety poll is lowered to the account's `recoveryDelay / 6` when that is shorter, and the
+     * client starts at the verified history's seq.
+     */
+    func streamClient(home: String, config: StreamConfig, cursor: String?) throws  -> HomeStream
+    
 }
 /**
  * The account engine over a host record source.
@@ -3740,6 +3763,58 @@ open func versionPaths(listing: [String])throws  -> [String]  {
 })
 }
     
+    /**
+     * The session view of the verified history at `at_ms` (wall clock) for an endpoint of
+     * `namespace`: every member current then, with its session number and `records` entries,
+     * stamped with this engine, the account, the namespace and the authority head.
+     */
+open func sessionAccount(namespace: String, atMs: Int64)throws  -> SessionAccountView  {
+    return try  FfiConverterTypeSessionAccountView_lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_accountengine_session_account(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(namespace),
+        FfiConverterInt64.lower(atMs),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Prepare the `colophon.home.stream` call that mints a ticket at `home`, signed by this
+     * session's own `key`. 32 bytes of entropy (the request ID). `finish` judges it by the home's
+     * own rule and returns the envelope as `artifact`, for `HomeStream.ticket_request`. Before
+     * the first pass with the home this is `Unavailable` (no fresh head): call
+     * `ticket_call_failed`.
+     */
+open func streamBeginCall(home: String, key: Data, entropy: Data)throws  -> AccountAction  {
+    return try  FfiConverterTypeAccountAction_lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_accountengine_stream_begin_call(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(home),
+        FfiConverterData.lower(key),
+        FfiConverterData.lower(entropy),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * A stream client for `home`, at the home's first endpoint, resuming from `cursor`; the
+     * safety poll is lowered to the account's `recoveryDelay / 6` when that is shorter, and the
+     * client starts at the verified history's seq.
+     */
+open func streamClient(home: String, config: StreamConfig, cursor: String?)throws  -> HomeStream  {
+    return try  FfiConverterTypeHomeStream_lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_accountengine_stream_client(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(home),
+        FfiConverterTypeStreamConfig_lower(config),
+        FfiConverterOptionString.lower(cursor),uniffiCallStatus
+    )
+})
+}
+    
 
     
 }
@@ -4960,6 +5035,514 @@ public func FfiConverterTypeCombinedSlotAction_lift(_ handle: UInt64) throws -> 
 #endif
 public func FfiConverterTypeCombinedSlotAction_lower(_ value: CombinedSlotAction) -> UInt64 {
     return FfiConverterTypeCombinedSlotAction.lower(value)
+}
+
+
+
+
+
+
+/**
+ * A stream client for one home. One per home; it holds no engine. Calls are serialized: a
+ * second thread waits for the first.
+ */
+public protocol HomeStreamProtocol: AnyObject, Sendable {
+    
+    /**
+     * Reconnect attempts since a connection was last live for `stable_ms`.
+     */
+    func attempts() throws  -> UInt32
+    
+    /**
+     * The configuration in force (after `stream_client` applied the account's floor).
+     */
+    func config() throws  -> StreamConfig
+    
+    /**
+     * The resume cursor held now, to persist beside the exchange checkpoint.
+     */
+    func cursor() throws  -> String?
+    
+    /**
+     * The home.
+     */
+    func home() throws  -> String
+    
+    /**
+     * What to do at `now_ms` (monotonic milliseconds on the host's clock).
+     */
+    func next(nowMs: Int64) throws  -> StreamStep
+    
+    /**
+     * The socket closed with `code`, or without one (none: the transport failed or the socket
+     * never opened).
+     */
+    func onClosed(code: UInt32?, nowMs: Int64) throws  -> [StreamEvent]
+    
+    /**
+     * One text frame from the home, unchanged.
+     */
+    func onFrame(text: String, nowMs: Int64) throws  -> [StreamEvent]
+    
+    /**
+     * The account's verified history is at `seq` (`head_seq`): call it after every pass and on
+     * open. A blocked stream is tried again, and the ticket budget restarts, once it changes.
+     */
+    func onHistory(seq: UInt64) throws 
+    
+    /**
+     * The socket opened (101).
+     */
+    func onOpen(nowMs: Int64) throws 
+    
+    /**
+     * The home refused the upgrade with this HTTP answer.
+     */
+    func onRefused(answer: HttpAnswer, nowMs: Int64) throws  -> [StreamEvent]
+    
+    /**
+     * The home's answer to the ticket request; none when it could not be sent.
+     */
+    func onTicket(answer: HttpAnswer?, nowMs: Int64) throws  -> [StreamEvent]
+    
+    /**
+     * Whether the host's ordinary poll timer should run: always, unless the stream is live.
+     */
+    func polling() throws  -> Bool
+    
+    /**
+     * Try again now (foreground entry, a network change, an explicit user action; never from a
+     * timer). The core bounds what this allows.
+     */
+    func retryNow() throws 
+    
+    /**
+     * A `session` message carrying `frame`, a sealed session frame's JSON text exactly as the
+     * endpoint produced it (a `Send` effect's bytes, at most 16,384), to send on the live
+     * socket. The frame is carried verbatim: the message is `{"type":"session",["id":…,]"frame":`
+     * followed by those bytes and `}`.
+     */
+    func sessionFrame(frame: String, id: String?) throws  -> String
+    
+    /**
+     * Where the stream stands.
+     */
+    func status() throws  -> StreamStatus
+    
+    /**
+     * A `subscribe` frame for `(namespace, cell)` to send on the live socket.
+     */
+    func subscribe(namespace: String, cell: String, id: String?) throws  -> String
+    
+    /**
+     * The host could not build or sign the ticket call (for example the engine answered
+     * `Unavailable` before its first pass). The stream backs off and asks again.
+     */
+    func ticketCallFailed(nowMs: Int64) throws  -> [StreamEvent]
+    
+    /**
+     * The ticket request for the call the host signed (`stream_begin_call`, then `finish`,
+     * whose `artifact` this is): `POST {base}/stream/ticket` with no body. Refused unless a
+     * `NeedTicketCall` step is outstanding.
+     */
+    func ticketRequest(call: Data, nowMs: Int64) throws  -> HttpRequest
+    
+    /**
+     * Tickets minted since the last stable connection (the breaker's count).
+     */
+    func unstableMints() throws  -> UInt32
+    
+    /**
+     * An `unsubscribe` frame.
+     */
+    func unsubscribe(namespace: String, cell: String, id: String?) throws  -> String
+    
+}
+/**
+ * A stream client for one home. One per home; it holds no engine. Calls are serialized: a
+ * second thread waits for the first.
+ */
+open class HomeStream: HomeStreamProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_colophon_ffi_fn_clone_homestream(self.handle, $0) }
+    }
+    /**
+     * A stream client for `home` at `base` (its endpoint), resuming from `cursor` (one saved
+     * from a `Cursor` event). An application normally uses `AccountEngine.stream_client`, which
+     * takes the base from the account and applies its safety-poll floor.
+     */
+public convenience init(home: String, base: String, config: StreamConfig, cursor: String?)throws  {
+    let handle =
+        try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_constructor_homestream_new(
+        FfiConverterString.lower(home),
+        FfiConverterString.lower(base),
+        FfiConverterTypeStreamConfig_lower(config),
+        FfiConverterOptionString.lower(cursor),uniffiCallStatus
+    )
+}
+    self.init(unsafeFromHandle: handle)
+}
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_colophon_ffi_fn_free_homestream(handle, $0) }
+    }
+
+    
+
+    
+    /**
+     * Reconnect attempts since a connection was last live for `stable_ms`.
+     */
+open func attempts()throws  -> UInt32  {
+    return try  FfiConverterUInt32.lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_homestream_attempts(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * The configuration in force (after `stream_client` applied the account's floor).
+     */
+open func config()throws  -> StreamConfig  {
+    return try  FfiConverterTypeStreamConfig_lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_homestream_config(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * The resume cursor held now, to persist beside the exchange checkpoint.
+     */
+open func cursor()throws  -> String?  {
+    return try  FfiConverterOptionString.lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_homestream_cursor(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * The home.
+     */
+open func home()throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_homestream_home(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * What to do at `now_ms` (monotonic milliseconds on the host's clock).
+     */
+open func next(nowMs: Int64)throws  -> StreamStep  {
+    return try  FfiConverterTypeStreamStep_lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_homestream_next(
+            self.uniffiCloneHandle(),
+        FfiConverterInt64.lower(nowMs),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * The socket closed with `code`, or without one (none: the transport failed or the socket
+     * never opened).
+     */
+open func onClosed(code: UInt32?, nowMs: Int64)throws  -> [StreamEvent]  {
+    return try  FfiConverterSequenceTypeStreamEvent.lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_homestream_on_closed(
+            self.uniffiCloneHandle(),
+        FfiConverterOptionUInt32.lower(code),
+        FfiConverterInt64.lower(nowMs),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * One text frame from the home, unchanged.
+     */
+open func onFrame(text: String, nowMs: Int64)throws  -> [StreamEvent]  {
+    return try  FfiConverterSequenceTypeStreamEvent.lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_homestream_on_frame(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(text),
+        FfiConverterInt64.lower(nowMs),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * The account's verified history is at `seq` (`head_seq`): call it after every pass and on
+     * open. A blocked stream is tried again, and the ticket budget restarts, once it changes.
+     */
+open func onHistory(seq: UInt64)throws   {try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_homestream_on_history(
+            self.uniffiCloneHandle(),
+        FfiConverterUInt64.lower(seq),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * The socket opened (101).
+     */
+open func onOpen(nowMs: Int64)throws   {try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_homestream_on_open(
+            self.uniffiCloneHandle(),
+        FfiConverterInt64.lower(nowMs),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * The home refused the upgrade with this HTTP answer.
+     */
+open func onRefused(answer: HttpAnswer, nowMs: Int64)throws  -> [StreamEvent]  {
+    return try  FfiConverterSequenceTypeStreamEvent.lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_homestream_on_refused(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeHttpAnswer_lower(answer),
+        FfiConverterInt64.lower(nowMs),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * The home's answer to the ticket request; none when it could not be sent.
+     */
+open func onTicket(answer: HttpAnswer?, nowMs: Int64)throws  -> [StreamEvent]  {
+    return try  FfiConverterSequenceTypeStreamEvent.lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_homestream_on_ticket(
+            self.uniffiCloneHandle(),
+        FfiConverterOptionTypeHttpAnswer.lower(answer),
+        FfiConverterInt64.lower(nowMs),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Whether the host's ordinary poll timer should run: always, unless the stream is live.
+     */
+open func polling()throws  -> Bool  {
+    return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_homestream_polling(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Try again now (foreground entry, a network change, an explicit user action; never from a
+     * timer). The core bounds what this allows.
+     */
+open func retryNow()throws   {try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_homestream_retry_now(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * A `session` message carrying `frame`, a sealed session frame's JSON text exactly as the
+     * endpoint produced it (a `Send` effect's bytes, at most 16,384), to send on the live
+     * socket. The frame is carried verbatim: the message is `{"type":"session",["id":…,]"frame":`
+     * followed by those bytes and `}`.
+     */
+open func sessionFrame(frame: String, id: String?)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_homestream_session_frame(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(frame),
+        FfiConverterOptionString.lower(id),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Where the stream stands.
+     */
+open func status()throws  -> StreamStatus  {
+    return try  FfiConverterTypeStreamStatus_lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_homestream_status(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * A `subscribe` frame for `(namespace, cell)` to send on the live socket.
+     */
+open func subscribe(namespace: String, cell: String, id: String?)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_homestream_subscribe(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(namespace),
+        FfiConverterString.lower(cell),
+        FfiConverterOptionString.lower(id),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * The host could not build or sign the ticket call (for example the engine answered
+     * `Unavailable` before its first pass). The stream backs off and asks again.
+     */
+open func ticketCallFailed(nowMs: Int64)throws  -> [StreamEvent]  {
+    return try  FfiConverterSequenceTypeStreamEvent.lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_homestream_ticket_call_failed(
+            self.uniffiCloneHandle(),
+        FfiConverterInt64.lower(nowMs),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * The ticket request for the call the host signed (`stream_begin_call`, then `finish`,
+     * whose `artifact` this is): `POST {base}/stream/ticket` with no body. Refused unless a
+     * `NeedTicketCall` step is outstanding.
+     */
+open func ticketRequest(call: Data, nowMs: Int64)throws  -> HttpRequest  {
+    return try  FfiConverterTypeHttpRequest_lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_homestream_ticket_request(
+            self.uniffiCloneHandle(),
+        FfiConverterData.lower(call),
+        FfiConverterInt64.lower(nowMs),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Tickets minted since the last stable connection (the breaker's count).
+     */
+open func unstableMints()throws  -> UInt32  {
+    return try  FfiConverterUInt32.lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_homestream_unstable_mints(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * An `unsubscribe` frame.
+     */
+open func unsubscribe(namespace: String, cell: String, id: String?)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_homestream_unsubscribe(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(namespace),
+        FfiConverterString.lower(cell),
+        FfiConverterOptionString.lower(id),uniffiCallStatus
+    )
+})
+}
+    
+
+    
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeHomeStream: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = HomeStream
+
+    public static func lift(_ handle: UInt64) throws -> HomeStream {
+        return HomeStream(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: HomeStream) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> HomeStream {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: HomeStream, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHomeStream_lift(_ handle: UInt64) throws -> HomeStream {
+    return try FfiConverterTypeHomeStream.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHomeStream_lower(_ value: HomeStream) -> UInt64 {
+    return FfiConverterTypeHomeStream.lower(value)
 }
 
 
@@ -7650,6 +8233,827 @@ public func FfiConverterTypePrfAction_lift(_ handle: UInt64) throws -> PrfAction
 #endif
 public func FfiConverterTypePrfAction_lower(_ value: PrfAction) -> UInt64 {
     return FfiConverterTypePrfAction.lower(value)
+}
+
+
+
+
+
+
+/**
+ * The members of one account that are current at the host's accepted authority head (§S1,
+ * §S2), stamped with the engine and authority head it was taken at. Immutable: a new head is
+ * a new view.
+ */
+public protocol SessionAccountViewProtocol: AnyObject, Sendable {
+    
+    /**
+     * The account (64 hex).
+     */
+    func account()  -> String
+    
+    /**
+     * Whether `member` is current at `wall_ms` and holds a `records` entry for `namespace`.
+     */
+    func entitled(member: String, namespace: String, wallMs: Int64)  -> Bool
+    
+    /**
+     * The member's session number, when it is current.
+     */
+    func sessionOf(member: String)  -> UInt64?
+    
+    /**
+     * The members entitled to write in `namespace` at `wall_ms`, sorted.
+     */
+    func writers(namespace: String, wallMs: Int64)  -> [String]
+    
+}
+/**
+ * The members of one account that are current at the host's accepted authority head (§S1,
+ * §S2), stamped with the engine and authority head it was taken at. Immutable: a new head is
+ * a new view.
+ */
+open class SessionAccountView: SessionAccountViewProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_colophon_ffi_fn_clone_sessionaccountview(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_colophon_ffi_fn_free_sessionaccountview(handle, $0) }
+    }
+
+    
+
+    
+    /**
+     * The account (64 hex).
+     */
+open func account() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_sessionaccountview_account(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Whether `member` is current at `wall_ms` and holds a `records` entry for `namespace`.
+     */
+open func entitled(member: String, namespace: String, wallMs: Int64) -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_sessionaccountview_entitled(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(member),
+        FfiConverterString.lower(namespace),
+        FfiConverterInt64.lower(wallMs),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * The member's session number, when it is current.
+     */
+open func sessionOf(member: String) -> UInt64?  {
+    return try!  FfiConverterOptionUInt64.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_sessionaccountview_session_of(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(member),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * The members entitled to write in `namespace` at `wall_ms`, sorted.
+     */
+open func writers(namespace: String, wallMs: Int64) -> [String]  {
+    return try!  FfiConverterSequenceString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_sessionaccountview_writers(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(namespace),
+        FfiConverterInt64.lower(wallMs),uniffiCallStatus
+    )
+})
+}
+    
+
+    
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSessionAccountView: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = SessionAccountView
+
+    public static func lift(_ handle: UInt64) throws -> SessionAccountView {
+        return SessionAccountView(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: SessionAccountView) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SessionAccountView {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: SessionAccountView, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSessionAccountView_lift(_ handle: UInt64) throws -> SessionAccountView {
+    return try FfiConverterTypeSessionAccountView.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSessionAccountView_lower(_ value: SessionAccountView) -> UInt64 {
+    return FfiConverterTypeSessionAccountView.lower(value)
+}
+
+
+
+
+
+
+/**
+ * One member of one cell, with sealing. Calls are serialized (one at a time, as §6 of the wire
+ * document requires): a second thread waits for the first.
+ *
+ * Every call that runs the session takes the engine and works under its `SessionGate` (read
+ * side; see there for the lock order), against the head and keys the engine has installed. A
+ * view of an older head is refused with `session:staleAccount`, changing nothing. A step
+ * releases its effects only up to and including the first `Persist`; what follows waits for
+ * `persisted`, and is discarded, never released, if the head moves before it is acknowledged.
+ */
+public protocol SessionEndpointProtocol: AnyObject, Sendable {
+    
+    /**
+     * The acknowledgement ID of the `Persist` waiting for `persisted`, if any.
+     */
+    func awaitingPersist() throws  -> UInt64?
+    
+    /**
+     * The exact `colophon/session-key/6` body for the host to sign with this member's key, as
+     * it signs a `Raw` signing step (P-256, `r||s`), for the window `[not_before_ms,
+     * expires_ms]` (at most 86,400 s). Nothing can be sent before the signature is installed;
+     * call again to renew before the window ends. Only the latest body can be finished.
+     */
+    func beginDelegation(notBeforeMs: Int64, expiresMs: Int64) throws  -> Data
+    
+    /**
+     * Whether this member may write (§S1), as last set.
+     */
+    func canWrite() throws  -> Bool
+    
+    /**
+     * The greatest accepted claim as JSON (`{term, rank, holder, via?}`), if any.
+     */
+    func claimJson() throws  -> String?
+    
+    /**
+     * An application command (§S10), as JSON tagged by `command`. While a `Persist` waits it
+     * is refused with `session:persistPending` and changes nothing: retry after `persisted`.
+     */
+    func command(commandJson: String, engine: AccountEngine, clock: SessionClock) throws  -> SessionStep
+    
+    /**
+     * SHA-256 hex of `view_json` as the reference writes it.
+     */
+    func digest() throws  -> String
+    
+    /**
+     * Whether this member holds a `records` entry for the namespace (it may send).
+     */
+    func entitled() throws  -> Bool
+    
+    /**
+     * Install the host's signature over the body the last `begin_delegation` returned, after
+     * verifying it under this member's key in the account view. Any other body, including one
+     * with a field changed, is `session:delegation`; a body already installed is `consumed`.
+     */
+    func finishDelegation(body: Data, signature: Data, clock: SessionClock) throws 
+    
+    /**
+     * Whether this member, as holder, is gated: out of contact or restarted, it waits out
+     * `askTimeoutMs` before acting as holder (§S6). A gated holder sends no holder frames.
+     */
+    func gated() throws  -> Bool
+    
+    /**
+     * The holder this member sees, if any.
+     */
+    func holder() throws  -> String?
+    
+    /**
+     * Whether this member acts as holder (it may still be gated: see `gated`).
+     */
+    func isHolder() throws  -> Bool
+    
+    /**
+     * Whether the member has joined.
+     */
+    func joined() throws  -> Bool
+    
+    /**
+     * The session key's ID (a key ID of its point).
+     */
+    func keyId() throws  -> String
+    
+    /**
+     * The highest `n` sealed so far.
+     */
+    func lastN() throws  -> UInt64
+    
+    /**
+     * No carrier works. While a `Persist` waits it updates the outage summary.
+     */
+    func linkDown(engine: AccountEngine, clock: SessionClock) throws  -> SessionStep
+    
+    /**
+     * Some carrier works again. While a `Persist` waits it updates the outage summary.
+     */
+    func linkUp(engine: AccountEngine, clock: SessionClock) throws  -> SessionStep
+    
+    /**
+     * This member.
+     */
+    func me() throws  -> String
+    
+    /**
+     * When to call `tick` next (monotonic ms), if ever. None while a `Persist` is
+     * outstanding: arm the timer again from the step `persisted` returns.
+     */
+    func nextDeadline() throws  -> UInt64?
+    
+    /**
+     * The host stored the `Persist` whose acknowledgement ID is `ack` (the step's
+     * `awaiting_persist`); any other ID, or one already acknowledged, is `session:wrongAck`.
+     * If the engine's head is still the installed view's, the effects held behind it are
+     * released and the inputs that waited run (the outage summary, the frames in order, one
+     * tick), all with this call's clock, up to the next
+     * `Persist`. If the head has moved, the held effects are discarded (`discarded`), the
+     * inputs keep waiting, and the next call that runs the session is `session:staleAccount`
+     * until `set_account`.
+     */
+    func persisted(ack: UInt64, engine: AccountEngine, clock: SessionClock) throws  -> SessionStep
+    
+    /**
+     * How many inputs wait (frames, plus one for a tick and one for a link state).
+     */
+    func queued() throws  -> UInt32
+    
+    /**
+     * Bytes received from a carrier, exactly as the sender sealed them. A frame that fails any
+     * §S3 check changes nothing and is reported in `drops`. While a `Persist` waits the frame is
+     * kept (`queued`), up to 64 frames and 1 MiB; past that it is lost (a `queueFull` drop).
+     */
+    func receive(bytes: Data, engine: AccountEngine, clock: SessionClock) throws  -> SessionStep
+    
+    /**
+     * A newly accepted authority head: install `view`, which must be `engine`'s
+     * `session_account` for this endpoint's account and namespace (else `session:wrongView`)
+     * at its current head (else `session:staleAccount`). Allowed while a `Persist` waits: the
+     * effects held behind it, decided under the older head, are discarded (`discarded`), and
+     * what this call decides waits behind that `Persist` in their place. Otherwise the inputs
+     * that waited run.
+     */
+    func setAccount(view: SessionAccountView, engine: AccountEngine, clock: SessionClock) throws  -> SessionStep
+    
+    /**
+     * A timer expiry: call at or soon after `next_deadline` (within 250 ms). While a
+     * `Persist` waits it is kept (one, however many arrive) and runs at `persisted`.
+     */
+    func tick(engine: AccountEngine, clock: SessionClock) throws  -> SessionStep
+    
+    /**
+     * The protocol-visible state as JSON (`{accepted, holder, holding, gated, synced, seq,
+     * state}`, as in the vectors' `final`). It carries application state: do not log it.
+     */
+    func viewJson() throws  -> String
+    
+}
+/**
+ * One member of one cell, with sealing. Calls are serialized (one at a time, as §6 of the wire
+ * document requires): a second thread waits for the first.
+ *
+ * Every call that runs the session takes the engine and works under its `SessionGate` (read
+ * side; see there for the lock order), against the head and keys the engine has installed. A
+ * view of an older head is refused with `session:staleAccount`, changing nothing. A step
+ * releases its effects only up to and including the first `Persist`; what follows waits for
+ * `persisted`, and is discarded, never released, if the head moves before it is acknowledged.
+ */
+open class SessionEndpoint: SessionEndpointProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_colophon_ffi_fn_clone_sessionendpoint(self.handle, $0) }
+    }
+    /**
+     * Start a session for member `me` in `(account, namespace, cell)` under `policy_json` (the
+     * §S1 policy as JSON; `session_default_policy` gives the defaults), resuming from
+     * `persisted_json` (the last `Persist` effect the host stored, or none). `view` is the
+     * engine's `session_account`. `key_random` (32 bytes) makes the session key and
+     * `fresh_seed` (16 bytes) seeds the machine's challenges: both must be new random bytes on
+     * every process start, and both are wiped. A policy out of bounds is `session:policy`; a
+     * member not entitled to the namespace is `denied:notGranted`.
+     */
+public convenience init(account: String, namespace: String, cell: String, me: String, policyJson: String, persistedJson: String?, view: SessionAccountView, keyRandom: Data, freshSeed: Data, clock: SessionClock)throws  {
+    let handle =
+        try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_constructor_sessionendpoint_new(
+        FfiConverterString.lower(account),
+        FfiConverterString.lower(namespace),
+        FfiConverterString.lower(cell),
+        FfiConverterString.lower(me),
+        FfiConverterString.lower(policyJson),
+        FfiConverterOptionString.lower(persistedJson),
+        FfiConverterTypeSessionAccountView_lower(view),
+        FfiConverterData.lower(keyRandom),
+        FfiConverterData.lower(freshSeed),
+        FfiConverterTypeSessionClock_lower(clock),uniffiCallStatus
+    )
+}
+    self.init(unsafeFromHandle: handle)
+}
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_colophon_ffi_fn_free_sessionendpoint(handle, $0) }
+    }
+
+    
+
+    
+    /**
+     * The acknowledgement ID of the `Persist` waiting for `persisted`, if any.
+     */
+open func awaitingPersist()throws  -> UInt64?  {
+    return try  FfiConverterOptionUInt64.lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_sessionendpoint_awaiting_persist(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * The exact `colophon/session-key/6` body for the host to sign with this member's key, as
+     * it signs a `Raw` signing step (P-256, `r||s`), for the window `[not_before_ms,
+     * expires_ms]` (at most 86,400 s). Nothing can be sent before the signature is installed;
+     * call again to renew before the window ends. Only the latest body can be finished.
+     */
+open func beginDelegation(notBeforeMs: Int64, expiresMs: Int64)throws  -> Data  {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_sessionendpoint_begin_delegation(
+            self.uniffiCloneHandle(),
+        FfiConverterInt64.lower(notBeforeMs),
+        FfiConverterInt64.lower(expiresMs),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Whether this member may write (§S1), as last set.
+     */
+open func canWrite()throws  -> Bool  {
+    return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_sessionendpoint_can_write(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * The greatest accepted claim as JSON (`{term, rank, holder, via?}`), if any.
+     */
+open func claimJson()throws  -> String?  {
+    return try  FfiConverterOptionString.lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_sessionendpoint_claim_json(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * An application command (§S10), as JSON tagged by `command`. While a `Persist` waits it
+     * is refused with `session:persistPending` and changes nothing: retry after `persisted`.
+     */
+open func command(commandJson: String, engine: AccountEngine, clock: SessionClock)throws  -> SessionStep  {
+    return try  FfiConverterTypeSessionStep_lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_sessionendpoint_command(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(commandJson),
+        FfiConverterTypeAccountEngine_lower(engine),
+        FfiConverterTypeSessionClock_lower(clock),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * SHA-256 hex of `view_json` as the reference writes it.
+     */
+open func digest()throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_sessionendpoint_digest(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Whether this member holds a `records` entry for the namespace (it may send).
+     */
+open func entitled()throws  -> Bool  {
+    return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_sessionendpoint_entitled(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Install the host's signature over the body the last `begin_delegation` returned, after
+     * verifying it under this member's key in the account view. Any other body, including one
+     * with a field changed, is `session:delegation`; a body already installed is `consumed`.
+     */
+open func finishDelegation(body: Data, signature: Data, clock: SessionClock)throws   {try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_sessionendpoint_finish_delegation(
+            self.uniffiCloneHandle(),
+        FfiConverterData.lower(body),
+        FfiConverterData.lower(signature),
+        FfiConverterTypeSessionClock_lower(clock),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Whether this member, as holder, is gated: out of contact or restarted, it waits out
+     * `askTimeoutMs` before acting as holder (§S6). A gated holder sends no holder frames.
+     */
+open func gated()throws  -> Bool  {
+    return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_sessionendpoint_gated(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * The holder this member sees, if any.
+     */
+open func holder()throws  -> String?  {
+    return try  FfiConverterOptionString.lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_sessionendpoint_holder(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Whether this member acts as holder (it may still be gated: see `gated`).
+     */
+open func isHolder()throws  -> Bool  {
+    return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_sessionendpoint_is_holder(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Whether the member has joined.
+     */
+open func joined()throws  -> Bool  {
+    return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_sessionendpoint_joined(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * The session key's ID (a key ID of its point).
+     */
+open func keyId()throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_sessionendpoint_key_id(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * The highest `n` sealed so far.
+     */
+open func lastN()throws  -> UInt64  {
+    return try  FfiConverterUInt64.lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_sessionendpoint_last_n(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * No carrier works. While a `Persist` waits it updates the outage summary.
+     */
+open func linkDown(engine: AccountEngine, clock: SessionClock)throws  -> SessionStep  {
+    return try  FfiConverterTypeSessionStep_lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_sessionendpoint_link_down(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeAccountEngine_lower(engine),
+        FfiConverterTypeSessionClock_lower(clock),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Some carrier works again. While a `Persist` waits it updates the outage summary.
+     */
+open func linkUp(engine: AccountEngine, clock: SessionClock)throws  -> SessionStep  {
+    return try  FfiConverterTypeSessionStep_lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_sessionendpoint_link_up(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeAccountEngine_lower(engine),
+        FfiConverterTypeSessionClock_lower(clock),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * This member.
+     */
+open func me()throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_sessionendpoint_me(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * When to call `tick` next (monotonic ms), if ever. None while a `Persist` is
+     * outstanding: arm the timer again from the step `persisted` returns.
+     */
+open func nextDeadline()throws  -> UInt64?  {
+    return try  FfiConverterOptionUInt64.lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_sessionendpoint_next_deadline(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * The host stored the `Persist` whose acknowledgement ID is `ack` (the step's
+     * `awaiting_persist`); any other ID, or one already acknowledged, is `session:wrongAck`.
+     * If the engine's head is still the installed view's, the effects held behind it are
+     * released and the inputs that waited run (the outage summary, the frames in order, one
+     * tick), all with this call's clock, up to the next
+     * `Persist`. If the head has moved, the held effects are discarded (`discarded`), the
+     * inputs keep waiting, and the next call that runs the session is `session:staleAccount`
+     * until `set_account`.
+     */
+open func persisted(ack: UInt64, engine: AccountEngine, clock: SessionClock)throws  -> SessionStep  {
+    return try  FfiConverterTypeSessionStep_lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_sessionendpoint_persisted(
+            self.uniffiCloneHandle(),
+        FfiConverterUInt64.lower(ack),
+        FfiConverterTypeAccountEngine_lower(engine),
+        FfiConverterTypeSessionClock_lower(clock),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * How many inputs wait (frames, plus one for a tick and one for a link state).
+     */
+open func queued()throws  -> UInt32  {
+    return try  FfiConverterUInt32.lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_sessionendpoint_queued(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Bytes received from a carrier, exactly as the sender sealed them. A frame that fails any
+     * §S3 check changes nothing and is reported in `drops`. While a `Persist` waits the frame is
+     * kept (`queued`), up to 64 frames and 1 MiB; past that it is lost (a `queueFull` drop).
+     */
+open func receive(bytes: Data, engine: AccountEngine, clock: SessionClock)throws  -> SessionStep  {
+    return try  FfiConverterTypeSessionStep_lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_sessionendpoint_receive(
+            self.uniffiCloneHandle(),
+        FfiConverterData.lower(bytes),
+        FfiConverterTypeAccountEngine_lower(engine),
+        FfiConverterTypeSessionClock_lower(clock),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * A newly accepted authority head: install `view`, which must be `engine`'s
+     * `session_account` for this endpoint's account and namespace (else `session:wrongView`)
+     * at its current head (else `session:staleAccount`). Allowed while a `Persist` waits: the
+     * effects held behind it, decided under the older head, are discarded (`discarded`), and
+     * what this call decides waits behind that `Persist` in their place. Otherwise the inputs
+     * that waited run.
+     */
+open func setAccount(view: SessionAccountView, engine: AccountEngine, clock: SessionClock)throws  -> SessionStep  {
+    return try  FfiConverterTypeSessionStep_lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_sessionendpoint_set_account(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeSessionAccountView_lower(view),
+        FfiConverterTypeAccountEngine_lower(engine),
+        FfiConverterTypeSessionClock_lower(clock),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * A timer expiry: call at or soon after `next_deadline` (within 250 ms). While a
+     * `Persist` waits it is kept (one, however many arrive) and runs at `persisted`.
+     */
+open func tick(engine: AccountEngine, clock: SessionClock)throws  -> SessionStep  {
+    return try  FfiConverterTypeSessionStep_lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_sessionendpoint_tick(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeAccountEngine_lower(engine),
+        FfiConverterTypeSessionClock_lower(clock),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * The protocol-visible state as JSON (`{accepted, holder, holding, gated, synced, seq,
+     * state}`, as in the vectors' `final`). It carries application state: do not log it.
+     */
+open func viewJson()throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_sessionendpoint_view_json(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+
+    
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSessionEndpoint: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = SessionEndpoint
+
+    public static func lift(_ handle: UInt64) throws -> SessionEndpoint {
+        return SessionEndpoint(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: SessionEndpoint) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SessionEndpoint {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: SessionEndpoint, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSessionEndpoint_lift(_ handle: UInt64) throws -> SessionEndpoint {
+    return try FfiConverterTypeSessionEndpoint.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSessionEndpoint_lower(_ value: SessionEndpoint) -> UInt64 {
+    return FfiConverterTypeSessionEndpoint.lower(value)
 }
 
 
@@ -15166,6 +16570,355 @@ public func FfiConverterTypeSeenActivation_lower(_ value: SeenActivation) -> Rus
 
 
 /**
+ * The host's clocks at a call: monotonic ms (every session timer) and wall-clock ms since
+ * the Unix epoch (delegation windows, member expiry).
+ */
+public struct SessionClock: Equatable, Hashable {
+    public let monoMs: UInt64
+    public let wallMs: Int64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(monoMs: UInt64, wallMs: Int64) {
+        self.monoMs = monoMs
+        self.wallMs = wallMs
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension SessionClock: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSessionClock: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SessionClock {
+        return
+            try SessionClock(
+                monoMs: FfiConverterUInt64.read(from: &buf), 
+                wallMs: FfiConverterInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SessionClock, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.monoMs, into: &buf)
+        FfiConverterInt64.write(value.wallMs, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSessionClock_lift(_ buf: RustBuffer) throws -> SessionClock {
+    return try FfiConverterTypeSessionClock.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSessionClock_lower(_ value: SessionClock) -> RustBuffer {
+    return FfiConverterTypeSessionClock.lower(value)
+}
+
+
+/**
+ * One §S7 clock sample: round trip, offset (`peer ≈ mine + offset`) and error, ms.
+ */
+public struct SessionClockSample: Equatable, Hashable {
+    public let rtt: UInt64
+    public let offset: Int64
+    public let error: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(rtt: UInt64, offset: Int64, error: UInt64) {
+        self.rtt = rtt
+        self.offset = offset
+        self.error = error
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension SessionClockSample: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSessionClockSample: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SessionClockSample {
+        return
+            try SessionClockSample(
+                rtt: FfiConverterUInt64.read(from: &buf), 
+                offset: FfiConverterInt64.read(from: &buf), 
+                error: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SessionClockSample, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.rtt, into: &buf)
+        FfiConverterInt64.write(value.offset, into: &buf)
+        FfiConverterUInt64.write(value.error, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSessionClockSample_lift(_ buf: RustBuffer) throws -> SessionClockSample {
+    return try FfiConverterTypeSessionClockSample.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSessionClockSample_lower(_ value: SessionClockSample) -> RustBuffer {
+    return FfiConverterTypeSessionClockSample.lower(value)
+}
+
+
+/**
+ * A received frame that was dropped: the §S3 reason code (as in the wire vectors) and the
+ * member §S3 asks this one to send `hello` to, if any. Silent on the wire.
+ */
+public struct SessionDrop: Equatable, Hashable {
+    public let reason: String
+    public let helloTo: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(reason: String, helloTo: String?) {
+        self.reason = reason
+        self.helloTo = helloTo
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension SessionDrop: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSessionDrop: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SessionDrop {
+        return
+            try SessionDrop(
+                reason: FfiConverterString.read(from: &buf), 
+                helloTo: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SessionDrop, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.reason, into: &buf)
+        FfiConverterOptionString.write(value.helloTo, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSessionDrop_lift(_ buf: RustBuffer) throws -> SessionDrop {
+    return try FfiConverterTypeSessionDrop.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSessionDrop_lower(_ value: SessionDrop) -> RustBuffer {
+    return FfiConverterTypeSessionDrop.lower(value)
+}
+
+
+/**
+ * One effect. Send: broadcast `bytes` (the sealed frame) to every member of the cell;
+ * `to` is advice and `frame_kind` names the plaintext kind for logs. Persist: store
+ * `persisted_json` before carrying out any later effect, and pass it back when the
+ * endpoint is made again. Event: tell the application `event_json` (tagged by `event`, the
+ * same JSON the conformance vectors use). Unsent: a frame of `frame_kind` could not be
+ * sealed, for the reason `unsent`; to the protocol that is loss.
+ */
+public struct SessionEffect: Equatable, Hashable {
+    public let kind: SessionEffectKind
+    public let bytes: Data
+    public let to: String?
+    public let frameKind: String?
+    public let persistedJson: String?
+    public let event: String?
+    public let eventJson: String?
+    public let unsent: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(kind: SessionEffectKind, bytes: Data, to: String?, frameKind: String?, persistedJson: String?, event: String?, eventJson: String?, unsent: String?) {
+        self.kind = kind
+        self.bytes = bytes
+        self.to = to
+        self.frameKind = frameKind
+        self.persistedJson = persistedJson
+        self.event = event
+        self.eventJson = eventJson
+        self.unsent = unsent
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension SessionEffect: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSessionEffect: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SessionEffect {
+        return
+            try SessionEffect(
+                kind: FfiConverterTypeSessionEffectKind.read(from: &buf), 
+                bytes: FfiConverterData.read(from: &buf), 
+                to: FfiConverterOptionString.read(from: &buf), 
+                frameKind: FfiConverterOptionString.read(from: &buf), 
+                persistedJson: FfiConverterOptionString.read(from: &buf), 
+                event: FfiConverterOptionString.read(from: &buf), 
+                eventJson: FfiConverterOptionString.read(from: &buf), 
+                unsent: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SessionEffect, into buf: inout [UInt8]) {
+        FfiConverterTypeSessionEffectKind.write(value.kind, into: &buf)
+        FfiConverterData.write(value.bytes, into: &buf)
+        FfiConverterOptionString.write(value.to, into: &buf)
+        FfiConverterOptionString.write(value.frameKind, into: &buf)
+        FfiConverterOptionString.write(value.persistedJson, into: &buf)
+        FfiConverterOptionString.write(value.event, into: &buf)
+        FfiConverterOptionString.write(value.eventJson, into: &buf)
+        FfiConverterOptionString.write(value.unsent, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSessionEffect_lift(_ buf: RustBuffer) throws -> SessionEffect {
+    return try FfiConverterTypeSessionEffect.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSessionEffect_lower(_ value: SessionEffect) -> RustBuffer {
+    return FfiConverterTypeSessionEffect.lower(value)
+}
+
+
+/**
+ * What one endpoint call produced: `effects` in order (perform them in order); `drops` the
+ * frames this call judged and dropped, in order, with their reasons (`queueFull` for a frame
+ * that could not be kept). `awaiting_persist` is set only on the step whose last effect is a
+ * `Persist`: it is that `Persist`'s acknowledgement ID, to pass to `persisted` once the
+ * host's durable write of that effect has completed, and no other step ever carries it.
+ * `persist_outstanding` says a `Persist` is still unacknowledged after this call (this one's
+ * or an earlier one's); `queued` says this call's input is kept to run after it. `discarded`
+ * counts effects decided under an older authority head that were dropped, not released.
+ * `next_deadline` is when to call `tick` next after this call (absent while a `Persist` is
+ * outstanding: the step that acknowledges it carries the real one).
+ */
+public struct SessionStep: Equatable, Hashable {
+    public let effects: [SessionEffect]
+    public let drops: [SessionDrop]
+    public let awaitingPersist: UInt64?
+    public let persistOutstanding: Bool
+    public let queued: Bool
+    public let discarded: UInt32
+    public let nextDeadline: UInt64?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(effects: [SessionEffect], drops: [SessionDrop], awaitingPersist: UInt64?, persistOutstanding: Bool, queued: Bool, discarded: UInt32, nextDeadline: UInt64?) {
+        self.effects = effects
+        self.drops = drops
+        self.awaitingPersist = awaitingPersist
+        self.persistOutstanding = persistOutstanding
+        self.queued = queued
+        self.discarded = discarded
+        self.nextDeadline = nextDeadline
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension SessionStep: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSessionStep: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SessionStep {
+        return
+            try SessionStep(
+                effects: FfiConverterSequenceTypeSessionEffect.read(from: &buf), 
+                drops: FfiConverterSequenceTypeSessionDrop.read(from: &buf), 
+                awaitingPersist: FfiConverterOptionUInt64.read(from: &buf), 
+                persistOutstanding: FfiConverterBool.read(from: &buf), 
+                queued: FfiConverterBool.read(from: &buf), 
+                discarded: FfiConverterUInt32.read(from: &buf), 
+                nextDeadline: FfiConverterOptionUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SessionStep, into buf: inout [UInt8]) {
+        FfiConverterSequenceTypeSessionEffect.write(value.effects, into: &buf)
+        FfiConverterSequenceTypeSessionDrop.write(value.drops, into: &buf)
+        FfiConverterOptionUInt64.write(value.awaitingPersist, into: &buf)
+        FfiConverterBool.write(value.persistOutstanding, into: &buf)
+        FfiConverterBool.write(value.queued, into: &buf)
+        FfiConverterUInt32.write(value.discarded, into: &buf)
+        FfiConverterOptionUInt64.write(value.nextDeadline, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSessionStep_lift(_ buf: RustBuffer) throws -> SessionStep {
+    return try FfiConverterTypeSessionStep.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSessionStep_lower(_ value: SessionStep) -> RustBuffer {
+    return FfiConverterTypeSessionStep.lower(value)
+}
+
+
+/**
  * A signature the host made over a step's body: raw `r||s`, or DER with the assertion.
  */
 public struct Signature: Equatable, Hashable {
@@ -16069,6 +17822,360 @@ public func FfiConverterTypeStore_lift(_ buf: RustBuffer) throws -> Store {
 #endif
 public func FfiConverterTypeStore_lower(_ value: Store) -> RustBuffer {
     return FfiConverterTypeStore.lower(value)
+}
+
+
+/**
+ * The host's choices for one stream; `stream_default_config` gives the documented values.
+ */
+public struct StreamConfig: Equatable, Hashable {
+    public let backoffBaseMs: Int64
+    public let backoffCapMs: Int64
+    public let coalesceMs: Int64
+    public let seed: UInt64
+    public let pingMs: Int64
+    public let idleMs: Int64
+    public let stableMs: Int64
+    public let mintBudget: UInt32
+    public let mintWindowMs: Int64
+    public let safetyPollMs: Int64
+    public let suspendAfter: UInt32
+    public let suspendMs: Int64
+    public let maxMintsPerDay: UInt32
+    public let retryAllowance: UInt32
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(backoffBaseMs: Int64, backoffCapMs: Int64, coalesceMs: Int64, seed: UInt64, pingMs: Int64, idleMs: Int64, stableMs: Int64, mintBudget: UInt32, mintWindowMs: Int64, safetyPollMs: Int64, suspendAfter: UInt32, suspendMs: Int64, maxMintsPerDay: UInt32, retryAllowance: UInt32) {
+        self.backoffBaseMs = backoffBaseMs
+        self.backoffCapMs = backoffCapMs
+        self.coalesceMs = coalesceMs
+        self.seed = seed
+        self.pingMs = pingMs
+        self.idleMs = idleMs
+        self.stableMs = stableMs
+        self.mintBudget = mintBudget
+        self.mintWindowMs = mintWindowMs
+        self.safetyPollMs = safetyPollMs
+        self.suspendAfter = suspendAfter
+        self.suspendMs = suspendMs
+        self.maxMintsPerDay = maxMintsPerDay
+        self.retryAllowance = retryAllowance
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension StreamConfig: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeStreamConfig: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> StreamConfig {
+        return
+            try StreamConfig(
+                backoffBaseMs: FfiConverterInt64.read(from: &buf), 
+                backoffCapMs: FfiConverterInt64.read(from: &buf), 
+                coalesceMs: FfiConverterInt64.read(from: &buf), 
+                seed: FfiConverterUInt64.read(from: &buf), 
+                pingMs: FfiConverterInt64.read(from: &buf), 
+                idleMs: FfiConverterInt64.read(from: &buf), 
+                stableMs: FfiConverterInt64.read(from: &buf), 
+                mintBudget: FfiConverterUInt32.read(from: &buf), 
+                mintWindowMs: FfiConverterInt64.read(from: &buf), 
+                safetyPollMs: FfiConverterInt64.read(from: &buf), 
+                suspendAfter: FfiConverterUInt32.read(from: &buf), 
+                suspendMs: FfiConverterInt64.read(from: &buf), 
+                maxMintsPerDay: FfiConverterUInt32.read(from: &buf), 
+                retryAllowance: FfiConverterUInt32.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: StreamConfig, into buf: inout [UInt8]) {
+        FfiConverterInt64.write(value.backoffBaseMs, into: &buf)
+        FfiConverterInt64.write(value.backoffCapMs, into: &buf)
+        FfiConverterInt64.write(value.coalesceMs, into: &buf)
+        FfiConverterUInt64.write(value.seed, into: &buf)
+        FfiConverterInt64.write(value.pingMs, into: &buf)
+        FfiConverterInt64.write(value.idleMs, into: &buf)
+        FfiConverterInt64.write(value.stableMs, into: &buf)
+        FfiConverterUInt32.write(value.mintBudget, into: &buf)
+        FfiConverterInt64.write(value.mintWindowMs, into: &buf)
+        FfiConverterInt64.write(value.safetyPollMs, into: &buf)
+        FfiConverterUInt32.write(value.suspendAfter, into: &buf)
+        FfiConverterInt64.write(value.suspendMs, into: &buf)
+        FfiConverterUInt32.write(value.maxMintsPerDay, into: &buf)
+        FfiConverterUInt32.write(value.retryAllowance, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeStreamConfig_lift(_ buf: RustBuffer) throws -> StreamConfig {
+    return try FfiConverterTypeStreamConfig.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeStreamConfig_lower(_ value: StreamConfig) -> RustBuffer {
+    return FfiConverterTypeStreamConfig.lower(value)
+}
+
+
+/**
+ * One stream event. Connected: `principal`, `expires_at`. Cursor: `cursor` (absent: forget
+ * the saved one). Notice, Route, Ack: the frame as JSON in `json`. Session: the server's
+ * message byte for byte in `text`, for the session layer. Error: `code` and `reference`.
+ * Resync, Bye, Violation: `reason`. Down: `retry_at`. Blocked: `blocked` and `refused`.
+ */
+public struct StreamEvent: Equatable, Hashable {
+    public let kind: StreamEventKind
+    public let principal: String?
+    public let expiresAt: Int64?
+    public let cursor: String?
+    public let json: String?
+    public let text: String?
+    public let code: String?
+    public let reference: String?
+    public let reason: String?
+    public let retryAt: Int64?
+    public let blocked: StreamBlockedKind?
+    public let refused: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(kind: StreamEventKind, principal: String?, expiresAt: Int64?, cursor: String?, json: String?, text: String?, code: String?, reference: String?, reason: String?, retryAt: Int64?, blocked: StreamBlockedKind?, refused: String?) {
+        self.kind = kind
+        self.principal = principal
+        self.expiresAt = expiresAt
+        self.cursor = cursor
+        self.json = json
+        self.text = text
+        self.code = code
+        self.reference = reference
+        self.reason = reason
+        self.retryAt = retryAt
+        self.blocked = blocked
+        self.refused = refused
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension StreamEvent: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeStreamEvent: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> StreamEvent {
+        return
+            try StreamEvent(
+                kind: FfiConverterTypeStreamEventKind.read(from: &buf), 
+                principal: FfiConverterOptionString.read(from: &buf), 
+                expiresAt: FfiConverterOptionInt64.read(from: &buf), 
+                cursor: FfiConverterOptionString.read(from: &buf), 
+                json: FfiConverterOptionString.read(from: &buf), 
+                text: FfiConverterOptionString.read(from: &buf), 
+                code: FfiConverterOptionString.read(from: &buf), 
+                reference: FfiConverterOptionString.read(from: &buf), 
+                reason: FfiConverterOptionString.read(from: &buf), 
+                retryAt: FfiConverterOptionInt64.read(from: &buf), 
+                blocked: FfiConverterOptionTypeStreamBlockedKind.read(from: &buf), 
+                refused: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: StreamEvent, into buf: inout [UInt8]) {
+        FfiConverterTypeStreamEventKind.write(value.kind, into: &buf)
+        FfiConverterOptionString.write(value.principal, into: &buf)
+        FfiConverterOptionInt64.write(value.expiresAt, into: &buf)
+        FfiConverterOptionString.write(value.cursor, into: &buf)
+        FfiConverterOptionString.write(value.json, into: &buf)
+        FfiConverterOptionString.write(value.text, into: &buf)
+        FfiConverterOptionString.write(value.code, into: &buf)
+        FfiConverterOptionString.write(value.reference, into: &buf)
+        FfiConverterOptionString.write(value.reason, into: &buf)
+        FfiConverterOptionInt64.write(value.retryAt, into: &buf)
+        FfiConverterOptionTypeStreamBlockedKind.write(value.blocked, into: &buf)
+        FfiConverterOptionString.write(value.refused, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeStreamEvent_lift(_ buf: RustBuffer) throws -> StreamEvent {
+    return try FfiConverterTypeStreamEvent.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeStreamEvent_lower(_ value: StreamEvent) -> RustBuffer {
+    return FfiConverterTypeStreamEvent.lower(value)
+}
+
+
+/**
+ * Where a stream stands. `until` is set for Backoff, Throttled and Suspended; `blocked`
+ * for Blocked, with `refused` the home's result of a refused ticket mint.
+ */
+public struct StreamStatus: Equatable, Hashable {
+    public let kind: StreamStatusKind
+    public let until: Int64?
+    public let blocked: StreamBlockedKind?
+    public let refused: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(kind: StreamStatusKind, until: Int64?, blocked: StreamBlockedKind?, refused: String?) {
+        self.kind = kind
+        self.until = until
+        self.blocked = blocked
+        self.refused = refused
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension StreamStatus: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeStreamStatus: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> StreamStatus {
+        return
+            try StreamStatus(
+                kind: FfiConverterTypeStreamStatusKind.read(from: &buf), 
+                until: FfiConverterOptionInt64.read(from: &buf), 
+                blocked: FfiConverterOptionTypeStreamBlockedKind.read(from: &buf), 
+                refused: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: StreamStatus, into buf: inout [UInt8]) {
+        FfiConverterTypeStreamStatusKind.write(value.kind, into: &buf)
+        FfiConverterOptionInt64.write(value.until, into: &buf)
+        FfiConverterOptionTypeStreamBlockedKind.write(value.blocked, into: &buf)
+        FfiConverterOptionString.write(value.refused, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeStreamStatus_lift(_ buf: RustBuffer) throws -> StreamStatus {
+    return try FfiConverterTypeStreamStatus.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeStreamStatus_lower(_ value: StreamStatus) -> RustBuffer {
+    return FfiConverterTypeStreamStatus.lower(value)
+}
+
+
+/**
+ * The next thing to do. `url` (Connect) carries the ticket, a bearer credential: open the
+ * socket with it and log `log_url` (the ticket redacted) instead. `text` is set for Send,
+ * `code` for Close, `until` for Sleep (absent: nothing is scheduled). `wake_at`, on every
+ * step, is when to call `next` again at the latest even if nothing happens (absent: only an
+ * answer, a frame, a close or a new history moves the stream). A `NeedTicketCall` is handed
+ * out once: until the host answers it, `next` returns `Waiting`, and an answer that never
+ * comes counts as a failed call after `SIGN_TIMEOUT_MS`.
+ */
+public struct StreamStep: Equatable, Hashable {
+    public let kind: StreamStepKind
+    public let url: String?
+    public let logUrl: String?
+    public let text: String?
+    public let code: UInt32?
+    public let until: Int64?
+    public let wakeAt: Int64?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(kind: StreamStepKind, url: String?, logUrl: String?, text: String?, code: UInt32?, until: Int64?, wakeAt: Int64?) {
+        self.kind = kind
+        self.url = url
+        self.logUrl = logUrl
+        self.text = text
+        self.code = code
+        self.until = until
+        self.wakeAt = wakeAt
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension StreamStep: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeStreamStep: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> StreamStep {
+        return
+            try StreamStep(
+                kind: FfiConverterTypeStreamStepKind.read(from: &buf), 
+                url: FfiConverterOptionString.read(from: &buf), 
+                logUrl: FfiConverterOptionString.read(from: &buf), 
+                text: FfiConverterOptionString.read(from: &buf), 
+                code: FfiConverterOptionUInt32.read(from: &buf), 
+                until: FfiConverterOptionInt64.read(from: &buf), 
+                wakeAt: FfiConverterOptionInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: StreamStep, into buf: inout [UInt8]) {
+        FfiConverterTypeStreamStepKind.write(value.kind, into: &buf)
+        FfiConverterOptionString.write(value.url, into: &buf)
+        FfiConverterOptionString.write(value.logUrl, into: &buf)
+        FfiConverterOptionString.write(value.text, into: &buf)
+        FfiConverterOptionUInt32.write(value.code, into: &buf)
+        FfiConverterOptionInt64.write(value.until, into: &buf)
+        FfiConverterOptionInt64.write(value.wakeAt, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeStreamStep_lift(_ buf: RustBuffer) throws -> StreamStep {
+    return try FfiConverterTypeStreamStep.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeStreamStep_lower(_ value: StreamStep) -> RustBuffer {
+    return FfiConverterTypeStreamStep.lower(value)
 }
 
 
@@ -21386,6 +23493,89 @@ public func FfiConverterTypeRuleKind_lower(_ value: RuleKind) -> RustBuffer {
 
 
 /**
+ * One effect for the host, in order.
+ */
+
+public enum SessionEffectKind: Equatable, Hashable {
+    
+    case send
+    case persist
+    case event
+    case unsent
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension SessionEffectKind: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSessionEffectKind: FfiConverterRustBuffer {
+    typealias SwiftType = SessionEffectKind
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SessionEffectKind {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .send
+        
+        case 2: return .persist
+        
+        case 3: return .event
+        
+        case 4: return .unsent
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: SessionEffectKind, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .send:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .persist:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .event:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .unsent:
+            writeInt(&buf, Int32(4))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSessionEffectKind_lift(_ buf: RustBuffer) throws -> SessionEffectKind {
+    return try FfiConverterTypeSessionEffectKind.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSessionEffectKind_lower(_ value: SessionEffectKind) -> RustBuffer {
+    return FfiConverterTypeSessionEffectKind.lower(value)
+}
+
+
+
+/**
  * The signature form a signer uses. `Unknown` is a form a newer writer made: it can be
  * shown and counted, never created or checked here.
  */
@@ -22257,6 +24447,436 @@ public func FfiConverterTypeStepRole_lift(_ buf: RustBuffer) throws -> StepRole 
 #endif
 public func FfiConverterTypeStepRole_lower(_ value: StepRole) -> RustBuffer {
     return FfiConverterTypeStepRole.lower(value)
+}
+
+
+
+/**
+ * Why a stream will not be tried again until the history changes.
+ */
+
+public enum StreamBlockedKind: Equatable, Hashable {
+    
+    case accessEnded
+    case released
+    case refused
+    case unsupported
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension StreamBlockedKind: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeStreamBlockedKind: FfiConverterRustBuffer {
+    typealias SwiftType = StreamBlockedKind
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> StreamBlockedKind {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .accessEnded
+        
+        case 2: return .released
+        
+        case 3: return .refused
+        
+        case 4: return .unsupported
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: StreamBlockedKind, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .accessEnded:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .released:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .refused:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .unsupported:
+            writeInt(&buf, Int32(4))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeStreamBlockedKind_lift(_ buf: RustBuffer) throws -> StreamBlockedKind {
+    return try FfiConverterTypeStreamBlockedKind.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeStreamBlockedKind_lower(_ value: StreamBlockedKind) -> RustBuffer {
+    return FfiConverterTypeStreamBlockedKind.lower(value)
+}
+
+
+
+/**
+ * What a frame or a transport event told the host.
+ */
+
+public enum StreamEventKind: Equatable, Hashable {
+    
+    case connected
+    case cursor
+    case notice
+    case route
+    case session
+    case ack
+    case error
+    case resync
+    case bye
+    case violation
+    case down
+    case blocked
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension StreamEventKind: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeStreamEventKind: FfiConverterRustBuffer {
+    typealias SwiftType = StreamEventKind
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> StreamEventKind {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .connected
+        
+        case 2: return .cursor
+        
+        case 3: return .notice
+        
+        case 4: return .route
+        
+        case 5: return .session
+        
+        case 6: return .ack
+        
+        case 7: return .error
+        
+        case 8: return .resync
+        
+        case 9: return .bye
+        
+        case 10: return .violation
+        
+        case 11: return .down
+        
+        case 12: return .blocked
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: StreamEventKind, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .connected:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .cursor:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .notice:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .route:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .session:
+            writeInt(&buf, Int32(5))
+        
+        
+        case .ack:
+            writeInt(&buf, Int32(6))
+        
+        
+        case .error:
+            writeInt(&buf, Int32(7))
+        
+        
+        case .resync:
+            writeInt(&buf, Int32(8))
+        
+        
+        case .bye:
+            writeInt(&buf, Int32(9))
+        
+        
+        case .violation:
+            writeInt(&buf, Int32(10))
+        
+        
+        case .down:
+            writeInt(&buf, Int32(11))
+        
+        
+        case .blocked:
+            writeInt(&buf, Int32(12))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeStreamEventKind_lift(_ buf: RustBuffer) throws -> StreamEventKind {
+    return try FfiConverterTypeStreamEventKind.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeStreamEventKind_lower(_ value: StreamEventKind) -> RustBuffer {
+    return FfiConverterTypeStreamEventKind.lower(value)
+}
+
+
+
+/**
+ * Where a stream stands.
+ */
+
+public enum StreamStatusKind: Equatable, Hashable {
+    
+    case backoff
+    case connecting
+    case live
+    case closing
+    case blocked
+    case throttled
+    case suspended
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension StreamStatusKind: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeStreamStatusKind: FfiConverterRustBuffer {
+    typealias SwiftType = StreamStatusKind
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> StreamStatusKind {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .backoff
+        
+        case 2: return .connecting
+        
+        case 3: return .live
+        
+        case 4: return .closing
+        
+        case 5: return .blocked
+        
+        case 6: return .throttled
+        
+        case 7: return .suspended
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: StreamStatusKind, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .backoff:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .connecting:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .live:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .closing:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .blocked:
+            writeInt(&buf, Int32(5))
+        
+        
+        case .throttled:
+            writeInt(&buf, Int32(6))
+        
+        
+        case .suspended:
+            writeInt(&buf, Int32(7))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeStreamStatusKind_lift(_ buf: RustBuffer) throws -> StreamStatusKind {
+    return try FfiConverterTypeStreamStatusKind.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeStreamStatusKind_lower(_ value: StreamStatusKind) -> RustBuffer {
+    return FfiConverterTypeStreamStatusKind.lower(value)
+}
+
+
+
+/**
+ * What the host does next for a stream.
+ */
+
+public enum StreamStepKind: Equatable, Hashable {
+    
+    case wake
+    case needTicketCall
+    case connect
+    case send
+    case close
+    case waiting
+    case sleep
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension StreamStepKind: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeStreamStepKind: FfiConverterRustBuffer {
+    typealias SwiftType = StreamStepKind
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> StreamStepKind {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .wake
+        
+        case 2: return .needTicketCall
+        
+        case 3: return .connect
+        
+        case 4: return .send
+        
+        case 5: return .close
+        
+        case 6: return .waiting
+        
+        case 7: return .sleep
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: StreamStepKind, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .wake:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .needTicketCall:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .connect:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .send:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .close:
+            writeInt(&buf, Int32(5))
+        
+        
+        case .waiting:
+            writeInt(&buf, Int32(6))
+        
+        
+        case .sleep:
+            writeInt(&buf, Int32(7))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeStreamStepKind_lift(_ buf: RustBuffer) throws -> StreamStepKind {
+    return try FfiConverterTypeStreamStepKind.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeStreamStepKind_lower(_ value: StreamStepKind) -> RustBuffer {
+    return FfiConverterTypeStreamStepKind.lower(value)
 }
 
 
@@ -24058,6 +26678,30 @@ fileprivate struct FfiConverterOptionTypeGrantOptions: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeHttpAnswer: FfiConverterRustBuffer {
+    typealias SwiftType = HttpAnswer?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeHttpAnswer.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeHttpAnswer.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeHttpRequest: FfiConverterRustBuffer {
     typealias SwiftType = HttpRequest?
 
@@ -24338,6 +26982,30 @@ fileprivate struct FfiConverterOptionTypeSignatureCheck: FfiConverterRustBuffer 
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeSignatureCheck.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeStreamBlockedKind: FfiConverterRustBuffer {
+    typealias SwiftType = StreamBlockedKind?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeStreamBlockedKind.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeStreamBlockedKind.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -25543,6 +28211,56 @@ fileprivate struct FfiConverterSequenceTypeSeenActivation: FfiConverterRustBuffe
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeSessionDrop: FfiConverterRustBuffer {
+    typealias SwiftType = [SessionDrop]
+
+    public static func write(_ value: [SessionDrop], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeSessionDrop.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [SessionDrop] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [SessionDrop]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeSessionDrop.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeSessionEffect: FfiConverterRustBuffer {
+    typealias SwiftType = [SessionEffect]
+
+    public static func write(_ value: [SessionEffect], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeSessionEffect.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [SessionEffect] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [SessionEffect]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeSessionEffect.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeSignature: FfiConverterRustBuffer {
     typealias SwiftType = [Signature]
 
@@ -25810,6 +28528,31 @@ fileprivate struct FfiConverterSequenceTypeStore: FfiConverterRustBuffer {
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeStore.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeStreamEvent: FfiConverterRustBuffer {
+    typealias SwiftType = [StreamEvent]
+
+    public static func write(_ value: [StreamEvent], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeStreamEvent.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [StreamEvent] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [StreamEvent]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeStreamEvent.read(from: &buf))
         }
         return seq
     }
@@ -26617,6 +29360,67 @@ public func accountVerifyAtHead(account: String, seq: UInt64, head: String, memb
 })
 }
 /**
+ * The §S7 sample of one `pong` (`rtt = max(0, (now - echo) - hold)`, `offset = t - now +
+ * floor(rtt / 2)`, `error = ceil(rtt / 2)`), as the machine computes it.
+ */
+public func sessionClockSample(now: UInt64, t: UInt64, echo: UInt64, hold: UInt64) -> SessionClockSample  {
+    return try!  FfiConverterTypeSessionClockSample_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_func_session_clock_sample(
+        FfiConverterUInt64.lower(now),
+        FfiConverterUInt64.lower(t),
+        FfiConverterUInt64.lower(echo),
+        FfiConverterUInt64.lower(hold),uniffiCallStatus
+    )
+})
+}
+/**
+ * The default §S1 cell policy as JSON (camelCase, as in the vectors).
+ */
+public func sessionDefaultPolicy()throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_func_session_default_policy(uniffiCallStatus
+    )
+})
+}
+/**
+ * Check a cell policy as `SessionEndpoint` does: its largest frame in bytes, or
+ * `session:policy` with the bound it breaks.
+ */
+public func sessionValidatePolicy(policyJson: String, account: String, namespace: String, cell: String)throws  -> UInt64  {
+    return try  FfiConverterUInt64.lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_func_session_validate_policy(
+        FfiConverterString.lower(policyJson),
+        FfiConverterString.lower(account),
+        FfiConverterString.lower(namespace),
+        FfiConverterString.lower(cell),uniffiCallStatus
+    )
+})
+}
+/**
+ * The documented stream configuration (core `StreamConfig::default`).
+ */
+public func streamDefaultConfig() -> StreamConfig  {
+    return try!  FfiConverterTypeStreamConfig_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_func_stream_default_config(uniffiCallStatus
+    )
+})
+}
+/**
+ * `url` with its `ticket` parameter redacted (core `redact_url`), for logs.
+ */
+public func streamRedactUrl(url: String) -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_func_stream_redact_url(
+        FfiConverterString.lower(url),uniffiCallStatus
+    )
+})
+}
+/**
  * The §2.2 date text of a millisecond time.
  */
 public func accountFormatDate(ms: Int64)throws  -> String  {
@@ -26800,6 +29604,21 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_colophon_ffi_checksum_func_account_verify_at_head() != 18815) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_func_session_clock_sample() != 26025) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_func_session_default_policy() != 41680) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_func_session_validate_policy() != 11646) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_func_stream_default_config() != 35190) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_func_stream_redact_url() != 1125) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_colophon_ffi_checksum_func_account_format_date() != 57652) {
@@ -27495,6 +30314,15 @@ private let initializationResult: InitializationResult = {
     if (uniffi_colophon_ffi_checksum_method_accountengine_version_paths() != 51633) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_colophon_ffi_checksum_method_accountengine_session_account() != 60760) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_accountengine_stream_begin_call() != 37335) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_accountengine_stream_client() != 28099) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_colophon_ffi_checksum_method_accountlivewrite_generation() != 21994) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -27615,6 +30443,150 @@ private let initializationResult: InitializationResult = {
     if (uniffi_colophon_ffi_checksum_method_swiftsource_slots() != 62737) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_colophon_ffi_checksum_method_sessionaccountview_account() != 43531) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_sessionaccountview_entitled() != 47905) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_sessionaccountview_session_of() != 64109) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_sessionaccountview_writers() != 33969) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_sessionendpoint_awaiting_persist() != 13373) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_sessionendpoint_begin_delegation() != 36807) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_sessionendpoint_can_write() != 34390) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_sessionendpoint_claim_json() != 57056) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_sessionendpoint_command() != 1261) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_sessionendpoint_digest() != 52957) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_sessionendpoint_entitled() != 60438) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_sessionendpoint_finish_delegation() != 44694) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_sessionendpoint_gated() != 57079) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_sessionendpoint_holder() != 1203) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_sessionendpoint_is_holder() != 55915) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_sessionendpoint_joined() != 62303) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_sessionendpoint_key_id() != 12540) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_sessionendpoint_last_n() != 11830) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_sessionendpoint_link_down() != 15741) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_sessionendpoint_link_up() != 8467) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_sessionendpoint_me() != 7781) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_sessionendpoint_next_deadline() != 31466) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_sessionendpoint_persisted() != 42392) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_sessionendpoint_queued() != 26579) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_sessionendpoint_receive() != 30423) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_sessionendpoint_set_account() != 52489) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_sessionendpoint_tick() != 56993) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_sessionendpoint_view_json() != 56345) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_homestream_attempts() != 13353) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_homestream_config() != 24214) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_homestream_cursor() != 61037) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_homestream_home() != 47459) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_homestream_next() != 21693) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_homestream_on_closed() != 37267) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_homestream_on_frame() != 44922) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_homestream_on_history() != 16169) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_homestream_on_open() != 27865) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_homestream_on_refused() != 10635) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_homestream_on_ticket() != 40486) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_homestream_polling() != 37929) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_homestream_retry_now() != 25728) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_homestream_session_frame() != 53087) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_homestream_status() != 61882) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_homestream_subscribe() != 62941) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_homestream_ticket_call_failed() != 38479) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_homestream_ticket_request() != 26290) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_homestream_unstable_mints() != 12826) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_homestream_unsubscribe() != 16884) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_colophon_ffi_checksum_method_swiftsuccessorcreation_ceremonies() != 63612) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -27703,6 +30675,12 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_colophon_ffi_checksum_constructor_swiftsource_read() != 11394) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_constructor_sessionendpoint_new() != 41139) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_constructor_homestream_new() != 52146) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_colophon_ffi_checksum_constructor_swiftsuccessorcreation_begin() != 61863) {

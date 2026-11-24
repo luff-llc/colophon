@@ -1,6 +1,6 @@
 import { KeyCustodyError, StorageError } from './errors.js';
 import { ChangeHints, planBatch, RecordPaths, sameBytes, type MediumEntry, type MediumWrite, type RecordMedium } from './medium.js';
-import type { DeviceSecretStore, PrivateStore } from './private.js';
+import type { AtomicPrivateStore, DeviceSecretStore } from './private.js';
 import { SecretBytes } from './secrets.js';
 
 function openDatabase(factory: IDBFactory | undefined, name: string, stores: readonly string[]): Promise<IDBDatabase> {
@@ -161,8 +161,12 @@ export class IndexedDBMedium implements RecordMedium {
   private requireOpen(): void { if (this.closed) throw StorageError.unavailable('the record store is closed'); }
 }
 
-/** The private files of one device in IndexedDB (one object store). */
-export class IndexedDBPrivateStore implements PrivateStore {
+/**
+ * The private files of one device in IndexedDB (one object store). `update` reads, decides and writes in one
+ * `readwrite` transaction, which IndexedDB runs alone against every other transaction on the store, in this tab or
+ * another: a compare-and-set across all of them.
+ */
+export class IndexedDBPrivateStore implements AtomicPrivateStore {
   private db: Promise<IDBDatabase> | undefined;
   constructor(readonly name: string, private readonly factory: IDBFactory | undefined = globalThis.indexedDB) {}
   private open(): Promise<IDBDatabase> { return this.db ??= openDatabase(this.factory, this.name, ['files']); }
@@ -172,6 +176,23 @@ export class IndexedDBPrivateStore implements PrivateStore {
   }
   async write(name: string, bytes: Uint8Array): Promise<void> { await transact(await this.open(), 'files', 'readwrite', s => s.put(bytes.slice(), name)); }
   async remove(name: string): Promise<void> { await transact(await this.open(), 'files', 'readwrite', s => s.delete(name)); }
+  async update(name: string, decide: (current: Uint8Array | undefined) => Uint8Array | undefined): Promise<boolean> {
+    const db = await this.open();
+    return new Promise<boolean>((resolve, reject) => {
+      const tx = db.transaction('files', 'readwrite', { durability: 'strict' });
+      const files = tx.objectStore('files');
+      let wrote = false;
+      const get = files.get(name);
+      get.onsuccess = () => {
+        let next: Uint8Array | undefined;
+        try { next = decide(get.result instanceof Uint8Array ? get.result : undefined); } catch (error) { tx.abort(); reject(error); return; }
+        if (next !== undefined) { files.put(next.slice(), name); wrote = true; }
+      };
+      tx.oncomplete = () => resolve(wrote);
+      tx.onabort = () => reject(tx.error ?? new Error('IndexedDB transaction aborted'));
+      tx.onerror = () => { /* onabort reports it after the rollback */ };
+    });
+  }
   async close(): Promise<void> { if (this.db) { (await this.db).close(); this.db = undefined; } }
 }
 

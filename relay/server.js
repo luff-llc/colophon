@@ -9,7 +9,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { HomeModule, moduleMemoryBytes } from './home.js';
 import { webcrypto } from 'node:crypto';
 import path from 'node:path';
-import { ProvisionTable, TABLE_FILE, clientAddressConfig, provisionConfig } from './provision.js';
+import { ProvisionTable, TABLE_FILE, checkPrivateListen, clientAddressConfig, parsePrivateListen, provisionConfig } from './provision.js';
 import { corsOrigins, newToken, startRelay } from './relay.js';
 import { streamOptions } from './stream.js';
 
@@ -81,6 +81,15 @@ function loadConfig(argv, env) {
   provisionConfig(config.provision);
   clientAddressConfig(config.clientAddress);
   streamOptions(config.stream);
+  // The private listener: provisioning and the operator API, on an address only the operator's
+  // own network reaches (COLOPHON_PRIVATE_LISTEN=host:port, or privateListen in the config file).
+  // A Unix socket (unix:/path) is preferred; a host must be loopback or private unless
+  // COLOPHON_PRIVATE_LISTEN_ALLOW_PUBLIC=1 (or privateListenAllowPublic) allows another.
+  const privateListen = env.COLOPHON_PRIVATE_LISTEN
+    ? parsePrivateListen(env.COLOPHON_PRIVATE_LISTEN, 'COLOPHON_PRIVATE_LISTEN')
+    : config.privateListen;
+  const privateListenAllowPublic = env.COLOPHON_PRIVATE_LISTEN_ALLOW_PUBLIC === '1' || config.privateListenAllowPublic === true;
+  if (privateListen !== undefined) checkPrivateListen(privateListen, privateListenAllowPublic);
   const tracing = Boolean(clockFile) && env.COLOPHON_RELAY_TRACE === '1';
   return {
     cors: { origins: origins ?? [] },
@@ -111,6 +120,8 @@ function loadConfig(argv, env) {
     } : config.resolve,
     host: env.COLOPHON_RELAY_HOST ?? config.host ?? '127.0.0.1',
     port: Number(env.COLOPHON_RELAY_PORT ?? config.port ?? 8787),
+    privateListen,
+    privateListenAllowPublic,
     dataDir: env.COLOPHON_RELAY_DATA ?? config.dataDir ?? './relay-data',
     libraries,
     limits: config.limits ?? {},
@@ -185,7 +196,9 @@ if (process.argv[2] === 'provisioned') {
   }
   const running = await startRelay(config);
   // The first stdout line is machine-readable, so tests and supervisors can use port 0.
-  process.stdout.write(JSON.stringify({ listening: { host: running.host, port: running.port, tls: Boolean(config.tls) } }) + '\n');
+  process.stdout.write(JSON.stringify({ listening: { host: running.host, port: running.port, tls: Boolean(config.tls),
+    ...(running.privatePort !== undefined ? { private: { host: running.privateHost, port: running.privatePort } } : {}),
+    ...(running.privatePath !== undefined ? { private: { path: running.privatePath } } : {}) } }) + '\n');
   // Test builds only (--test-clock): each line `tick` on stdin runs one scheduler pass over every
   // home slot (recording entries, heads) and answers {"ticked":true} on stdout once it is done, so
   // a test publishes heads when it asks instead of waiting for the timer (start the relay with

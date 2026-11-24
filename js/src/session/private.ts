@@ -11,11 +11,27 @@ export interface PrivateStore {
   remove(name: string): Promise<void>;
 }
 
-export class MemoryPrivateStore implements PrivateStore {
+/**
+ * A `PrivateStore` that can also replace one file by compare-and-set, linearizable across every client of the same
+ * underlying storage (other instances, tabs and processes included; `MemoryPrivateStore` and `IndexedDBPrivateStore`): `update` reads the file, hands it to `decide`, and
+ * writes what `decide` returns (nothing when it returns undefined) as one atomic step. `decide` must be synchronous.
+ * Resolves with whether it wrote.
+ */
+export interface AtomicPrivateStore extends PrivateStore {
+  update(name: string, decide: (current: Uint8Array | undefined) => Uint8Array | undefined): Promise<boolean>;
+}
+
+export class MemoryPrivateStore implements AtomicPrivateStore {
   private readonly files = new Map<string, Uint8Array>();
   async read(name: string): Promise<Uint8Array | undefined> { return this.files.get(name)?.slice(); }
   async write(name: string, bytes: Uint8Array): Promise<void> { this.files.set(name, bytes.slice()); }
   async remove(name: string): Promise<void> { this.files.delete(name); }
+  async update(name: string, decide: (current: Uint8Array | undefined) => Uint8Array | undefined): Promise<boolean> {
+    const next = decide(this.files.get(name)?.slice());
+    if (next === undefined) return false;
+    this.files.set(name, next.slice());
+    return true;
+  }
 }
 
 /**

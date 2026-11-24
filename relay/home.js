@@ -50,6 +50,16 @@ const ROUTE_BODY_BYTES = 4096;
 const HISTORY_DIRS = new Set(['authority', 'predecessor', 'transitions', 'vetoes', 'receipts']);
 const NOTICE_COMMIT = 'notice-commit.json';
 
+/** The slot's suspension (operator behaviour, not protocol): while this file is in the slot's
+ * directory the slot's data is read-only, every data write answering 403
+ * `refused:subscriptionLapsed` (the authority history is still taken). Its
+ * presence is the state; its body (`{"suspended":true,"at":<ms>}`) only says since when. Written
+ * like every durable file of a slot (staged, fsynced, renamed, the directory fsynced), removed on
+ * resume, and gone with the slot's directory only when the slot itself is released. */
+export const SUSPENSION_FILE = 'suspended.json';
+/** The answer to a write while the slot is suspended. */
+export const LAPSED = 'refused:subscriptionLapsed';
+
 // Forwarding (§13.1), per peer: each request's own time limit, a pass's wall-time budget, how many
 // newly listed objects and how many backlog objects one pass offers, and how soon the same
 // entries are offered again while the peer's head lags. PASS_MS bounds all network request
@@ -76,6 +86,43 @@ export function moduleMemoryBytes(value) {
   }
   return Number(text) * 1024 * 1024;
 }
+
+/** A peer's answer was over its bound: the read was cancelled. */
+export class PeerAnswerTooLarge extends Error {
+  constructor(max) { super(`the answer is over ${max} bytes`); this.max = max; }
+}
+
+/**
+ * The body of a peer's answer, read as a stream and bounded in decoded bytes (what fetch hands
+ * over after any content coding): over `max`, the read is cancelled and PeerAnswerTooLarge is
+ * thrown, so a peer cannot make this home hold more than `max` bytes for one answer. A declared
+ * `Content-Length` over `max` is refused before anything is read.
+ */
+export async function readCapped(response, max) {
+  const declared = Number(response.headers?.get?.('content-length'));
+  if (Number.isFinite(declared) && declared > max) {
+    await response.body?.cancel().catch(() => {});
+    throw new PeerAnswerTooLarge(max);
+  }
+  if (!response.body) return Buffer.alloc(0);
+  const reader = response.body.getReader();
+  const chunks = []; let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > max) { await reader.cancel().catch(() => {}); throw new PeerAnswerTooLarge(max); }
+    chunks.push(Buffer.from(value.buffer, value.byteOffset, value.byteLength));
+  }
+  return Buffer.concat(chunks, size);
+}
+
+/** At most this much of a refusal's text is read, for a note. */
+const NOTE_BYTES = 4096;
+const noteText = async (r) => {
+  try { return (await readCapped(r, NOTE_BYTES)).toString('utf8').slice(0, 200); }
+  catch (error) { return error instanceof PeerAnswerTooLarge ? '(an answer over its bound)' : `(unreadable: ${error.message})`; }
+};
 
 /** A loaded home module. The module is pure: an instance that traps is dropped and replaced. */
 export class HomeModule {
@@ -230,6 +277,7 @@ export class HomeSlot {
     this.commits = 0; // committed state changes, for long polls judged before one
     this.lastHead = null;
     this.stream = new HomeStream(this, o.stream ?? {});
+    this.suspended = false; // read-only (SUSPENSION_FILE); read at open
     // Aborted at shutdown: a forwarding pass's waits on other homes end at once.
     this.stopping = new AbortController();
   }
@@ -276,6 +324,10 @@ export class HomeSlot {
     this.noticeCommit = await this.readOptionalJson(NOTICE_COMMIT);
     await this.flushNotices();
     this.noticeSeq = await this.lastNoticeSeq();
+    // Any entry of that name is a suspension: a damaged one never reopens the slot to writes.
+    const suspension = await fsp.lstat(this.file(SUSPENSION_FILE)).catch((error) => { if (error.code === 'ENOENT') return null; throw error; });
+    if (suspension && !suspension.isFile()) throw new Error(`Home slot ${this.slot.name}: ${this.file(SUSPENSION_FILE)} is not a regular file`);
+    this.suspended = Boolean(suspension);
     // Reconcile storage with the state before serving: a crash between a commit and its files
     // (a missing entry, a head file older than the committed head) heals here, not later.
     await this.materialize(files);
@@ -659,6 +711,93 @@ export class HomeSlot {
   status(now = this.clock()) { return this.wasm.call({ op: 'status', state: this.state, now }); }
 
   // -------------------------------------------------------------------------------------------
+  // Suspension (operator behaviour): the slot's data is read-only. Every data write is refused
+  // under the slot's lock, where every write commits, after its call (if it needs one) is
+  // judged: a record, live value or blob chunk put, a predecessor put, a forwarded head, and a
+  // delete. A suspension is itself taken under that lock, so a write admitted before it ends
+  // before it is answered, and none commits after it. The account's authority history is never
+  // held back: history uploads (POST authority) and pending objects (POST pending: transitions,
+  // vetoes, receipts) are taken as always, so the account can still appoint another home or
+  // revoke this one, and this home keeps receipting. Reads (GET and HEAD: the slot, its head,
+  // history and pending objects, records and blob chunks, the change feed and its long poll) and
+  // the home's own upkeep (recording due entries, signing heads, forwarding) go on. Nothing is
+  // deleted.
+
+  /** A history write (an upload, pending objects, a forwarded head, a predecessor entry) of
+   * `added` bytes, refused before the module is asked when the slot's history would pass
+   * `historyBytes`: 507 `refused:historyQuota`. Checked before anything commits, so the state and
+   * its files never part; what the home itself appends (entries, receipts, heads) is never
+   * refused. Real histories are far below the default. */
+  refuseIfHistoryFull(added) {
+    const max = this.limits?.historyBytes ?? 0;
+    if (!(max > 0)) return;
+    const used = this.slot.bytes - (this.slot.dataBytes ?? 0);
+    if (used + added > max) throw new this.deps.HttpError(507, 'Library history quota exceeded', {}, { result: 'refused:historyQuota' });
+  }
+
+  /** Under the slot's lock. While the suspension's state on disk is uncertain (a write of it
+   * failed part way), data writes stay refused: the state is reconciled first, and a write is
+   * answered 503 `unavailable` if that fails too. */
+  async refuseIfSuspended() {
+    const { HttpError } = this.deps;
+    if (this.suspensionUncertain) {
+      try { await this.reconcileSuspensionLocked(); } catch (error) {
+        this.note('suspension', `the suspension's state could not be read: ${error.message}`);
+        throw new HttpError(503, 'The library is unavailable', { 'retry-after': '1' }, { result: 'unavailable' });
+      }
+    }
+    if (this.suspended) throw new HttpError(403, 'This library is read-only', {}, { result: LAPSED });
+  }
+
+  /** Read the marker's presence from disk and make the directory durable, so what is on disk now
+   * is what a restart reads; only then is the state certain again. Under the slot's lock. */
+  async reconcileSuspensionLocked() {
+    const st = await fsp.lstat(this.file(SUSPENSION_FILE)).catch((error) => { if (error.code === 'ENOENT') return null; throw error; });
+    if (st && !st.isFile()) throw new Error(`${this.file(SUSPENSION_FILE)} is not a regular file`);
+    await syncDir(this.slot.root);
+    this.suspended = Boolean(st);
+    this.suspensionUncertain = false;
+  }
+
+  /** Whether the marker is on disk now, whatever memory says (a release consults it). */
+  async suspensionOnDisk() {
+    const st = await fsp.lstat(this.file(SUSPENSION_FILE)).catch((error) => { if (error.code === 'ENOENT') return null; throw error; });
+    return Boolean(st);
+  }
+
+  /** The operator's read of the state: reconciled first when it is uncertain. */
+  async reconcileSuspension() {
+    if (!this.suspensionUncertain) return;
+    await this.lock(() => this.reconcileSuspensionLocked());
+  }
+
+  /**
+   * Suspend (`on`) or resume the slot, durably before it is answered, under the slot's lock. The
+   * marker is staged, fsynced and renamed into place (or removed), and the directory fsynced. If
+   * any step fails the state is uncertain: data writes stay refused until it is reconciled, and the
+   * request fails (a retry redoes every step, whatever the state in memory says, so a 204 always
+   * means the intended state is durable).
+   */
+  async setSuspended(on) {
+    await this.lock(async () => {
+      if (on === this.suspended && !this.suspensionUncertain) return;
+      this.suspensionUncertain = true;
+      if (on) {
+        const staged = path.join(this.slot.root, 'tmp', `${SUSPENSION_FILE}.${randomBytes(12).toString('hex')}`);
+        const handle = await fsp.open(staged, fsc.O_WRONLY | fsc.O_CREAT | fsc.O_EXCL | fsc.O_NOFOLLOW, 0o600);
+        try { await writeAll(handle, JSON.stringify({ suspended: true, at: this.clock() })); await handle.sync(); } finally { await handle.close(); }
+        try { await fsp.rename(staged, this.file(SUSPENSION_FILE)); } catch (error) { await fsp.rm(staged, { force: true }); throw error; }
+      } else {
+        await fsp.rm(this.file(SUSPENSION_FILE), { force: true });
+      }
+      await this.deps.reach?.(on ? 'suspension renamed' : 'suspension removed'); // a test hook (traced builds only)
+      await syncDir(this.slot.root);
+      this.suspended = on;
+      this.suspensionUncertain = false;
+    });
+  }
+
+  // -------------------------------------------------------------------------------------------
   // The replay table (§12.4). The module decides; this keeps the rows durable: an append-only
   // log, a reservation line (fsynced) before any effect, a completion line after it, and
   // recovery at start-up from the effect's own record.
@@ -928,6 +1067,9 @@ export class HomeSlot {
     const effect = writing ? { path: rest, prior: this.slot.current.get(rest)?.sha256 ?? null } : null;
     const allowed = await this.access(req, section ?? '', rest ?? null, effect, null);
     await this.deps.reach?.(`access ${section ?? ''}`); // a test hook (traced builds only)
+    // A write the relay's own code would serve (a delete) is refused here; the others are
+    // refused under the lock where they commit.
+    if (method !== 'GET' && method !== 'HEAD' && section === 'records' && !writing) await this.lock(() => this.refuseIfSuspended());
     if (!section) return false;
     if (section === 'head') { await this.serveOwnHead(res); return true; }
     if (section === 'authority') {
@@ -1025,9 +1167,15 @@ export class HomeSlot {
       const allowed = await this.access(req, section, rest, effect, body, colophonCall(req), digest);
       await this.deps.reach?.(`access ${section}`); // a test hook (traced builds only)
       const key = allowed.reserve?.key;
+      if (this.suspended || this.suspensionUncertain) {
+        // Judged first, so the caller's own call is what is refused (a request with no call is
+        // challenged, as always); the reservation ends with no effect, and the call is spent.
+        try { await this.refuseIfSuspended(); } catch (error) { if (key) await this.complete(key, 'completed'); throw error; }
+      }
       let ended = false;
       try {
         if (section === 'predecessor') {
+          this.refuseIfHistoryFull(body.length);
           const r = this.wasm.call({ op: 'put_predecessor', state: this.state, now: this.clock(), path: rest, bytes: b64(body) });
           await this.commit(r.state);
           await this.materialize(r.store);
@@ -1101,6 +1249,8 @@ export class HomeSlot {
     const { readBody } = this.deps;
     const body = await readBody(req, 8192);
     await this.lock(async () => {
+      await this.refuseIfSuspended();
+      this.refuseIfHistoryFull(body.length);
       const r = this.wasm.call({ op: 'admit_one', state: this.state, now: this.clock(), bytes: b64(body), path: recordPath });
       await this.commit(r.state);
       await this.materialize(r.store);
@@ -1137,6 +1287,7 @@ export class HomeSlot {
 
   async postAuthority(res, body) {
     const { send } = this.deps;
+    this.refuseIfHistoryFull(body.length);
     const r = this.wasm.call({ op: 'post_authority', state: this.state, now: this.clock(), body: b64(body) });
     await this.commit(r.state, r.notify); // even a refusal changes state (§13.1)
     await this.deps.reach?.('authority committed'); // a test hook (traced builds only)
@@ -1153,6 +1304,7 @@ export class HomeSlot {
 
   async postPending(res, body) {
     const { send } = this.deps;
+    this.refuseIfHistoryFull(body.length);
     const r = this.wasm.call({ op: 'post_pending', state: this.state, now: this.clock(), body: b64(body) });
     await this.commit(r.state, r.notify);
     await this.materialize(r.store);
@@ -1204,9 +1356,25 @@ export class HomeSlot {
     if (this.stopping?.signal.aborted) return;
     const resolve = typeof this.resolve === 'function' ? this.resolve() : this.resolve;
     this.passes ??= new Map();
-    for (const peer of st.peers ?? []) {
+    // Bounded: at most `forwardPeersPerSlot` passes run for this slot, and `forwardPasses` for the
+    // whole home (`deps.forwarding`, shared by every slot). A peer left out gets its pass at a
+    // later tick, when one has ended.
+    const budget = this.deps?.forwarding ?? (this.ownForwarding ??= { running: 0, max: Infinity });
+    const perSlot = this.limits?.forwardPeersPerSlot ?? Infinity;
+    // Round robin: each start begins after the last peer the previous one started, so peers early
+    // in the list cannot take every pass while the bounds are full.
+    const peers = st.peers ?? [];
+    const first = peers.length ? (this.forwardCursor ?? 0) % peers.length : 0;
+    let lastStarted = -1;
+    for (let i = 0; i < peers.length; i += 1) {
+      const at = (first + i) % peers.length;
+      const peer = peers[at];
       const endpoint = (peer.endpoints ?? [])[0];
       if (!endpoint || this.passes.has(peer.id)) continue; // its last pass is still running
+      if (this.passes.size >= perSlot || budget.running >= budget.max) {
+        this.note('forward budget', `forwarding passes are at their bound (${this.passes.size} here, ${budget.running} in all); the rest wait for a later tick`);
+        break;
+      }
       // The last pass to this peer found nothing to send (no new or backlogged object, no entry,
       // its head already taken) and the state has not changed since, nor can anything come
       // due before the quiet ends: another pass would send nothing and save the same rows.
@@ -1217,12 +1385,15 @@ export class HomeSlot {
       const base = (resolve?.[endpoint.replace(/\/$/, '')] ?? endpoint).replace(/\/$/, '');
       const row = (this.forward.peers[peer.id] ??= { after: 0, retry: [], head: '' });
       row.retry ??= [];
+      budget.running += 1;
+      lastStarted = at;
       const pass = this.forwardTo(base, row, peer.id)
         .then(() => this.note(`forward ${peer.id}`, ''))
         .catch((error) => this.note(`forward ${peer.id}`, `forwarding to home ${peer.id} failed (it will be retried): ${error.message}`))
-        .finally(() => this.passes.delete(peer.id));
+        .finally(() => { this.passes.delete(peer.id); budget.running -= 1; });
       this.passes.set(peer.id, pass);
     }
+    if (lastStarted >= 0) this.forwardCursor = lastStarted + 1;
   }
 
   /** A request to another home: its own time limit, or shutdown, whichever comes first. */
@@ -1271,7 +1442,9 @@ export class HomeSlot {
     const timeout = Math.min(PEER_TIMEOUT_MS, deadline - Date.now());
     if (timeout <= 0) return false;
     const r = await fetch(`${base}/pending`, { signal: this.peerSignal(timeout), method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ objects }) });
-    const body = Buffer.from(await r.arrayBuffer());
+    // Bounded: a peer's answer (its receipts) is read up to `peerAnswerBytes`, and an answer over
+    // it counts as not delivered (offered again later), never held whole.
+    const body = await readCapped(r, this.limits?.peerAnswerBytes ?? 1024 * 1024);
     const a = this.wasm.call({ op: 'peer_answer', status: r.status, body: b64(body) });
     if (a.receipts?.length) {
       await this.lock(async () => {
@@ -1379,7 +1552,9 @@ export class HomeSlot {
       const timeout = Math.min(PEER_TIMEOUT_MS, deadline - Date.now());
       if (timeout <= 0) return 0;
       const r = await fetch(`${base}/authority`, { signal: this.peerSignal(timeout), method: 'POST', headers: { 'content-type': 'application/json' }, body });
-      this.note(`entries ${peerId}`, r.status === 200 ? '' : `home ${peerId} did not take this home's entries from ${fwd.from}: ${r.status} ${(await r.text()).slice(0, 200)}`);
+      const said = r.status === 200 ? '' : await noteText(r);
+      if (r.status === 200) await r.body?.cancel().catch(() => {});
+      this.note(`entries ${peerId}`, r.status === 200 ? '' : `home ${peerId} did not take this home's entries from ${fwd.from}: ${r.status} ${said}`);
       return r.status;
     };
     const putHead = async () => {
@@ -1391,8 +1566,8 @@ export class HomeSlot {
       const timeout = Math.min(PEER_TIMEOUT_MS, deadline - Date.now());
       if (timeout <= 0) return;
       const r = await fetch(`${base}/records/heads/${this.key.memberId}.json`, { signal: this.peerSignal(timeout), method: 'PUT', headers: { 'content-type': 'application/json' }, body: text });
-      if (r.status === 200) { row.head = sha(text); await this.saveForward(); this.note(`head ${peerId}`, ''); }
-      else this.note(`head ${peerId}`, `home ${peerId} refused this home's head: ${r.status} ${(await r.text()).slice(0, 200)}`);
+      if (r.status === 200) { await r.body?.cancel().catch(() => {}); row.head = sha(text); await this.saveForward(); this.note(`head ${peerId}`, ''); }
+      else this.note(`head ${peerId}`, `home ${peerId} refused this home's head: ${r.status} ${await noteText(r)}`);
     };
     // Nothing to send at all: no entry the peer lacks, and the peer took this very head.
     if (!fwd.entries.length && head && sha(JSON.stringify(head)) === row.head) return false;

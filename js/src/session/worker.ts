@@ -8,7 +8,7 @@ import type {
   PrfRequest, RemovalFollowUp, Report, RequestInfo, SealedSeed, SigningStep, SlotInfo, Standing, Status, Store, UnlockInput, Written, NamespaceRevision,
 } from './records.js';
 import { closeAll, withEntropy } from './secrets.js';
-import { homeRefusal, HomeLimits, type HomeAnswer, type HomeIssue, type HomeProblem, type HomeRequest } from './transport.js';
+import { homeRefusal, HomeLimits, type HomeAnswer, type HomeIssue, type HomeProblem, type HomeRequest, type HomeTransport } from './transport.js';
 import {
   ConfiguredHome, emptyNotices, noDuties, noticesFrom, phaseUsable, samePhase, SessionRefusal,
   type AccessRequest, type ApprovalStart, type DeadTransition, type DomainCommand, type HomeFault, type HostDuties, type RemovalCard, type RouteState,
@@ -318,23 +318,11 @@ export class SessionWorker {
       return this.snapshot({ kind: 'waitingForApproval' }, { members, requests, homes });
     } else if (standing.kind === glue.StandingKind.Controller) {
       phase = { kind: 'failed', failure: { kind: 'other', detail: 'this identity is a controller, not a member' } };
-    } else if (standing.member?.revokedAt !== undefined) {
-      phase = { kind: 'denied' };
     } else {
-      // Denied only when this member lost access it was granted, never for a library namespace it was never granted
-      // (`libraryNamespaces` wider than its grant, or an approval that narrowed its request): `notGranted` on a namespace
-      // its verified grant does not name, while it is not provisional, is skipped (neither denied nor published).
-      phase = { kind: 'ready' };
-      const granted = standing.member?.grant?.namespaces ?? [];
-      const provisional = standing.member?.provisional ?? false;
-      for (const namespace of this.libraryNamespaces) {
-        const denial = plain<AccountDenial | undefined>(engine.run(e => e.access(namespace)));
-        if (!denial) { readable.push(namespace); continue; }
-        if (denial.reason === glue.AccountDenialReason.NotGranted && !provisional && !granted.includes(namespace)) continue;
-        phase = denial.reason === glue.AccountDenialReason.NotReadable || denial.reason === glue.AccountDenialReason.Unavailable
-          ? { kind: 'unavailable', reason: denial.detail } : { kind: 'denied' };
-        break;
-      }
+      const readiness = memberReadiness(standing.member, BigInt(this.nowMs), this.libraryNamespaces,
+        namespace => plain<AccountDenial | undefined>(engine.run(e => e.access(namespace))));
+      phase = readiness.phase;
+      readable.push(...readiness.readable);
     }
     const ready = phase.kind === 'ready';
     const revisions: Record<string, bigint> = {};
@@ -1237,6 +1225,31 @@ export class SessionWorker {
     });
   }
 
+  /**
+   * The `colophon.home.stream` call that mints a stream ticket at `home` (0.6 stream §1.1), signed by this device's
+   * member key and judged by the core with the home's own rule, as the envelope's bytes (`HomeStream.ticket_request`
+   * takes them). Before the first pass with the home the core refuses it (`Unavailable`: no fresh head).
+   */
+  streamCall(home: string, signal?: AbortSignal): Promise<Uint8Array> {
+    return this.gated(async () => {
+      if (!this.engine) await this.reconcile(signal);
+      const engine = this.engine; const custody = this.memberCustody; const id = this.memberId;
+      if (!engine || !custody || id === undefined) throw new SessionError('notReady');
+      const signing = (await custody.provider(id).publicKeys()).signing;
+      plain(engine.run(e => e.advance(BigInt(this.nowMs))));
+      const written = await engine.execute(custody, e => withEntropy(32, entropy => e.stream_begin_call(home, signing, entropy)), undefined, this.waiting(signal));
+      if (!written.artifact) throw makeFault('Internal', 'internal', 'a call returned no envelope');
+      return written.artifact;
+    });
+  }
+  /** The configured transport of the home `home` (matched by its endpoints), if any. */
+  transportOf(home: string): HomeTransport | undefined {
+    const engine = this.engine;
+    if (!engine) return undefined;
+    const found = plain<Home[]>(engine.run(e => e.exchange_homes())).find(h => h.id === home);
+    return found ? this.transportFor(found)?.transport : undefined;
+  }
+
   /** Records transitions that came due (§8.7). A schedule calls it; refresh calls it too. */
   recordDue(): Promise<SessionSnapshot> {
     return this.gated(async () => {
@@ -1437,4 +1450,28 @@ function withExclusiveLock<T>(name: string, body: () => Promise<T>): Promise<T> 
   processLocks.set(name, settled);
   void settled.then(() => { if (processLocks.get(name) === settled) processLocks.delete(name); });
   return run;
+}
+
+/**
+ * A member's readiness, judged as the core judges a member current (spec §10.1): a member that is missing, revoked,
+ * provisional or past its expiry (inclusive: denied only once `nowMs > expiresMs`) is `denied` before any namespace is
+ * asked about, so a service or identity-only grant, or one with no namespace in `namespaces`, cannot come out `ready`.
+ * Then each library namespace: a `notGranted` one its verified grant does not name is skipped (a wider library, or an
+ * approval that narrowed the request, is not a loss of access); a missing epoch key is `unavailable`; any other
+ * reason, including one this SDK does not know, is `denied`.
+ */
+export function memberReadiness(member: AccountMember | undefined, nowMs: bigint, namespaces: readonly string[],
+  access: (namespace: string) => AccountDenial | undefined): { phase: SessionPhase; readable: string[] } {
+  if (!member || member.revokedAt !== undefined || member.provisional || (member.expiresMs !== undefined && nowMs > member.expiresMs))
+    return { phase: { kind: 'denied' }, readable: [] };
+  const granted = member.grant?.namespaces ?? [];
+  const readable: string[] = [];
+  for (const namespace of namespaces) {
+    const denial = access(namespace);
+    if (!denial) { readable.push(namespace); continue; }
+    if (denial.reason === glue.AccountDenialReason.NotGranted && !granted.includes(namespace)) continue;
+    const unavailable = denial.reason === glue.AccountDenialReason.NotReadable || denial.reason === glue.AccountDenialReason.Unavailable;
+    return { phase: unavailable ? { kind: 'unavailable', reason: denial.detail } : { kind: 'denied' }, readable: [] };
+  }
+  return { phase: { kind: 'ready' }, readable };
 }

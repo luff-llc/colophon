@@ -134,9 +134,13 @@ home holds no account secret: no controller or member key, no PRF output, no see
 | Scheduler tick | `COLOPHON_RELAY_TICK_MS` or `tickMs` | `2000` |
 | Other homes | config `resolve`: `{"https://other.example/v1/libraries/acct": "http://10.0.0.7:8787/v1/libraries/acct"}` (the endpoint an account names, to the URL to reach it) | the endpoint itself |
 | Request rate | `limits.requestsPerMinute` (per address) | `1200` |
+| Slot quota | `limits.slotBytes` (`COLOPHON_SLOT_BYTES` in the container): the most bytes of data one slot may hold. At a home slot only data counts (records under `ops/` and `history/`, live values under `state/`, blob chunks), and a data write over it answers 507 `{"result":"refused:overQuota"}`; the account's history, and everything the module stores, is never refused, and reads never are. A hosted home should set it | `0`: none |
+| History quota | `limits.historyBytes` (`COLOPHON_SLOT_HISTORY_BYTES`): the most bytes of a home slot's history and the module's other files (authority entries, transitions, vetoes, receipts, heads, predecessor entries). A history upload, pending objects, a forwarded head or a predecessor entry that would pass it answers 507 `{"result":"refused:historyQuota"}`, checked before anything commits; what the home appends itself, and every read, is never refused. Real account histories are far smaller: the default is a ceiling against abuse, not a plan limit | `67108864` (64 MiB); `0`: none |
+| Forwarding bounds | `limits.peerAnswerBytes` (the most decoded bytes read of one peer's answer; a longer answer is cancelled and the object offered again later), `limits.forwardPeersPerSlot` and `limits.forwardPasses` (forwarding passes running at once for one slot, and for the whole home; a peer left out gets its pass at a later tick, peers take turns within a slot and each pass of the scheduler starts from the next slot, so early ones cannot take every pass) | `1048576`, `8`, `64` |
 | TLS | `COLOPHON_RELAY_TLS_CERT`, `COLOPHON_RELAY_TLS_KEY`, or `"tls":{…}` | off |
 | CORS origins | `COLOPHON_RELAY_CORS_ORIGINS="https://app.example,…"` or `cors.origins`: each exactly `scheme://host[:port]`, lower case, compared whole; `*`, `null`, a path or a default port refuse start-up | none: no CORS header |
 | Provisioning | config `provision` (below) | off |
+| Private listener | `COLOPHON_PRIVATE_LISTEN=unix:/path/to.sock` (preferred) or `host:port`, or config `privateListen: {"path"}` / `{"host","port"}`: serves `/v1/provision` and `/v1/operator/*` only, and the public listener answers 404 for them (below) | none: the public listener serves both |
 | Client address | config `clientAddress`: `{"header": "CF-Connecting-IP", "trustedPeers": ["127.0.0.1", "::1", "172.16.0.0/12"]}` (addresses or CIDR ranges; a `/0` or a range with host bits set refuses start-up) | the socket address |
 
 **Provisioning.** A home slot serves one account, by its account ID, from before anything is
@@ -174,17 +178,31 @@ have a slot that matches `slotPattern`, `base === prefix + slot`, and a member r
 module finds well formed, signed by this home's key, and naming the row's account and endpoint.
 A bad table refuses start-up with a message naming the row.
 
-**Release, and a lapsed entitlement.** Only a slot that was never appointed and holds no genesis
-is ever released (`unclaimedHours`). The release takes the slot out of service first (new requests
-answer `refused:notProvisioned`, a waiting change feed is woken and ended, a provision of the name
-waits), drains every request and scheduler pass still running on it, and checks again that nothing
-is held; only then are its directory and its row removed, and only then can the name be
-provisioned again. If an upload landed meanwhile, the release is abandoned and the slot stays. An
+**Release, and a lapsed entitlement.** Only a slot that was never appointed, holds no genesis and
+is not suspended is ever released (`unclaimedHours`); a slot counts as suspended when its marker is
+on disk or its suspension's state is uncertain, whatever the state in memory says. A provision
+that passes the door's first checks (for gate `"token"`, the address's share and the token itself;
+for gate `"grant"`, the module's judgement of the call, membership included, over the operator
+slot's state as it stands) sweeps such slots before
+it is decided; a request those checks refuse starts nothing. A full home (`maxSlots`) with releases
+under way waits for them, outside the lock, before it answers 507. The release takes the slot out of service
+first, under the door's lock (new requests answer `refused:notProvisioned`, a waiting change feed is
+woken and ended, a provision of the name and an operator call on it wait for the release to end),
+then drains every request and scheduler pass still running on it outside that lock, so a slow
+request on one slot never holds up the door or the operator API for others. Back under the lock it
+checks that the row and the slot are still the ones it started from, and again under the slot's own
+lock that nothing is held; only then is its directory renamed aside (`<dataDir>/.released-<slot>.*`,
+removed after the lock is released, or at the next start-up after a crash) and its row removed, and
+only then can the name be provisioned again. If an upload landed meanwhile, the release is abandoned and the slot
+stays. An
 appointed home keeps witnessing and receipting the account's authority history until its
 revocation is final, whatever the grant's expiry or the state of a subscription: when an
 entitlement lapses, the gate may stop new slots and the home may stop serving records, but it keeps
 signing heads and receipting authority changes until the account revokes it, or it would block that
 account's key changes. (Entitlements are not built in 0.5; gate `"token"` is the smallest one.)
+A suspension through the operator API (below) keeps to this: it stops data writes only, and the
+home goes on taking and receipting the account's authority changes, so a lapsed account can always
+appoint another home and revoke this one.
 The same holds for a grant: revoking a member that provisioned slots, or its expiry, stops its new
 slots and leaves its slots alone. An appointed one keeps being witnessed; one never appointed is
 released after `unclaimedHours`, as any other.
@@ -194,11 +212,13 @@ released after `unclaimedHours`, as any other.
 | `enabled` | `false` | The door answers 404 when off, and every other answer is as without the setting |
 | `prefix` | none, required when on (and while a table file exists) | The public `https://` URL prefix, ending in `/`: `base` must equal `prefix + slot`. Plain `http://` only to a loopback host, for tests; anything else refuses start-up |
 | `maxSlots` | `200` | Provisioned slots this home holds |
-| `perAddressPerHour` | `10` | New slots (open path), refused tokens and requests no listed path takes, one client address may spend in an hour; separately, the grant requests from one address that may be refused in an hour (see below) |
+| `perAddressPerHour` | `10` | New slots (open and token paths), refused tokens and requests no listed path takes, one client address may spend in an hour; separately, the grant requests from one address that may be refused in an hour (see below). The same slot provisioned again for the same account spends none and is never refused by it. Behind a private listener every request shares one address (a Unix socket's is empty): set it to the new slots the provisioner may make in an hour |
 | `unclaimedHours` | `24` | A provisioned slot holding no genesis this long after it was made is released (its directory, then its row, removed) at the next provision or start-up, on the relay's clock |
 | `slotPattern` | `^[a-z0-9][a-z0-9._-]{7,63}$` | Names an app may pick, besides the slot grammar |
 | `gate` | `"open"` | Who may provision: `"open"` (anyone within the bounds), `"token"` (`Authorization: Bearer <token>` whose SHA-256 is `tokenSha256`; `bun relay/server.js token` prints one), `"grant"` (a call by a member of the operator account, below), or a list of them, such as `["grant", "open"]`. No value twice, and not `"open"` with `"token"` (open admits everything token would). Anything else refuses start-up |
 | `tokenSha256` | none | 64 hex; required with gate `"token"`, compared in constant time |
+| `operatorPerMinute` | `600` | Gate `"token"` only: authenticated operator API requests (below) the whole home takes in a minute; one share, held in no per-address table |
+| `operatorRefusedPerMinute` | `10` | Gate `"token"` only: operator API requests with a missing or wrong token one client address may make in a minute |
 | `operator` | none, required with `"grant"` | `{"account": "<64-hex ID>", "slot": "<slot>"}`: the operator account, and this home's own slot for it (configured or provisioned) |
 | `audience` | none, required with `"grant"` | The door's canonical audience (§10.1), its own: for example `https://home.example/v1/provision`. Not a slot's base, nor `prefix + slot`; one per deployment, so staging's grants do not reach production |
 | `grantMaxSlots` | `20` | Slots one grant may hold (made by it, claimed or not; a released slot frees its place) |
@@ -218,7 +238,7 @@ released after `unclaimedHours`, as any other.
 | 409 | The slot is held by another account, configured by the operator, or a directory of that name is in the data directory; or another home slot already serves the account at that base (checked before the call is reserved or anything is written) |
 | 411, 413 | No `Content-Length`, or a body over 4 KiB |
 | 415 | The media type is not `application/json` (checked before the body is read; a browser must preflight such a request, and only a listed origin's preflight succeeds) |
-| 429 `{"result":"refused:overQuota"}` | The address is over `perAddressPerHour`, with `Retry-After` (checked first: a guesser over its share learns nothing about its token); for a grant request, the address is over its attempts or its refusals, the replay table is full, or the grant is over `grantPerHour`, each with `Retry-After` |
+| 429 `{"result":"refused:overQuota"}` | A new slot, or a refused token, while the address is over `perAddressPerHour`, with `Retry-After` (a repeat provision of an existing slot is never refused so); for a grant request, the address is over its attempts or its refusals, the replay table is full, or the grant is over `grantPerHour`, each with `Retry-After` |
 | 429 `{"result":"refused:window"}` | A grant over its share of the replay table, with `Retry-After` |
 | 503 `{"result":"unavailable"}` | A grant request while the operator slot is not set up (not held, no genesis, not appointed, stopped), or its account's heads cannot be judged here |
 | 507 `{"result":"refused:overQuota"}` | `maxSlots` are held, or the grant holds `grantMaxSlots` |
@@ -230,6 +250,80 @@ not produced. With provisioning on, a request to a slot this home does not hold 
 So the answers tell the kinds of slot apart: an unknown name is 404, a configured token slot asked
 without its token is 401, and a home slot answers `GET {base}` with 200. That is intended: slot
 names are not secrets, and access is by call (or, at a 0.3 slot, by token), never by knowing a name.
+
+**The private listener.** `COLOPHON_PRIVATE_LISTEN` (or `privateListen` in the config file)
+starts a second, plain HTTP listener that serves the door (`/v1/provision`) and the operator API
+(`/v1/operator/*`), and `/healthz`, and nothing else. The public listener then answers 404 for both,
+as for any unknown path, before any check or body read. A hosted home runs gate `"token"` with
+the private listener (and, in the container, `COLOPHON_HOSTED=1`): the door and the operator API
+are then reached only from the operator's own side. The
+token crosses it in plain text, so:
+
+- Prefer a Unix domain socket: `unix:/run/colophon/private.sock` (`{"path": …}`). It is made mode
+  0600 for the relay's user; a socket left by an earlier run is replaced, and anything else at that
+  path refuses start-up. Nothing on any network carries the token.
+- Otherwise `host:port` on a loopback or private address (127.0.0.0/8, ::1, 10/8, 172.16/12,
+  192.168/16, fc00::/7, link-local): loopback, or a container-internal network the provisioner
+  alone shares. A wildcard (`0.0.0.0`, `::`) or a public address refuses start-up unless
+  `COLOPHON_PRIVATE_LISTEN_ALLOW_PUBLIC=1` (`privateListenAllowPublic: true`) allows it.
+
+**The operator API, and read-only slots.** With gate `"token"`, the same token also lets the
+operator's own tools (a billing service beside the home, say) make a home slot's data read-only and
+writable again. Without gate `"token"` these paths do not exist: every one answers 404 as an unknown
+path does.
+
+| Request (`Authorization: Bearer <token>`) | Answer |
+| --- | --- |
+| `GET /v1/operator/slots?after=<slot>&limit=<n>` | 200 `{"slots":[{"slot","provisioned","suspended","generation"}…],"next"}`: every home slot, configured or provisioned, in name order, `limit` (1-1000, default 100) at a time after the cursor `after`; `next` is the cursor for the next page, or null at the end. A slot whose release is under way is left out. For a billing cutover: list, then suspend or resume each by its generation |
+| `GET /v1/operator/slots/<slot>` | 200 `{"slot","provisioned","suspended","generation"}`: `provisioned` is whether the door made the slot (false for a configured home slot), `suspended` whether its data is read-only, `generation` an opaque string that changes whenever the name is released and provisioned again (it is the same across restarts) |
+| `POST /v1/operator/slots/<slot>/suspend?generation=<g>` | 204: the slot's data is read-only, durably, before the answer. Again: 204 |
+| `POST /v1/operator/slots/<slot>/resume?generation=<g>` | 204: the slot takes data writes again, durably. Again: 204 |
+
+The door's 200 carries the slot's generation in a `Colophon-Slot-Generation` header, read in the
+same decision as the member request (the body is unchanged): a provisioner keeps it from there,
+with no separate read that could see a name released and provisioned again meanwhile. A suspend or resume names
+it, and it is compared under the door's lock: a command for a library whose name has since been
+released and provisioned again (another library) answers 409 `{"result":"refused:staleGeneration"}`
+and changes nothing.
+
+No body is read. Refusals, in this order: 405 for another method (`Allow` names the one); 403 for
+an `Origin` not on the CORS list; then the token, compared in constant time against `tokenSha256`
+as at the door (it is 256 random bits, so it is checked before any limit): a missing or wrong one
+answers 403 `{"result":"refused:noEntitlement"}`, or 429 `{"result":"refused:overQuota"}` with
+`Retry-After` once its address is over `operatorRefusedPerMinute`; a right one answers 429 only
+once the home's `operatorPerMinute` is spent. Refused traffic from any address, the operator's own
+included, never spends the operator's share, and a full table of refused addresses never refuses
+the operator. Then 400 for a query that is not exactly one `generation` on a change (or any query
+on a read); 404 `{"result":"refused:notProvisioned"}` for a name that is not a home slot of this
+home (unknown, a 0.3 slot, or released); 409 `refused:staleGeneration`. The token is checked
+before the slot is looked up.
+
+A suspended slot keeps everything it holds and serves every read: `GET {base}`, the head, the
+history and pending objects, records and blob chunks, the change feed and its long poll. Every
+data write answers 403 `{"result":"refused:subscriptionLapsed"}` and stores nothing: a record, live
+value or blob chunk `PUT` and a predecessor entry (each after its call is judged, so a request with
+no call is still challenged with 401), and a forwarded head `PUT {base}/records/heads/<id>.json`.
+The account's authority history is never held back: a history upload `POST {base}/authority`
+(member, keyring and home changes) and `POST {base}/pending` (transitions, vetoes and receipts) are
+taken and receipted as always, so a lapsed account can still appoint another home, move its data
+there and revoke this one. The check is made under the slot's lock, where every write commits, and
+a suspension is taken under the same lock: a data write admitted before it ends before the 204, and
+none commits after. The home's own upkeep goes on (it records due entries, signs heads,
+renews its lease and forwards to the account's other homes), so its head stays fresh for readers.
+Forwarding is not stopped for a suspended slot: what it carries is the account's authority history
+and its receipts, which another home needs to take over; it is bounded like every slot's (above).
+
+The suspension is the file `<dataDir>/<slot>/suspended.json` (`{"suspended":true,"at":<ms>}`,
+staged, fsynced and renamed into place, then the directory fsynced; a resume removes it and fsyncs
+the directory); its presence is the state. If any step fails, the request answers 500 and the state
+is uncertain: data writes stay refused until it is reconciled under the slot's lock (the marker's
+presence read from disk, and the directory fsynced, so memory and a restart agree), which the next
+data write or `GET` does first; a data write whose reconciliation fails answers 503
+`{"result":"unavailable"}`. A retried suspend or resume redoes every step, so its 204 always means
+the intended state is durable. The suspension survives a restart, and a restart with gate `"token"`
+turned off (the slot stays read-only; turn the gate back on to resume it). It is never deleted
+except with the slot's directory, and a suspended slot is never released as unclaimed. Nothing is
+ever deleted by a suspension.
 
 **Provisioning by a grant.** Gate `"grant"` lets a key the operator's own Colophon account has
 delegated provision, within bounds, revocable alone: a test rig or agent is granted once and then
@@ -486,6 +580,7 @@ flooding cannot take a place the genuine entry needs. Nothing staged is served.
 <dataDir>/<slot>/routes.json      home slots: registered notice routes (includes private addresses)
 <dataDir>/<slot>/notices.jsonl   home slots: durable queue of public notice metadata
 <dataDir>/<slot>/notice-commit.json  home slots: temporary journal for crash recovery of a queue append
+<dataDir>/<slot>/suspended.json   home slots, only while read-only (the operator API)
 ```
 
 Home slots add `authority/<8 digits>.json`, `transitions/<digest>.json`, `vetoes/<digest>.json`,
