@@ -527,10 +527,13 @@ public final class FolderMedium: RecordMedium, @unchecked Sendable {
         if lock.withLock({ localFolder }) == identity { return }
         do {
             let values = try url.resourceValues(forKeys: [.isUbiquitousItemKey, .ubiquitousItemDownloadingStatusKey])
-            if values.isUbiquitousItem == true {
+            switch values.isUbiquitousItem {
+            case true?:
                 if values.ubiquitousItemDownloadingStatus != .current { throw DownloadPending(url: url, name: name) }
-            } else {
+            case false?:
                 lock.withLock { localFolder = identity }
+            case nil:
+                break // undetermined: nothing is remembered, and the next open asks again
             }
         } catch let error as CocoaError where error.code == .fileReadNoSuchFile || error.code == .fileNoSuchFile {
             return
