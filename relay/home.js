@@ -45,13 +45,36 @@ const NEW_PER_PASS = 64;
 const RETRY_PER_PASS = 16;
 const ENTRIES_RESEND_MS = 2000;
 
+/** The module memory (MiB) past which an instance is dropped after a call, by default. A
+ * WebAssembly memory never shrinks: an instance that grew for one big request keeps that memory
+ * until it is replaced. 128 MiB leaves room on a 1 GiB machine for the relay's own heap, request
+ * bodies, and the old memory until it is collected. */
+export const MODULE_MEMORY_MB = 128;
+
+/** `COLOPHON_MODULE_MEMORY_MB` (or the config's `home.moduleMemoryMB`) as bytes: an integer of
+ * MiB, at least 16. Unset or empty is the default. */
+export function moduleMemoryBytes(value) {
+  if (value === undefined || value === null || String(value).trim() === '') return MODULE_MEMORY_MB * 1024 * 1024;
+  const text = String(value).trim();
+  if (!/^\d+$/.test(text) || Number(text) < 16 || !Number.isSafeInteger(Number(text) * 1024 * 1024)) {
+    throw new Error(`COLOPHON_MODULE_MEMORY_MB must be a whole number of MiB, at least 16, not ${JSON.stringify(value)}`);
+  }
+  return Number(text) * 1024 * 1024;
+}
+
 /** A loaded home module. The module is pure: an instance that traps is dropped and replaced. */
 export class HomeModule {
-  constructor(module) { this.module = module; this.instance = null; }
-
-  static async load(file) {
-    return new HomeModule(await WebAssembly.compile(await fsp.readFile(file)));
+  /** `resetBytes`: the memory size past which the instance is dropped after a call. */
+  constructor(module, { resetBytes = moduleMemoryBytes() } = {}) {
+    this.module = module; this.instance = null; this.resetBytes = resetBytes; this.resets = 0;
   }
+
+  static async load(file, options) {
+    return new HomeModule(await WebAssembly.compile(await fsp.readFile(file)), options);
+  }
+
+  /** The current instance's memory, in bytes (0 with no instance). */
+  memoryBytes() { return this.instance?.exports.memory.buffer.byteLength ?? 0; }
 
   /** One request, one response, both JSON. A response with `ok: false` throws a ModuleError. */
   call(request) {
@@ -67,12 +90,12 @@ export class HomeModule {
       const text = Buffer.from(new Uint8Array(memory.buffer, outPtr + 4, length)).toString('utf8');
       free(outPtr, length + 4);
       // A page of memory that grew for one big request is not kept for ever.
-      if (memory.buffer.byteLength > 512 * 1024 * 1024) this.instance = null;
+      if (memory.buffer.byteLength > this.resetBytes) { this.instance = null; this.resets += 1; }
       const out = JSON.parse(text);
       if (!out.ok) throw new ModuleError(out.error);
       return out;
     } catch (error) {
-      if (error instanceof WebAssembly.RuntimeError) this.instance = null;
+      if (error instanceof WebAssembly.RuntimeError) { this.instance = null; this.resets += 1; }
       throw error;
     }
   }

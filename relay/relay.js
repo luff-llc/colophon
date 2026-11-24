@@ -5,7 +5,7 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { constants as fsc, promises as fsp, writeSync } from 'node:fs';
 import http from 'node:http';
 import https from 'node:https';
-import { HomeKey, HomeModule, HomeSlot, ModuleError } from './home.js';
+import { HomeKey, HomeModule, HomeSlot, ModuleError, moduleMemoryBytes } from './home.js';
 import { streamOptions } from './stream.js';
 import {
   ProvisionReplay, ProvisionTable, REPLAY_DIR, TABLE_FILE, clientAddressConfig, tableKind, clientAddressResolver, isJsonType, memberRequest,
@@ -535,7 +535,7 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
   let homeModule = null; let homeKey = null;
   if (Object.values(libraries ?? {}).some((e) => e && e.home) || provisioning.enabled || table.size > 0) {
     if (!home?.wasm || !home?.key) throw new Error('A home slot, and provisioning, need home.wasm (the module path) and home.key (a private P-256 JWK)');
-    homeModule = home.wasm instanceof HomeModule ? home.wasm : await HomeModule.load(home.wasm);
+    homeModule = home.wasm instanceof HomeModule ? home.wasm : await HomeModule.load(home.wasm, { resetBytes: moduleMemoryBytes(home.moduleMemoryMB) });
     homeKey = await HomeKey.fromJwk(home.key, homeModule);
   }
   // Every row against this relay's settings and key, through the module. Nothing is repaired.

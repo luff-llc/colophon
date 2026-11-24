@@ -53,6 +53,7 @@ curl http://127.0.0.1:8080/healthz          # {"ok":true}
 | `COLOPHON_PROVISION_UNCLAIMED_HOURS` | `24` | `provision.unclaimedHours` |
 | `COLOPHON_SLOT_BYTES` | `0` (no quota) | `limits.slotBytes`: the most bytes one slot may hold |
 | `COLOPHON_CORS_ORIGINS` | none | A comma-separated list of exact `scheme://host[:port]` origins |
+| `COLOPHON_MODULE_MEMORY_MB` | `128` | The home module's memory, in MiB, past which its instance is replaced after a request (see "Memory"). At least 16. |
 | `COLOPHON_CLIENT_IP_HEADER`, `COLOPHON_TRUSTED_PROXIES` | none | Set both or neither. The header holding the client's address (for example `X-Real-IP` or `CF-Connecting-IP`), and the peers it is read from: IP addresses or CIDR ranges, comma-separated. A `/0` range is refused. |
 
 Those are read again at every start, and the relay config is rewritten from them. The relay's
@@ -65,6 +66,20 @@ removed before the relay starts.
 Relative paths in it are resolved against `/data`. `host`, `port` and `home.wasm` default to
 `0.0.0.0`, `PORT` and the image's module if the file leaves them out. Use this for settings the
 variables do not cover, such as `resolve` or `limits.requestsPerMinute`.
+
+## Memory
+
+The home's rules run in one WebAssembly instance of the home module, and a WebAssembly memory
+never shrinks: after a large request (a big history upload, a large batch) the instance keeps
+the memory it grew to. Once its memory is past `COLOPHON_MODULE_MEMORY_MB` (128 MiB by default)
+after a request, the instance is dropped and the next request makes a new one, which costs a
+few milliseconds. The bound does not limit a single request, which may use more while it runs.
+
+Give the container a memory limit, so the host stays responsive if something grows: 1 GiB is
+enough for a home serving a handful of accounts (`docker run --memory 1g`, or `mem_limit: 1g` in
+Compose). The module's 128 MiB, the relay's own heap, request bodies (up to 16 MiB each), and the
+memory of a replaced instance until it is collected all fit in it. On a machine with more
+memory, raise both together; on a smaller one, lower the bound (64 MiB) before the limit.
 
 ## What the volume holds
 

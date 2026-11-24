@@ -6,7 +6,7 @@
 //   node relay/server.js provisioned <config> list the provisioned slots: account, when, by
 //                                            which gate or grant, claimed or not
 import { existsSync, readFileSync } from 'node:fs';
-import { HomeModule } from './home.js';
+import { HomeModule, moduleMemoryBytes } from './home.js';
 import { webcrypto } from 'node:crypto';
 import path from 'node:path';
 import { ProvisionTable, TABLE_FILE, clientAddressConfig, provisionConfig } from './provision.js';
@@ -53,6 +53,10 @@ function loadConfig(argv, env) {
   const keyText = env.COLOPHON_HOME_KEY ?? (env.COLOPHON_HOME_KEY_FILE ? readFileSync(env.COLOPHON_HOME_KEY_FILE, 'utf8') : config.home?.keyFile ? readFileSync(config.home.keyFile, 'utf8') : undefined);
   if (env.COLOPHON_HOME_KEY) delete env.COLOPHON_HOME_KEY;
   const wasm = env.COLOPHON_HOME_WASM ?? config.home?.wasm;
+  // The module memory past which its instance is replaced (MiB); checked here so a bad value
+  // refuses start-up with its message.
+  const moduleMemoryMB = env.COLOPHON_MODULE_MEMORY_MB ?? config.home?.moduleMemoryMB;
+  moduleMemoryBytes(moduleMemoryMB);
   // A test hook: the clock is the number of milliseconds in this file. It works only when the
   // relay is started with --test-clock; without that flag the relay refuses to start with it.
   const clockFile = env.COLOPHON_RELAY_CLOCK_FILE;
@@ -87,7 +91,7 @@ function loadConfig(argv, env) {
     // first time it is reached) until the file COLOPHON_RELAY_RESUME_FILE exists.
     crashAt: tracing ? env.COLOPHON_RELAY_CRASH_AT : undefined,
     hook: tracing && env.COLOPHON_RELAY_PAUSE_AT && env.COLOPHON_RELAY_RESUME_FILE ? pauseOnce(env.COLOPHON_RELAY_PAUSE_AT, env.COLOPHON_RELAY_RESUME_FILE) : undefined,
-    home: keyText && wasm ? { key: JSON.parse(keyText), wasm } : undefined,
+    home: keyText && wasm ? { key: JSON.parse(keyText), wasm, moduleMemoryMB } : undefined,
     // The test clock: a reading taken while a test rewrites the file can be empty; read again
     // rather than take 0 (which would put every entry in the future).
     clock: clockFile ? () => {

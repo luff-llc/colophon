@@ -9,6 +9,8 @@ services:
     restart: unless-stopped
     # Ten seconds is Docker's default; the relay drains for at most eight, then exits.
     stop_grace_period: 15s
+    # Enough for a home serving a handful of accounts; see "Memory" in docs/self-hosting/docker.md.
+    mem_limit: 1g
     ports:
       # Publish on loopback and put a TLS reverse proxy in front; clients need https.
       - "127.0.0.1:${COLOPHON_HOST_PORT:-8080}:8080"
@@ -25,6 +27,7 @@ services:
       # COLOPHON_MAX_SLOTS: "200"
       # COLOPHON_SLOT_BYTES: "0"          # per-slot quota in bytes; 0 = none
       # COLOPHON_CORS_ORIGINS: "https://app.example"
+      # COLOPHON_MODULE_MEMORY_MB: "128" # the module's memory past which its instance is replaced
       # Behind a reverse proxy on a Docker network the peer is the proxy, not the client: name the
       # header it sets and the range it connects from, so rate limits count per client.
       # COLOPHON_CLIENT_IP_HEADER: "X-Real-IP"
