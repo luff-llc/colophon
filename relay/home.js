@@ -20,6 +20,13 @@ const b64 = (bytes) => Buffer.from(bytes).toString('base64');
 const unb64 = (text) => Buffer.from(text, 'base64');
 const sha = (bytes) => createHash('sha256').update(bytes).digest('hex');
 
+/** Make a rename or a new name in `dir` durable. Not every file system syncs a directory. */
+async function syncDir(dir) {
+  const handle = await fsp.open(dir, fsc.O_RDONLY);
+  try { await handle.sync(); } catch (error) { if (error.code !== 'EINVAL' && error.code !== 'EPERM') throw error; }
+  finally { await handle.close(); }
+}
+
 function colophonCall(req) {
   const match = /^Colophon ([A-Za-z0-9_-]+)$/.exec(req.headers.authorization ?? '');
   return match ? b64(Buffer.from(match[1], 'base64url')) : null;
@@ -149,6 +156,7 @@ export class HomeSlot {
     this.replayLock = chain();
     this.state = null;
     this.rows = new Map(); // replay key -> { digest, at, signer }
+    this.inFlight = new Map(); // replay key -> the effect a reserved write has not ended yet
     this.bySigner = new Map(); // principal -> Set of keys
     this.logLines = 0;
     this.forward = { peers: {} };
@@ -281,8 +289,7 @@ export class HomeSlot {
     await fsp.rename(staged, this.file(name));
     // The rename must be durable too: in particular, a refused unknown-format entry's
     // stop has no stored entry to replay if a crash were to lose the checkpoint update.
-    const directory = await fsp.open(this.slot.root, 'r');
-    try { await directory.sync(); } finally { await directory.close(); }
+    await syncDir(this.slot.root);
   }
 
   async commit(state, notices = []) {
@@ -395,8 +402,7 @@ export class HomeSlot {
         await handle.writeFile(lines);
         await handle.sync();
       } finally { await handle.close(); }
-      const directory = await fsp.open(this.slot.root, 'r');
-      try { await directory.sync(); } finally { await directory.close(); }
+      await syncDir(this.slot.root);
     }
     await fsp.unlink(this.file(NOTICE_COMMIT));
     this.noticeCommit = null;
@@ -615,17 +621,25 @@ export class HomeSlot {
     }
   }
 
-  /** Rewrite the log with the rows the module keeps (§12.4 retention), plus `extra` lines. */
+  /** Rewrite the log with the rows the module keeps (§12.4 retention), plus `extra` lines. A
+   * write whose effect has not ended keeps its reservation line (its effect, no completion), so
+   * a crash before it ends is recovered from the effect's own record. The new log replaces the
+   * old durably, like every append to it. */
   async compactReplay(extra = []) {
     const all = [...this.rows].map(([key, r]) => ({ key, at: r.at }));
     const keep = new Set(this.wasm.call({ op: 'replay_keep', now: this.clock(), rows: all }).keep);
     this.dropRows(all.map((r) => r.key).filter((k) => !keep.has(k)));
-    const lines = [...this.rows].map(([key, r]) => JSON.stringify({ r: key, d: r.digest, s: r.signer, at: r.at, t: 'completed' }));
+    const lines = [...this.rows].map(([key, r]) => {
+      const effect = this.inFlight?.get(key);
+      return JSON.stringify({ r: key, d: r.digest, s: r.signer, at: r.at, ...(effect ? { e: effect } : { t: 'completed' }) });
+    });
     for (const e of extra) lines.push(JSON.stringify(e));
-    const staged = path.join(this.slot.root, 'tmp', `replay.${process.pid}.${Date.now()}`);
-    const handle = await fsp.open(staged, 'w', 0o600);
+    const staged = path.join(this.slot.root, 'tmp', `replay.${randomBytes(12).toString('hex')}`);
+    const handle = await fsp.open(staged, fsc.O_WRONLY | fsc.O_CREAT | fsc.O_EXCL | fsc.O_NOFOLLOW, 0o600);
     try { await handle.write(lines.map((l) => l + '\n').join('')); await handle.sync(); } finally { await handle.close(); }
-    await fsp.rename(staged, this.file('replay.log'));
+    try { await fsp.rename(staged, this.file('replay.log')); }
+    catch (error) { await fsp.rm(staged, { force: true }); throw error; }
+    await syncDir(this.slot.root);
     this.logLines = lines.length;
   }
 
@@ -642,9 +656,26 @@ export class HomeSlot {
     const line = { r: row.key, d: row.digest, s: row.signer, at: row.at, ...(effect ? { e: effect } : { t: 'completed' }) };
     await this.appendReplay(line, true);
     this.addRow(row.key, { digest: row.digest, at: row.at, signer: row.signer });
+    if (effect) (this.inFlight ??= new Map()).set(row.key, effect);
     if (this.logLines > 2 * this.rows.size + 1024) await this.compactReplay();
   }
-  async complete(key, t) { await this.appendReplay({ c: key, t }, false); }
+  /** The completion line of a reservation (under the replay lock, so a compaction never drops it). */
+  async complete(key, t) {
+    await this.replayLock(async () => {
+      this.inFlight?.delete(key);
+      await this.appendReplay({ c: key, t }, false);
+    });
+  }
+  /** A reserved write that ended with an error: its completion is what the recovery at start-up
+   * would find, by the effect's own record (the module decides), never `completed` unseen. */
+  async completeFailed(key) {
+    const effect = this.inFlight?.get(key);
+    if (!effect) return this.complete(key, 'completed');
+    const now = this.slot.current.get(effect.path)?.sha256 ?? null;
+    const present = now !== null && now !== (effect.prior ?? null);
+    const [{ state }] = this.wasm.call({ op: 'replay_recover', rows: [{ key, present }] }).states;
+    return this.complete(key, state);
+  }
 
   // -------------------------------------------------------------------------------------------
   // Who may do what (§13.4, §14): the module's `access` decision, all of it.
@@ -849,23 +880,26 @@ export class HomeSlot {
       const allowed = await this.access(req, section, rest, effect, body);
       await this.deps.reach?.(`access ${section}`); // a test hook (traced builds only)
       const key = allowed.reserve?.key;
+      let ended = false;
       try {
         if (section === 'predecessor') {
           const r = this.wasm.call({ op: 'put_predecessor', state: this.state, now: this.clock(), path: rest, bytes: b64(body) });
           await this.commit(r.state);
           await this.materialize(r.store);
-          if (r.outcome !== 'ok') {
-            if (r.outcome === 'conflict') { send(res, 412, { result: 'conflict' }); return; }
-            await this.answerOutcome(res, r);
-            return;
+          if (r.outcome === 'conflict') send(res, 412, { result: 'conflict' });
+          else if (r.outcome !== 'ok') await this.answerOutcome(res, r);
+          else {
+            res.writeHead(r.created ? 201 : 200, { etag: `"${sha(body)}"`, 'content-length': 0 });
+            res.end();
           }
-          res.writeHead(r.created ? 201 : 200, { etag: `"${sha(body)}"`, 'content-length': 0 });
-          res.end();
-          return;
+        } else {
+          if (url.search) throw new HttpError(400, 'Record URLs take no query');
+          await this.putRecord(req, res, rest, body);
         }
-        if (url.search) throw new HttpError(400, 'Record URLs take no query');
-        await this.putRecord(req, res, rest, body);
-      } finally { if (key) await this.complete(key, 'completed'); }
+        ended = true;
+      } finally {
+        if (key) await (ended ? this.complete(key, 'completed') : this.completeFailed(key));
+      }
     });
   }
 
