@@ -757,17 +757,18 @@ export class HomeSlot {
     }
     const method = req.method;
     const writing = section === 'records' && method === 'PUT';
-    const effectPath = writing ? rest : (section === 'predecessor' && method === 'PUT' ? `predecessor/${rest}` : null);
-    const effect = effectPath ? { path: effectPath, prior: this.slot.current.get(effectPath)?.sha256 ?? null } : null;
     // A write's body is read (bounded) before its call is judged: the call is bound to its digest.
     const recordWrite = writing && typeof rest === 'string' && !rest.startsWith('heads/');
     const predecessorPut = section === 'predecessor' && method === 'PUT';
-    const body = recordWrite || predecessorPut
-      ? await readBody(req, rest?.startsWith('blobs/') ? this.limits.blobBytes : this.limits.recordBytes)
-      : null;
-    const allowed = await this.access(req, section ?? '', rest ?? null, effect, body);
+    if (recordWrite || predecessorPut) {
+      const body = await readBody(req, rest?.startsWith('blobs/') ? this.limits.blobBytes : this.limits.recordBytes);
+      await this.lockedWrite(req, res, url, section, rest, body);
+      return true;
+    }
+    // Heads (anyone may forward one; the module checks it) record their own effect, or none.
+    const effect = writing ? { path: rest, prior: this.slot.current.get(rest)?.sha256 ?? null } : null;
+    await this.access(req, section ?? '', rest ?? null, effect, null);
     await this.deps.reach?.(`access ${section ?? ''}`); // a test hook (traced builds only)
-    const key = allowed.reserve?.key;
     if (!section || section === 'changes') return false;
     if (section === 'head') { await this.serveOwnHead(res); return true; }
     if (section === 'authority') {
@@ -818,22 +819,6 @@ export class HomeSlot {
     }
     if (section === 'predecessor') {
       const file = `predecessor/${rest}`;
-      if (method === 'PUT') {
-        await this.lock(async () => {
-          const r = this.wasm.call({ op: 'put_predecessor', state: this.state, now: this.clock(), path: rest, bytes: b64(body) });
-          await this.commit(r.state);
-          await this.materialize(r.store);
-          if (r.outcome !== 'ok') {
-            if (r.outcome === 'conflict') { send(res, 412, { result: 'conflict' }); return; }
-            await this.answerOutcome(res, r);
-            return;
-          }
-          res.writeHead(r.created ? 201 : 200, { etag: `"${sha(body)}"`, 'content-length': 0 });
-          res.end();
-        });
-        if (key) await this.complete(key, 'completed');
-        return true;
-      }
       const entry = this.slot.current.get(file);
       if (!entry) throw new HttpError(404, 'Not found');
       const bytes = await this.slot.readFile(file);
@@ -845,11 +830,43 @@ export class HomeSlot {
       if (!writing && rest === `heads/${this.key.memberId}.json` && (method === 'GET' || method === 'HEAD')) { await this.serveOwnHead(res); return true; }
       if (!writing) return false; // a read the module allowed: the relay serves the file
       if (url.search) throw new HttpError(400, 'Record URLs take no query');
-      if (rest.startsWith('heads/')) { await this.putHead(req, res, rest); return true; }
-      try { await this.putRecord(req, res, rest, body); } finally { if (key) await this.complete(key, 'completed'); }
+      await this.putHead(req, res, rest);
       return true;
     }
     throw new HttpError(404, 'Not found');
+  }
+
+  /** `PUT {base}/records/<path>` (not a head) and `PUT {base}/predecessor/<path>`. The call is
+   * judged, and its reservation names the effect (what is at the path now), under the slot's
+   * lock, which the write holds until it is stored: an upload that revokes the writer is ordered
+   * wholly before the judgement or wholly after the write, never between them. */
+  async lockedWrite(req, res, url, section, rest, body) {
+    const { HttpError, send } = this.deps;
+    await this.deps.reach?.(`${section} locking`); // a test hook (traced builds only)
+    await this.lock(async () => {
+      const effectPath = section === 'predecessor' ? `predecessor/${rest}` : rest;
+      const effect = { path: effectPath, prior: this.slot.current.get(effectPath)?.sha256 ?? null };
+      const allowed = await this.access(req, section, rest, effect, body);
+      await this.deps.reach?.(`access ${section}`); // a test hook (traced builds only)
+      const key = allowed.reserve?.key;
+      try {
+        if (section === 'predecessor') {
+          const r = this.wasm.call({ op: 'put_predecessor', state: this.state, now: this.clock(), path: rest, bytes: b64(body) });
+          await this.commit(r.state);
+          await this.materialize(r.store);
+          if (r.outcome !== 'ok') {
+            if (r.outcome === 'conflict') { send(res, 412, { result: 'conflict' }); return; }
+            await this.answerOutcome(res, r);
+            return;
+          }
+          res.writeHead(r.created ? 201 : 200, { etag: `"${sha(body)}"`, 'content-length': 0 });
+          res.end();
+          return;
+        }
+        if (url.search) throw new HttpError(400, 'Record URLs take no query');
+        await this.putRecord(req, res, rest, body);
+      } finally { if (key) await this.complete(key, 'completed'); }
+    });
   }
 
   async handleRoutes(req, res, id) {
@@ -912,23 +929,22 @@ export class HomeSlot {
     });
   }
 
+  /** Store a record write the module allowed. Under the lock (see lockedWrite). */
   async putRecord(req, res, recordPath, body) {
     const { HttpError, send } = this.deps;
-    await this.lock(async () => {
-      const check = this.wasm.call({ op: 'check_record', state: this.state, now: this.clock(), path: recordPath, bytes: b64(body) });
-      if (!check.allowed) { send(res, 422, { result: check.code }); return; }
-      const conditional = req.headers['if-none-match'];
-      let status;
-      if (conditional === '*') status = await this.slot.putImmutable(recordPath, body);
-      else if (conditional !== undefined) throw new HttpError(400, 'Only If-None-Match: * is supported');
-      else if (recordPath.startsWith('state/')) {
-        const expected = req.headers['if-match'];
-        if (!expected || !/^"[0-9a-f]{64}"$/.test(expected)) throw new HttpError(428, 'Live replacement requires If-Match');
-        status = await this.slot.replaceRequest(recordPath, body, expected);
-      } else throw new HttpError(428, 'Immutable records require If-None-Match: *');
-      res.writeHead(status, { etag: `"${sha(body)}"`, 'content-length': 0 });
-      res.end();
-    });
+    const check = this.wasm.call({ op: 'check_record', state: this.state, now: this.clock(), path: recordPath, bytes: b64(body) });
+    if (!check.allowed) { send(res, 422, { result: check.code }); return; }
+    const conditional = req.headers['if-none-match'];
+    let status;
+    if (conditional === '*') status = await this.slot.putImmutable(recordPath, body);
+    else if (conditional !== undefined) throw new HttpError(400, 'Only If-None-Match: * is supported');
+    else if (recordPath.startsWith('state/')) {
+      const expected = req.headers['if-match'];
+      if (!expected || !/^"[0-9a-f]{64}"$/.test(expected)) throw new HttpError(428, 'Live replacement requires If-Match');
+      status = await this.slot.replaceRequest(recordPath, body, expected);
+    } else throw new HttpError(428, 'Immutable records require If-None-Match: *');
+    res.writeHead(status, { etag: `"${sha(body)}"`, 'content-length': 0 });
+    res.end();
   }
 
   async answerOutcome(res, r) {
