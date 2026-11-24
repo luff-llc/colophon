@@ -859,3 +859,202 @@ fn the_slot_state_does_not_grow_with_heads() {
     eprintln!("slot state bytes after 1, 40 and 1,000 heads: {sizes:?}");
     assert!(sizes[2] <= sizes[0] + 256, "{sizes:?}");
 }
+
+/// The answer `check_record` gave when it replayed the held history from genesis
+/// (`RecordAuthority::from_objects`) rather than reading the home's checkpoint: the same steps in
+/// the same order, for the comparison below.
+fn check_record_by_replay(state: &str, now: i64, path: &str, bytes: &[u8]) -> Value {
+    use colophon_core::v05::engine::paths::{classify, Kind};
+    use colophon_core::v05::history::home::HomeState;
+    use colophon_core::v05::records::{OperationHeader, RecordAuthority};
+    let slot: Value = serde_json::from_slice(&STANDARD.decode(state).unwrap()).unwrap();
+    let h = HomeState::from_bytes(&STANDARD.decode(slot["home_state"].as_str().unwrap()).unwrap()).unwrap();
+    let refuse = |code: &str| json!({"allowed": false, "code": code, "ok": true});
+    if h.is_stopped(now).unwrap() {
+        return refuse("unavailable");
+    }
+    let Some(kind) = classify(path) else { return refuse("malformed") };
+    match kind {
+        Kind::Blob(name) => {
+            if digest(bytes) != name {
+                return refuse("malformed");
+            }
+            json!({"allowed": true, "ok": true})
+        }
+        Kind::Op { .. } | Kind::Live { .. } | Kind::History => {
+            let objects = h.persisted().unwrap().objects().cloned().unwrap_or_default();
+            let ra = match RecordAuthority::from_objects(&objects, now) {
+                Ok(ra) => ra,
+                Err(e) => return json!({"ok": false, "error": e.to_string()}),
+            };
+            let Ok((header, env)) = OperationHeader::parse(bytes) else { return refuse("malformed") };
+            let Some(m) = ra.member(&header.author) else { return refuse("notGranted") };
+            if &header.account != ra.account() {
+                return refuse("malformed");
+            }
+            let path_ok = match &kind {
+                Kind::Live { author, namespace, slot } => {
+                    header.live.as_ref().is_some_and(|s| &s.slot == slot)
+                        && &header.author == author
+                        && &header.namespace == namespace
+                }
+                Kind::History => {
+                    header.live.is_some()
+                        && path
+                            == format!(
+                                "history/{}/{}/{:012}-{}.json",
+                                header.author, header.namespace, header.clock, header.id
+                            )
+                }
+                _ => header.check_path(path).is_ok(),
+            };
+            if !path_ok {
+                return refuse("malformed");
+            }
+            if OperationHeader::verify(&env, &m.request.signing).is_err() {
+                return refuse("badSignature");
+            }
+            json!({"allowed": true, "ok": true})
+        }
+        _ => refuse("malformed"),
+    }
+}
+
+/// `check_record` reads who may write from the home's verified view (its checkpoint) and no
+/// longer replays the history from genesis on every record. Over a home with current members, a
+/// member revoked after writing, a member the home has not seen admitted, and a stopped home, at
+/// several clock readings, every record (good ones, a swapped signature, a record at another's
+/// path, a stranger's, blobs good and bad, paths outside the store) gets exactly the answer the
+/// replay gave, and the check runs one verification of the history, not a replay besides it.
+#[test]
+fn a_record_check_reads_the_home_view_and_answers_as_the_replay_from_genesis_did() {
+    use colophon_core::v05::history::work;
+    let mut f = create_with(&[NS], "members", 1);
+    let writer = f.host.identity(41);
+    let leaver = f.host.identity(42);
+    for (id, label) in [(&writer, "Writer"), (&leaver, "Leaver")] {
+        admit(&mut f, id, label, "device", terms_for(&[(NS, "write")]), terms_for(&[(NS, "write")]));
+    }
+    let keys = HomeKeys::new(0x77);
+    appoint_homes(&mut f, &[(&keys, BASE_A)]);
+    let mut home = Home::new(keys, f.account.id().as_str());
+    let entries: Vec<Value> = entries_json(&f).into_iter().map(|(_, e)| e).collect();
+    let uploaded = entries.len() as u64;
+    assert_eq!(home.authority(1, &entries, NOW)["appointed"], true);
+    assert!(home.head(NOW).is_some());
+    // A third member, admitted after the upload: the home has not seen it.
+    let late = f.host.identity(43);
+    f.account.advance(NOW).unwrap();
+    admit(&mut f, &late, "Late", "device", terms_for(&[(NS, "write")]), terms_for(&[(NS, "write")]));
+
+    let src = MemSource::new();
+    src.store_account(&f.account);
+    let mut host = std::mem::replace(&mut f.host, Host::new());
+    let mut records: Vec<(String, Vec<u8>)> = Vec::new();
+    for id in [&writer, &leaver, &late] {
+        let mut e = member_engine(&f, &host, &src, id, NOW);
+        let w = engine_write(&mut e, &mut host, &src, NS, "follow", json!({"id": "show", "url": "https://example.org/feed", "title": "Show"}));
+        records.extend(w.stores.into_iter().filter(|(p, _)| p.starts_with("ops/")));
+        if id == &writer {
+            let l = engine_live(&mut e, &mut host, &src, json!({"id": "e1", "show": "show", "seconds": 1.0}));
+            records.extend(l.stores);
+        }
+    }
+    f.host = host;
+    assert!(records.iter().any(|(p, _)| p.starts_with("state/")) && records.iter().any(|(p, _)| p.starts_with("history/")));
+    // A swapped signature, and a good record presented at another record's path.
+    let (op_w, op_l) = (records[0].clone(), records.iter().find(|(p, _)| p.contains(&leaver)).unwrap().clone());
+    let mut swapped: Value = serde_json::from_slice(&op_w.1).unwrap();
+    let other: Value = serde_json::from_slice(&op_l.1).unwrap();
+    swapped["signature"] = other["signature"].clone();
+    records.push((op_w.0.clone(), serde_json::to_vec(&swapped).unwrap()));
+    records.push((op_l.0.clone(), op_w.1.clone()));
+    let blob = vec![9u8; 64];
+    records.push((format!("blobs/{}", digest(&blob)), blob.clone()));
+    records.push((format!("blobs/{}", "0".repeat(64)), blob));
+    records.push(("authority/00000001.json".into(), entries[0].to_string().into_bytes()));
+    records.push((format!("ops/{writer}/{NS}/000000000001-{}.json", "a".repeat(32)), b"{}".to_vec()));
+    records.push(("x/y.json".into(), b"{}".to_vec()));
+
+    let compare = |home: &Home, now: i64, when: &str| -> Vec<Value> {
+        records
+            .iter()
+            .map(|(path, bytes)| {
+                work::reset();
+                let out = handle(json!({"op": "check_record", "state": home.state, "now": now,
+                                        "path": path, "bytes": b(bytes)}).to_string().as_bytes());
+                let verifications = work::get().verifications;
+                let got: Value = serde_json::from_slice(&out).unwrap();
+                let want = check_record_by_replay(&home.state, now, path, bytes);
+                assert_eq!(got, want, "{when}: {path}");
+                assert!(verifications <= 1, "{when}: {path}: {verifications} verifications");
+                got
+            })
+            .collect()
+    };
+    let codes = |answers: &[Value]| -> Vec<String> {
+        answers.iter().map(|a| a["code"].as_str().unwrap_or(if a["allowed"] == true { "ok" } else { "error" }).to_string()).collect()
+    };
+    let before = compare(&home, NOW, "all current");
+    let first = codes(&before);
+    // The late member's record: notGranted; everyone else's good records are taken.
+    assert_eq!(first.iter().filter(|c| *c == "notGranted").count(), 1, "{first:?}");
+    assert_eq!(first.iter().filter(|c| *c == "badSignature").count(), 1, "{first:?}");
+    for now in [NOW + 1, NOW + HOUR, NOW + 30 * 24 * HOUR] {
+        compare(&home, now, "later");
+    }
+
+    // The leaver is revoked and the home takes the revocation (and the late admission): the
+    // leaver's earlier record still checks (a revoked member's records stay its own), as before.
+    f.account.advance(NOW + 1_000).unwrap();
+    let revoke = f
+        .account
+        .begin_revoke(&leaver, &RevokeKeep::Nothing, &[f.d.clone()], [0x7a; 32])
+        .unwrap();
+    run(&mut f.account, &f.host, revoke);
+    let rest: Vec<Value> = entries_json(&f).into_iter().filter(|(s, _)| *s > uploaded).map(|(_, e)| e).collect();
+    let r = home.authority(uploaded + 1, &rest, NOW + 2_000);
+    assert_eq!(r["outcome"], "ok", "{r}");
+    home.head(NOW + 2_000);
+    let after = compare(&home, NOW + 2_000, "after the revocation");
+    // The late member's admission went up with the revocation: its record is taken now.
+    let expected: Vec<String> = first.iter().map(|c| if c == "notGranted" { "ok".into() } else { c.clone() }).collect();
+    assert_eq!(codes(&after), expected);
+    for now in [NOW + 2_001, NOW + 8 * 24 * HOUR] {
+        compare(&home, now, "after, later");
+    }
+}
+
+/// A stopped home takes no record, from the same verified view.
+#[test]
+fn a_stopped_home_refuses_every_record_check_as_before() {
+    use stopped_support::{activate, final_entry, head, transition, value, DUE};
+    let keys = HomeKeys::new(0x77);
+    let f = stopped_support::fixture("public", &[(&keys, BASE_A)]);
+    let mut home = Home::new(keys, f.account.id().as_str());
+    let entries: Vec<_> = entries_json(&f).into_iter().map(|(_, entry)| entry).collect();
+    assert_eq!(home.authority(1, &entries, T0)["outcome"], "ok");
+    assert!(home.head(NOW).is_some());
+    let raise = transition(&f, json!({"layout": 3}), &f.k, NOW);
+    let response = home.pending(&[value(&raise)], NOW);
+    let receipts = home.sign_receipts(&response, NOW);
+    let mut objects = f.account.objects().clone();
+    objects.pending.extend([raise.clone(), canonical(&receipts[0]).unwrap()]);
+    let activation = activate(&mut objects, &raise, DUE);
+    objects.heads.push(head(&home.keys, &objects, DUE));
+    let finality = final_entry(&mut objects, entry_seq(&activation), DUE);
+    let stopped = home.authority(entry_seq(&activation), &[value(&activation), value(&finality)], DUE);
+    assert_eq!(stopped["outcome"], "ok", "{stopped}");
+    let blob = vec![1u8; 8];
+    for (path, bytes) in [
+        (format!("blobs/{}", digest(&blob)), blob.clone()),
+        (format!("ops/{}/{NS}/000000000001-{}.json", "a".repeat(32), "b".repeat(32)), b"{}".to_vec()),
+        ("x/y.json".to_string(), b"{}".to_vec()),
+    ] {
+        for now in [DUE, DUE + HOUR] {
+            let got = call(json!({"op": "check_record", "state": home.state, "now": now, "path": path, "bytes": b(&bytes)}));
+            assert_eq!(got, check_record_by_replay(&home.state, now, &path, &bytes), "{path}");
+            assert_eq!(got["code"], "unavailable");
+        }
+    }
+}

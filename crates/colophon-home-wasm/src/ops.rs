@@ -27,7 +27,8 @@ use colophon_core::v05::home_stream::{
     RouteVerdict,
 };
 use colophon_core::v05::ids::{key_id, AccountId};
-use colophon_core::v05::records::{OperationHeader, RecordAuthority};
+use colophon_core::v05::records::OperationHeader;
+use colophon_core::v05::Failure;
 use colophon_core::v05::replay::{
     retained, ReplayKey, ReplayState, ReplayStore, Reservation, RETENTION_MS,
 };
@@ -2265,7 +2266,15 @@ fn check_record(req: &Value) -> R<Value> {
     let path = str_of(req, "path")?;
     let bytes = bytes_of(req, "bytes")?;
     let refuse = |code: &str| Ok(json!({"allowed": false, "code": code}));
-    if l.home.as_ref().map(|h| h.is_stopped(now_ms)).transpose().map_err(|e| e.to_string())?.unwrap_or(false) {
+    // The home's verified history, once: from its checkpoint, as every other decision about this
+    // slot reads it (a stopped home takes nothing).
+    let verified = l
+        .home
+        .as_ref()
+        .map(|h| h.verified_history(now_ms))
+        .transpose()
+        .map_err(|e| e.to_string())?;
+    if verified.as_ref().is_some_and(|(_, v)| v.is_stopped()) {
         return refuse("unavailable");
     }
     let Some(kind) = paths::classify(path) else {
@@ -2279,17 +2288,25 @@ fn check_record(req: &Value) -> R<Value> {
             Ok(json!({"allowed": true}))
         }
         Kind::Op { .. } | Kind::Live { .. } | Kind::History => {
-            let h = l.home.as_ref().ok_or("no home state")?;
-            let objects = held(h)?;
-            let ra = RecordAuthority::from_objects(&objects, now_ms).map_err(|e| e.to_string())?;
+            let (_, verdict) = verified.as_ref().ok_or("no home state")?;
+            // As the record layer takes a verdict (`RecordAuthority::from_objects`): a history that failed
+            // outright is an error; a held entry or an unresolved fork leaves the verified prefix.
+            if let Some(Stop::Failed { failure, .. }) = &verdict.stop {
+                return Err(failure.to_string());
+            }
+            let state = verdict
+                .state
+                .as_ref()
+                .ok_or_else(|| Failure::Malformed("the held objects hold no genesis".into()).to_string())?;
             let Ok((header, env)) = OperationHeader::parse(&bytes) else {
                 return refuse("malformed");
             };
-            // A member of the verified history signed it, and the path says what the header says.
-            let Some(m) = ra.member(&header.author) else {
+            // A member of the verified history (revoked ones included) signed it, and the path
+            // says what the header says.
+            let Some(m) = state.members().iter().find(|m| m.request.member_id() == header.author) else {
                 return refuse("notGranted");
             };
-            if &header.account != ra.account() {
+            if &header.account != state.account() {
                 return refuse("malformed");
             }
             let path_ok = match &kind {
