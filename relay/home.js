@@ -85,7 +85,21 @@ export class HomeModule {
   }
 
   static async load(file, options) {
-    return new HomeModule(await WebAssembly.compile(await fsp.readFile(file)), options);
+    const bytes = await fsp.readFile(file);
+    const module = new HomeModule(await WebAssembly.compile(bytes), options);
+    // The build every instance is named (`build`): a home's proof of its fold names it, so a proof
+    // written by any other build is not taken, and the slot is verified again once at its start.
+    module.fingerprint = sha(bytes);
+    return module;
+  }
+
+  /** The instance, made and named its build (when the module takes one) if there is none. */
+  ensure() {
+    if (this.instance) return;
+    this.instance = new WebAssembly.Instance(this.module, {});
+    if (!this.fingerprint) return;
+    this.takesBuild ??= this.invoke({ op: 'limits' }).build === true;
+    if (this.takesBuild) this.invoke({ op: 'build', fingerprint: this.fingerprint });
   }
 
   /** The current instance's memory, in bytes (0 with no instance). */
@@ -93,7 +107,17 @@ export class HomeModule {
 
   /** One request, one response, both JSON. A response with `ok: false` throws a ModuleError. */
   call(request) {
-    this.instance ??= new WebAssembly.Instance(this.module, {});
+    this.ensure();
+    try {
+      return this.invoke(request);
+    } finally {
+      // A page of memory that grew for one big request is not kept for ever.
+      if (this.memoryBytes() > this.resetBytes) { this.instance = null; this.resets += 1; }
+    }
+  }
+
+  /** One request on the current instance. */
+  invoke(request) {
     const { colophon_alloc: alloc, colophon_free: free, colophon_home: home, memory } = this.instance.exports;
     const text = JSON.stringify(request);
     const size = Buffer.byteLength(text);
@@ -107,8 +131,6 @@ export class HomeModule {
       // Decoded straight from the module's memory (a view, not a copy), before it is freed.
       const answer = Buffer.from(memory.buffer, outPtr + 4, length).toString('utf8');
       free(outPtr, length + 4);
-      // A page of memory that grew for one big request is not kept for ever.
-      if (memory.buffer.byteLength > this.resetBytes) { this.instance = null; this.resets += 1; }
       const out = JSON.parse(answer);
       if (!out.ok) throw new ModuleError(out.error);
       return out;
@@ -270,6 +292,10 @@ export class HomeSlot {
     const until = alive && typeof alive.until === 'number' ? alive.until : null;
     const now = this.clock();
     const r = this.wasm.call({ op: 'resume', state: this.state, now, alive: until });
+    // A checkpoint the module could not verify again from genesis is answered by a replay at every
+    // decision until it is rebuilt: said once per start, and counted in the metrics.
+    this.foldUnproved = r.fold === 'unproved';
+    if (this.foldUnproved) console.warn(`[home ${this.slot.name}] checkpoint not verified again from genesis: its decisions replay the history`);
     await this.renewLease(now);
     if (r.changed) await this.commit(r.state);
   }

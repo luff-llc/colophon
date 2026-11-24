@@ -48,10 +48,11 @@ describe('metrics', () => {
       assert.equal(text.includes('private-slot-name'), false, 'no slot names');
       const m = JSON.parse(text);
       assert.deepEqual(Object.keys(m).sort(), ['containerLockAgeSeconds', 'eventLoopLagMs', 'moduleMemoryBytes', 'moduleResets',
-        'requestsInFlight', 'rssBytes', 'slots', 'stoppedSlots', 'uptimeSeconds'].sort());
+        'requestsInFlight', 'rssBytes', 'slots', 'stoppedSlots', 'unprovedFoldSlots', 'uptimeSeconds'].sort());
       assert.ok(m.rssBytes > 0);
       assert.equal(m.slots, 1);
       assert.equal(m.stoppedSlots, 0);
+      assert.equal(m.unprovedFoldSlots, 0);
       assert.equal(m.moduleMemoryBytes, 0, 'no module loaded');
       assert.equal(m.moduleResets, 0);
       assert.equal(m.requestsInFlight, 0, 'other requests (not this one)');

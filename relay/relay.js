@@ -956,6 +956,8 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
       slots: homeSlots.size + auth.size, // every slot this relay holds, open or not
       // As of each home's last scheduler pass that asked the module.
       stoppedSlots: homes.filter((s) => s.home.lastStatus?.stopped === true).length,
+      // Homes whose checkpoint was not verified again from genesis at their start (`resume`).
+      unprovedFoldSlots: homes.filter((s) => s.home.foldUnproved === true).length,
       containerLockAgeSeconds: Number.isFinite(lock?.lastBeatAt) ? Math.max(0, Math.round((Date.now() - lock.lastBeatAt) / 1000)) : null,
     });
   }

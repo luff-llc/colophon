@@ -26,6 +26,8 @@ use crate::support::*;
 pub const BASE_A: &str = "https://home-a.example";
 pub const BASE_B: &str = "https://home-b.example";
 pub const TOKEN: &str = "test-token-0123456789abcdef";
+/// The bearer token of the relay's `/metrics` (every relay started here serves them).
+pub const METRICS_TOKEN: &str = "test-metrics-token-0123456789abcdef";
 
 /// Where the pieces are, or `None` (with a loud note) when this machine cannot run the relay.
 pub fn prerequisites() -> Option<(PathBuf, PathBuf)> {
@@ -234,6 +236,7 @@ impl Relay {
             .env("COLOPHON_HOME_WASM", wasm)
             .env("COLOPHON_RELAY_CLOCK_FILE", &clock)
             .env("COLOPHON_RELAY_RESOLVE_FILE", dir.join("resolve.json"))
+            .env("COLOPHON_METRICS_TOKEN_SHA256", colophon_core::v05::encoding::digest(METRICS_TOKEN.as_bytes()))
             .env(
                 "COLOPHON_RELAY_TICK_MS",
                 limits.get("tickMs").and_then(Value::as_u64).map_or("0".to_string(), |t| t.to_string()),
@@ -321,6 +324,26 @@ impl Relay {
             body.to_string().as_bytes(),
         );
         (s, serde_json::from_slice(&b).unwrap_or(Value::Null))
+    }
+    /// The relay's `/metrics`.
+    pub fn metrics(&self) -> Value {
+        let auth = vec![("Authorization".to_string(), format!("Bearer {METRICS_TOKEN}"))];
+        let (s, _, b) = http(self.port, "GET", "/metrics", &auth, &[]);
+        assert_eq!(s, 200, "{}", String::from_utf8_lossy(&b));
+        serde_json::from_slice(&b).unwrap()
+    }
+    /// The home slot's committed state (the module's slot JSON), read from `home-state.json`.
+    pub fn slot_state(&self) -> Value {
+        use base64::engine::general_purpose::STANDARD;
+        let text = std::fs::read_to_string(self.dir.join("data/home/home-state.json")).unwrap();
+        let outer: String = serde_json::from_str(&text).unwrap();
+        serde_json::from_slice(&STANDARD.decode(outer).unwrap()).unwrap()
+    }
+    /// Replace the home slot's committed state (the relay must be stopped).
+    pub fn write_slot_state(&self, slot: &Value) {
+        use base64::engine::general_purpose::STANDARD;
+        let outer = STANDARD.encode(serde_json::to_vec(slot).unwrap());
+        std::fs::write(self.dir.join("data/home/home-state.json"), serde_json::to_string(&outer).unwrap()).unwrap();
     }
 /// The serving intervals a home slot's committed state holds (`[from, through]`, ms; `through`
     /// `None` while open), read from `home-state.json`.
