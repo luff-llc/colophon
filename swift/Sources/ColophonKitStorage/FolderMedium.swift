@@ -40,6 +40,9 @@ public final class FolderMedium: RecordMedium, @unchecked Sendable {
     /// as their own presenter, so the coordinator never waits on this process's presenter for this process's writes.
     private var presenter: FolderPresenter?
     private var observers: [UUID: AsyncStream<Void>.Continuation] = [:]
+    /// Serialises registering and removing the presenter, so `changes()` returns only once it is registered. The
+    /// presenter's callbacks never take it (they take `lock`), so Foundation can call them while it is held.
+    private let registration = NSLock()
     private var hook: (@Sendable (FolderBatchStep) throws -> Void)?
     static let journalName = ".colophon.nosync"
 
@@ -189,6 +192,8 @@ public final class FolderMedium: RecordMedium, @unchecked Sendable {
             if clean { return try withExtendedLifetime(shared) { try body(root) } }
         }
         // A batch was left behind: complete or discard it under the exclusive lock, then read under that lock.
+        // Completing it changes the folder, and this medium's own presenter is not told: wake the observers.
+        defer { signal() }
         return try coordinate { () -> T in
             let exclusive = try FolderFiles.Lock(journal, exclusive: true)
             return try withExtendedLifetime(exclusive) {
@@ -206,6 +211,8 @@ public final class FolderMedium: RecordMedium, @unchecked Sendable {
             try RecordPaths.validate(item.path)
         }
         guard !writes.isEmpty else { return }
+        // Also after a failure: recovering an earlier batch may have changed the folder before this one failed.
+        defer { signal() }
         try downloadAfterUnlock {
             try coordinate {
                 try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
@@ -218,7 +225,6 @@ public final class FolderMedium: RecordMedium, @unchecked Sendable {
                 }
             }
         }
-        signal()
     }
 
     private func publish(_ writes: [MediumWrite], root: DirectoryHandle, journal: DirectoryHandle) throws {
@@ -450,24 +456,28 @@ public final class FolderMedium: RecordMedium, @unchecked Sendable {
     public func changes() -> AsyncStream<Void> {
         let id = UUID()
         let (stream, continuation) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
-        let added: FolderPresenter? = lock.withLock {
-            observers[id] = continuation
-            guard presenter == nil else { return nil }
-            let created = FolderPresenter(folder: folder) { [weak self] in self?.signal() }
-            presenter = created
-            return created
+        registration.withLock {
+            let added: FolderPresenter? = lock.withLock {
+                observers[id] = continuation
+                guard presenter == nil else { return nil }
+                let created = FolderPresenter(folder: folder) { [weak self] in self?.signal() }
+                presenter = created
+                return created
+            }
+            // Outside `lock`: the presenter's callbacks take it.
+            if let added { NSFileCoordinator.addFilePresenter(added) }
         }
-        // Registration and removal happen outside the lock: the presenter's callbacks take it.
-        if let added { NSFileCoordinator.addFilePresenter(added) }
         continuation.onTermination = { [weak self] _ in
             guard let self else { return }
-            let removed: FolderPresenter? = self.lock.withLock {
-                self.observers.removeValue(forKey: id)
-                guard self.observers.isEmpty, let current = self.presenter else { return nil }
-                self.presenter = nil
-                return current
+            self.registration.withLock {
+                let removed: FolderPresenter? = self.lock.withLock {
+                    self.observers.removeValue(forKey: id)
+                    guard self.observers.isEmpty, let current = self.presenter else { return nil }
+                    self.presenter = nil
+                    return current
+                }
+                if let removed { NSFileCoordinator.removeFilePresenter(removed) }
             }
-            if let removed { NSFileCoordinator.removeFilePresenter(removed) }
         }
         return stream
     }

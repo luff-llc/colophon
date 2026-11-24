@@ -169,14 +169,28 @@ struct FolderMediumTests {
         let medium = FolderMedium(folder: root)
         var first = medium.changes().makeAsyncIterator()
         var second = medium.changes().makeAsyncIterator()
-        let third = Task { for await _ in medium.changes() {} }
+        let thirdStream = medium.changes()
+        let third = Task { for await _ in thirdStream {} }
         try medium.write([MediumWrite(path: "authority/00000001.json", bytes: Data([1]))])
         #expect(await first.next() != nil)
         #expect(await second.next() != nil)
         third.cancel()
         _ = await third.value
+        let registered = NSFileCoordinator.filePresenters.contains { $0.presentedItemURL == medium.folder }
+        #expect(registered, "the presenter stays registered while other streams are open")
         try medium.write([MediumWrite(path: "authority/00000002.json", bytes: Data([2]))])
         #expect(await first.next() != nil, "the remaining observers still hear writes")
         #expect(await second.next() != nil)
+    }
+
+    /// Another writer's change reaches this medium through its presenter, not through `signal()`.
+    @Test(.enabled(if: FileCoordinationProbe.available, FileCoordinationProbe.reason), .timeLimit(.minutes(1)))
+    func anotherWritersChangeReachesTheObserverThroughThePresenter() async throws {
+        let root = try folder(); defer { try? FileManager.default.removeItem(at: root) }
+        let watched = FolderMedium(folder: root)
+        try watched.write([MediumWrite(path: "authority/00000001.json", bytes: Data([1]))])
+        var hints = watched.changes().makeAsyncIterator()
+        try FolderMedium(folder: root).write([MediumWrite(path: "authority/00000002.json", bytes: Data([2]))])
+        #expect(await hints.next() != nil, "a write by another medium wakes this medium's observer")
     }
 }
