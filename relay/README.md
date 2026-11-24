@@ -129,6 +129,7 @@ home holds no account secret: no controller or member key, no PRF output, no see
 | Home slots | `COLOPHON_RELAY_HOME_SLOTS="slot=<account ID>@<base URL>,…"` (config: `libraries.slot = {"home":true,"account":…,"base":…}`). Two home slots for one account at one base (after normalizing case and trailing slashes) are refused at start-up: replay tables are per slot, so one captured call could be taken once in each | none |
 | Home key | `COLOPHON_HOME_KEY_FILE` (preferred) or `home.keyFile` in the config; `COLOPHON_HOME_KEY` (the JWK itself) is readable from the process environment, so prefer a file | required for a home |
 | Home module | `COLOPHON_HOME_WASM`, or `home.wasm` | required for a home |
+| Metrics | `COLOPHON_METRICS_TOKEN_SHA256` or `metrics.tokenSha256`: the SHA-256 of the bearer token that may read `GET /metrics` (counters, no names; see docs/self-hosting/docker.md, "Metrics") | off |
 | Module memory bound | `COLOPHON_MODULE_MEMORY_MB` or `home.moduleMemoryMB`: an instance whose memory grew past it is replaced after the request (a WebAssembly memory never shrinks); at least 16 | `128` |
 | Scheduler tick | `COLOPHON_RELAY_TICK_MS` or `tickMs` | `2000` |
 | Other homes | config `resolve`: `{"https://other.example/v1/libraries/acct": "http://10.0.0.7:8787/v1/libraries/acct"}` (the endpoint an account names, to the URL to reach it) | the endpoint itself |

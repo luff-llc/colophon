@@ -530,6 +530,7 @@ export class HomeSlot {
     // One clock reading for the whole pass: the quiet it may leave certifies exactly the reading
     // every module call of the pass was asked at.
     const st = this.status(now);
+    this.lastStatus = st; // for the operator's metrics (stopped)
     if (!st.appointed) {
       // An unappointed slot's answers change only with its state.
       this.quiet = { state: asked, now, until: Infinity, status: st };

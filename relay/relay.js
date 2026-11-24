@@ -5,7 +5,7 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { constants as fsc, promises as fsp, writeSync } from 'node:fs';
 import http from 'node:http';
 import https from 'node:https';
-import { failingChecks } from './health.js';
+import { failingChecks, healthChecks } from './health.js';
 import { HomeKey, HomeModule, HomeSlot, ModuleError, moduleMemoryBytes } from './home.js';
 import { streamOptions } from './stream.js';
 import {
@@ -498,8 +498,9 @@ async function serveBatch(res, slot, decisions) {
  * Creates the relay. `libraries` maps slot names to `{ tokenSha256 }`, `{ token }` or
  * `{ open: true }` (no bearer token; local testing only).
  */
-export async function createRelay({ dataDir, libraries, limits = {}, home, clock = Date.now, resolve, tickMs = 0, tracing = false, cors, provision, clientAddress: addressConfig, crashAt, hook, stream: streamOptionsIn = {}, drainMs = DRAIN_MS }) {
+export async function createRelay({ dataDir, libraries, limits = {}, home, clock = Date.now, resolve, tickMs = 0, tracing = false, cors, provision, clientAddress: addressConfig, crashAt, hook, stream: streamOptionsIn = {}, drainMs = DRAIN_MS, metrics }) {
   if (!dataDir) throw new Error('dataDir is required');
+  const metricsToken = metricsConfig(metrics);
   if (cors !== undefined && cors !== null && (typeof cors !== 'object' || Array.isArray(cors))) throw new Error('cors must be an object with origins, an array of origins');
   const origins = corsOrigins(cors?.origins);
   const provisioning = provisionConfig(provision);
@@ -833,6 +834,7 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
       const failing = failingChecks();
       return failing.length ? send(res, 503, { ok: false, failing }) : send(res, 200, { ok: true });
     }
+    if (metricsToken && url.pathname === '/metrics') return serveMetrics(req, res);
     if (provisioning.enabled && url.pathname === '/v1/provision') return door(req, res);
     const route = /^\/v1\/libraries\/([^/]+)(?:\/(changes|records|head|authority|pending|predecessor|routes|stream)(?:\/(.*))?)?$/.exec(url.pathname);
     if (!route) throw new HttpError(404, 'Not found');
@@ -951,6 +953,40 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
     throw new HttpError(405, 'Method not allowed', { allow: kind === 'request' ? 'GET, PUT, DELETE' : 'GET, PUT' });
   }
 
+  // ---------------------------------------------------------------------------------------------
+  // Metrics for the operator (`GET /metrics`, off unless `metrics.tokenSha256` is set): counters
+  // read from memory, naming no slot or account. The event loop's lag is sampled once a second.
+
+  const started = Date.now();
+  let lag = 0;
+  let lagTimer = null;
+  if (metricsToken) {
+    let expected = Date.now() + 1000;
+    lagTimer = setInterval(() => { const at = Date.now(); lag = Math.max(0, at - expected); expected = at + 1000; }, 1000);
+    lagTimer.unref?.();
+  }
+  function serveMetrics(req, res) {
+    req.resume();
+    const match = /^Bearer ([^\s]+)$/.exec(req.headers.authorization ?? '');
+    const given = createHash('sha256').update(match ? match[1] : '').digest();
+    if (!match || !timingSafeEqual(given, metricsToken)) throw new HttpError(401, 'Unauthorized', { 'www-authenticate': 'Bearer' });
+    if (req.method !== 'GET') throw new HttpError(405, 'Method not allowed', { allow: 'GET' });
+    const lock = healthChecks()['container lock'];
+    const homes = [...slots.values()].filter((s) => s.home);
+    send(res, 200, {
+      uptimeSeconds: Math.round((Date.now() - started) / 1000),
+      rssBytes: process.memoryUsage.rss(),
+      moduleMemoryBytes: homeModule?.memoryBytes() ?? 0,
+      moduleResets: homeModule?.resets ?? 0,
+      requestsInFlight: requests.size, // others: this one is answered before it is counted
+      eventLoopLagMs: lag,
+      slots: homeSlots.size + auth.size, // every slot this relay holds, open or not
+      // As of each home's last scheduler pass that asked the module.
+      stoppedSlots: homes.filter((s) => s.home.lastStatus?.stopped === true).length,
+      containerLockAgeSeconds: Number.isFinite(lock?.lastBeatAt) ? Math.max(0, Math.round((Date.now() - lock.lastBeatAt) / 1000)) : null,
+    });
+  }
+
   async function upgrade(req, connect) {
     // The ticket is in the query: never log req.url (or this URL) anywhere.
     const url = new URL(req.url, 'http://relay.invalid');
@@ -1004,6 +1040,7 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
     if (closePromise) return closePromise;
     closing = true;
     if (timer) clearInterval(timer);
+    if (lagTimer) clearInterval(lagTimer);
     for (const s of slots.values()) {
       s.closing = true;
       s.home?.stream.closeAll('restart');
@@ -1156,6 +1193,16 @@ async function enableStreams(server, relay) {
       socket.end(`HTTP/1.1 ${status} ${http.STATUS_CODES[status]}\r\n${headers}Connection: close\r\nContent-Type: application/json\r\nCache-Control: no-store\r\nContent-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`);
     });
   });
+}
+
+/** `metrics`: absent or `{tokenSha256}` (64 hex: the SHA-256 of the bearer token that may read
+ * `GET /metrics`). Returns the digest's bytes, or null when metrics are off. */
+function metricsConfig(metrics) {
+  if (metrics === undefined || metrics === null) return null;
+  if (typeof metrics !== 'object' || Array.isArray(metrics) || !HEX64.test(metrics.tokenSha256 ?? '')) {
+    throw new Error('metrics.tokenSha256 must be the 64-hex SHA-256 of the token that may read GET /metrics');
+  }
+  return Buffer.from(metrics.tokenSha256, 'hex');
 }
 
 /** Starts an HTTP (or HTTPS when `tls` holds PEM `cert` and `key`) server. */

@@ -53,6 +53,7 @@ curl http://127.0.0.1:8080/healthz          # {"ok":true}
 | `COLOPHON_PROVISION_UNCLAIMED_HOURS` | `24` | `provision.unclaimedHours` |
 | `COLOPHON_SLOT_BYTES` | `0` (no quota) | `limits.slotBytes`: the most bytes one slot may hold |
 | `COLOPHON_CORS_ORIGINS` | none | A comma-separated list of exact `scheme://host[:port]` origins |
+| `COLOPHON_METRICS_TOKEN_SHA256` | none (off) | The SHA-256 of a token (`bun relay/server.js token`) that may read `GET /metrics` (see "Metrics"). |
 | `COLOPHON_MODULE_MEMORY_MB` | `128` | The home module's memory, in MiB, past which its instance is replaced after a request (see "Memory"). At least 16. |
 | `COLOPHON_CLIENT_IP_HEADER`, `COLOPHON_TRUSTED_PROXIES` | none | Set both or neither. The header holding the client's address (for example `X-Real-IP` or `CF-Connecting-IP`), and the peers it is read from: IP addresses or CIDR ranges, comma-separated. A `/0` range is refused. |
 
@@ -80,6 +81,30 @@ enough for a home serving a handful of accounts (`docker run --memory 1g`, or `m
 Compose). The module's 128 MiB, the relay's own heap, request bodies (up to 16 MiB each), and the
 memory of a replaced instance until it is collected all fit in it. On a machine with more
 memory, raise both together; on a smaller one, lower the bound (64 MiB) before the limit.
+
+## Metrics
+
+`GET /metrics` is off unless `COLOPHON_METRICS_TOKEN_SHA256` (or `metrics.tokenSha256` in your
+own config) is set. Then it answers the bearer token with that SHA-256, and 401 to anyone else,
+with a few counters kept in memory. It names no slot or account:
+
+```sh
+curl -H "Authorization: Bearer $METRICS_TOKEN" http://127.0.0.1:8080/metrics
+```
+
+| Field | Meaning |
+| --- | --- |
+| `uptimeSeconds` | Since the relay started |
+| `rssBytes` | The process's resident memory |
+| `moduleMemoryBytes`, `moduleResets` | The home module's memory now, and how often its instance was replaced (see "Memory") |
+| `requestsInFlight` | Requests being handled, other than this one |
+| `eventLoopLagMs` | How late the last once-a-second timer ran: the event loop's recent delay |
+| `slots`, `stoppedSlots` | Slots this relay holds, and homes whose last scheduler pass found them stopped (they need an update) |
+| `containerLockAgeSeconds` | Since the container lock's last successful update (see "One container per volume"); `null` outside the container |
+
+Use a token of its own, not the provisioning token: it lets its holder read these numbers
+only. Alert on `stoppedSlots` above 0, `containerLockAgeSeconds` above 15, and `rssBytes` near
+the container's memory limit.
 
 ## What the volume holds
 

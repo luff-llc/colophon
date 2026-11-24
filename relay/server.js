@@ -87,6 +87,7 @@ function loadConfig(argv, env) {
     provision: config.provision,
     clientAddress: config.clientAddress,
     stream: config.stream,
+    metrics: env.COLOPHON_METRICS_TOKEN_SHA256 ? { tokenSha256: env.COLOPHON_METRICS_TOKEN_SHA256.trim().toLowerCase() } : config.metrics,
     // Test hooks with the trace: the relay kills itself at the named point, or waits there (the
     // first time it is reached) until the file COLOPHON_RELAY_RESUME_FILE exists.
     crashAt: tracing ? env.COLOPHON_RELAY_CRASH_AT : undefined,
