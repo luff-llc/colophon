@@ -38,6 +38,27 @@ class RefreshPhaseTest {
         } finally { device.close() }
     }
 
+    /** A write refusal still permits reads: its own refresh must restore Ready without another refresh. */
+    @Test(timeout = 60_000) fun aRefusedCommandRefreshPutsReadyBack() = runBlocking<Unit> {
+        val first = Device()
+        val second = Device(medium = first.medium)
+        try {
+            first.session.create()
+            second.session.restore()
+            approveByScan(second.session, first.session, """{"records":[{"namespace":"notes","access":"read"}]}""")
+            second.session.flushExternalChanges()
+            assertEquals(SessionPhase.Ready, second.session.phase, second.describe())
+            val holds = RefreshHolds(setOf(1))
+            second.session.refreshWillFinish = { holds.reached() }
+            assertFailsWith<com.luff.colophon.AccountException.Denied> { note(second.session, "refused") }
+            holds.waiting(1)
+            assertEquals(SessionPhase.Refreshing, second.session.phase, second.describe())
+            holds.release(1)
+            assertNotNull(second.session.refusalRefresh).join()
+            assertEquals(SessionPhase.Ready, second.session.phase, second.describe())
+        } finally { second.close(); first.close() }
+    }
+
     /**
      * The refreshes held at [ColophonSession.refreshWillFinish], numbered in the order they reach it: a held one waits there
      * (its worker has answered, its outcome is not published) until the test releases it, with or without an error.

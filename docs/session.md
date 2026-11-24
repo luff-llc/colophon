@@ -70,13 +70,18 @@ error is `retry` or `waitingForDownload`, never an empty library.
 
 **A namespace this member was never granted.** A session is `denied` only when its own member has lost access it was
 granted, never because the library declares namespaces this member was never granted (`libraryNamespaces` wider than
-`namespaces`). For each namespace in `libraryNamespaces` the session asks the engine's `access`: no denial, the namespace
-is readable; `notReadable` or `unavailable`, the phase is `unavailable(reason)`; `notGranted` for a namespace that the
-member's verified grant (`me().member.grant.namespaces`) does not name, while the member is not provisional, is not this
-member's namespace and is skipped (neither denied nor published); anything else (`revoked`, `expired`, `budgetSpent`,
-`notGranted` while provisional or on a granted namespace) is `denied`. Revisions are published only for the library
-namespaces whose `access` has no denial. Tests: `LibraryNamespacesTests` and `GrantedNamespacesTests` (Swift), `LibraryNamespacesTest` and
-`GrantedNamespacesTest` (Kotlin), `library-namespaces.test.ts` and `granted-namespaces.test.ts` (JS).
+`namespaces`). The member itself is judged first, as the core judges a member current (spec §10.1): a member that is
+missing, revoked, provisional or expired (its expiry is inclusive: expired only once the time is past it) is `denied`
+before any namespace is asked about, so a service or identity-only member, or one whose grant shares no namespace with
+`libraryNamespaces`, is `denied` too and never `ready`. Then, for each namespace in `libraryNamespaces`, the session asks
+the engine's `access`: no denial, the namespace is readable; `notReadable` or `unavailable`, the phase is
+`unavailable(reason)`; `notGranted` for a namespace that the member's verified grant (`me().member.grant.namespaces`)
+does not name is not this member's namespace and is skipped (neither denied nor published); anything else (`revoked`,
+`expired`, `budgetSpent`, `notGranted` on a granted namespace, or a reason the SDK does not know) is `denied`. Revisions
+are published only for the library namespaces whose `access` has no denial. Tests: `LibraryNamespacesTests`,
+`GrantedNamespacesTests` and `MemberReadinessTests` (Swift), `LibraryNamespacesTest`, `GrantedNamespacesTest` and
+`MemberReadinessTest` (Kotlin), `library-namespaces.test.ts`, `granted-namespaces.test.ts` and
+`member-readiness.test.ts` (JS).
 
 ### A stopped account, a home's refusals, waiting for approval (freeze package)
 
