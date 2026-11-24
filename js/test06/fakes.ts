@@ -1,6 +1,6 @@
 // Fakes for the host unit tests: a manual clock with timers, scripted sockets, a ticket transport, and claim stores
 // whose writes the test completes, delays or fails.
-import { fenceAfter, type ClaimStore, type Fence, type HostClock, type HostSocket, type SocketFactory, type SocketHandlers, type StoredClaim } from '../src/hosts/index.js';
+import { compareAndSet, type ClaimStore, type Fence, type HostClock, type HostSocket, type SocketFactory, type SocketHandlers, type StoredClaim } from '../src/hosts/index.js';
 import type { HomeAnswer, HomeRequest, HomeTransport } from '../src/session/index.js';
 
 /** A clock the test moves. Timers fire, in due order, only inside `advance`. */
@@ -76,7 +76,7 @@ export const answer = (status: number, body: unknown = {}, headers: { name: stri
 
 /**
  * A claim store whose writes complete when the test says (`hold`, `hang`), after a delay, or fail. It applies the
- * fence check when a write lands, as the contract requires, and records how many saves were ever in flight at once.
+ * compare-and-set when a write lands, as the contract requires, and records how many saves were ever in flight at once.
  */
 export class TestStore implements ClaimStore {
   /** The claim last stored (none: nothing, or only a reservation). */
@@ -98,7 +98,7 @@ export class TestStore implements ClaimStore {
     this.value = initial?.claim ?? undefined; this.fence = initial?.fence;
   }
   async load(): Promise<StoredClaim | undefined> { return this.fence ? { claim: this.value ?? null, fence: { ...this.fence } } : undefined; }
-  async save(record: StoredClaim): Promise<'stored' | 'stale'> {
+  async save(record: StoredClaim, expected: Fence | undefined): Promise<'stored' | 'stale'> {
     this.inflight++; this.maxInflight = Math.max(this.maxInflight, this.inflight);
     try {
       if (record.claim !== null) this.writes.push(record.claim);
@@ -107,8 +107,10 @@ export class TestStore implements ClaimStore {
       if (this.hang > 0) { this.hang--; await new Promise<void>(resolve => this.hung.push(resolve)); }
       if (this.hold) await new Promise<void>(resolve => this.waiting.push(resolve));
       if (this.delayMs > 0) await new Promise<void>(resolve => this.timer(resolve, this.delayMs));
-      if (this.fence && !fenceAfter(record.fence, this.fence)) { this.refused++; return 'stale'; }
-      this.value = record.claim ?? undefined; this.fence = { ...record.fence };
+      // The compare-and-set, applied when the write lands.
+      const next = compareAndSet(await this.load(), record, expected);
+      if (!next) { this.refused++; return 'stale'; }
+      this.value = next.claim ?? undefined; this.fence = next.fence;
       return 'stored';
     } finally {
       this.inflight--;

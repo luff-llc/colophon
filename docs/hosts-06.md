@@ -17,7 +17,7 @@ own, and it never reads, rewrites or logs a ticket, an unredacted URL or a frame
 | `HostAccount` | What the hosts need from the account: `account`, `member`, `engine()` (read again for every call), `streamCall(home)` (the `colophon.home.stream` call, signed and judged by the core), `exchange()` (one ordinary pass), `signRaw(body)` (the member key's `r‖s` over a delegation body). `accountOf(session)` makes one from a restored `ColophonSession`; its `exchange` is the session's own `syncNow`, so passes never overlap the app's poll loop. |
 | `HomeStreamHost` | One per home. `start`, `stop`, `status`, `polling`, `cursor`, `live`, `retryNow` (foreground entry, a network change, a user action; never a timer), `historyChanged` (the app's own poll moved the history), `attach(cell)` / `detach(cell)`, `sendSession(frame)`, `on(listener)`, `onPass(listener)`. Options: the account, the home's member ID, the ticket `transport` (default `FetchHomeTransport`), the `socket` factory (default the runtime's `WebSocket`), the `clock`, `configure` (adjusts `stream_default_config()`), a saved `cursor` and `saveCursor`. |
 | `SessionCellHost` | One member of one cell: `SessionCellHost.open(options, listener)` loads the stored claim, makes the endpoint, has the member key sign its delegation, attaches to the carrier and joins. `command(name, json)` (resolves once the endpoint ran it), `deliver`, `linkUp`, `linkDown`, `accountChanged`, `leave`, `close`, `current` (the endpoint, for its read-only calls), `stats`. Options: account, carrier, namespace, cell, `store` (a fenced `ClaimStore`, §3), `policy`, `clock`, `state` (the application's state for `join`), `delegationMs`, `persistRetryMs`, `persistTimeoutMs`, `persistAttempts`, `maxCommands`, `random`. |
-| `ClaimStore`, `MemoryClaimStore`, `privateClaimStore(store, name)`, `FencedClaimStore` | The fenced claim store contract and the reference stores that apply it: in memory, in one file of a session's `PrivateStore`, or over any `read`/`write` of the record. |
+| `ClaimStore`, `MemoryClaimStore`, `privateClaimStore(store, name)` | The claim store contract (a linearizable compare-and-set, §3) and the stores that provide it: in memory, or in one file of an `AtomicPrivateStore` (`IndexedDBPrivateStore`, `FilePrivateStore`, `MemoryPrivateStore`, which gain `update`, an atomic read-decide-write). |
 | `CellSession` | The small typed API over a cell host: `CellSession.join(options)`; `state` (`joined`, `holder`, `isHolder`, `gated`, `claim`, `state`, `seq`, `entitled`, `canWrite`) and `subscribe`; `events` (the core's events with bytes decoded); `take`, `ask`, `pass`, `decline`, `release`, `publish`, `submit`, `presence`, `ping`, `leave`, `close`. |
 | `sessionFrameText(message)` | The exact text of a `session` message's `frame` value, or none (no `frame`, `frame` twice, or not one JSON object). |
 | `webSocketFactory(class?)` | The standard `WebSocket` behind `SocketFactory` (see §5 for what a browser cannot report). |
@@ -76,17 +76,31 @@ jobs, so nothing a listener, store, socket or timer does can re-enter the endpoi
   ends in `failed` (`store`) without a second save ever being issued. A save that succeeds only
   after its deadline acknowledges nothing; the claim is saved again under the next fence. Only a
   completed save becomes the claim a new endpoint starts from.
-- **Fencing.** Every save carries a fence `{generation, seq}` (`js/src/hosts/claim-store.ts`).
-  An instance's generation is one more than the one the store holds when it opens, and it reserves
-  it before saving any claim, by saving the claim it loaded under `{generation, 0}`; saves are then
-  numbered within it, and a rebuilt endpoint moves to the next generation (after the last save has
-  settled). The store refuses (`stale`) any save whose fence is not greater than the one it holds,
-  so the held fence never goes back, and since every instance's generation is in the store before
-  it saves a claim, a save from an earlier instance or attempt that settles late is refused instead
-  of overwriting a newer claim. The fence is stored with the claim, so it survives restarts. The
-  reference stores apply the check; a custom store must. A refused reservation means another
-  instance holds the cell: `open` fails. A refused claim save means the same, and the cell fails
-  with reason `superseded`. One live host per cell and store is assumed.
+- **Fencing.** Every save carries a fence `{generation, seq}` of two non-negative safe integers
+  (anything else is refused), and the fence the host last saw held. `ClaimStore.save(record,
+  expected)` is a compare-and-set, linearizable across every client of the same storage (other
+  instances, tabs and processes): it writes only if the held fence is exactly `expected` and the
+  new one is greater, else it is `stale` and writes nothing. A store that reads, compares and writes
+  as separate steps is incorrect: two clients could both read fence F and both write, and two hosts
+  would each believe they hold the cell. The shipped stores make it one step: `MemoryClaimStore`
+  synchronously; `privateClaimStore` through `AtomicPrivateStore.update`, which `IndexedDBPrivateStore`
+  runs as one `readwrite` transaction (get, compare, put) and `FilePrivateStore` under a
+  cross-process lock file (the `FileLock` that `FileMedium` already used: created exclusively,
+  taken over only from a dead process, and checked again just before the rename, so a holder that
+  lost it writes nothing).
+- A host **opens and rebuilds by reserving** the next generation: a compare-and-set of the claim it
+  holds under `{generation + 1, 0}` from the fence it read. Of two that read the same fence, only
+  one can store; the other is `stale`, and its open fails (`CellHostError` `superseded`) or its
+  rebuild fails the cell (`failed`, reason `superseded`). The held fence changes only by a save made
+  from exactly the previous one, so it never goes back, and a save from an older instance or attempt
+  that settles late finds a fence it did not expect and changes nothing. The fence is stored with
+  the claim, so it survives restarts. After a save fails or is `stale`, the host reads the held
+  fence: one of its own (a save it could not see complete) is adopted and the claim saved again;
+  another instance's means it no longer holds the cell.
+- **A superseded host stops within one beat.** Every `beatMs` (the cell policy's), while no write is
+  in progress, the host reads the held fence; when it is not the one it last stored, it fails with
+  `superseded` at once, whether or not it saves again. So a host that another instance replaced
+  sends for at most one beat after the replacement reserved its generation.
 - **A store that keeps failing fails the cell.** After `persistAttempts` consecutive failed or
   overdue attempts of one write (default 20) the host stops acting: its endpoint is freed, it is detached
   from the carrier and sends nothing more, every held and new command is refused (`CellHostError`
@@ -137,6 +151,13 @@ relay's home module, typecheck strictly and run `bun test test06`:
   a wake during a pass; a call never signed counted as failed through the `wake_at` timer; `stop`
   from a `connect` listener and from inside the socket factory leaving no socket open; listeners
   calling back into the host from every event.
+- `claim-fence.test.ts`: two clients of one storage (a fake whose reads and compare-and-sets are
+  separate transactions, run in every one of the six interleavings of two opens) racing to open,
+  leaving exactly one holder after one beat; a rebuild racing an open in all three interleavings;
+  the real `FilePrivateStore` through two handles on one folder (one of two racing saves stored,
+  one of two racing opens left); a superseded holder failing within one beat and sending nothing
+  after; fences that are not non-negative safe integers refused. The browser run adds eight
+  `IndexedDBPrivateStore` clients of one database racing from one fence, twice: one stored each time.
 - `frames.test.ts`: `sessionFrameText` on escaped quotes, `frame` inside strings and nested
   objects, duplicate and escaped-duplicate `frame` names, unicode escapes, whitespace, invalid
   tokens and numbers, bad escapes, control characters, trailing data and deep nesting.

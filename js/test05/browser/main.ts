@@ -5,6 +5,7 @@ import {
   ColophonSession, FetchHomeTransport, glue, IndexedDBMedium, IndexedDBPrivateStore, init, keyIdOf, MemoryMedium, PasskeyProvider,
   WebCryptoDeviceSecrets, WebCryptoKeyProvider, WebCryptoKeyStore, type HomeConfiguration, type KeyDescriptor,
 } from '../../src/session/index.js';
+import { privateClaimStore } from '../../src/hosts/index.js';
 import { journey, journeys } from '../journey.ts';
 import { admitted, approveByScan, assert, Device, equal, note, RelayHome, sleep, type RelayHost } from '../support.ts';
 
@@ -83,6 +84,18 @@ async function main(): Promise<void> {
     equal(again.readBlob('blobs/none').length, 0, 'a chunk not held is empty');
     again.close();
     await IndexedDBMedium.destroy(name);
+  });
+
+  await run('a claim save is a compare-and-set across IndexedDB clients: of many racing from one fence, exactly one is stored', async () => {
+    const name = `colophon-claims-${crypto.randomUUID().slice(0, 8)}`;
+    const clients = Array.from({ length: 8 }, () => new IndexedDBPrivateStore(name));
+    const results = await Promise.all(clients.map((c, k) => privateClaimStore(c, 'cell').save({ claim: `claim-${k}`, fence: { generation: 1, seq: 0 } }, undefined)));
+    equal(results.filter(r => r === 'stored').length, 1, 'one save is stored');
+    const next = await Promise.all(clients.map((c, k) => privateClaimStore(c, 'cell').save({ claim: `next-${k}`, fence: { generation: 2, seq: 0 } }, { generation: 1, seq: 0 })));
+    equal(next.filter(r => r === 'stored').length, 1, 'one save from the held fence is stored');
+    const held = await privateClaimStore(clients[0]!, 'cell').load();
+    equal(held?.fence.generation, 2, 'the newest fence is held');
+    for (const c of clients) await c.close();
   });
 
   await run('device keys are non-extractable CryptoKeys that survive a reopen; the sealed-state key is derived, never stored', async () => {

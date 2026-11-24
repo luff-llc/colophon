@@ -447,7 +447,7 @@ describe('the cell host', () => {
     const carrier = new LoopCarrier();
     let failed: unknown;
     try { await SessionCellHost.open({ account: accountOf(first.session), carrier, namespace: NS, cell: CELL, store, clock: new ManualClock() }); } catch (error) { failed = error; }
-    expect((failed as CellHostError).code).toBe('failed');
+    expect((failed as CellHostError).code).toBe('superseded');
     expect(carrier.cells.size).toBe(0);
   });
 
