@@ -115,6 +115,28 @@ import ColophonSavedKit
         #expect(items.contains(#""id":"outside""#), "the operation is read again once the medium answers")
     }
 
+    /// A path the engine dropped after the baseline was taken (a load or unlock after an open or a refresh, here a read
+    /// through the engine's source that fails) retires the baseline: the next reconcile refreshes in full, even with
+    /// the listing unchanged, and keeps a new baseline only from then on.
+    @Test func aDropAfterTheBaselineWasTakenMakesTheNextReconcileFull() async throws {
+        let device = Device()
+        await device.session.create()
+        let worker = SessionWorker(configuration: device.configuration)
+        _ = try await worker.restore()
+        _ = try await worker.refresh()
+        let quietFull = await worker.fullRefreshes
+        #expect(quietFull == 0, "the baseline taken at the open serves an unchanged listing")
+
+        let source = try #require(await worker.engineSource)
+        #expect(throws: (any Error).self) { _ = try source.read(path: "ops/absent/reading.saved/000000000001-x.json") }
+        _ = try await worker.refresh()
+        let afterDrop = await worker.fullRefreshes
+        #expect(afterDrop == 1, "a drop since the baseline means a full refresh")
+        _ = try await worker.refresh()
+        let settled = await worker.fullRefreshes
+        #expect(settled == 1, "the full refresh held everything and took a new baseline")
+    }
+
     @Test func aListingOverTheFullRefreshBoundHasNoDelta() {
         let limit = ListingBaseline.maximumListing
         let entries = (0...limit).map { MediumEntry(path: String(format: "ops/a/b/%012d-x.json", $0), version: "1") }

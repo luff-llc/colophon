@@ -11,17 +11,27 @@ struct ListingBaseline {
     /// Paths the engine held that this listing did not name (`missing_covered`). One that reappears is judged by a
     /// full refresh, which is what clears it.
     let missing: Set<String>
+    /// The source's unconfirmed reads and the engine's stale live slots when the baseline was taken. Either one moving
+    /// before the next reconcile (a later load or unlock dropped a path) retires the baseline.
+    let drops: Drops
 
-    init(engine: ColophonEngine, entries: [MediumEntry], missing: Set<String>) {
-        self.engine = engine; self.entries = entries; self.missing = missing
+    /// Counters of paths an engine was given but may not hold: reads the source could not confirm, live slots refused
+    /// as stale.
+    struct Drops: Equatable {
+        let reads: UInt64
+        let stale: Int
+    }
+
+    init(engine: ColophonEngine, entries: [MediumEntry], missing: Set<String>, drops: Drops) {
+        self.engine = engine; self.entries = entries; self.missing = missing; self.drops = drops
     }
 
     /// The baseline after `engine` took `entries` in full, or nil when the listing cannot serve as one (out of path
     /// order), so the next reconcile refreshes in full again.
-    init?(engine: ColophonEngine, entries: [MediumEntry]) async throws {
+    init?(engine: ColophonEngine, entries: [MediumEntry], drops: Drops) async throws {
         guard Self.isOrdered(entries) else { return nil }
         let missing = try await engine.run { try $0.missingCovered() }
-        self.init(engine: engine, entries: entries, missing: Set(missing))
+        self.init(engine: engine, entries: entries, missing: Set(missing), drops: drops)
     }
 
     /// The longest listing a full refresh accepts (the bindings' list bound, `MAX_LIST`, below the engine's own

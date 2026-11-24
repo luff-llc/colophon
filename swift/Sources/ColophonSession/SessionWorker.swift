@@ -78,8 +78,8 @@ actor SessionWorker {
     private var memberCustody: KeyCustody?
     /// The listing the engine last took (see `take(_:into:)`). Nil means the next reconcile refreshes in full.
     private var listingBaseline: ListingBaseline?
-    /// The source `engine` reads through, which counts the reads it could not confirm.
-    private var engineSource: MediumSource?
+    /// The source `engine` reads through, which counts the reads it could not confirm (tests read it).
+    private(set) var engineSource: MediumSource?
     /// How many reconciles handed the engine the whole listing, and how many only what changed (tests read these).
     private(set) var fullRefreshes = 0
     private(set) var incrementalRefreshes = 0
@@ -385,9 +385,10 @@ actor SessionWorker {
             saved: saved, deviceKey: key, nowMs: nowMs)
         engine = opened; accountID = account; engineSource = source
         // Without a baseline the next reconcile refreshes in full: never a reason to fail this one. A read the open
-        // could not confirm leaves none, so the next reconcile's full refresh reads that path again.
-        if source.unconfirmedReads == 0, (try? await opened.run({ try $0.staleLive() }))?.isEmpty == true {
-            listingBaseline = (try? await ListingBaseline(engine: opened, entries: entries)) ?? nil
+        // could not confirm leaves none, so the next reconcile's full refresh reads that path again. The load and
+        // unlock below can still drop a path; the next reconcile sees the counters moved and refreshes in full.
+        if source.unconfirmedReads == 0, let stale = try? await opened.run({ try $0.staleLive() }).count, stale == 0 {
+            listingBaseline = (try? await ListingBaseline(engine: opened, entries: entries, drops: .init(reads: 0, stale: 0))) ?? nil
         }
         // A member that is not approved yet holds no keys; the records can still be read and the exchange can
         // still bring the approval in. A member opens its epoch shares in `unlockIfPossible`.
@@ -416,28 +417,34 @@ actor SessionWorker {
     ///
     /// A baseline is kept only when the engine held every path it was given: no read failed or was refused for its
     /// size, and no live slot was refused as stale. Otherwise a path may be listed but not held, which only a full
-    /// refresh reads again, so the next reconcile refreshes in full.
+    /// refresh reads again, so the next reconcile refreshes in full. The baseline records those counters, and is used
+    /// only while they have not moved since: a load, unlock or other call after it that dropped a path retires it too.
     private func take(_ entries: [MediumEntry], into engine: ColophonEngine) async throws {
         let baseline = listingBaseline
         listingBaseline = nil // set again only once the engine took this listing
-        let source = engineSource
-        let readsBefore = source?.unconfirmedReads
-        let staleBefore = try? await engine.run({ try $0.staleLive() }).count
-        func held() async -> Bool {
-            guard let source, let readsBefore, let staleBefore, source.unconfirmedReads == readsBefore else { return false }
-            return (try? await engine.run({ try $0.staleLive() }).count) == staleBefore
-        }
-        if let baseline, baseline.engine === engine, let delta = ListingBaseline.delta(from: baseline.entries, to: entries),
+        let before = await drops(engine)
+        if let baseline, let before, baseline.drops == before, baseline.engine === engine,
+           let delta = ListingBaseline.delta(from: baseline.entries, to: entries),
            !delta.contains(where: { baseline.missing.contains($0.path) }),
            try await engine.run({ try $0.stats() }).unreadPaths == 0 {
             if !delta.isEmpty { try await applyPaths(engine, listed(delta)) }
             incrementalRefreshes += 1
-            if await held() { listingBaseline = ListingBaseline(engine: engine, entries: entries, missing: baseline.missing) }
+            if let after = await drops(engine), after == before {
+                listingBaseline = ListingBaseline(engine: engine, entries: entries, missing: baseline.missing, drops: after)
+            }
             return
         }
         try await refresh(engine, listing: listed(entries))
         fullRefreshes += 1
-        if await held() { listingBaseline = (try? await ListingBaseline(engine: engine, entries: entries)) ?? nil }
+        if let before, let after = await drops(engine), after == before {
+            listingBaseline = (try? await ListingBaseline(engine: engine, entries: entries, drops: after)) ?? nil
+        }
+    }
+
+    /// The counters of paths `engine` may have dropped, or nil when they cannot be read (no baseline is kept then).
+    private func drops(_ engine: ColophonEngine) async -> ListingBaseline.Drops? {
+        guard let source = engineSource, let stale = try? await engine.run({ try $0.staleLive() }).count else { return nil }
+        return ListingBaseline.Drops(reads: source.unconfirmedReads, stale: stale)
     }
 
     /// A member opens its epoch shares with its own agreement key (silent for a Secure Enclave key): at first, and
