@@ -459,3 +459,96 @@ fn a_change_feed_read_is_judged_and_listed_over_one_state() {
     assert_eq!(rs, 200, "the revocation: {}", String::from_utf8_lossy(&rb));
     drop(relay);
 }
+
+#[test]
+fn a_history_file_read_is_judged_and_selected_over_one_state() {
+    if prerequisites().is_none() {
+        return;
+    }
+    let keys = HomeKeys::new(0x5e);
+    // A members-only history: reading an entry's file needs a member's call.
+    let mut f = create_with(&[NS], "members", 1);
+    appoint_home_keys(&mut f, &keys, BASE_A);
+    let m = f.host.identity(46);
+    admit(&mut f, &m, "Reader", "app", terms("write"), terms("write"));
+    let scratch = Scratch::new("history-file-one-state");
+    let now = f.account.now_ms() + 1_000;
+    let account = f.account.id().as_str().to_string();
+    let mut setup = Relay::start_with(
+        &keys,
+        &account,
+        BASE_A,
+        scratch.path(),
+        now,
+        &[],
+        0,
+        json!({"tickMs": 0}),
+    );
+    first_upload(&setup, &f, now);
+    setup.stop();
+    drop(setup);
+    // The read pauses right after its call is judged.
+    let (relay, rx) = Relay::start_paused(
+        &keys,
+        &account,
+        BASE_A,
+        scratch.path(),
+        now,
+        "access records",
+    );
+    let port = relay.port;
+    let from = entries_json(&f).last().unwrap().0 + 1;
+    // M reads the file of the entry that will revoke it, before that entry exists.
+    let path = format!("/records/authority/{from:08}.json");
+    let read = send(
+        port,
+        "GET",
+        &path,
+        read_headers(&f, &m, &path, now),
+        Vec::new(),
+    );
+    trace_marker(&rx, &["access records"]);
+    f.account.advance(now).unwrap();
+    let action = f
+        .account
+        .begin_revoke(&m, &RevokeKeep::Nothing, &[f.d.clone()], [9; 32])
+        .unwrap();
+    run(&mut f.account, &f.host, action);
+    let entry = entries_json(&f)
+        .into_iter()
+        .find(|(s, _)| *s == from)
+        .unwrap()
+        .1;
+    let body = json!({"from": from, "entries": [entry], "receipts": []}).to_string();
+    let (revoked, revoke_done) = std::sync::mpsc::channel();
+    let revoke = send(
+        port,
+        "POST",
+        "/authority",
+        vec![("Content-Type".into(), "application/json".into())],
+        body.into_bytes(),
+    );
+    std::thread::spawn(move || {
+        let _ = revoked.send(revoke.join().unwrap());
+    });
+    // While the read holds its judgement, the revocation cannot commit (a bound: it is the
+    // property, not a timing assumption).
+    let early = revoke_done
+        .recv_timeout(std::time::Duration::from_secs(3))
+        .ok();
+    std::fs::write(scratch.path().join("resume"), b"").unwrap();
+    let (s, b) = read.join().unwrap();
+    assert_eq!(
+        s,
+        404,
+        "a read judged before the revocation was served the revoking entry: {}",
+        String::from_utf8_lossy(&b)
+    );
+    assert!(
+        early.is_none(),
+        "the revocation committed between the read's judgement and its file"
+    );
+    let (rs, rb) = early.unwrap_or_else(|| revoke_done.recv().unwrap());
+    assert_eq!(rs, 200, "the revocation: {}", String::from_utf8_lossy(&rb));
+    drop(relay);
+}

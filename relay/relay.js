@@ -629,7 +629,7 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
           s.home = new HomeSlot({
             slot: s, wasm: homeModule, key: homeKey, base: homeSlots.get(name).base, account: homeSlots.get(name).account,
             clock, resolve, tracing, stream: streamOptions(streamOptionsIn), scheduled: tickMs > 0,
-            deps: { HttpError, send, readBody, readBatchBody, serveBatch, clampInt, clientAddress, isJsonType, reach, firstChanges, serveChanges },
+            deps: { HttpError, send, readBody, readBatchBody, serveBatch, clampInt, clientAddress, isJsonType, reach, firstChanges, serveChanges, serveRecord },
             limits: { ...effective, requestsPerMinute: effective.requestsPerMinute ?? 0 },
           });
           await s.home.open();
@@ -891,30 +891,7 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
     const kind = s.classify(recordPath);
     if (!kind) throw new HttpError(400, 'Invalid record path');
     if (url.search) throw new HttpError(400, 'Record URLs take no query');
-    if (req.method === 'GET' || req.method === 'HEAD') {
-      const entry = s.current.get(recordPath);
-      if (!entry) throw new HttpError(404, 'Not found');
-      const etag = `"${entry.sha256}"`;
-      const conditional = req.headers['if-none-match'];
-      if (conditional === '*' || conditional?.split(',').some((tag) => tag.trim().replace(/^W\//, '') === etag)) {
-        res.writeHead(304, { etag, 'cache-control': 'no-store' });
-        return res.end();
-      }
-      if (req.method === 'HEAD') {
-        const file = await s.target(recordPath, false);
-        const st = file && await fsp.lstat(file).catch((e) => { if (e.code !== 'ENOENT') throw e; });
-        if (!st) throw new HttpError(404, 'Not found');
-        if (!st.isFile() || st.size !== entry.size) throw new HttpError(500, 'Relay storage does not match index');
-        res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': entry.size, etag });
-        return res.end();
-      }
-      const bytes = await s.readFile(recordPath);
-      const actual = sha256(bytes);
-      if (bytes.length !== entry.size || actual !== entry.sha256) throw new HttpError(500, 'Relay storage does not match index');
-      res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': bytes.length,
-        etag, 'cache-control': 'no-store' });
-      return res.end(bytes);
-    }
+    if (req.method === 'GET' || req.method === 'HEAD') return serveRecord(req, res, s, recordPath);
     if (req.method === 'PUT') {
       const max = kind === 'blob' ? effective.blobBytes : effective.recordBytes;
       const body = await readBody(req, max);
@@ -974,6 +951,32 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
       stoppedSlots: homes.filter((s) => s.home.lastStatus?.stopped === true).length,
       containerLockAgeSeconds: Number.isFinite(lock?.lastBeatAt) ? Math.max(0, Math.round((Date.now() - lock.lastBeatAt) / 1000)) : null,
     });
+  }
+
+  /** `GET`/`HEAD {base}/records/<path>`: the stored file, checked against the index. */
+  async function serveRecord(req, res, s, recordPath) {
+    const entry = s.current.get(recordPath);
+    if (!entry) throw new HttpError(404, 'Not found');
+    const etag = `"${entry.sha256}"`;
+    const conditional = req.headers['if-none-match'];
+    if (conditional === '*' || conditional?.split(',').some((tag) => tag.trim().replace(/^W\//, '') === etag)) {
+      res.writeHead(304, { etag, 'cache-control': 'no-store' });
+      return res.end();
+    }
+    if (req.method === 'HEAD') {
+      const file = await s.target(recordPath, false);
+      const st = file && await fsp.lstat(file).catch((e) => { if (e.code !== 'ENOENT') throw e; });
+      if (!st) throw new HttpError(404, 'Not found');
+      if (!st.isFile() || st.size !== entry.size) throw new HttpError(500, 'Relay storage does not match index');
+      res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': entry.size, etag });
+      return res.end();
+    }
+    const bytes = await s.readFile(recordPath);
+    const actual = sha256(bytes);
+    if (bytes.length !== entry.size || actual !== entry.sha256) throw new HttpError(500, 'Relay storage does not match index');
+    res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': bytes.length,
+      etag, 'cache-control': 'no-store' });
+    return res.end(bytes);
   }
 
   /** `GET {base}/changes`: its query, checked. */
