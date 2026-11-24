@@ -104,7 +104,11 @@ import Observation
         restoreTask = task
         await task.value
     }
-    public func refresh() async {
+    public func refresh() async { await refresh(coalescing: false) }
+    /// `coalescing`: a refresh for a hint (the folder watcher, the end of an exchange) while the session is ready lists
+    /// the folder once and reconciles only when it holds something the engine has not read, or the engine holds
+    /// something not yet shown (`SessionWorker.refreshIfStale`). Any other phase takes the full refresh.
+    private func refresh(coalescing: Bool) async {
         guard !suspended, !Task.isCancelled else { return }
         let id = UUID(), lease = context, lockEpoch = lockGeneration
         refreshWaiters[id] = []
@@ -116,7 +120,9 @@ import Observation
         await restore()
         guard canPublish(lease, lockEpoch), !Task.isCancelled else { return }
         let failureRevision = commandFailureRevision
-        let marked = phase == .ready
+        // A hint's refresh that starts while another is in flight never re-marks: that would make the one in flight
+        // stale and drop a snapshot its caller awaits. Both finish; the later one (behind it in the worker gate) applies.
+        let marked = phase == .ready && !(coalescing && refreshWaiters.count > 1)
         if marked { phase = .refreshing; refreshMark &+= 1 }
         // This refresh's generation. A refresh that a newer one has since re-marked is stale: its outcome (snapshot or
         // error) is dropped and the phase follows the newer one.
@@ -129,9 +135,14 @@ import Observation
         // leaves the refresh's own outcome to decide.
         var failureHoldsPhase: Bool { failureRevision != commandFailureRevision && phase != .refreshing }
         do {
-            let snapshot = try await worker.refresh()
+            // Only a refresh with no other in flight answers from the folder mark: one that re-marks over an unmarked
+            // refresh makes that one stale, so it must bring a snapshot of its own.
+            let coalesce = coalescing && marked && refreshWaiters.count == 1
+            let fresh = coalesce ? try await worker.refreshIfStale() : try await worker.refresh()
             try await refreshWillFinish?()
             guard current, !Task.isCancelled else { return }
+            // Nothing new: what is shown is current.
+            guard let snapshot = fresh else { return }
             if snapshot.phase == .ready, failureHoldsPhase { return }
             apply(snapshot)
             await startWatching()
@@ -185,6 +196,63 @@ import Observation
             if observed.context == context { handleCommandError(error) }
             throw error
         }
+    }
+    /// Writes `commands` in order as one batch: for an import, a backfill or any run of many writes. Each command is
+    /// signed and admitted on its own, as `perform(_:observed:claimed:)` admits it, and its records are stored before the
+    /// next command is signed. The batch reconciles once, publishes one snapshot and asks for one sync. Returns a receipt
+    /// per command, in order.
+    ///
+    /// The whole batch is refused, with nothing written, by the errors a single write gives before it signs:
+    /// `SessionError.destinationChanged`, `.notReady` and `.staleRevision`, and `.invalidCommand` for more than
+    /// `maximumBatchCount` commands. After that the batch stops at the first command that fails: one this session does not
+    /// write (its namespace, a payload over its ceiling), one the engine refuses (a spent write budget, an expired grant;
+    /// the engine's clock advances before each command, as between separate writes), a failure of the keys, or a store
+    /// that refuses its records. The error is then a `BatchInterruption`: `index` names that command, `error` is what the
+    /// single write would have thrown for it, and `receipts` are those of the commands before it, which are durable and
+    /// visible. That command and every one after it are not written, except when the store failed in a way that cannot
+    /// be read back: then `error` is `StorageError.unavailable` saying the command may have been recorded, and the next
+    /// refresh shows whether it was. Once a command is durable its receipt is returned, or carried by the
+    /// `BatchInterruption`, whatever happens next: a snapshot that cannot be built afterwards is reported in `lastError`
+    /// and followed by a refresh, and a session that moved to another library meanwhile still returns the receipts of the
+    /// one it wrote to. An empty batch writes nothing and returns no receipts. Claimed dates are not taken here; write
+    /// those with `perform(_:observed:claimed:)`.
+    @discardableResult public func perform(_ commands: [DomainCommand], observed: ObservedRevision) async throws -> [WriteReceipt] {
+        await restore()
+        guard observed.context == context else { throw SessionError.destinationChanged }
+        guard commands.count <= Self.maximumBatchCount else { throw SessionError.invalidCommand }
+        guard !commands.isEmpty else { return [] }
+        do {
+            let written = try await worker.write(commands, observed: observed.revision)
+            publishAfterBatch(written.snapshot, lease: observed.context)
+            return written.receipts
+        } catch let refusal as SessionRefusal {
+            if observed.context == context { apply(refusal.snapshot); lastError = refusal.error.localizedDescription }
+            throw refusal.error
+        } catch let stop as BatchStop {
+            if let snapshot = stop.snapshot { publishAfterBatch(snapshot, lease: observed.context) }
+            if observed.context == context { handleCommandError(stop.error) }
+            throw BatchInterruption(receipts: stop.receipts, index: stop.index, error: stop.error)
+        } catch {
+            if observed.context == context { handleCommandError(error) }
+            throw error
+        }
+    }
+    /// After a durable batch: publishes its snapshot and asks for a sync. A snapshot that could not be built is reported
+    /// in `lastError` and a refresh publishes the next one; it never turns the durable batch into a failure. A session that
+    /// moved to another library meanwhile publishes nothing.
+    private func publishAfterBatch(_ snapshot: Result<SessionSnapshot, any Error>, lease: UUID) {
+        guard lease == context else { return }
+        switch snapshot {
+        case .success(let snapshot): apply(snapshot)
+        case .failure(let error):
+            lastError = error.localizedDescription
+            let generation = lockGeneration
+            refusalRefresh = Task { [weak self] in
+                guard let self, canPublish(lease, generation) else { return }
+                await refresh()
+            }
+        }
+        if homesConfigured { requestSync() }
     }
     /// Approves a member's request with the owner controller (a passkey owner is asked to confirm), spending
     /// `pairing`: confirmed on this device for exactly this request's key (spec §9.1), by the six-digit code
@@ -575,9 +643,15 @@ import Observation
             if result.stopped { syncState = .disabled; await refresh(); return true }
             // A home that answered `503 {"result":"unavailable"}` is not available: shown so, retried with backoff (never as
             // this device being stopped, which only its own verified history decides).
-            if result.homeUnavailable, !result.changed { syncState = .offline(reason: HomeWords.unavailable); return false }
+            if result.homeUnavailable, !result.changed {
+                syncState = .offline(reason: HomeWords.unavailable)
+                if result.owesRefresh { await refresh(coalescing: true) }
+                return false
+            }
             syncState = result.unauthorized ? .unauthorized : result.failed ? .error(reason: "a pass could not finish: the engine was still waiting") : .idle
-            if result.changed || phase != .ready { await refresh() }
+            // A folder hint answered during the pass left its refresh to this one, so a change is reconciled once.
+            if phase != .ready { await refresh() }
+            else if result.changed || result.owesRefresh { await refresh(coalescing: true) }
             else if let snapshot = try? await worker.currentSnapshot(), canPublish(lease, generation) { apply(snapshot) }
             return !result.unauthorized && !result.failed
         } catch is CancellationError {
@@ -585,17 +659,23 @@ import Observation
         } catch let error as HomeTransportError {
             guard canPublish(lease, generation) else { return false }
             if case .offline(let reason) = error { syncState = .offline(reason: reason) } else { syncState = .error(reason: error.localizedDescription) }
+            await refreshOwed()
             return false
         } catch let error as ColophonError {
             guard canPublish(lease, generation) else { return false }
             syncState = .error(reason: error.localizedDescription)
-            if error.isNewerFormat { fail(error) }
+            if error.isNewerFormat { fail(error) } else { await refreshOwed() }
             return false
         } catch {
             guard canPublish(lease, generation) else { return false }
             syncState = .error(reason: error.localizedDescription)
+            await refreshOwed()
             return false
         }
+    }
+    /// An exchange that failed after a folder hint was answered during it: the refresh that hint skipped runs now.
+    private func refreshOwed() async {
+        if await worker.owesRefresh { await refresh(coalescing: true) }
     }
 
     /// Wakes the background exchange loop, for example after a host learns the network returned.
@@ -741,7 +821,7 @@ import Observation
                 do { try await Task.sleep(for: .milliseconds(75)) } catch { return }
                 guard let self, !Task.isCancelled else { return }
                 batchNeedsRefresh = false
-                await refresh()
+                await refresh(coalescing: true)
                 guard !Task.isCancelled else { return }
                 if !batchNeedsRefresh { batchTask = nil; return }
             }
