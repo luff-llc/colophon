@@ -1451,6 +1451,11 @@ impl Account {
     /// it returns every recording it made, with its bytes, and has applied them all; or it
     /// returns the error and has applied none.
     pub fn record_due(&mut self) -> Result<Vec<Finished>> {
+        // Most calls find nothing due: answer those without copying the held state.
+        let Some(first) = self.next_recording() else {
+            return Ok(Vec::new());
+        };
+        // `next_recording` reads only, so this is still the state before any recording.
         let snapshot = (
             self.objects.clone(),
             self.records.clone(),
@@ -1462,12 +1467,17 @@ impl Account {
         // Bounded by the number of held pending objects and activations.
         let bound = self.objects.pending.len() + self.d.auth.state().activations().len() + 8;
         let mut failure = None;
+        let mut ready = Some(first);
         for _ in 0..bound {
-            let Some(batch) = self.next_recording() else {
+            let Some(batch) = ready.take().or_else(|| self.next_recording()) else {
                 break;
             };
             let action = self.batch_action("record", batch);
-            match self.finish(action, Vec::new()) {
+            #[cfg(not(test))]
+            let finished = self.finish(action, Vec::new());
+            #[cfg(test)]
+            let finished = record_due_tests::finish_or_fault(self, out.len(), action);
+            match finished {
                 Ok(f) => out.push(f),
                 Err(e) => {
                     failure = Some(e);
@@ -2197,3 +2207,7 @@ pub struct KeyringEdit {
     /// Policy fields to set (lowering windows, tightening `history` or `memberRule`).
     pub policy: Option<Value>,
 }
+
+#[cfg(test)]
+#[path = "record_due_tests.rs"]
+mod record_due_tests;
