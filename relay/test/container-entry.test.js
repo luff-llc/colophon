@@ -5,7 +5,8 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync, statSync, symlinkSync, utimesSync, writeFileSync, mkdirSync } from 'node:fs';
+import { existsSync, fstat, futimes, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync, mkdirSync } from 'node:fs';
+import { promisify } from 'node:util';
 import { promises as fsp } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -192,47 +193,90 @@ describe('the container lock', () => {
     assert.ok(existsSync(b.file));
     b.release();
   });
-  test('the heartbeat is asynchronous, one beat at a time, and reports its health', async () => {
-    // The beats are driven by hand: `schedule` holds the next one until the test fires it.
-    let next = null;
-    const schedule = (fn) => { assert.equal(next, null, 'one beat scheduled at a time'); next = fn; return () => { next = null; }; };
-    const fire = () => { const fn = next; next = null; assert.ok(fn, 'a beat is scheduled'); return fn(); };
-    const utimes = fsp.utimes;
+  // The beats are driven by hand: `schedule` holds the next one until the test fires it, and the
+  // lock's file calls go through `io`, which a test can stall or fail.
+  const manual = () => {
+    const h = { next: null };
+    h.schedule = (fn) => { assert.equal(h.next, null, 'one beat scheduled at a time'); h.next = fn; return () => { h.next = null; }; };
+    h.fire = () => { const fn = h.next; h.next = null; assert.ok(fn, 'a beat is scheduled'); return fn(); };
+    return h;
+  };
+  const realIo = { futimes: promisify(futimes), fstat: promisify(fstat), lstat: fsp.lstat };
+  test('the heartbeat touches its own lock asynchronously, one beat at a time, and reports its health', async () => {
+    const m = manual();
     let calls = 0; let release;
     const stall = new Promise((resolve) => { release = resolve; });
-    fsp.utimes = async (...args) => {
-      calls += 1;
-      if (calls === 1) await stall; // the first beat stalls (a slow disk)
-      return utimes.apply(fsp, args);
-    };
+    const io = { ...realIo, futimes: async (...args) => { calls += 1; if (calls === 1) await stall; return realIo.futimes(...args); } };
     let t = Date.now();
-    const a = acquireContainerLock(root, { beatMs: 5_000, schedule, now: () => t, onLost: () => assert.fail('lost') });
+    const a = acquireContainerLock(root, { beatMs: 5_000, schedule: m.schedule, io, now: () => t, onLost: () => assert.fail('lost') });
     try {
       t += 5_000;
-      const beat = fire();
+      const beat = m.fire();
       await until(() => calls === 1);
-      assert.equal(next, null, 'no beat is scheduled while one is in flight');
+      assert.equal(m.next, null, 'no beat is scheduled while one is in flight');
+      // Stalled past two beats and a second: unhealthy, though nothing has failed.
+      t += 6_001;
+      assert.equal(a.health().ok, false, 'a stalled beat is unhealthy');
       release();
       await beat;
-      assert.equal(calls, 1, 'the beat touches the lock through the asynchronous API');
-      assert.ok(next, 'the next beat is scheduled once this one ends');
-      assert.deepEqual(a.health(), { ok: true, lastBeatAt: t, failures: 0, error: null });
+      assert.ok(m.next, 'the next beat is scheduled once this one ends');
+      assert.equal(a.health().ok, true);
+      assert.equal(a.health().lastBeatAt, t - 6_001, 'the time the beat set on the lock');
       // A beat that fails is counted and reported, and the next beat tries again.
-      fsp.utimes = async () => { throw Object.assign(new Error('read-only file system'), { code: 'EROFS' }); };
+      io.futimes = async () => { throw Object.assign(new Error('read-only file system'), { code: 'EROFS' }); };
       t += 5_000;
-      await fire();
+      await m.fire();
       const h = a.health();
       assert.equal(h.ok, false);
       assert.equal(h.failures, 1);
-      assert.equal(h.lastBeatAt, t - 5_000);
       assert.match(h.error, /read-only/);
-      assert.ok(next, 'a failed beat is tried again');
-      fsp.utimes = utimes;
+      assert.ok(m.next, 'a failed beat is tried again');
+      io.futimes = realIo.futimes;
       t += 5_000;
-      await fire();
+      await m.fire();
       assert.equal(a.health().ok, true);
-    } finally { fsp.utimes = utimes; a.release(); }
-    assert.equal(next, null, 'release stops the beats');
+    } finally { a.release(); }
+    assert.equal(m.next, null, 'release stops the beats');
+  });
+  test('a beat never touches a lock that another owner put in its place, and then stops', async () => {
+    const m = manual();
+    let lost = false;
+    let replaced;
+    const io = {
+      ...realIo,
+      // Between this holder's beat starting and its touch, another container takes the volume.
+      futimes: async (...args) => {
+        rmSync(path.join(root, '.container.lock'));
+        writeFileSync(path.join(root, '.container.lock'), JSON.stringify({ host: 'b', pid: 1, id: 'b'.repeat(32) }) + '\n');
+        const old = new Date(Date.now() - 600_000);
+        utimesSync(path.join(root, '.container.lock'), old, old);
+        replaced = statSync(path.join(root, '.container.lock')).mtimeMs;
+        return realIo.futimes(...args);
+      },
+    };
+    const a = acquireContainerLock(root, { beatMs: 5_000, schedule: m.schedule, io, onLost: () => { lost = true; } });
+    await m.fire();
+    assert.equal(lost, true, 'the holder found its lock replaced');
+    assert.equal(statSync(path.join(root, '.container.lock')).mtimeMs, replaced, 'the other owner\'s lock was not touched');
+    assert.equal(m.next, null);
+    a.release();
+    assert.ok(existsSync(path.join(root, '.container.lock')), 'release leaves the other owner\'s lock');
+    rmSync(path.join(root, '.container.lock'));
+  });
+  test('a read error while checking ownership is a failed beat, not a lost lock', async () => {
+    const m = manual();
+    const io = { ...realIo, lstat: async () => { throw Object.assign(new Error('i/o error'), { code: 'EIO' }); } };
+    const a = acquireContainerLock(root, { beatMs: 5_000, schedule: m.schedule, io, onLost: () => assert.fail('taken as lost') });
+    try {
+      await m.fire();
+      assert.equal(a.health().ok, false);
+      assert.match(a.health().error, /i\/o error/);
+      assert.ok(m.next, 'tried again');
+      io.lstat = realIo.lstat;
+      await m.fire();
+      assert.equal(a.health().ok, true);
+    } finally { a.release(); }
+    assert.ok(!existsSync(path.join(root, '.container.lock')));
   });
   test('its own earlier run\'s lock is stale after two missed beats; another container\'s only after staleMs', () => {
     const opts = { staleMs: 30_000, beatMs: 5_000 };

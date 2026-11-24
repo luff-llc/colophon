@@ -225,8 +225,9 @@ and refuse to start, every time. The entry point therefore keeps a lock of its o
   `restart: unless-stopped`, Docker keeps retrying, so the home comes back on its own.
 - If a running container finds its lock taken (for example, it was paused for more than 30
   seconds and another container started meanwhile), it exits at once.
-- While updating the lock fails (a full or read-only volume), the container keeps serving and
-  logs each failure, and `GET /healthz` answers 503 `{"ok":false,"failing":["container lock"]}`
+- While updating the lock fails (a full or read-only volume), or an update has not completed
+  for more than 11 seconds (a stalled disk), the container keeps serving and logs each failure,
+  and `GET /healthz` answers 503 `{"ok":false,"failing":["container lock"]}`
   instead of `{"ok":true}`, so Docker marks it unhealthy. The image's health check runs once a
   minute.
 

@@ -21,7 +21,8 @@
 //   bun container-entry.js identity <key file>   print {"member": "<home ID>"} for a key (used at start)
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { closeSync, constants as fsc, fsyncSync, lchownSync, linkSync, lstatSync, mkdirSync, openSync, promises as fsp, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeSync, chmodSync, existsSync } from 'node:fs';
+import { closeSync, constants as fsc, fstat, fstatSync, fsyncSync, futimes, lchownSync, linkSync, lstatSync, mkdirSync, openSync, promises as fsp, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeSync, chmodSync, existsSync } from 'node:fs';
+import { promisify } from 'node:util';
 import { hostname } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -244,7 +245,7 @@ export function prepare(dataRoot, env) {
  * container (restarted after a hard stop): no other container has its host name. A live holder
  * beats every `beatMs`, so such a lock is stale after two missed beats rather than `staleMs`.
  */
-export function acquireContainerLock(dataRoot, { staleMs = 30_000, beatMs = 5_000, now = Date.now, onLost, host = hostname(), pid = process.pid, schedule = later } = {}) {
+export function acquireContainerLock(dataRoot, { staleMs = 30_000, beatMs = 5_000, now = Date.now, onLost, host = hostname(), pid = process.pid, schedule = later, io = LOCK_IO } = {}) {
   const file = path.join(dataRoot, '.container.lock');
   // Each lock file carries a random ID: a file system may give a new file a removed one's inode
   // number at once (Linux does), so the inode cannot say whose lock a file is.
@@ -252,9 +253,14 @@ export function acquireContainerLock(dataRoot, { staleMs = 30_000, beatMs = 5_00
   const owner = JSON.stringify({ host, pid, at: new Date(now()).toISOString(), id }) + '\n';
   const idOf = (f) => { try { return JSON.parse(readFileSync(f, 'utf8'))?.id ?? null; } catch { return null; } };
   const ownStaleMs = Math.min(staleMs, 2 * beatMs + 1_000);
+  // The holder keeps its lock file open: the heartbeat touches it through this descriptor, so it
+  // can only ever touch this holder's own file, and while it is open that file's inode is not
+  // reused, so a path that names another inode is another owner's lock.
+  let fd = null;
   const take = () => {
-    const fd = openSync(file, fsc.O_WRONLY | fsc.O_CREAT | fsc.O_EXCL | fsc.O_NOFOLLOW, 0o600);
-    try { writeSync(fd, owner); fsyncSync(fd); } finally { closeSync(fd); }
+    const opened = openSync(file, fsc.O_WRONLY | fsc.O_CREAT | fsc.O_EXCL | fsc.O_NOFOLLOW, 0o600);
+    try { writeSync(opened, owner); fsyncSync(opened); } catch (e) { closeSync(opened); throw e; }
+    fd = opened;
     return true;
   };
   let taken = false;
@@ -278,8 +284,11 @@ export function acquireContainerLock(dataRoot, { staleMs = 30_000, beatMs = 5_00
     // above, not one another starter made meanwhile; if not, put it back and refuse.
     const aside = `${file}.stale.${process.pid}`;
     try { renameSync(file, aside); } catch (e) { if (e.code === 'ENOENT') continue; throw e; }
-    // `held.id` is the stale lock's (undefined for one that was torn or written before IDs).
-    if (idOf(aside) !== (held.id ?? null)) {
+    // `held.id` is the stale lock's (undefined for one that was torn or written before IDs); a
+    // lock its holder touched since it was judged stale is not stale any more.
+    let movedAge = 0;
+    try { movedAge = now() - statSync(aside).mtimeMs; } catch { movedAge = 0; }
+    if (idOf(aside) !== (held.id ?? null) || movedAge < limit) {
       try { linkSync(aside, file); } catch { /* the new owner's lock is back or replaced */ }
       unlinkSync(aside);
       const err = new Error(`another container took this volume while this one was starting (${file})`);
@@ -290,19 +299,29 @@ export function acquireContainerLock(dataRoot, { staleMs = 30_000, beatMs = 5_00
   }
   if (!taken) throw new Error(`could not take ${file}`);
   let lost = false; let stopped = false; let cancel = null;
-  const mine = () => idOf(file) === id;
+  const same = (a, b) => a.ino === b.ino && a.dev === b.dev;
+  const mine = () => { try { return same(lstatSync(file), fstatSync(fd)); } catch { return false; } };
+  /** Whether the path still names this holder's file: false only for a verified other file (or
+   * none); an I/O error is thrown, a failed beat, not a lost lock. */
+  const owned = async () => {
+    const [at, own] = await Promise.all([io.lstat(file).catch((e) => { if (e.code === 'ENOENT') return null; throw e; }), io.fstat(fd)]);
+    return at !== null && same(at, own);
+  };
   // The beats run off the event loop's thread (asynchronous file calls), one at a time: the next
   // is scheduled only when this one has ended, so a slow disk delays beats and never stacks them.
   const health = { lastBeatAt: now(), failures: 0, error: null };
   const beat = async () => {
     cancel = null;
-    let held = null;
-    try { held = JSON.parse(await fsp.readFile(file, 'utf8'))?.id ?? null; } catch { held = null; }
-    if (stopped) return;
-    if (held !== id) { lost = true; (onLost ?? (() => { console.error(`colophon-home: ${file} was taken by another container; stopping at once`); process.exit(70); }))(); return; }
     const t = new Date(now());
     try {
-      await fsp.utimes(file, t, t);
+      await io.futimes(fd, t, t); // this holder's own file, whatever the path names now
+      if (stopped) return;
+      if (!(await owned())) {
+        if (stopped) return;
+        lost = true;
+        (onLost ?? (() => { console.error(`colophon-home: ${file} was taken by another container; stopping at once`); process.exit(70); }))();
+        return;
+      }
       Object.assign(health, { lastBeatAt: t.getTime(), failures: 0, error: null });
     } catch (e) {
       if (stopped) return;
@@ -314,15 +333,23 @@ export function acquireContainerLock(dataRoot, { staleMs = 30_000, beatMs = 5_00
   cancel = schedule(beat, beatMs);
   return {
     file,
-    /** `ok` while the last beat succeeded; when it last did, and the failures since. */
-    health() { return { ok: health.failures === 0, ...health }; },
+    /** `ok` while the last beat succeeded and it is no older than two beats and a second (what
+     * this container's own restart would take as stale); when it last did; failures since. */
+    health() {
+      const ageMs = now() - health.lastBeatAt;
+      return { ok: health.failures === 0 && ageMs <= ownStaleMs, ...health, ageMs };
+    },
     release() {
       stopped = true;
       cancel?.(); cancel = null;
       if (!lost && mine()) { try { unlinkSync(file); } catch { /* already gone */ } }
+      if (fd !== null) { try { closeSync(fd); } catch { /* closed */ } fd = null; }
     },
   };
 }
+
+/** The lock's asynchronous file calls (a test replaces them). */
+const LOCK_IO = { futimes: promisify(futimes), fstat: promisify(fstat), lstat: (f) => fsp.lstat(f) };
 
 /** `fn` after `ms`, on a timer that does not keep the process alive; returns its cancel. */
 function later(fn, ms) {
