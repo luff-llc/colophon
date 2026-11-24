@@ -157,3 +157,29 @@ steps = [
   "publish v0.5.4: exit 0",
   "open a pull request merging release/0.5 into main: exit 0",
 ]
+
+[[entry]]
+id = "2026-11-24T07:32:53Z/staging-home/d2c14db9ff/dd96122a"
+at = "2026-11-24T07:32:53Z"
+by = "Xinchen Liu"
+action = "deploy"
+product = "colophon"
+channel = "staging-home"
+tier = "staging"
+target = "https://colophon.toolsperson.com"
+ref = "main"
+commit = "d2c14db9ffda867f8c77430358fb682fe5a1acf5"
+tree = "376ae0596ede519270e128bbdb8bb8348e2c9e74"
+version = "0.6.0-dev"
+platform = "home"
+result = "ok"
+prev = "4d3ab29553d0a8618a409d2852f826526d76f5aa18d72332155a90782d4e8549"
+receipt = "dd96122ad1e61a73efbbcb0d1eb9ef57"
+command = [
+  "home d2c14db9ff to https://colophon.toolsperson.com: {var.home_kit_script} release {commit}",
+]
+steps = [
+  "check rust: exit 0",
+  "home d2c14db9ff to https://colophon.toolsperson.com: exit 0",
+  "probe: exit 0",
+]
