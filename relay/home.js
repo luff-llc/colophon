@@ -261,8 +261,8 @@ export class HomeSlot {
         this.state = this.wasm.call({ op: 'init', home: this.key.memberId, account: this.account }).state;
         fresh = true;
       }
-      const st = this.status();
-      if (st.error) throw new Error(st.error);
+      // Whose slot this is, as stored: its fold is proved later, off the path of the start.
+      const st = this.wasm.call({ op: 'slot', state: this.state });
       if (st.home !== this.key.memberId) throw new Error('state belongs to another home key');
       if (st.account !== this.account) throw new Error(`state belongs to account ${st.account}, not ${this.account}`);
       this.appointed = st.appointed;
@@ -292,12 +292,23 @@ export class HomeSlot {
     const until = alive && typeof alive.until === 'number' ? alive.until : null;
     const now = this.clock();
     const r = this.wasm.call({ op: 'resume', state: this.state, now, alive: until });
-    // A checkpoint the module could not verify again from genesis is answered by a replay at every
-    // decision until it is rebuilt: said once per start, and counted in the metrics.
-    this.foldUnproved = r.fold === 'unproved';
-    if (this.foldUnproved) console.warn(`[home ${this.slot.name}] checkpoint not verified again from genesis: its decisions replay the history`);
     await this.renewLease(now);
     if (r.changed) await this.commit(r.state);
+  }
+
+  /**
+   * Have the stored state carry a proof of its fold (the module's `prove`), once per start, under
+   * the slot's lock, after the slot is open and serving: until then every request replays the
+   * slot's held history before it decides anything, so serving does not wait for this. `fold` is
+   * the module's answer, for the metrics; a state left without a proof is said once in the log.
+   */
+  async prove() {
+    await this.lock(async () => {
+      const r = this.wasm.call({ op: 'prove', state: this.state, now: this.clock() });
+      this.fold = r.fold;
+      if (r.fold === 'unproved') console.warn(`[home ${this.slot.name}] its state cannot carry a proof of its fold: every request replays its history`);
+      if (r.changed) await this.commit(r.state);
+    });
   }
 
   /** A missing checkpoint is safe only when nothing that could outlive it remains. Check the

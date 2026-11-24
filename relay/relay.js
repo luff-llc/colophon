@@ -620,6 +620,17 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
   const notProvisioned = () => new HttpError(404, 'Not provisioned', {}, { result: 'refused:notProvisioned' });
   // Shutdown, unlike a release, says nothing about the slot: the request may be retried.
   const relayClosing = () => new HttpError(503, 'Relay is closing', { 'retry-after': '1' });
+  // Each opened home is proved (`HomeSlot.prove`) one at a time, off the path of start-up and of
+  // the requests: a slot not yet proved is served meanwhile, each request replaying its history.
+  // Not before the start is over: the slots opened at start-up are proved once the relay listens.
+  let startUpDone;
+  let proving = new Promise((done) => { startUpDone = done; });
+  function proveLater(s) {
+    proving = proving.then(() => new Promise((done) => setImmediate(done))).then(async () => {
+      if (closing || s.closing || s.releasing || s.released) return;
+      try { await s.home.prove(); } catch (error) { console.error(`Home slot ${s.name}: proving its fold failed: ${error.message}`); }
+    });
+  }
   async function slot(name) {
     if (closing) throw relayClosing();
     if (slots.has(name)) return slots.get(name);
@@ -642,6 +653,7 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
         } else await s.open();
         s.closing = closing; // Opening may have overlapped shutdown's first drain pass.
         slots.set(name, s);
+        if (s.home) proveLater(s);
         return s;
       })().catch((error) => {
         opening.delete(name); // a repaired runtime slot is retried on the next request
@@ -956,8 +968,9 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
       slots: homeSlots.size + auth.size, // every slot this relay holds, open or not
       // As of each home's last scheduler pass that asked the module.
       stoppedSlots: homes.filter((s) => s.home.lastStatus?.stopped === true).length,
-      // Homes whose checkpoint was not verified again from genesis at their start (`resume`).
-      unprovedFoldSlots: homes.filter((s) => s.home.foldUnproved === true).length,
+      // Homes whose state the last proving pass left without a proof of its fold (too large to
+      // carry one, or a module that was not named its build): each request replays its history.
+      unprovedFoldSlots: homes.filter((s) => s.home.fold === 'unproved' || s.home.fold === 'unnamed').length,
       containerLockAgeSeconds: Number.isFinite(lock?.lastBeatAt) ? Math.max(0, Math.round((Date.now() - lock.lastBeatAt) / 1000)) : null,
     });
   }
@@ -1076,6 +1089,7 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
     catch (error) { if (!(error instanceof HttpError && error.status === 503)) throw error; }
   }
   if (table.size > 0) await provisionLock(releaseUnclaimed);
+  startUpDone();
   // The timer runs whenever a home slot may exist: provisioning adds slots at run time, and
   // `tickAll` reads the slot table on every pass.
   if ((homeSlots.size > 0 || provisioning.enabled) && tickMs > 0) { timer = setInterval(() => { tickAll(); }, tickMs); timer.unref?.(); }
@@ -1093,7 +1107,7 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
       for (const waiter of [...s.waiters]) waiter.wake();
     }
     const drain = async () => {
-      await Promise.allSettled([...requests, ...opening.values(), provisionTail]);
+      await Promise.allSettled([...requests, ...opening.values(), provisionTail, proving]);
       // Then each home's own work no request carries (forwarding, its saves, queued lock work).
       await Promise.all([...slots.values()].map(async (s) => { await drained(s); await s.home?.quiesce(); await s.chain; }));
       await provisionReplay?.close();

@@ -991,10 +991,11 @@ fn time_driven_work_is_done_on_time_while_idle_passes_are_skipped() {
 
 /// A home's proof of its fold names the module build the relay instantiated (the SHA-256 of its
 /// bytes). Restarted on the same build, the proof holds. A checkpoint the module cannot verify
-/// again from genesis (here the honest one written in another form) is left without a proof, its
-/// decisions replay the history, and the relay counts it in `/metrics`.
+/// again from genesis byte for byte (here the honest one written in another form) is replaced,
+/// after the slot has opened and while it serves, by this build's fold of the held objects, stored
+/// with a proof; meanwhile its requests replay the history. Nothing is counted as unproved.
 #[test]
-fn a_home_proof_names_its_build_and_a_checkpoint_it_cannot_prove_is_counted() {
+fn a_home_proof_names_its_build_and_a_checkpoint_it_cannot_prove_is_rebuilt() {
     let Some(w) = world("fold-proof", "members", 1, false) else {
         return;
     };
@@ -1006,8 +1007,8 @@ fn a_home_proof_names_its_build_and_a_checkpoint_it_cannot_prove_is_counted() {
     assert_eq!(w.a.metrics()["unprovedFoldSlots"], 0);
     let ka = HomeKeys::new(0x77);
     let a = w.a.restart(&ka, T0 + 2_000, &[(BASE_B, CLOSED_PORT)]);
+    assert_eq!(a.get("/head").0, 200);
     assert_eq!(a.slot_state()["fold"], slot["fold"], "the same build keeps the proof");
-    assert_eq!(a.metrics()["unprovedFoldSlots"], 0);
     let mut a = a;
     a.stop();
     let mut doctored = a.slot_state();
@@ -1020,7 +1021,18 @@ fn a_home_proof_names_its_build_and_a_checkpoint_it_cannot_prove_is_counted() {
     doctored.as_object_mut().unwrap().remove("fold");
     a.write_slot_state(&doctored);
     let a = a.restart(&ka, T0 + 3_000, &[(BASE_B, CLOSED_PORT)]);
-    assert_eq!(a.metrics()["unprovedFoldSlots"], 1);
-    assert!(a.slot_state().get("fold").is_none(), "nothing is proved");
-    assert_eq!(a.get("/head").0, 200, "the home still serves");
+    assert_eq!(a.get("/head").0, 200, "the home serves while its fold is proved");
+    let mut proved = Value::Null;
+    for _ in 0..500 {
+        proved = a.slot_state();
+        if proved.get("fold").is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(proved["fold"]["build"], build.as_str(), "proved after the start: {proved}");
+    let home: Value = serde_json::from_slice(&STANDARD.decode(proved["home_state"].as_str().unwrap()).unwrap()).unwrap();
+    let rebuilt = STANDARD.decode(home["checkpoint"].as_str().unwrap()).unwrap();
+    assert_ne!(rebuilt, spaced, "replaced by this build's fold");
+    assert_eq!(a.metrics()["unprovedFoldSlots"], 0);
 }
