@@ -17,9 +17,11 @@ class HttpError extends Error {
 
 /** A home slot over `root` with the module stubbed: every row is kept, and recovery says
  * completed when the effect is there (as the module does). */
+const opened = [];
 async function slotAt(root) {
   await fsp.mkdir(path.join(root, 'tmp'), { recursive: true });
   const h = Object.create(HomeSlot.prototype);
+  opened.push(h);
   h.slot = { name: 'home', root, current: new Map() };
   h.rows = new Map();
   h.bySigner = new Map();
@@ -47,7 +49,10 @@ const row = (key) => ({ key, digest: 'd'.repeat(64), at: 1_000_000, signer: 'mem
 describe('the replay log', () => {
   let root;
   beforeEach(async () => { root = await mkdtemp(path.join(tmpdir(), 'colophon-replay-')); });
-  afterEach(async () => { await rm(root, { recursive: true, force: true }); });
+  afterEach(async () => {
+    for (const h of opened.splice(0)) await (h.closeReplay?.() ?? h.close?.());
+    await rm(root, { recursive: true, force: true });
+  });
 
   test('a compaction stages a file of its own and makes its rename durable', async () => {
     const h = await slotAt(root);
@@ -134,6 +139,7 @@ describe('the replay log', () => {
 
   test('provisioning: a reservation that compacts the log stays pending with its effect', async () => {
     const r = await ProvisionReplay.open(root, { wasm: stubWasm, clock: () => 1_000_000, table: { get: () => undefined } });
+    opened.push(r);
     r.logLines = 5_000;
     await r.reserve(row('p1'), { slot: 'tslot00000a' });
     const written = (await lines(path.join(root, 'provision-replay'))).find((l) => l.r === 'p1');
@@ -165,7 +171,7 @@ describe('the replay log', () => {
     provisioning: {
       effect: { slot: 'tslot00000a' },
       file: (dir) => path.join(dir, 'provision-replay', 'replay.log'),
-      open: (dir) => ProvisionReplay.open(dir, { wasm: stubWasm, clock: () => 1_000_000, table: { get: () => undefined } }),
+      open: async (dir) => { const r = await ProvisionReplay.open(dir, { wasm: stubWasm, clock: () => 1_000_000, table: { get: () => undefined } }); opened.push(r); return r; },
     },
   };
   for (const [name, loader] of Object.entries(loaders)) {

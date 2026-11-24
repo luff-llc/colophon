@@ -53,6 +53,7 @@ describe('short writes', () => {
     assert.deepEqual((await lines(path.join(root, 'replay.log'))).map((l) => l.r), ['a', 'b']);
     await h.compactReplay();
     assert.deepEqual((await lines(path.join(root, 'replay.log'))).map((l) => l.r), ['a', 'b']);
+    await h.closeReplay();
   });
 
   test('the provisioning replay log and table', async () => {
@@ -61,6 +62,7 @@ describe('short writes', () => {
     await r.complete('p', 'completed');
     assert.deepEqual((await lines(path.join(root, 'provision-replay', 'replay.log'))).map((l) => l.r ?? l.c), ['p', 'p']);
     await r.compact();
+    await r.close();
     assert.deepEqual((await lines(path.join(root, 'provision-replay', 'replay.log'))).map((l) => l.r), ['p']);
     const table = ProvisionTable.empty(root);
     const entry = { account: 'ab'.repeat(32), base: 'https://h.example/v1/libraries/tslot00000a', at: 1, request: 'AAAA' };
@@ -89,6 +91,7 @@ describe('short writes', () => {
     Object.assign(h, { slot: { root, current: new Map() }, rows: new Map(), bySigner: new Map(), logLines: 0, clock: () => 1_000_000, wasm });
     await h.reserve(row('a'), null);
     const before = await readFile(path.join(root, 'replay.log'), 'utf8');
+    await h.closeReplay(); // the next append opens its handle through the failing file system
     const open = fsp.open;
     fsp.open = async (...args) => {
       const handle = await open.apply(fsp, args);
@@ -105,5 +108,34 @@ describe('short writes', () => {
     assert.equal(await readFile(path.join(root, 'replay.log'), 'utf8'), before, 'no part of a line is left');
     await h.reserve(row('c'), null);
     assert.deepEqual((await lines(path.join(root, 'replay.log'))).map((l) => l.r), ['a', 'c']);
+    await h.closeReplay();
+  });
+});
+
+describe('replay log handles', () => {
+  test('a slot keeps one append handle, opened again only after a compaction replaces the log', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'colophon-handle-'));
+    const open = fsp.open;
+    let opened = 0;
+    fsp.open = async (file, ...rest) => { if (String(file).endsWith('replay.log')) opened += 1; return open.call(fsp, file, ...rest); };
+    try {
+      await fsp.mkdir(path.join(root, 'tmp'));
+      const h = Object.create(HomeSlot.prototype);
+      Object.assign(h, { slot: { root, current: new Map() }, rows: new Map(), bySigner: new Map(), logLines: 0, clock: () => 1_000_000, wasm });
+      let tail = Promise.resolve();
+      h.replayLock = (fn) => { const run = tail.then(fn, fn); tail = run.catch(() => {}); return run; };
+      for (let i = 0; i < 5; i++) await h.reserve(row(`k${i}`), null);
+      assert.equal(opened, 1, 'one handle for five appends');
+      await h.compactReplay();
+      await h.reserve(row('after'), null);
+      assert.equal(opened, 2, 'the compacted log is opened once');
+      assert.deepEqual((await lines(path.join(root, 'replay.log'))).map((l) => l.r), ['k0', 'k1', 'k2', 'k3', 'k4', 'after']);
+      await h.closeReplay();
+      const r = await ProvisionReplay.open(root, { wasm, clock: () => 1_000_000, table: { get: () => undefined } });
+      opened = 0;
+      for (let i = 0; i < 3; i++) await r.reserve(row(`p${i}`), null);
+      assert.equal(opened, 1, 'the provisioning log keeps one handle too');
+      await r.close();
+    } finally { fsp.open = open; await rm(root, { recursive: true, force: true }); }
   });
 });

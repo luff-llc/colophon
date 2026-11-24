@@ -704,6 +704,7 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
       if (claimed(s)) return false;
       const refuse = () => Promise.reject(new Error(`slot ${name} was released`));
       s.released = true;
+      await s.home.replayLock(() => s.home.closeReplay());
       s.home.lock = refuse; s.home.replayLock = refuse; s.exclusive = refuse;
       s.home.stream.closeAll('released');
       slots.delete(name); opening.delete(name);
@@ -1083,6 +1084,7 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
       await Promise.allSettled([...requests, ...opening.values(), provisionTail]);
       // Then each home's own work no request carries (forwarding, its saves, queued lock work).
       await Promise.all([...slots.values()].map(async (s) => { await drained(s); await s.home?.quiesce(); await s.chain; }));
+      await provisionReplay?.close();
       await unlock();
     };
     closePromise = boundedDrain(drain(), drainMs);

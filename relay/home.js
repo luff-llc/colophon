@@ -673,16 +673,30 @@ export class HomeSlot {
     try { await fsp.rename(staged, this.file('replay.log')); }
     catch (error) { await fsp.rm(staged, { force: true }); throw error; }
     await syncDir(this.slot.root);
+    // The append handle names the replaced file: the next append opens the new one.
+    await this.closeReplay();
     this.logLines = lines.length;
   }
 
+  /** Append to the log through one handle the slot keeps open (opened at the first append, and
+   * again after a compaction replaces the file). Under the replay lock, or before serving. */
   async appendReplay(entry, durable) {
     if (this.replayBroken) throw this.replayBroken; // a part of a line could not be cut back
-    const handle = await fsp.open(this.file('replay.log'), fsc.O_WRONLY | fsc.O_APPEND | fsc.O_CREAT | fsc.O_NOFOLLOW, 0o600);
-    try { await appendLines(handle, JSON.stringify(entry) + '\n', durable); }
-    catch (error) { if (error.unrepaired) this.replayBroken = error; throw error; }
-    finally { await handle.close(); }
+    this.replayHandle ??= await fsp.open(this.file('replay.log'), fsc.O_WRONLY | fsc.O_APPEND | fsc.O_CREAT | fsc.O_NOFOLLOW, 0o600);
+    try { await appendLines(this.replayHandle, JSON.stringify(entry) + '\n', durable); }
+    catch (error) {
+      if (error.unrepaired) this.replayBroken = error;
+      await this.closeReplay().catch(() => {}); // the next append opens the file afresh
+      throw error;
+    }
     this.logLines += 1;
+  }
+
+  /** Close the log's append handle (at compaction, release and shutdown). */
+  async closeReplay() {
+    const handle = this.replayHandle;
+    this.replayHandle = null;
+    await handle?.close();
   }
 
   /** The reservation, durable before any effect. A read's effect is not durable, so its
@@ -1149,6 +1163,7 @@ export class HomeSlot {
     await this.lock(async () => {});
     await this.replayLock?.(async () => {});
     await this.saving;
+    await (this.replayLock ? this.replayLock(() => this.closeReplay()) : this.closeReplay());
   }
 
   /** Persist the forwarding rows, one write at a time (passes to several peers run at once). */

@@ -593,15 +593,27 @@ export class ProvisionReplay {
     await fsp.rename(staged, this.file('replay.log'));
     const dir = await fsp.open(this.dir, 'r');
     try { await dir.sync(); } catch (error) { if (error.code !== 'EINVAL' && error.code !== 'EPERM') throw error; } finally { await dir.close(); }
+    await this.close(); // the append handle names the replaced file
     this.logLines = lines.length;
+  }
+
+  /** Close the log's append handle (at compaction and shutdown). */
+  async close() {
+    const handle = this.handle;
+    this.handle = null;
+    await handle?.close();
   }
 
   async append(entry, durable) {
     if (this.broken) throw this.broken; // a part of a line could not be cut back
-    const handle = await fsp.open(this.file('replay.log'), fsc.O_WRONLY | fsc.O_APPEND | fsc.O_CREAT | fsc.O_NOFOLLOW, 0o600);
-    try { await appendLines(handle, JSON.stringify(entry) + '\n', durable); }
-    catch (error) { if (error.unrepaired) this.broken = error; throw error; }
-    finally { await handle.close(); }
+    // One handle, kept open (appends are under the door's lock).
+    this.handle ??= await fsp.open(this.file('replay.log'), fsc.O_WRONLY | fsc.O_APPEND | fsc.O_CREAT | fsc.O_NOFOLLOW, 0o600);
+    try { await appendLines(this.handle, JSON.stringify(entry) + '\n', durable); }
+    catch (error) {
+      if (error.unrepaired) this.broken = error;
+      await this.close().catch(() => {}); // the next append opens the file afresh
+      throw error;
+    }
     this.logLines += 1;
   }
 
