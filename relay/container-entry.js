@@ -186,6 +186,7 @@ export function prepare(dataRoot, env) {
     return { configFile: userConfig, dataDir, generated: false, memberId, env: set, unset: [] };
   }
   const s = readSettings(env);
+  refuseLegacyDataDir(dataRoot);
   const secrets = path.join(dataRoot, 'secrets');
   const dataDir = path.join(dataRoot, 'records-dir');
   const run = path.join(dataRoot, 'run');
@@ -358,14 +359,53 @@ function later(fn, ms) {
   return () => clearTimeout(timer);
 }
 
-/** Removes a relay lock left by a container that is gone (call only while holding the container lock). */
-export function clearDeadRelayLock(dataDir) {
-  const removed = [];
+/**
+ * Generated mode keeps the relay's data under `records-dir/`. A relay data directory mounted at
+ * the volume's root instead (an existing home's slots, its provisioning table, or its lock) is
+ * refused, never started beside as a new, empty home with a new key.
+ */
+function refuseLegacyDataDir(dataRoot) {
+  const ours = new Set(['secrets', 'records-dir', 'run', 'config.json', '.container.lock', 'lost+found']);
+  const found = [];
+  for (const entry of readdirSync(dataRoot, { withFileTypes: true })) {
+    const name = entry.name;
+    if (ours.has(name) || name.startsWith('.container.lock.')) continue;
+    if (['provisioned.json', 'provision-replay', '.relay.lock', '.relay.lock.reclaim'].includes(name)) found.push(name);
+    else if (entry.isDirectory() && ['meta.json', 'home-state.json', 'log.jsonl'].some((f) => existsSync(path.join(dataRoot, name, f)))) found.push(`${name}/`);
+  }
+  if (found.length) {
+    throw new SettingError(`${dataRoot} already holds a relay data directory (${found.slice(0, 5).join(', ')}): this image keeps its own under ${path.join(dataRoot, 'records-dir')} and would start a new, empty home with a new key beside it. To move an existing home in, stop the relay that serves it first, then add ${path.join(dataRoot, 'config.json')} naming its dataDir and its home key (docs/self-hosting/docker.md, "Moving an existing home into the container").`);
+  }
+}
+
+/**
+ * The relay locks (`.relay.lock`, `.relay.lock.reclaim`) in `dataDir`, removed only when they can
+ * only be this container's own from an earlier run: in the container's data root, and naming
+ * this process's ID (the relay runs in this process, so an earlier run of this container wrote
+ * that ID; a relay outside the container, whose process cannot be seen from here, did not). Any
+ * other relay lock is left in place and the start refused: the relay that wrote it may be
+ * running. Call only while holding the container lock.
+ */
+export function clearDeadRelayLock(dataDir, { dataRoot, pid = process.pid } = {}) {
+  const inside = dataRoot !== undefined && !path.relative(path.resolve(dataRoot), path.resolve(dataDir)).startsWith('..');
+  const removable = [];
   for (const name of ['.relay.lock', '.relay.lock.reclaim']) {
     const f = path.join(dataDir, name);
-    try { unlinkSync(f); removed.push(name); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+    let text;
+    try { text = readFileSync(f, 'utf8'); } catch (e) { if (e.code === 'ENOENT') continue; throw e; }
+    let owner = null;
+    try { owner = JSON.parse(text); } catch { owner = null; }
+    if (!inside || !Number.isSafeInteger(owner?.pid) || owner.pid !== pid) {
+      const err = new Error(`${f} may belong to another relay serving this data directory (${owner && Number.isSafeInteger(owner.pid) ? `process ${owner.pid}` : 'no readable owner'}), which this container cannot see. A relay never shares its data directory: stop the other relay (it removes its lock), or, if you are sure none is running, remove ${f} yourself; then start again.`);
+      err.code = 'ELOCKED';
+      throw err;
+    }
+    removable.push(name);
   }
-  return removed;
+  for (const name of removable) {
+    try { unlinkSync(path.join(dataDir, name)); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+  }
+  return removable;
 }
 
 /** The user the image runs the home as (distroless "nonroot"). */
@@ -423,8 +463,14 @@ async function main() {
     lock?.release();
     process.exit(error instanceof SettingError || error.code === 'ELOCKED' ? 2 : 1);
   }
-  const removed = clearDeadRelayLock(prepared.dataDir);
-  if (removed.length) console.error(`colophon-home: removed ${removed.join(', ')} left by a container that is gone`);
+  let removed;
+  try { removed = clearDeadRelayLock(prepared.dataDir, { dataRoot }); }
+  catch (error) {
+    console.error(`colophon-home: ${error.message}`);
+    lock.release();
+    process.exit(error.code === 'ELOCKED' ? 2 : 1);
+  }
+  if (removed.length) console.error(`colophon-home: removed ${removed.join(', ')} left by an earlier run of this container`);
   const s = prepared.settings;
   const info = { colophonHome: { config: prepared.generated ? 'generated' : prepared.configFile, member: prepared.memberId ?? null,
     ...(s ? { base: s.prefix + '<slot>', provisioning: s.provisioning ? s.gates : false } : {}) } };

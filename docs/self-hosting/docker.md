@@ -172,9 +172,9 @@ Two kinds of copy are consistent:
 A snapshot of a running home holds its locks: `/data/.container.lock` and
 `/data/records-dir/.relay.lock` (and `.relay.lock.reclaim`, if present). The container takes
 over a stale container lock on its own after 30 seconds (11 for the same container) and removes
-the relay lock then; delete these files from the restored copy, before anything runs on it, to
-start at once, and always before running the relay outside the container on it, where an old
-relay lock can name a process ID that is now another process.
+a relay lock its own relay left; delete these files from the restored copy, before anything
+runs on it, to start at once, and always before running the relay outside the container on it,
+where an old relay lock can name a process ID that is now another process.
 
 A restored home is the home as it was when the copy was made: what it took, signed or stored
 since is not in it.
@@ -203,6 +203,22 @@ the container again with the same volume). The volume holds all state, so the co
 replaced at any time. Read the release notes before moving between minor versions: a home's
 state belongs to the format its module writes.
 
+## Moving an existing home into the container
+
+Moving a home that already runs (with `bun relay/server.js`, or in another container) into this
+image is an offline handover: stop the old relay first, and start the container only once it
+has exited. Two relays must never serve one data directory, and this container cannot see a
+relay running outside it.
+
+- Keep the home's key: it is the home's identity. Put it on the volume (for example
+  `/data/secrets/home-key.jwk`, mode 0600, owned by UID 65532).
+- Put the old data directory on the volume (for example `/data/relay-data/`) and add
+  `/data/config.json` with your relay settings, `"dataDir": "./relay-data"` and
+  `"home": {"keyFile": "./secrets/home-key.jwk"}`. The container then uses that config as-is.
+- Without a `config.json`, the container generates its own layout under `/data/records-dir/`.
+  If it finds a relay data directory at `/data` itself (slots, `provisioned.json`, a relay
+  lock), it refuses to start rather than create a new, empty home with a new key beside it.
+
 ## One container per volume
 
 A relay must never share its data directory. The relay's own lock (`records-dir/.relay.lock`)
@@ -220,7 +236,10 @@ and refuse to start, every time. The entry point therefore keeps a lock of its o
   their saved state, and the slot's queued writes. Give the container at least 10 seconds to
   stop (Docker's default; the Compose file gives 15).
 - After an unclean stop, a start is refused until the lock is stale. Then the lock is taken
-  over, and the dead container's relay lock is removed. The same container restarted (same host
+  over, and the relay lock the dead container's relay left (one naming the relay's process ID
+  in the container) is removed. A relay lock written by any other process, such as a relay
+  running outside the container on the same data directory, is never removed: the start is
+  refused (status 2) until that relay is stopped or its lock removed by hand. The same container restarted (same host
   name) waits for two missed updates, 11 seconds; a different container waits 30 seconds. With
   `restart: unless-stopped`, Docker keeps retrying, so the home comes back on its own.
 - If a running container finds its lock taken (for example, it was paused for more than 30

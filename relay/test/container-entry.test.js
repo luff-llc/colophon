@@ -138,6 +138,21 @@ describe('the volume', { skip: ready ? false : `build the module first (${wasm})
     assert.equal(b.token, undefined);
     assert.equal(JSON.parse(readFileSync(b.configFile, 'utf8')).provision.tokenSha256, undefined);
   });
+  test('a relay data directory mounted at the volume\'s root is not taken for a new home', () => {
+    for (const [name, make] of [
+      ['a provisioning table', (d) => writeFileSync(path.join(d, 'provisioned.json'), '{}\n')],
+      ['a slot', (d) => { mkdirSync(path.join(d, 'lib')); writeFileSync(path.join(d, 'lib', 'meta.json'), '{"instance":"x"}\n'); }],
+      ['a home slot', (d) => { mkdirSync(path.join(d, 'home')); writeFileSync(path.join(d, 'home', 'home-state.json'), '""'); }],
+      ['a relay lock', (d) => writeFileSync(path.join(d, '.relay.lock'), '{"pid":7}\n')],
+    ]) {
+      const data = path.join(root, `legacy-${name.replace(/ /g, '-')}`);
+      mkdirSync(data, { mode: 0o700 });
+      make(data);
+      assert.throws(() => prepare(data, env()), (e) => e instanceof SettingError && /already holds a relay data directory/.test(e.message), name);
+      assert.ok(!existsSync(path.join(data, 'secrets')), `${name}: no key is made`);
+      assert.ok(!existsSync(path.join(data, 'records-dir')), `${name}: no new data directory is made`);
+    }
+  });
   test('a config.json on the volume is used as-is', () => {
     const data = path.join(root, 'hatch');
     mkdirSync(data, { mode: 0o700 });
@@ -307,9 +322,29 @@ describe('the container lock', () => {
   test('a dead container\'s relay lock is removed', () => {
     const dir = path.join(root, 'records');
     mkdirSync(dir);
+    // Written by this container's relay in an earlier run: the same process ID, in this
+    // container's own data root.
     writeFileSync(path.join(dir, '.relay.lock'), JSON.stringify({ pid: 1 }));
-    assert.deepEqual(clearDeadRelayLock(dir), ['.relay.lock']);
-    assert.deepEqual(clearDeadRelayLock(dir), []);
+    assert.deepEqual(clearDeadRelayLock(dir, { dataRoot: root, pid: 1 }), ['.relay.lock']);
+    assert.deepEqual(clearDeadRelayLock(dir, { dataRoot: root, pid: 1 }), []);
+  });
+  test('a relay lock that may be another relay\'s is never removed: the start is refused', () => {
+    const dir = path.join(root, 'shared');
+    mkdirSync(dir);
+    const lock = path.join(dir, '.relay.lock');
+    // Another process ID (a relay outside the container, or another process), or no readable
+    // owner at all: whether it is alive cannot be told from here.
+    for (const text of [JSON.stringify({ pid: 4242, at: '2026-11-23T00:00:00Z' }), '', '{"pid":"one"}']) {
+      writeFileSync(lock, text);
+      assert.throws(() => clearDeadRelayLock(dir, { dataRoot: root, pid: 1 }), (e) => e.code === 'ELOCKED' && /stop the other relay/i.test(e.message), text);
+      assert.ok(existsSync(lock), 'left in place');
+    }
+    // A data directory outside the container's own root: never touched.
+    writeFileSync(lock, JSON.stringify({ pid: 1 }));
+    const outside = path.join(tmpdir(), 'not-this-root');
+    assert.throws(() => clearDeadRelayLock(dir, { dataRoot: outside, pid: 1 }), (e) => e.code === 'ELOCKED');
+    assert.ok(existsSync(lock));
+    rmSync(lock);
   });
 });
 
