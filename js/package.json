@@ -20,6 +20,10 @@
     "./hosts": {
       "types": "./dist/hosts/index.d.ts",
       "import": "./dist/hosts/index.js"
+    },
+    "./hosts/node": {
+      "types": "./dist/hosts/node.d.ts",
+      "import": "./dist/hosts/node.js"
     }
   },
   "files": [

@@ -13,7 +13,7 @@ export interface PrivateStore {
 
 /**
  * A `PrivateStore` that can also replace one file by compare-and-set, linearizable across every client of the same
- * underlying storage (other instances, tabs and processes included): `update` reads the file, hands it to `decide`, and
+ * underlying storage (other instances, tabs and processes included; `MemoryPrivateStore` and `IndexedDBPrivateStore`): `update` reads the file, hands it to `decide`, and
  * writes what `decide` returns (nothing when it returns undefined) as one atomic step. `decide` must be synchronous.
  * Resolves with whether it wrote.
  */

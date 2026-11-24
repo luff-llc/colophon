@@ -30,6 +30,8 @@ export interface StoredClaim { claim: string | null; fence: Fence }
  */
 export interface ClaimStore {
   load(): Promise<StoredClaim | undefined>;
+  /** The held fence alone, read cheaply (a host asks every beat). */
+  fence(): Promise<Fence | undefined>;
   save(record: StoredClaim, expected: Fence | undefined): Promise<'stored' | 'stale'>;
 }
 
@@ -67,6 +69,7 @@ export function compareAndSet(held: StoredClaim | undefined, record: StoredClaim
 export class MemoryClaimStore implements ClaimStore {
   private record: StoredClaim | undefined;
   async load(): Promise<StoredClaim | undefined> { return this.record && { claim: this.record.claim, fence: { ...this.record.fence } }; }
+  async fence(): Promise<Fence | undefined> { return this.record && { ...this.record.fence }; }
   async save(record: StoredClaim, expected: Fence | undefined): Promise<'stored' | 'stale'> {
     const next = compareAndSet(this.record, record, expected);
     if (!next) return 'stale';
@@ -75,6 +78,10 @@ export class MemoryClaimStore implements ClaimStore {
   }
 }
 
+/**
+ * A record without a valid fence is refused, never read as unfenced: 0.6 has not been released, so no claim was ever
+ * stored without one and there is nothing to migrate.
+ */
 const decode = (bytes: Uint8Array | undefined, name: string): StoredClaim | undefined => {
   if (!bytes) return undefined;
   const v = JSON.parse(new TextDecoder().decode(bytes)) as StoredClaim;
@@ -83,13 +90,15 @@ const decode = (bytes: Uint8Array | undefined, name: string): StoredClaim | unde
 };
 
 /**
- * A claim store in one file of an `AtomicPrivateStore` (`IndexedDBPrivateStore`, `FilePrivateStore`,
- * `MemoryPrivateStore`): `{claim, fence}` as JSON under `name`, saved through the store's `update`, so the comparison
+ * A claim store in one record of an `AtomicPrivateStore` (`IndexedDBPrivateStore`, `MemoryPrivateStore`; for files
+ * use `FileClaimStore` from `@colophon/core/hosts/node`): `{claim, fence}` as JSON under `name`, saved through the store's `update`, so the comparison
  * and the write are one atomic step against every client of the same database or folder.
  */
 export function privateClaimStore(store: AtomicPrivateStore, name: string): ClaimStore {
   return {
     load: async () => decode(await store.read(name), name),
+    // The record is one small file, so its fence is read with it.
+    fence: async () => decode(await store.read(name), name)?.fence,
     save: async (record, expected) => {
       const wrote = await store.update(name, current => {
         const next = compareAndSet(decode(current, name), record, expected);

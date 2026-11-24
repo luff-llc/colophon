@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { StorageError } from './errors.js';
 import { ChangeHints, planBatch, RecordPaths, type MediumEntry, type MediumWrite, type RecordMedium } from './medium.js';
-import type { AtomicPrivateStore } from './private.js';
+import type { PrivateStore } from './private.js';
 
 declare const process: { pid: number; kill(pid: number, signal: number): boolean };
 
@@ -40,11 +40,10 @@ function sleep(ms: number): void { Atomics.wait(new Int32Array(new SharedArrayBu
  * kill before the commit point leaves nothing; after it, the next `listing`, `write` or open completes the batch
  * (a committed batch is never discarded: if it cannot be completed the store is `unavailable`, not partly written).
  * A lock file with its holder's token keeps two processes from publishing at once; a dead holder's lock is taken over
- * (see `FileLock`).
+ * (see `locked`).
  */
 export class FileMedium implements RecordMedium {
   private readonly journal: string;
-  private readonly lock: FileLock;
   private readonly hints = new ChangeHints();
   private readonly onStep: (step: FileMediumStep, index?: number) => void;
 
@@ -52,12 +51,11 @@ export class FileMedium implements RecordMedium {
     this.onStep = options.onStep ?? (() => {});
     this.journal = join(root, '.colophon.nosync');
     fs.mkdirSync(this.journal, { recursive: true });
-    this.lock = new FileLock(join(this.journal, 'lock'), 'the record store');
-    this.lock.run(() => this.recover());
+    this.locked(() => this.recover());
   }
 
   listing(): MediumEntry[] {
-    return this.lock.run(() => {
+    return this.locked(() => {
       this.recover();
       const out: MediumEntry[] = [];
       const walk = (directory: string, prefix: string): void => {
@@ -101,7 +99,7 @@ export class FileMedium implements RecordMedium {
   }
 
   async write(writes: readonly MediumWrite[]): Promise<void> {
-    const wrote = this.lock.run(() => {
+    const wrote = this.locked(() => {
       this.recover();
       const plan = planBatch(writes, path => this.held(path));
       if (plan.length === 0) return false;
@@ -125,7 +123,7 @@ export class FileMedium implements RecordMedium {
       const commit = join(this.journal, `commit-${id}`);
       try {
         // A holder that was displaced commits nothing.
-        if (!this.lock.holding()) throw new Error('the store\'s lock was lost');
+        if (!this.holding()) throw new Error('the store\'s lock was lost');
         fs.renameSync(stage, commit);
       } catch (error) {
         fs.rmSync(stage, { recursive: true, force: true });
@@ -147,11 +145,11 @@ export class FileMedium implements RecordMedium {
    * `unavailable`; it is never handed part of a batch. Inside this medium's own locked section nothing is done.
    */
   private settle(): void {
-    if (this.lock.held) return;
+    if (this.token !== undefined) return;
     let committed: boolean;
     try { committed = fs.readdirSync(this.journal, { withFileTypes: true }).some(entry => entry.name.startsWith('commit-')); }
     catch (error) { throw StorageError.unavailable('the record store\'s journal could not be read', error); }
-    if (committed) this.lock.run(() => this.recover());
+    if (committed) this.locked(() => this.recover());
   }
 
   /** Completes every committed batch and discards every uncommitted one. */
@@ -195,26 +193,16 @@ export class FileMedium implements RecordMedium {
     this.onStep('cleaned');
   }
 
-  changes(listener: () => void): () => void { return this.hints.add(listener); }
-}
-
-/**
- * A lock across processes: an exclusively created file holding its holder's token. Shared by `FileMedium` and
- * `FilePrivateStore.update`. `body` runs synchronously, so a holder in this process never waits on another in it.
- */
-export class FileLock {
-  constructor(readonly path: string, private readonly what = 'the store') {}
   /**
-   * Runs `body` holding the lock: the file at `path`, created exclusively, holding this
+   * Runs `body` holding the store's lock: the file `.colophon.nosync/lock`, created exclusively, holding this
    * holder's token (its process ID and a random part). A lock whose process is dead is taken over by renaming it away
    * and checking that what was moved is the dead holder's token; anything else is put back. There is no kernel lock
    * here (Node and Bun have none that is portable), so a live holder can still be displaced in the instant between
    * another process's check and its rename. That is why `holding()` is asked again just before a batch's commit point:
    * a displaced holder commits nothing.
    */
-  run<T>(body: () => T): T {
-    const lock = this.path;
-    const dir = dirname(this.path);
+  private locked<T>(body: () => T): T {
+    const lock = join(this.journal, 'lock');
     const token = `${process.pid}:${randomUUID()}`;
     const read = (path: string): string | undefined => { try { return new TextDecoder().decode(fs.readFileSync(path)); } catch { return undefined; } };
     for (let attempt = 0; ; attempt++) {
@@ -224,7 +212,7 @@ export class FileLock {
       let alive = pid === process.pid;
       if (!alive && pid > 0) { try { process.kill(pid, 0); alive = true; } catch { alive = false; } }
       if (holder !== undefined && pid > 0 && !alive) {
-        const grave = join(dir, `dead-${randomUUID()}`);
+        const grave = join(this.journal, `dead-${randomUUID()}`);
         try { fs.renameSync(lock, grave); } catch { continue; }
         if (read(grave) !== holder) {
           // Not the dead holder's: another process took the lock in between. Give it back unless a third already holds it.
@@ -233,7 +221,7 @@ export class FileLock {
         fs.rmSync(grave, { force: true });
         continue;
       }
-      if (attempt > 400) throw StorageError.unavailable(`${this.what} is in use by another process`);
+      if (attempt > 400) throw StorageError.unavailable('the record store is in use by another process');
       sleep(5);
     }
     this.token = token;
@@ -243,20 +231,16 @@ export class FileLock {
     }
   }
   private token: string | undefined;
-  /** Whether this process is inside `run`. */
-  get held(): boolean { return this.token !== undefined; }
   /** Whether this medium still holds the lock it took. */
-  holding(): boolean {
-    try { return this.token !== undefined && new TextDecoder().decode(fs.readFileSync(this.path)) === this.token; } catch { return false; }
+  private holding(): boolean {
+    try { return this.token !== undefined && new TextDecoder().decode(fs.readFileSync(join(this.journal, 'lock'))) === this.token; } catch { return false; }
   }
+
+  changes(listener: () => void): () => void { return this.hints.add(listener); }
 }
 
-/**
- * The private files of one device in a folder; each write is a synchronised sibling renamed into place. `update` is a
- * compare-and-set across every process using the folder: it runs under that file's `FileLock` (`.<name>.lock`), and a
- * holder that finds it lost the lock before its rename writes nothing.
- */
-export class FilePrivateStore implements AtomicPrivateStore {
+/** The private files of one device in a folder; each write is a synchronised sibling renamed into place. */
+export class FilePrivateStore implements PrivateStore {
   constructor(readonly directory: string) { fs.mkdirSync(directory, { recursive: true }); }
   private path(name: string): string {
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,200}$/.test(name)) throw StorageError.invalidPath(name);
@@ -275,21 +259,4 @@ export class FilePrivateStore implements AtomicPrivateStore {
     syncDirectory(this.directory);
   }
   async remove(name: string): Promise<void> { fs.rmSync(this.path(name), { force: true }); }
-  async update(name: string, decide: (current: Uint8Array | undefined) => Uint8Array | undefined): Promise<boolean> {
-    const path = this.path(name);
-    const lock = new FileLock(join(this.directory, `.${name}.lock`), name);
-    return lock.run(() => {
-      const current = fs.existsSync(path) ? new Uint8Array(fs.readFileSync(path)) : undefined;
-      const next = decide(current);
-      if (next === undefined) return false;
-      const temporary = join(this.directory, `.${name}.${randomUUID()}.tmp`);
-      try {
-        writeDurably(temporary, next);
-        if (!lock.holding()) throw new Error('the lock was lost');
-        fs.renameSync(temporary, path);
-      } catch (error) { fs.rmSync(temporary, { force: true }); throw StorageError.unavailable(`could not store ${name}`, error); }
-      syncDirectory(this.directory);
-      return true;
-    });
-  }
 }
