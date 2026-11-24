@@ -818,7 +818,9 @@ fn clock_retries_future_genesis_and_immediate_entry_at_sixty_second_boundary() {
 /// a format or a final raise, upgraded in place from `/4`, successors of `/5` and Swift
 /// predecessors), each checkpointed at several clock readings, resumed from an earlier
 /// checkpoint, and with a high-water mark ahead of the branch, the verdict at clock readings
-/// before, at and 30 days after the checkpoint's is the full verifier's.
+/// before, at and 30 days after the checkpoint's is the full verifier's; wherever the shortcut
+/// is taken it is also the replay of the checkpoint's objects from genesis at that clock. A
+/// checkpoint read back from bytes is never answered from alone.
 #[test]
 fn an_unchanged_checkpoint_gives_the_full_verdict() {
     use colophon_core::v05::history::{resumes_unchanged, verify_history_in_full, Stop};
@@ -826,7 +828,8 @@ fn an_unchanged_checkpoint_gives_the_full_verdict() {
     let mut all: Vec<(PathBuf, Objects, i64)> =
         cases().into_iter().map(|(d, now)| (d.clone(), objects_of(&d), now)).collect();
     all.extend(other_cases());
-    let (mut compared, mut resumed) = (0usize, 0usize);
+    let (mut compared, mut resumed, mut cold_equal) = (0usize, 0usize, 0usize);
+    let mut cold_differs = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
     for (dir, objects, now) in &all {
         let none = Objects::default();
@@ -860,15 +863,68 @@ fn an_unchanged_checkpoint_gives_the_full_verdict() {
                 let want = full(&verify_history_in_full(&none, p, t));
                 assert_eq!(got, want, "{} checkpointed at {at}, verified at {t}", dir.display());
                 compared += 1;
-                resumed += usize::from(resumes_unchanged(&none, p, t));
+                if resumes_unchanged(&none, p, t) {
+                    resumed += 1;
+                    // And a replay from genesis of the checkpoint's objects, with only its
+                    // high-water mark, at the same clock.
+                    let mark = match &p.high_water {
+                        Some((seq, d)) => Persisted::high_water(*seq, d.clone()),
+                        None => Persisted::default(),
+                    };
+                    let cold = full(&verify_history_in_full(p.objects().unwrap(), &mark, t));
+                    if cold == got {
+                        cold_equal += 1;
+                    } else {
+                        cold_differs.push(format!("{} checkpointed at {at}, verified at {t}", dir.display()));
+                    }
+                }
             }
+            // Read back from bytes, it is never answered from alone.
+            let restored = Persisted::from_bytes(&p.to_bytes().unwrap()).unwrap();
+            assert!(!resumes_unchanged(&none, &restored, *at));
+            assert_eq!(full(&verify_history(&none, &restored, *at)), full(&verify_history_in_full(&none, &restored, *at)));
             // Anything coming in takes the full path.
             assert!(!resumes_unchanged(objects, p, *at) || objects.entries.is_empty());
         }
     }
-    eprintln!("{compared} verdicts compared, {resumed} from an unchanged checkpoint; histories: {seen:?}");
+    eprintln!("{compared} verdicts compared, {resumed} from an unchanged checkpoint, {cold_equal} of those equal to a replay from genesis; histories: {seen:?}");
+    assert!(cold_differs.is_empty(), "a shortcut verdict is not the replay from genesis: {cold_differs:#?}");
     for kind in ["ok", "held", "fork", "stopped", "failed", "upgraded", "successor"] {
         assert!(seen.contains(kind), "no {kind} history among the vectors: {seen:?}");
     }
     assert!(resumed * 8 > compared, "the shortcut was taken for {resumed} of {compared}");
+}
+
+/// A checkpoint read from bytes is local memory this verifier did not fold: another verifier (an
+/// older one with the same format number) or a damaged copy may have written it. Here the fold
+/// ends one entry before the last, and its held entries are that many, but the one at the end
+/// is the next entry instead of the fold's own. Nothing comes in. The verdict must be the full
+/// verifier's (which resumes the fold and finds the next entry), not the saved fold alone.
+#[test]
+fn a_checkpoint_read_from_bytes_is_never_answered_from_alone() {
+    use colophon_core::v05::history::{resumes_unchanged, verify_history_in_full};
+    let (dir, objects, now) = other_cases().into_iter().next().unwrap();
+    let n = objects.entries.len();
+    assert!(n >= 3, "{}", dir.display());
+    let prefix = Objects { entries: objects.entries[..n - 1].to_vec(), ..objects.clone() };
+    let p = Persisted::checkpoint(&prefix, &Persisted::default(), now);
+    assert!(resumes_unchanged(&Objects::default(), &p, now), "folded here, it is answered from alone");
+    let mut cp: Value = serde_json::from_slice(&p.to_bytes().unwrap()).unwrap();
+    let held = cp["objects"]["entries"].as_array_mut().unwrap();
+    assert_eq!(held.len(), n - 1);
+    *held.last_mut().unwrap() = serde_json::to_value(&objects.entries[n - 1]).unwrap();
+    let restored = Persisted::from_bytes(&serde_json::to_vec(&cp).unwrap()).unwrap();
+    let none = Objects::default();
+    let got = verify_history(&none, &restored, now);
+    let want = verify_history_in_full(&none, &restored, now);
+    assert_eq!(full(&got), full(&want));
+    assert_eq!(got.branch.len(), n, "the next entry is found");
+    assert!(!resumes_unchanged(&none, &restored, now));
+    // The same checkpoint, read back unchanged, is not answered from alone either.
+    let again = Persisted::from_bytes(&p.to_bytes().unwrap()).unwrap();
+    assert!(!resumes_unchanged(&none, &again, now));
+    assert_eq!(full(&verify_history(&none, &again, now)), full(&verify_history_in_full(&none, &again, now)));
+    // Rebuilt from its objects, it is folded here again.
+    let rebuilt = Persisted::rebuild(&prefix, &p.to_bytes().unwrap(), now);
+    assert!(resumes_unchanged(&none, &rebuilt, now));
 }

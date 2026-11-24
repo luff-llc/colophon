@@ -139,6 +139,10 @@ pub struct Persisted {
     /// The stop this verifier once verified for the account (§1 "A stop"): `(seq, layout)`. A floor,
     /// as the head marks are: local memory that evidence going missing never undoes.
     stop_floor: Option<(u64, Option<u64>)>,
+    /// This process folded the checkpoint's state from the genesis of its own objects, under these
+    /// rules (directly, or by resuming a checkpoint that was). Never stored: a checkpoint read from
+    /// bytes may have been written by another verifier, so it is not known until it is rebuilt.
+    folded_here: bool,
 }
 
 /// Checkpoint format. 2 added `held_until`; 3 added the successor fields; 4 added the per-home
@@ -179,6 +183,7 @@ impl Persisted {
             head_marks: BTreeMap::new(),
             succession_verified: false,
             stop_floor: None,
+            folded_here: false,
         }
     }
 
@@ -259,7 +264,11 @@ impl Persisted {
     /// so callers cannot accidentally pair a folded state with a different object set.
     pub fn checkpoint(objects: &Objects, previous: &Self, now_ms: i64) -> Self {
         let all = merged_objects(objects, previous);
-        let verdict = verify_history(objects, previous, now_ms);
+        work::verification();
+        let (verdict, resumed) = match resume_unchanged(objects, previous, now_ms) {
+            Some(v) => (v, true),
+            None => replay_resumed(objects, previous, now_ms),
+        };
         let high_water = previous
             .high_water
             .clone()
@@ -275,6 +284,7 @@ impl Persisted {
             head_marks: previous.head_marks.clone(),
             succession_verified: previous.succession_verified,
             stop_floor: previous.stop_floor,
+            folded_here: !resumed || previous.folded_here,
             checkpoint: Some(Checkpoint {
                 version: CHECKPOINT_VERSION,
                 now_ms,
@@ -323,6 +333,7 @@ impl Persisted {
             head_marks: cp.head_marks.clone(),
             succession_verified: cp.succession_verified,
             stop_floor: cp.stop_floor,
+            folded_here: false,
             checkpoint: Some(cp),
         })
     }
@@ -527,14 +538,14 @@ pub fn verify_history(objects: &Objects, persisted: &Persisted, now_ms: i64) -> 
     if let Some(verdict) = resume_unchanged(objects, persisted, now_ms) {
         return verdict;
     }
-    replay(objects, persisted, now_ms)
+    replay_resumed(objects, persisted, now_ms).0
 }
 
 /// [`verify_history`] without its shortcut for an unchanged checkpoint
 /// ([`resumes_unchanged`]), for tests that compare the two. Never needed otherwise.
 #[doc(hidden)]
 pub fn verify_history_in_full(objects: &Objects, persisted: &Persisted, now_ms: i64) -> Verdict {
-    replay(objects, persisted, now_ms)
+    replay_resumed(objects, persisted, now_ms).0
 }
 
 /// Whether [`verify_history`] answers from the checkpoint alone, for tests. Never needed
@@ -544,8 +555,9 @@ pub fn resumes_unchanged(objects: &Objects, persisted: &Persisted, now_ms: i64) 
     resume_point(objects, persisted, now_ms).is_some()
 }
 
-/// The checkpointed state [`replay`] would resume from and fold nothing onto, when that is
-/// certain without reading a held object: nothing comes in with the call (no entry, pending
+/// The checkpointed state [`replay_resumed`] would resume from and fold nothing onto, when that is
+/// certain without reading a held object: this process folded the checkpoint itself
+/// (`Persisted::folded_here`), nothing comes in with the call (no entry, pending
 /// object, head or predecessor entry), the checkpoint holds a state at no conflict, no held
 /// candidate and no stop, the clock has not gone back from it, the account neither upgraded
 /// in place nor claims a predecessor, and the checkpoint holds exactly one entry per verified
@@ -553,16 +565,19 @@ pub fn resumes_unchanged(objects: &Objects, persisted: &Persisted, now_ms: i64) 
 ///
 /// Every state a checkpoint holds was verified from the objects it holds (they are merged into
 /// it before the verdict is taken, and none is ever dropped), so each verified seq has at least
-/// one held entry, the one whose digest the history names. With as many entries as seqs, every
+/// one held entry, the one whose digest the history names. That holds for checkpoints this process
+/// folded; one read from bytes may come from another verifier, or be inconsistent, and is never
+/// taken here until it is rebuilt. With as many entries as seqs, every
 /// held entry is that entry: none sits beyond the history, none fails to parse, and none is a
-/// `/4` genesis. [`replay`] would then resume from the checkpoint's state (the conditions of its
+/// `/4` genesis. [`replay_resumed`] would then resume from the checkpoint's state (the conditions of its
 /// own fast path hold), find no candidate after it, and leave it as it is: no `/4` prefix to
 /// bootstrap, no succession to finish. What it adds (the rollback mark, a final layout raise)
 /// is added here the same way.
 fn resume_point<'a>(objects: &Objects, persisted: &'a Persisted, now_ms: i64) -> Option<&'a State> {
     let cp = persisted.checkpoint.as_ref()?;
     let saved = cp.state.as_ref()?;
-    let quiet = objects.entries.is_empty()
+    let quiet = persisted.folded_here
+        && objects.entries.is_empty()
         && objects.pending.is_empty()
         && objects.heads.is_empty()
         && objects.predecessor.is_empty()
@@ -577,7 +592,7 @@ fn resume_point<'a>(objects: &Objects, persisted: &'a Persisted, now_ms: i64) ->
     quiet.then_some(saved)
 }
 
-/// [`verify_history`] from an unchanged checkpoint ([`resume_point`]): the verdict [`replay`]
+/// [`verify_history`] from an unchanged checkpoint ([`resume_point`]): the verdict [`replay_resumed`]
 /// gives there, without parsing the held objects.
 fn resume_unchanged(objects: &Objects, persisted: &Persisted, now_ms: i64) -> Option<Verdict> {
     let saved = resume_point(objects, persisted, now_ms)?;
@@ -597,7 +612,7 @@ fn resume_unchanged(objects: &Objects, persisted: &Persisted, now_ms: i64) -> Op
     Some(verdict)
 }
 
-/// What [`replay`] does after its fold, apart from the succession: the rollback mark against
+/// What [`replay_resumed`] does after its fold, apart from the succession: the rollback mark against
 /// the persisted high water, a final layout raise as the stop, and the state.
 fn finish_verdict(verdict: &mut Verdict, st: Option<State>, persisted: &Persisted) {
     if let Some((hw_seq, hw_digest)) = &persisted.high_water {
@@ -622,8 +637,8 @@ fn finish_verdict(verdict: &mut Verdict, st: Option<State>, persisted: &Persiste
 }
 
 /// The verifier: every held object parsed and the history folded, resuming from the checkpoint
-/// where that is safe.
-fn replay(objects: &Objects, persisted: &Persisted, now_ms: i64) -> Verdict {
+/// where that is safe. Also says whether it resumed the checkpoint's state.
+fn replay_resumed(objects: &Objects, persisted: &Persisted, now_ms: i64) -> (Verdict, bool) {
     let incoming = objects;
     let all_objects = merged_objects(objects, persisted);
     let objects = &all_objects;
@@ -675,6 +690,7 @@ fn replay(objects: &Objects, persisted: &Persisted, now_ms: i64) -> Verdict {
         stopped: None,
     };
     let mut st: Option<State> = None;
+    let mut resumed = false;
     if let Some(result) = upgrade::bootstrap(objects, now_ms) {
         match result {
             Ok(saved) => {
@@ -684,7 +700,7 @@ fn replay(objects: &Objects, persisted: &Persisted, now_ms: i64) -> Verdict {
             Err(stop) => {
                 verdict.stop = Some(stop);
                 verdict.stopped = stopped_at(&verdict.stop);
-                return verdict;
+                return (verdict, false);
             }
         }
     }
@@ -710,6 +726,7 @@ fn replay(objects: &Objects, persisted: &Persisted, now_ms: i64) -> Verdict {
             if safe {
                 verdict.branch = saved.history().to_vec();
                 st = Some(saved.clone());
+                resumed = true;
             }
         }
     }
@@ -735,7 +752,7 @@ fn replay(objects: &Objects, persisted: &Persisted, now_ms: i64) -> Verdict {
         }
     }
     finish_verdict(&mut verdict, st, persisted);
-    verdict
+    (verdict, resumed)
 }
 
 /// §1 "A stop": the seq of the authority entry whose verdict is `newerFormat`.
