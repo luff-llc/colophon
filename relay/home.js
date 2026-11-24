@@ -731,7 +731,8 @@ export class HomeSlot {
     }
   }
 
-  async handle(req, res, url, section, rest) {
+  /** `work` is the relay's record of this request: an allowed read of a record gets its `kind`. */
+  async handle(req, res, url, section, rest, work) {
     const { HttpError, send, readBody, clampInt } = this.deps;
     await this.rateGate(req, section, rest);
     if (section === 'routes') {
@@ -864,7 +865,7 @@ export class HomeSlot {
     }
     if (section === 'records') {
       if (!writing && rest === `heads/${this.key.memberId}.json` && (method === 'GET' || method === 'HEAD')) { await this.serveOwnHead(res); return true; }
-      if (!writing) return false; // a read the module allowed: the relay serves the file
+      if (!writing) { if (work) work.kind = allowed.kind; return false; } // a read the module allowed: the relay serves the file
       if (url.search) throw new HttpError(400, 'Record URLs take no query');
       if (rest.startsWith('heads/')) { await this.putHead(req, res, rest); return true; }
       try { await this.putRecord(req, res, rest, body); } finally { if (key) await this.complete(key, 'completed'); }

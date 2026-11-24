@@ -257,7 +257,7 @@ fn a_batch_uses_one_bound_call_for_records_and_members_only_history() {
     let decisions = allowed["records"].as_array().unwrap();
     assert_eq!(decisions.len(), paths.len());
     for (decision, path) in decisions.iter().zip(paths) {
-        assert_eq!(*decision, json!({"path": path, "status": 200}));
+        assert_eq!(*decision, json!({"path": path, "status": 200, "kind": kind_of(path)}));
         let relative = format!("/records/{path}");
         for method in ["GET", "HEAD"] {
             let single = call(json!({
@@ -470,7 +470,7 @@ fn a_conditional_delegation_cannot_batch_paths_it_could_not_get_one_at_a_time() 
     for (who, n) in [(&linked as &dyn Fn(Value, u8) -> Value, 21u8), (&own, 22)] {
         let ok = call(batch_request(&home, NOW, &in_scope, who(batch_args(&in_scope), n)));
         assert_eq!(ok["allowed"], true, "{ok}");
-        assert_eq!(ok["records"], json!([{"path": live, "status": 200}]));
+        assert_eq!(ok["records"], json!([{"path": live, "status": 200, "kind": "live"}]));
     }
     // One path out of scope refuses the whole batch: no per-item results, nothing reserved.
     for body in [json!({"paths": [&live, &op]}), json!({"paths": [&op, &live]})] {
@@ -1103,6 +1103,8 @@ fn an_authenticated_read_verifies_the_history_once_and_keeps_its_refusal_order()
     assert_eq!(allowed["allowed"], true, "{allowed}");
     assert_eq!(allowed["via"], "call");
     assert_eq!(allowed["signer"], format!("member:{member}"));
+    assert_eq!(allowed["kind"], kind_of(&rest), "the record's kind, as classify gives it");
+    assert_eq!(allowed["kind"], "op");
     let refused = |call: &[u8]| {
         let r = call_op(ask(call));
         (r["status"].clone(), r["result"].clone())
@@ -1188,4 +1190,9 @@ fn an_authenticated_read_verifies_the_history_once_and_keeps_its_refusal_order()
 /// `call`, without asserting the module answered `ok` (a refusal is still an answer).
 fn call_op(req: Value) -> Value {
     serde_json::from_slice(&handle(req.to_string().as_bytes())).unwrap()
+}
+
+/// The kind the module's `classify` gives a path.
+fn kind_of(path: &str) -> Value {
+    call(json!({"op": "classify", "path": path}))["kind"].clone()
 }

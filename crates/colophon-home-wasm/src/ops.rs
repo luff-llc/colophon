@@ -94,7 +94,7 @@ fn run(input: &[u8]) -> R<Value> {
             Ok(_) => json!({"allowed": true}),
             Err(response) => response,
         }),
-        "access" => access(&req),
+        "access" => access(&req).map(|answer| with_kind(&req, answer)),
         "stream_standing" => stream_standing(&req),
         "session_frame" => session_frame(&req),
         "subscription" => subscription(&req),
@@ -398,7 +398,11 @@ fn resume(req: &Value) -> R<Value> {
 /// The kind of a file in a home slot, by the engine's path grammar, or `null`: the host's
 /// storage scan and log replay use it, so the slot's grammar is the module's.
 fn classify(req: &Value) -> R<Value> {
-    let kind = paths::classify(str_of(req, "path")?).and_then(|k| match k {
+    Ok(json!({"kind": kind_of(str_of(req, "path")?)}))
+}
+/// [`classify`]'s answer for one path.
+fn kind_of(path: &str) -> Option<&'static str> {
+    paths::classify(path).and_then(|k| match k {
         Kind::Authority(_) => Some("authority"),
         Kind::Predecessor(_) => Some("predecessor"),
         Kind::Pending => Some("pending"),
@@ -409,8 +413,7 @@ fn classify(req: &Value) -> R<Value> {
         Kind::History => Some("history"),
         Kind::Blob(_) => Some("blob"),
         Kind::Request => None,
-    });
-    Ok(json!({"kind": kind}))
+    })
 }
 
 /// What a request reads or writes.
@@ -711,7 +714,7 @@ fn access(req: &Value) -> R<Value> {
         // The verified home read also meets the call requirement for members-only history.
         answer["records"] = json!(paths
             .into_iter()
-            .map(|path| json!({"path": path, "status": 200}))
+            .map(|path| json!({"path": path, "status": 200, "kind": kind_of(&path)}))
             .collect::<Vec<_>>());
     }
     if matches!(class, Class::StreamTicket) {
@@ -766,6 +769,18 @@ fn signer_rows(req: &Value, now_ms: i64) -> (usize, Option<i64>, Vec<Value>) {
         }
     }
     (live, oldest, drop)
+}
+
+/// An allowed record request's answer with the record's `kind` ([`classify`]'s), so the host
+/// serving the file need not ask for it again.
+fn with_kind(req: &Value, mut answer: Value) -> Value {
+    let rest = req.get("rest").and_then(Value::as_str);
+    if answer["allowed"] == true && req.get("section").and_then(Value::as_str) == Some("records") {
+        if let Some(kind) = rest.filter(|p| *p != "batch").and_then(kind_of) {
+            answer["kind"] = json!(kind);
+        }
+    }
+    answer
 }
 
 /// One stream principal's standing at the committed history (`null`: it may no longer stream):
