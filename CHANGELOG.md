@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.5.4 — 2026-11-24
+
+No format or reader-rule change. The spec stays Colophon 0.5, revision 18; 0.5.x homes and apps
+continue to interoperate, and a home's data directory opens unchanged. There is no 0.5.3 release.
+
+**Home (`relay/`, `colophon-home-wasm`)**
+
+- **Container image**: `relay/Dockerfile` and `relay/container-entry.js` package the home as an image configured by environment, with its key, token and data on one volume, for amd64 and arm64. CI builds it and publishes it on a final tag. See [`docs/self-hosting/docker.md`](docs/self-hosting/docker.md).
+- **Idle cost**: the module tells the scheduler when something can next come due, and the relay makes no module calls for a quiet slot until then. Eight idle libraries went from a full core to about 1% on a small machine.
+- **Writes ordered against revocation**: a record or predecessor write is judged under the slot's lock, so a write that arrives while its author's revocation is being applied is refused. Change-feed pages, history pages and history files are judged and selected over one state, and a long poll ends when the home's state changes.
+- **Replay log**: compaction is durable and keeps unfinished writes pending; a failed write stays pending for recovery and each row keeps its real outcome; a log that cannot be read whole refuses to open; durable files are written whole; a checkpoint is acknowledged only after a strict directory sync.
+- **Shutdown**: the relay waits for a home's own work, aborts waits on other homes, and answers 503 with `Retry-After` while closing; a released slot still answers 404.
+- **Container safety**: the entry point refuses to start a new home beside an existing data directory and leaves another relay's lock alone. Moving an existing home into the container is an offline handover.
+- CI now runs on pushes and pull requests to release lines.
+
+**Core**
+
+- `record_due` no longer copies the held state when nothing is due, and restores the live set when a recording fails part-way.
+
+**Swift**
+
+- **Folder writes**: a session's writes name its own file presenter when coordinating, so a signed write no longer waits on it (about 0.5 s to a few milliseconds per write on a folder store). Per-open and per-batch work in `FolderMedium` is cut.
+- **Batched writes**: `perform(_ commands:observed:)` signs and stores up to 256 commands under one reconcile and one snapshot. A failure part-way returns the durable prefix in `BatchInterruption`.
+- A write builds one snapshot instead of two, and the pre-write reconcile hands the engine only what changed in the folder.
+- Sync coalesces watcher refreshes and re-checks the folder before each later home.
+- Fixed: a store error after a write became durable no longer reports failure, and a receipt for a command that keeps a live head now names the new operation.
+
+Known limits of the reference home, unchanged in this release: exclusive use of a data directory relies on lock files and a heartbeat rather than a kernel-held lock; keep the machine's clock synchronised, since a clock set far ahead and then back can let an old call through; never restore part of a data directory.
+
 ## 0.5.2
 
 No format or reader-rule change. The spec stays Colophon 0.5, revision 18;
