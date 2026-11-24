@@ -1451,23 +1451,36 @@ impl Account {
     /// it returns every recording it made, with its bytes, and has applied them all; or it
     /// returns the error and has applied none.
     pub fn record_due(&mut self) -> Result<Vec<Finished>> {
+        // Most calls find nothing due: answer those without copying the held state.
+        let Some(first) = self.next_recording() else {
+            return Ok(Vec::new());
+        };
+        // `next_recording` reads only, so this is still the state before any recording. It holds
+        // every field a recording's `finish` changes (through `commit`, which also settles the
+        // live set); recordings carry no seed or epoch key.
         let snapshot = (
             self.objects.clone(),
             self.records.clone(),
             self.persisted.clone(),
             self.now_ms,
             self.first_seen.clone(),
+            self.live.clone(),
         );
         let mut out = Vec::new();
         // Bounded by the number of held pending objects and activations.
         let bound = self.objects.pending.len() + self.d.auth.state().activations().len() + 8;
         let mut failure = None;
+        let mut ready = Some(first);
         for _ in 0..bound {
-            let Some(batch) = self.next_recording() else {
+            let Some(batch) = ready.take().or_else(|| self.next_recording()) else {
                 break;
             };
             let action = self.batch_action("record", batch);
-            match self.finish(action, Vec::new()) {
+            #[cfg(not(test))]
+            let finished = self.finish(action, Vec::new());
+            #[cfg(test)]
+            let finished = record_due_tests::finish_or_fault(self, out.len(), action);
+            match finished {
                 Ok(f) => out.push(f),
                 Err(e) => {
                     failure = Some(e);
@@ -1480,14 +1493,19 @@ impl Account {
             Some(e) => {
                 // Put back what was applied: the same inputs rebuild the same account.
                 if !out.is_empty() {
-                    let (o, r, p, n, seen) = snapshot;
-                    if let Ok(d) = self.candidate(&o, &r, &p, n) {
-                        self.d = d;
-                        self.objects = o;
-                        self.records = r;
-                        self.persisted = p;
-                        self.now_ms = n;
-                        self.first_seen = seen;
+                    let (o, r, p, n, seen, live) = snapshot;
+                    // The candidate is built over the earlier live set, so it goes back first.
+                    let settled = std::mem::replace(&mut self.live, live);
+                    match self.candidate(&o, &r, &p, n) {
+                        Ok(d) => {
+                            self.d = d;
+                            self.objects = o;
+                            self.records = r;
+                            self.persisted = p;
+                            self.now_ms = n;
+                            self.first_seen = seen;
+                        }
+                        Err(_) => self.live = settled,
                     }
                 }
                 Err(e)
@@ -2197,3 +2215,7 @@ pub struct KeyringEdit {
     /// Policy fields to set (lowering windows, tightening `history` or `memberRule`).
     pub policy: Option<Value>,
 }
+
+#[cfg(test)]
+#[path = "record_due_tests.rs"]
+mod record_due_tests;
