@@ -114,3 +114,24 @@ command = [
 steps = [
   "check rust: exit 101",
 ]
+
+[[entry]]
+id = "2026-11-24T07:43:04Z/push-tag/26c4703dea/60170adb"
+at = "2026-11-24T07:43:04Z"
+by = "Xinchen Liu"
+action = "push-tag"
+product = "colophon"
+ref = "v0.5.4"
+commit = "26c4703deaa92e3619cd1df88529c02b8627b888"
+tree = "ae97d1fac3a63d4b767fc3ebc011e8bc90b5522b"
+result = "ok"
+prev = "1c97ce316c5671f33a78c36c02dcf64b646b82a2c342393f8ae4f83b6b6502f5"
+receipt = "60170adb2b3acc68270b24019618bb2f"
+command = [
+  "publish v0.5.4: git -c core.hooksPath=/dev/null -c core.fsmonitor=false -c protocol.ext.allow=never push --atomic --force-with-lease=refs/tags/v0.5.4: https://github.com/luff-llc/colophon.git refs/tags/v0.5.4",
+]
+steps = [
+  "tag 26c4703dea as v0.5.4: exit 0",
+  "publish v0.5.4: exit 0",
+  "open a pull request merging release/0.5 into main: exit 0",
+]
