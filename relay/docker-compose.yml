@@ -1,0 +1,34 @@
+# A Colophon home in one container, for `docker compose up -d` or a Portainer stack.
+# Everything the home keeps (its key, the provisioning token's hash, every slot) is in the
+# named volume `colophon-home`. See docs/self-hosting/docker.md.
+#
+# The first start prints the provisioning token once: `docker compose logs colophon-home`.
+services:
+  colophon-home:
+    image: colophon-home:dev   # built with: docker build -f relay/Dockerfile -t colophon-home:dev .
+    restart: unless-stopped
+    # Ten seconds is Docker's default; the relay drains for at most eight, then exits.
+    stop_grace_period: 15s
+    ports:
+      # Publish on loopback and put a TLS reverse proxy in front; clients need https.
+      - "127.0.0.1:${COLOPHON_HOST_PORT:-8080}:8080"
+    volumes:
+      - colophon-home:/data
+    environment:
+      # Required: the https origin clients reach this home at (no path).
+      COLOPHON_PUBLIC_URL: "https://home.example.org"
+      # Provisioning: on, gate token (the default). Set a hash to use a token you made yourself
+      # (`bun relay/server.js token`); leave it unset to have one made on the first start.
+      # COLOPHON_PROVISION: "on"
+      # COLOPHON_PROVISION_GATE: "token"
+      # COLOPHON_PROVISION_TOKEN_SHA256: ""
+      # COLOPHON_MAX_SLOTS: "200"
+      # COLOPHON_SLOT_BYTES: "0"          # per-slot quota in bytes; 0 = none
+      # COLOPHON_CORS_ORIGINS: "https://app.example"
+      # Behind a reverse proxy on a Docker network the peer is the proxy, not the client: name the
+      # header it sets and the range it connects from, so rate limits count per client.
+      # COLOPHON_CLIENT_IP_HEADER: "X-Real-IP"
+      # COLOPHON_TRUSTED_PROXIES: "172.16.0.0/12"
+
+volumes:
+  colophon-home:

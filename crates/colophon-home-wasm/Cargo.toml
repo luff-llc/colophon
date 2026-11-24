@@ -10,14 +10,14 @@ rust-version.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-colophon-core = { path = "../colophon-core", version = "=0.5.2" }
+colophon-core = { path = "../colophon-core", version = "=0.5.4" }
 serde.workspace = true
 serde_json.workspace = true
 base64.workspace = true
 
 [dev-dependencies]
 # The same core, with its work counters on for the tests that bound work by counting.
-colophon-core = { path = "../colophon-core", version = "=0.5.2", features = ["work-counters"] }
+colophon-core = { path = "../colophon-core", version = "=0.5.4", features = ["work-counters"] }
 p256.workspace = true
 sha2.workspace = true
 # The core's Swift test fixture (v05_swift_support), for the succession journey: both are

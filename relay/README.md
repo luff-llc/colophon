@@ -99,7 +99,7 @@ home holds no account secret: no controller or member key, no PRF output, no see
 | TLS | `COLOPHON_RELAY_TLS_CERT`, `COLOPHON_RELAY_TLS_KEY`, or `"tls":{…}` | off |
 | CORS origins | `COLOPHON_RELAY_CORS_ORIGINS="https://app.example,…"` or `cors.origins`: each exactly `scheme://host[:port]`, lower case, compared whole; `*`, `null`, a path or a default port refuse start-up | none: no CORS header |
 | Provisioning | config `provision` (below) | off |
-| Client address | config `clientAddress`: `{"header": "CF-Connecting-IP", "trustedPeers": ["127.0.0.1", "::1"]}` | the socket address |
+| Client address | config `clientAddress`: `{"header": "CF-Connecting-IP", "trustedPeers": ["127.0.0.1", "::1", "172.16.0.0/12"]}` (addresses or CIDR ranges; a `/0` or a range with host bits set refuses start-up) | the socket address |
 
 **Provisioning.** A home slot serves one account, by its account ID, from before anything is
 uploaded. Its first upload is accepted only if it starts with the genesis whose digest is that ID;
@@ -324,6 +324,9 @@ real time. Without `--test-clock` stdin is not read.
 Production use is over TLS (directly, or behind Caddy/nginx or Tailscale, as for the 0.3 relay:
 pass `Authorization`, `If-None-Match`, `If-Match` and `Content-Length`, do not buffer bodies).
 
+A container image configured by environment variables, with its key, token and data on one
+volume, is described in [`docs/self-hosting/docker.md`](../docs/self-hosting/docker.md).
+
 ## What a home serves (0.5 §14)
 
 At `{base}` (`/v1/libraries/<slot>`), in addition to the 0.3 endpoints (`changes`, `records/...`):
@@ -382,6 +385,19 @@ any head is produced the home appends what is due at its clock. An object a
 peer did not take (a transient refusal such as `unavailable`, or any status or result the module
 does not read as delivered or permanently refused) is offered again every pass while this home
 still lists it.
+
+**Idle passes are skipped.** A pass that records nothing, asks for no receipt and signs no head
+is also told by the module when the same state could next give something else (`wakeAt` from
+`record_due` and from `head_request`): the earliest due time of a held transition, the time a
+held candidate is judged again, a head ahead of the clock that becomes usable for a `final`, and
+half of `headMaxAge` after the latest head (or this home's own expiry). Until the earlier of the
+two, while the state is unchanged and the clock has not gone back, a pass makes no module call
+for the slot (the status it read is reused for forwarding), and a peer whose last pass found
+nothing to send (no new or backlogged object, no entry, its head already taken) gets no pass. The
+first pass at or after that time runs as before, so time-driven work is done no later than it was
+every tick. Where the module gives no bound (a held veto, a transition due but not recorded, a
+fork, a stop, a succession, a refused recording) every pass asks again, as before. The serving
+lease is still renewed on its own schedule.
 
 **Forks** (§8.6). A non-primary home stores a valid entry at a seq it holds when a primary head
 covers it, and keeps a current home's head over another digest at a held seq as fork evidence (at

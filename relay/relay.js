@@ -4,6 +4,7 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { constants as fsc, promises as fsp, writeSync } from 'node:fs';
 import http from 'node:http';
 import https from 'node:https';
+import { appendLines, writeAll } from './files.js';
 import { HomeKey, HomeModule, HomeSlot, ModuleError } from './home.js';
 import {
   ProvisionReplay, ProvisionTable, REPLAY_DIR, TABLE_FILE, clientAddressConfig, tableKind, clientAddressResolver, isJsonType, memberRequest,
@@ -259,8 +260,13 @@ class Slot {
     const file = path.join(this.root, 'log.jsonl');
     const st = await fsp.lstat(file).catch((e) => { if (e.code !== 'ENOENT') throw e; });
     if (st && !st.isFile()) throw new Error('Relay log must be a regular file');
+    // A part of a line that could not be cut back: no row may follow it (the next open finds the
+    // log damaged at that line, and starts a new instance, as for any inconsistent log).
+    if (this.logBroken) throw this.logBroken;
     const handle = await fsp.open(file, fsc.O_WRONLY | fsc.O_APPEND | fsc.O_CREAT | fsc.O_NOFOLLOW, 0o600);
-    try { await handle.write(JSON.stringify(e) + '\n'); await handle.sync(); } finally { await handle.close(); }
+    try { await appendLines(handle, JSON.stringify(e) + '\n', true); }
+    catch (error) { if (error.unrepaired) this.logBroken = error; throw error; }
+    finally { await handle.close(); }
     this.indexEntry(e);
     for (const waiter of [...this.waiters]) {
       if (!waiter.namespaces.length || waiter.namespaces.some((ns) => pathInNamespace(e.path, ns))) waiter.wake();
@@ -269,9 +275,14 @@ class Slot {
 
   /** Serializes mutations within the slot; reads use the in-memory index. */
   async exclusive(fn) {
-    if (this.closing || this.released) throw new HttpError(503, 'Relay is closing');
+    // At shutdown no new request is admitted, and the work already admitted on the slot (a
+    // request, a scheduler pass) finishes its file work: a checkpoint already committed is not
+    // left without its files, nor answered 503. Anything else is refused once the slot closes,
+    // and everything once it is being released after its work drained.
+    const refused = () => this.released || (this.closing && (this.releasing || !this.active));
+    if (refused()) throw new HttpError(503, 'Relay is closing');
     const execute = () => {
-      if (this.closing || this.released) throw new HttpError(503, 'Relay is closing');
+      if (refused()) throw new HttpError(503, 'Relay is closing');
       return fn();
     };
     const run = this.chain.then(execute, execute);
@@ -402,14 +413,19 @@ class Slot {
   async stage(body) {
     const staged = path.join(this.root, 'tmp', randomBytes(12).toString('hex'));
     const handle = await fsp.open(staged, fsc.O_WRONLY | fsc.O_CREAT | fsc.O_EXCL | fsc.O_NOFOLLOW, 0o600);
-    try { await handle.write(body); await handle.sync(); } finally { await handle.close(); }
+    try { await writeAll(handle, body); await handle.sync(); } finally { await handle.close(); }
     return staged;
   }
 }
 
 async function ensureRealDir(dir) {
   const st = await fsp.lstat(dir).catch(() => null);
-  if (!st) { await fsp.mkdir(dir, { mode: 0o700 }).catch((e) => { if (e.code !== 'EEXIST') throw e; }); return ensureRealDir(dir); }
+  if (!st) {
+    // A new directory is a new name in its parent: durable only once the parent is synced.
+    const made = await fsp.mkdir(dir, { mode: 0o700 }).then(() => true, (e) => { if (e.code !== 'EEXIST') throw e; return false; });
+    if (made) await syncDir(path.dirname(dir));
+    return ensureRealDir(dir);
+  }
   if (st.isSymbolicLink() || !st.isDirectory()) throw new Error(`Relay storage must be a plain directory: ${dir}`);
 }
 
@@ -422,7 +438,7 @@ async function syncDir(dir) {
 async function writeDurable(file, bytes, tmpDir) {
   const staged = path.join(tmpDir, randomBytes(12).toString('hex'));
   const handle = await fsp.open(staged, fsc.O_WRONLY | fsc.O_CREAT | fsc.O_EXCL | fsc.O_NOFOLLOW, 0o600);
-  try { await handle.write(bytes); await handle.sync(); } finally { await handle.close(); }
+  try { await writeAll(handle, bytes); await handle.sync(); } finally { await handle.close(); }
   try { await fsp.rename(staged, file); }
   catch (error) { await fsp.rm(staged, { force: true }); throw error; }
   await syncDir(path.dirname(file));
@@ -452,7 +468,7 @@ function readBody(req, max) {
  * Creates the relay. `libraries` maps slot names to `{ tokenSha256 }`, `{ token }` or
  * `{ open: true }` (no bearer token; local testing only).
  */
-export async function createRelay({ dataDir, libraries, limits = {}, home, clock = Date.now, resolve, tickMs = 0, tracing = false, cors, provision, clientAddress: addressConfig, crashAt, hook }) {
+export async function createRelay({ dataDir, libraries, limits = {}, home, clock = Date.now, resolve, tickMs = 0, tracing = false, cors, provision, clientAddress: addressConfig, crashAt, hook, drainMs = DRAIN_MS }) {
   if (!dataDir) throw new Error('dataDir is required');
   if (cors !== undefined && cors !== null && (typeof cors !== 'object' || Array.isArray(cors))) throw new Error('cors must be an object with origins, an array of origins');
   const origins = corsOrigins(cors?.origins);
@@ -537,8 +553,10 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
   const slots = new Map();
   const opening = new Map();
   const notProvisioned = () => new HttpError(404, 'Not provisioned', {}, { result: 'refused:notProvisioned' });
+  // Shutdown, unlike a release, says nothing about the slot: the request may be retried.
+  const relayClosing = () => new HttpError(503, 'Relay is closing', { 'retry-after': '1' });
   async function slot(name) {
-    if (closing) throw new HttpError(503, 'Relay is closing');
+    if (closing) throw relayClosing();
     if (slots.has(name)) return slots.get(name);
     // Never opened for a name this relay does not hold (a released slot is not reopened).
     if (!homeSlots.has(name) && !auth.has(name)) throw notProvisioned();
@@ -552,7 +570,7 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
           s.home = new HomeSlot({
             slot: s, wasm: homeModule, key: homeKey, base: homeSlots.get(name).base, account: homeSlots.get(name).account,
             clock, resolve, tracing,
-            deps: { HttpError, send, readBody, clampInt, clientAddress, reach },
+            deps: { HttpError, send, readBody, clampInt, clientAddress, reach, firstChanges, serveChanges, serveRecord },
             limits: { ...effective, requestsPerMinute: effective.requestsPerMinute ?? 0 },
           });
           await s.home.open();
@@ -743,7 +761,9 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
         await reach('provision written');
         if (reserve) await provisionReplay.complete(reserve.key, 'completed');
         homeSlots.set(asked.slot, { base: asked.base, account: asked.account });
-        await slot(asked.slot);
+        // The row is durable: a shutdown that began meanwhile leaves the slot to open at the next
+        // start, and the request is answered, not refused after its effect.
+        await slot(asked.slot).catch((error) => { if (!closing) throw error; });
         return request;
       };
       if (!session) return decide(undefined);
@@ -754,7 +774,7 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
   }
 
   async function handle(req, res, work) {
-    if (closing) throw new HttpError(503, 'Relay is closing');
+    if (closing) throw relayClosing();
     const url = new URL(req.url, 'http://relay.invalid');
     if (url.pathname === '/healthz' && req.method === 'GET') return send(res, 200, { ok: true });
     if (provisioning.enabled && url.pathname === '/v1/provision') return door(req, res);
@@ -770,7 +790,8 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
     if (!homeSlots.has(name)) authorize(req, name);
     const s = await slot(name);
     // Counted from here until the response has ended and this handler has settled.
-    if (closing || s.closing || s.releasing || s.released) throw notProvisioned();
+    if (s.releasing || s.released) throw notProvisioned();
+    if (closing || s.closing) throw relayClosing();
     enter(s); work.slot = s;
     if (s.home && await s.home.handle(req, res, url, section, recordPath)) return undefined;
     if (section === 'records' && recordPath === 'batch') {
@@ -815,49 +836,11 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
       return send(res, 200, { protocol: PROTOCOL, slot: name, limits: published, ...(slotBytes ? { quotaBytes: slotBytes } : {}),
         ...(s.home ? { home: { member: s.home.key.memberId }, layouts: homeModule.call({ op: 'limits' }).layouts } : {}) });
     }
-    if (section === 'changes') {
-      if (req.method !== 'GET' || recordPath !== undefined) throw new HttpError(405, 'Method not allowed', { allow: 'GET' });
-      const after = url.searchParams.get('after') ?? '';
-      const limit = clampInt(url.searchParams.get('limit'), 500, 1, effective.pageEntries);
-      const wait = clampInt(url.searchParams.get('wait'), 0, 0, effective.waitSeconds);
-      const namespaces = url.searchParams.getAll('namespace').filter((n) => n.length > 0);
-      let page = s.changes(after, limit, namespaces);
-      const deadline = Date.now() + wait * 1000;
-      while (page.entries.length === 0 && Date.now() < deadline) {
-        await s.waitForEntry(deadline - Date.now(), res, namespaces);
-        if (res.destroyed) return undefined;
-        if (s.closing || s.releasing) throw notProvisioned(); // woken by a release
-        page = s.changes(page.cursor, limit, namespaces);
-      }
-      return send(res, 200, page);
-    }
+    if (section === 'changes') return serveChanges(req, res, url, s, recordPath);
     const kind = s.classify(recordPath);
     if (!kind) throw new HttpError(400, 'Invalid record path');
     if (url.search) throw new HttpError(400, 'Record URLs take no query');
-    if (req.method === 'GET' || req.method === 'HEAD') {
-      const entry = s.current.get(recordPath);
-      if (!entry) throw new HttpError(404, 'Not found');
-      const etag = `"${entry.sha256}"`;
-      const conditional = req.headers['if-none-match'];
-      if (conditional === '*' || conditional?.split(',').some((tag) => tag.trim().replace(/^W\//, '') === etag)) {
-        res.writeHead(304, { etag, 'cache-control': 'no-store' });
-        return res.end();
-      }
-      if (req.method === 'HEAD') {
-        const file = await s.target(recordPath, false);
-        const st = file && await fsp.lstat(file).catch((e) => { if (e.code !== 'ENOENT') throw e; });
-        if (!st) throw new HttpError(404, 'Not found');
-        if (!st.isFile() || st.size !== entry.size) throw new HttpError(500, 'Relay storage does not match index');
-        res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': entry.size, etag });
-        return res.end();
-      }
-      const bytes = await s.readFile(recordPath);
-      const actual = sha256(bytes);
-      if (bytes.length !== entry.size || actual !== entry.sha256) throw new HttpError(500, 'Relay storage does not match index');
-      res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': bytes.length,
-        etag, 'cache-control': 'no-store' });
-      return res.end(bytes);
-    }
+    if (req.method === 'GET' || req.method === 'HEAD') return serveRecord(req, res, s, recordPath);
     if (req.method === 'PUT') {
       const max = kind === 'blob' ? effective.blobBytes : effective.recordBytes;
       const body = await readBody(req, max);
@@ -882,6 +865,75 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
       res.writeHead(status); return res.end();
     }
     throw new HttpError(405, 'Method not allowed', { allow: kind === 'request' ? 'GET, PUT, DELETE' : 'GET, PUT' });
+  }
+
+  /** `GET`/`HEAD {base}/records/<path>`: the stored file, checked against the index. */
+  async function serveRecord(req, res, s, recordPath) {
+    const entry = s.current.get(recordPath);
+    if (!entry) throw new HttpError(404, 'Not found');
+    const etag = `"${entry.sha256}"`;
+    const conditional = req.headers['if-none-match'];
+    if (conditional === '*' || conditional?.split(',').some((tag) => tag.trim().replace(/^W\//, '') === etag)) {
+      res.writeHead(304, { etag, 'cache-control': 'no-store' });
+      return res.end();
+    }
+    if (req.method === 'HEAD') {
+      const file = await s.target(recordPath, false);
+      const st = file && await fsp.lstat(file).catch((e) => { if (e.code !== 'ENOENT') throw e; });
+      if (!st) throw new HttpError(404, 'Not found');
+      if (!st.isFile() || st.size !== entry.size) throw new HttpError(500, 'Relay storage does not match index');
+      res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': entry.size, etag });
+      return res.end();
+    }
+    const bytes = await s.readFile(recordPath);
+    const actual = sha256(bytes);
+    if (bytes.length !== entry.size || actual !== entry.sha256) throw new HttpError(500, 'Relay storage does not match index');
+    res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': bytes.length,
+      etag, 'cache-control': 'no-store' });
+    return res.end(bytes);
+  }
+
+  /** `GET {base}/changes`: its query, checked. */
+  function changesQuery(req, url, rest) {
+    if (req.method !== 'GET' || rest !== undefined) throw new HttpError(405, 'Method not allowed', { allow: 'GET' });
+    return {
+      after: url.searchParams.get('after') ?? '',
+      limit: clampInt(url.searchParams.get('limit'), 500, 1, effective.pageEntries),
+      wait: clampInt(url.searchParams.get('wait'), 0, 0, effective.waitSeconds),
+      namespaces: url.searchParams.getAll('namespace').filter((n) => n.length > 0),
+    };
+  }
+  /** A home's first page of the change feed, taken under its lock with the call's judgement. */
+  function firstChanges(req, url, rest, s) {
+    const q = changesQuery(req, url, rest);
+    return s.changes(q.after, q.limit, q.namespaces);
+  }
+  /**
+   * The change feed, and its long poll. A home slot passes `judged`: the first page and its
+   * commit count, taken under its lock with the call's judgement. When the home's state changes
+   * during the wait (a revocation, among others) the poll ends with the page it has (empty, the
+   * same cursor), so the caller is judged again on its next poll.
+   */
+  async function serveChanges(req, res, url, s, rest, judged) {
+    const { limit, wait, namespaces, after } = changesQuery(req, url, rest);
+    let page = judged ? judged.page : s.changes(after, limit, namespaces);
+    const deadline = Date.now() + wait * 1000;
+    const changed = () => Boolean(judged) && s.home.commits !== judged.commits;
+    while (page.entries.length === 0 && Date.now() < deadline && !changed()) {
+      // Checked right before registering (nothing in between waits): a release or a shutdown
+      // that began meanwhile has already woken every waiter, and would not wake this one.
+      if (s.releasing || s.released) throw notProvisioned();
+      if (s.closing) throw relayClosing();
+      const waiting = s.waitForEntry(deadline - Date.now(), res, namespaces);
+      await reach('changes waiting'); // a test hook (traced builds only)
+      await waiting;
+      if (res.destroyed) return undefined;
+      if (s.releasing) throw notProvisioned(); // woken by a release
+      if (s.closing) throw relayClosing(); // woken by shutdown: retry elsewhere or later
+      if (changed()) break;
+      page = s.changes(page.cursor, limit, namespaces);
+    }
+    return send(res, 200, page);
   }
 
   function listener(req, res) {
@@ -925,23 +977,33 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
     if (closePromise) return closePromise;
     closing = true;
     if (timer) clearInterval(timer);
-    for (const s of slots.values()) { s.closing = true; for (const waiter of [...s.waiters]) waiter.wake(); }
+    for (const s of slots.values()) {
+      s.closing = true;
+      s.home?.stop();
+      for (const waiter of [...s.waiters]) waiter.wake();
+    }
     const drain = async () => {
       await Promise.allSettled([...requests, ...opening.values(), provisionTail]);
-      await Promise.all([...slots.values()].map(async (s) => { await drained(s); await s.chain; }));
+      // Then each home's own work no request carries (forwarding, its saves, queued lock work).
+      await Promise.all([...slots.values()].map(async (s) => { await drained(s); await s.home?.quiesce(); await s.chain; }));
       await unlock();
     };
-    closePromise = boundedDrain(drain());
+    closePromise = boundedDrain(drain(), drainMs);
     return closePromise;
   } };
   } catch (error) { await unlock(true); throw error; }
 }
 
+/** How long shutdown waits for work in flight: under the 10 s Docker gives a container to stop
+ * by default (docker-compose.yml gives 15 s), with time left to exit. A forwarding pass's waits
+ * on other homes are cut at once; what remains is local commits and requests in flight. */
+export const DRAIN_MS = 8_000;
+
 // The lock stays held until writes settle, even after the shutdown deadline expires.
-function boundedDrain(work) {
+function boundedDrain(work, ms = DRAIN_MS) {
   let timer;
   return Promise.race([work, new Promise((_, reject) => {
-    timer = setTimeout(() => reject(new Error('Relay shutdown timed out draining writes')), 5000);
+    timer = setTimeout(() => reject(new Error('Relay shutdown timed out draining writes')), ms);
   })]).finally(() => clearTimeout(timer));
 }
 

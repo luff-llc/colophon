@@ -10,6 +10,7 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { constants as fsc, promises as fsp } from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
+import { appendLines, readLogRows, replayRow, writeAll } from './files.js';
 
 const HEX64 = /^[0-9a-f]{64}$/;
 const KEY_ID = /^[0-9a-f]{32}$/; // a member or key ID: the first 32 hex characters of SHA-256 of its point
@@ -128,11 +129,62 @@ export function clientAddressConfig(raw) {
   if (typeof raw.header !== 'string' || !/^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/.test(raw.header)) throw new Error('clientAddress.header must be a header name');
   if (!Array.isArray(raw.trustedPeers) || raw.trustedPeers.length === 0) throw new Error('clientAddress.trustedPeers must list the proxy addresses the header is read from');
   const peers = new Set();
+  const ranges = [];
   for (const p of raw.trustedPeers) {
-    if (typeof p !== 'string' || net.isIP(p) === 0) throw new Error(`clientAddress.trustedPeers: ${JSON.stringify(p)} is not an IP address`);
+    const range = typeof p === 'string' ? parseRange(p) : undefined;
+    if (range === null) throw new Error(`clientAddress.trustedPeers: ${JSON.stringify(p)} is not an IP range: write it as address/prefix with no host bits set, for example 10.0.0.0/8 (a /0 is refused: it would trust every peer)`);
+    if (range) { ranges.push(range); continue; }
+    if (typeof p !== 'string' || net.isIP(p) === 0) throw new Error(`clientAddress.trustedPeers: ${JSON.stringify(p)} is not an IP address or range`);
     peers.add(normalIp(p));
   }
-  return { header: raw.header.toLowerCase(), trustedPeers: peers };
+  const trusted = (peer) => {
+    const a = normalIp(peer);
+    if (peers.has(a)) return true;
+    if (ranges.length === 0) return false;
+    const n = ipBits(a);
+    return n !== null && ranges.some((r) => r.family === n.family && (n.value >> r.shift) === r.network);
+  };
+  return { header: raw.header.toLowerCase(), trustedPeers: peers, trusted };
+}
+
+/**
+ * A CIDR range (`10.0.0.0/8`, `fd00::/8`): `{family, shift, network}`; null for a malformed one
+ * (a bad prefix, host bits set, or a /0, which would trust every peer); undefined when `text` has
+ * no `/` (an exact address, checked by the caller). An IPv4-mapped IPv6 range is not accepted:
+ * peers are normalized to IPv4 first, so write the IPv4 range.
+ */
+function parseRange(text) {
+  const at = text.indexOf('/');
+  if (at < 0) return undefined;
+  const bits = ipBits(text.slice(0, at));
+  const prefix = text.slice(at + 1);
+  if (!bits || !/^\d{1,3}$/.test(prefix) || /^::ffff:/i.test(text)) return null;
+  const width = bits.family === 4 ? 32 : 128;
+  const n = Number(prefix);
+  if (n < 1 || n > width) return null;
+  const shift = BigInt(width - n);
+  const network = bits.value >> shift;
+  if ((network << shift) !== bits.value) return null;
+  return { family: bits.family, shift, network };
+}
+
+/** An address as `{family, value}` (value a BigInt), or null. Accepts what net.isIP accepts, without a zone. */
+function ipBits(text) {
+  const family = net.isIP(text);
+  if (family === 4) return { family, value: text.split('.').reduce((v, o) => (v << 8n) | BigInt(Number(o)), 0n) };
+  if (family !== 6 || text.includes('%')) return null;
+  let s = text.toLowerCase();
+  const v4 = /(\d+\.\d+\.\d+\.\d+)$/.exec(s);
+  if (v4) {
+    const o = v4[1].split('.').map(Number);
+    s = s.slice(0, -v4[1].length) + `${((o[0] << 8) | o[1]).toString(16)}:${((o[2] << 8) | o[3]).toString(16)}`;
+  }
+  const [head, tail] = s.includes('::') ? s.split('::') : [s, undefined];
+  const left = head ? head.split(':') : [];
+  const right = tail === undefined ? [] : tail ? tail.split(':') : [];
+  const groups = tail === undefined ? left : [...left, ...Array(8 - left.length - right.length).fill('0'), ...right];
+  if (groups.length !== 8) return null;
+  return { family, value: groups.reduce((v, g) => (v << 16n) | BigInt(parseInt(g, 16)), 0n) };
 }
 
 /** An IPv4-mapped IPv6 address as IPv4; IPv6 lower case. */
@@ -156,7 +208,7 @@ export function clientAddressResolver(cfg) {
   if (!cfg) return (req) => req.socket?.remoteAddress ?? '';
   return (req) => {
     const peer = req.socket?.remoteAddress ?? '';
-    if (!cfg.trustedPeers.has(normalIp(peer))) return peer;
+    if (!(cfg.trusted ? cfg.trusted(peer) : cfg.trustedPeers.has(normalIp(peer)))) return peer;
     const value = req.headers[cfg.header];
     if (typeof value !== 'string') return SHARED_BUCKET;
     const text = value.trim();
@@ -285,7 +337,7 @@ export class ProvisionTable {
     const bytes = Buffer.from(serialize(next));
     const staged = path.join(this.dataDir, `.${TABLE_FILE}.${randomBytes(8).toString('hex')}`);
     const handle = await fsp.open(staged, 'wx', 0o600);
-    try { await handle.write(bytes); await handle.sync(); } finally { await handle.close(); }
+    try { await writeAll(handle, bytes); await handle.sync(); } finally { await handle.close(); }
     await fsp.rename(staged, path.join(this.dataDir, TABLE_FILE));
     const dir = await fsp.open(this.dataDir, 'r');
     try { await dir.sync(); } catch (error) { if (error.code !== 'EINVAL' && error.code !== 'EPERM') throw error; } finally { await dir.close(); }
@@ -440,7 +492,8 @@ export class ProvisionReplay {
   constructor(dir, wasm, clock) {
     this.dir = dir; this.wasm = wasm; this.clock = clock;
     this.retentionMs = wasm.call({ op: 'limits' }).retentionMs;
-    this.rows = new Map(); // key -> {digest, at, signer}
+    this.rows = new Map(); // key -> {digest, at, signer, t (its outcome, once it has one)}
+    this.inFlight = new Map(); // key -> the effect a reservation has not ended yet
     this.bySigner = new Map();
     this.logLines = 0;
   }
@@ -462,23 +515,23 @@ export class ProvisionReplay {
   }
 
   async load(table) {
-    let text = '';
-    try { text = await fsp.readFile(this.file('replay.log'), 'utf8'); } catch { text = ''; }
-    const end = text.lastIndexOf('\n');
-    if (end !== text.length - 1) text = text.slice(0, end + 1); // a torn last line
+    // Fails closed, as a home slot's replay log does.
+    const entries = await readLogRows(this.file('replay.log'), replayRow((e) => typeof e.slot === 'string'), 'The provisioning replay log');
     const pending = new Map();
-    for (const line of text.split('\n')) {
-      if (!line) continue;
-      let e; try { e = JSON.parse(line); } catch { continue; }
+    for (const e of entries) {
       this.logLines += 1;
       if (typeof e.r === 'string') {
-        this.addRow(e.r, { digest: e.d, at: e.at, signer: e.s });
+        this.addRow(e.r, { digest: e.d, at: e.at, signer: e.s, t: e.t });
         if (e.e && !e.t) pending.set(e.r, e.e); else pending.delete(e.r);
-      } else if (typeof e.c === 'string') pending.delete(e.c);
+      } else if (typeof e.c === 'string') {
+        pending.delete(e.c);
+        const row = this.rows.get(e.c);
+        if (row) row.t = e.t;
+      }
     }
     const rows = [...pending].map(([key, effect]) => ({ key, present: table.get(effect.slot)?.by?.call === this.rows.get(key).digest }));
-    const lines = rows.length ? this.wasm.call({ op: 'replay_recover', rows }).states.map((s) => ({ c: s.key, t: s.state })) : [];
-    await this.compact(lines);
+    if (rows.length) for (const s of this.wasm.call({ op: 'replay_recover', rows }).states) this.rows.get(s.key).t = s.state;
+    await this.compact();
   }
 
   addRow(key, row) {
@@ -492,6 +545,7 @@ export class ProvisionReplay {
       const row = this.rows.get(key);
       if (!row) continue;
       this.rows.delete(key);
+      this.inFlight.delete(key);
       const set = this.bySigner.get(row.signer);
       set?.delete(key);
       if (set && set.size === 0) this.bySigner.delete(row.signer);
@@ -527,11 +581,15 @@ export class ProvisionReplay {
   /** Rewrite the log with the rows kept, plus `extra` lines, staged and renamed. */
   async compact(extra = []) {
     this.prune(this.clock());
-    const lines = [...this.rows].map(([key, r]) => JSON.stringify({ r: key, d: r.digest, s: r.signer, at: r.at, t: 'completed' }));
+    // Each row keeps its outcome; a reservation whose effect has not ended stays pending.
+    const lines = [...this.rows].map(([key, r]) => {
+      const effect = this.inFlight.get(key);
+      return JSON.stringify({ r: key, d: r.digest, s: r.signer, at: r.at, ...(effect ? { e: effect } : { t: r.t ?? 'completed' }) });
+    });
     for (const e of extra) lines.push(JSON.stringify(e));
     const staged = this.file(`.replay.${randomBytes(8).toString('hex')}`);
     const handle = await fsp.open(staged, 'wx', 0o600);
-    try { await handle.write(lines.map((l) => l + '\n').join('')); await handle.sync(); } finally { await handle.close(); }
+    try { await writeAll(handle, lines.map((l) => l + '\n').join('')); await handle.sync(); } finally { await handle.close(); }
     await fsp.rename(staged, this.file('replay.log'));
     const dir = await fsp.open(this.dir, 'r');
     try { await dir.sync(); } catch (error) { if (error.code !== 'EINVAL' && error.code !== 'EPERM') throw error; } finally { await dir.close(); }
@@ -539,8 +597,11 @@ export class ProvisionReplay {
   }
 
   async append(entry, durable) {
-    const handle = await fsp.open(this.file('replay.log'), 'a', 0o600);
-    try { await handle.write(JSON.stringify(entry) + '\n'); if (durable) await handle.sync(); } finally { await handle.close(); }
+    if (this.broken) throw this.broken; // a part of a line could not be cut back
+    const handle = await fsp.open(this.file('replay.log'), fsc.O_WRONLY | fsc.O_APPEND | fsc.O_CREAT | fsc.O_NOFOLLOW, 0o600);
+    try { await appendLines(handle, JSON.stringify(entry) + '\n', durable); }
+    catch (error) { if (error.unrepaired) this.broken = error; throw error; }
+    finally { await handle.close(); }
     this.logLines += 1;
   }
 
@@ -550,10 +611,16 @@ export class ProvisionReplay {
   async reserve(row, effect) {
     const line = { r: row.key, d: row.digest, s: row.signer, at: row.at, ...(effect ? { e: effect } : { t: 'completed' }) };
     await this.append(line, true);
-    this.addRow(row.key, { digest: row.digest, at: row.at, signer: row.signer });
+    this.addRow(row.key, { digest: row.digest, at: row.at, signer: row.signer, t: effect ? undefined : 'completed' });
+    if (effect) this.inFlight.set(row.key, effect);
     if (this.logLines > 2 * this.rows.size + 1024) await this.compact();
   }
-  async complete(key, t) { await this.append({ c: key, t }, false); }
+  async complete(key, t) {
+    await this.append({ c: key, t }, false);
+    this.inFlight.delete(key);
+    const row = this.rows.get(key);
+    if (row) row.t = t;
+  }
 }
 
 /** The door's body: exactly `{"slot","base","account"}`, strings. Anything else is null. */

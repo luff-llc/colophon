@@ -1,0 +1,130 @@
+name: Home image
+
+# Builds the home's container image (relay/Dockerfile) for amd64 and arm64, each on a runner of
+# its own architecture, and publishes it to the GitHub Container Registry:
+#
+#   push to main   ghcr.io/<owner>/colophon-home:main and :sha-<commit>
+#   tag vX.Y.Z     ghcr.io/<owner>/colophon-home:X.Y.Z and :latest (final tags only)
+#   pull request   builds both architectures and publishes nothing
+#
+# Deploy by commit or version, not by :main, so a restart never changes what runs.
+
+'on':
+  push:
+    branches: [main]
+    tags: ['v*']
+    paths-ignore: ['docs/**', '**/*.md']
+  pull_request:
+    branches: [main, 'release/**']
+    paths: ['relay/**', 'crates/**', 'Cargo.toml', 'Cargo.lock', '.dockerignore', '.github/workflows/home-image.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/colophon-home
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Log in to the registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: relay/Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.licenses=Apache-2.0
+          cache-from: type=gha,scope=home-${{ matrix.arch }}
+          cache-to: type=gha,scope=home-${{ matrix.arch }},mode=max
+          # Published by digest; the manifest job gives the two digests their tags.
+          outputs: ${{ github.event_name != 'pull_request' && format('type=image,name={0},push-by-digest=true,name-canonical=true,push=true', env.IMAGE) || 'type=docker' }}
+      - name: Start it and ask for its health
+        if: github.event_name == 'pull_request'
+        run: |
+          docker run -d --name home -p 127.0.0.1:8080:8080 -e COLOPHON_PUBLIC_URL=https://home.example.org "${{ steps.build.outputs.imageid }}"
+          for _ in $(seq 1 30); do curl -fsS http://127.0.0.1:8080/healthz && exit 0; sleep 1; done
+          docker logs home; exit 1
+      - name: Keep the digest
+        if: github.event_name != 'pull_request'
+        run: |
+          mkdir -p "$RUNNER_TEMP/digests"
+          digest="${{ steps.build.outputs.digest }}"
+          touch "$RUNNER_TEMP/digests/${digest#sha256:}"
+      - uses: actions/upload-artifact@v4
+        if: github.event_name != 'pull_request'
+        with:
+          name: digest-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  manifest:
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digest-*
+          merge-multiple: true
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Choose the tags
+        id: tags
+        run: |
+          short="${GITHUB_SHA::7}"
+          case "$GITHUB_REF" in
+            refs/tags/v*-*) tags="${GITHUB_REF_NAME#v}" ;;                 # a release candidate: its version only
+            refs/tags/v*)   tags="${GITHUB_REF_NAME#v} latest" ;;
+            refs/heads/main) tags="main sha-$short" ;;
+            *)              tags="sha-$short" ;;
+          esac
+          echo "tags=$tags" >> "$GITHUB_OUTPUT"
+      - name: Publish the multi-architecture image
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          args=""
+          for tag in ${{ steps.tags.outputs.tags }}; do args="$args -t $IMAGE:$tag"; done
+          # shellcheck disable=SC2086
+          docker buildx imagetools create $args $(printf "$IMAGE@sha256:%s " *)
+          docker buildx imagetools inspect "$IMAGE:$(echo ${{ steps.tags.outputs.tags }} | cut -d' ' -f1)"

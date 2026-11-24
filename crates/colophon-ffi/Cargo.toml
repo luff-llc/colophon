@@ -22,7 +22,7 @@ zero-on-free = []
 
 [dependencies]
 zeroize.workspace = true
-colophon-core = { path = "../colophon-core", version = "=0.5.2" }
+colophon-core = { path = "../colophon-core", version = "=0.5.4" }
 serde.workspace = true
 serde_json.workspace = true
 uniffi = { version = "=0.32.2", default-features = false }

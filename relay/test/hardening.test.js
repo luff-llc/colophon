@@ -90,7 +90,12 @@ test('shutdown wakes every filtered long poll', () => fixture(async (r, base) =>
   const polls = ['notes', 'other', ''].map((ns) => fetch(`${base}/changes?namespace=${ns}&wait=30`));
   await until(() => slot.waiters.size === 3);
   await r.relay.close();
-  for (const poll of polls) expect((await poll).status).toBe(404);
+  // Retryable: the relay is going away, not the slot.
+  for (const poll of polls) {
+    const res = await poll;
+    expect(res.status).toBe(503);
+    expect(res.headers.get('retry-after')).toBe('1');
+  }
   expect(slot.waiters.size).toBe(0);
 }));
 
@@ -163,7 +168,7 @@ test('log refuses symlinks and durable metadata staging uses exclusive no-follow
   const rename = fs.rename, open = fs.open;
   let checked = false;
   fs.open = async (file, mode, ...rest) => {
-    if (String(file).includes('/tmp/')) {
+    if (String(file).includes('/test/tmp/')) {
       expect(mode & (flags.O_WRONLY | flags.O_CREAT | flags.O_EXCL | flags.O_NOFOLLOW)).toBe(flags.O_WRONLY | flags.O_CREAT | flags.O_EXCL | flags.O_NOFOLLOW);
       checked = true;
     }
