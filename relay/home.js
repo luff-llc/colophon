@@ -659,26 +659,29 @@ export class HomeSlot {
   async access(req, section, rest, effect, body, call = colophonCall(req)) {
     const { HttpError } = this.deps;
     return this.replayLock(async () => {
-      const now = this.clock();
-      let existing = null; let share = { live: 0, oldest: null, expired: [] };
+      let existing = null; let signerRows = [];
       if (call) {
         const k = this.wasm.call({ op: 'call_key', call });
         if (k.parsed) {
           const row = this.rows.get(k.key);
           existing = row ? { at: row.at, digest: row.digest } : null;
-          share = this.signerShare(k.signer, now);
+          signerRows = [...(this.bySigner.get(k.signer) ?? [])].map((key) => ({ key, at: this.rows.get(key).at }));
         }
       }
+      // One clock reading, after the call's key and rows are looked up, for the count and the call.
+      const now = this.clock();
+      const share = this.signerShare(signerRows, now);
       const r = this.wasm.call({
         op: 'access', state: this.state, now, method: req.method, section, rest,
-        call, existing, signerLive: share.live, signerOldest: share.oldest, replayRows: this.limits.replayRows, base: this.base,
+        call, existing, ...(share ? { signerLive: share.live, signerOldest: share.oldest } : { signerRows }),
+        replayRows: this.limits.replayRows, base: this.base,
         path: this.relativePath(req),
         ...(section === 'records' && rest === 'batch'
           ? { batchBody: b64(body) }
           : { bodySha256: sha(body ?? Buffer.alloc(0)) }),
       });
-      // The module answers `drop` where it would have listed the rows no longer retained.
-      if (r.drop) this.dropRows([...r.drop, ...share.expired]);
+      // With counts, the module answers `drop` where it would have listed the expired rows.
+      if (r.drop) this.dropRows(share ? [...r.drop, ...share.expired] : r.drop);
       if (r.allowed) {
         if (r.reserve) await this.reserve(r.reserve, effect);
         return r;
@@ -695,14 +698,18 @@ export class HomeSlot {
     });
   }
 
-  /** A principal's replay rows as the module counts them at `now` (§12.4): how many are retained,
-   * the oldest `at` among those, and the keys of the rest. */
-  signerShare(signer, now) {
-    this.retentionMs ??= this.wasm.call({ op: 'limits' }).retentionMs;
+  /** A principal's replay rows (`{key, at}`) as the module counts them at `now` (§12.4): how many
+   * are retained, the oldest `at` among those, and the keys of the rest. Null when the rows must
+   * be sent as they are: the loaded module does not say it takes counts (`limits.replayCounts`),
+   * or the clock or a row's time is an integer JavaScript cannot subtract exactly. */
+  signerShare(rows, now) {
+    this.replayLimits ??= this.wasm.call({ op: 'limits' });
+    const { retentionMs, replayCounts } = this.replayLimits;
+    if (replayCounts !== true || !Number.isSafeInteger(now)) return null;
     let live = 0; let oldest = null; const expired = [];
-    for (const key of this.bySigner.get(signer) ?? []) {
-      const at = this.rows.get(key).at;
-      if (retainedAt(at, now, this.retentionMs)) { live += 1; if (oldest === null || at < oldest) oldest = at; } else expired.push(key);
+    for (const { key, at } of rows) {
+      if (Number.isInteger(at) && !Number.isSafeInteger(at)) return null;
+      if (retainedAt(at, now, retentionMs)) { live += 1; if (oldest === null || at < oldest) oldest = at; } else expired.push(key);
     }
     return { live, oldest, expired };
   }

@@ -5,10 +5,11 @@
 //
 //   COLOPHON_REQUEST_BENCH=<file> cargo test -p colophon-home-wasm --test v05_home_module \
 //     write_request_bench_input -- --ignored
-//   bun relay/test/bench-request.js --input <file> --wasm <module>[,<module>…] [--runs 50] [--rows 2000]
+//   bun relay/test/bench-request.js --input <file> --wasm <module>[,<module>…] [--runs 50] [--rows 500]
 //
-// `--rows` gives the caller's principal that many retained replay rows: a module is sent them
-// as `signerRows` and, when it takes them, as the two counts the relay now sends.
+// `--rows` gives the caller's principal that many retained replay rows (fewer than its share of
+// the table, or every call is refused): a module is sent them as `signerRows` and, when its
+// `limits` say it takes them (`replayCounts`), as the two counts the relay then sends.
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { HomeModule } from '../home.js';
@@ -21,7 +22,7 @@ const opt = (name, fallback) => {
 const input = opt('input');
 const wasmFiles = (opt('wasm') ?? '').split(',').filter(Boolean);
 if (!input || !wasmFiles.length) {
-  console.error('usage: bun relay/test/bench-request.js --input <file> --wasm <module>[,<module>…] [--runs 50] [--rows 2000]');
+  console.error('usage: bun relay/test/bench-request.js --input <file> --wasm <module>[,<module>…] [--runs 50] [--rows 500]');
   process.exit(2);
 }
 const bench = JSON.parse(await readFile(input, 'utf8'));
@@ -35,7 +36,8 @@ const counted = { signerLive: rows, signerOldest: rows ? bench.get.now - (rows -
 for (const file of wasmFiles) {
   const wasm = await HomeModule.load(file);
   const out = { module: path.basename(file) };
-  for (const [name, share] of [['rows', { signerRows }], ['counts', counted]]) {
+  const modes = [['rows', { signerRows }], ...(wasm.call({ op: 'limits' }).replayCounts === true ? [['counts', counted]] : [])];
+  for (const [name, share] of modes) {
     const time = (requests) => {
       for (const r of requests) wasm.call(r); // warm
       const start = performance.now();
