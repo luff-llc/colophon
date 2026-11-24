@@ -4,7 +4,7 @@ name: Home image
 # its own architecture, and publishes it to the GitHub Container Registry:
 #
 #   push to main        ghcr.io/<owner>/colophon-home:main and :sha-<commit>
-#   tag vX.Y.Z          :X.Y.Z, and :latest when it is the highest final version
+#   tag vX.Y.Z          :X.Y.Z; :latest then follows the highest final version
 #   tag vX.Y.Z-rc.N     its version only
 #   pull request        builds both architectures, starts the image, publishes nothing
 #
@@ -78,6 +78,7 @@ jobs:
       actions: read
     outputs:
       tags: ${{ steps.tags.outputs.tags }}
+      final: ${{ steps.tags.outputs.final }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -103,8 +104,7 @@ jobs:
               if [[ "$REF_NAME" =~ $final ]]; then
                 on_line "${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
                 tags="${REF_NAME#v}"
-                highest="$(git tag --list 'v*' | grep -E "$final" | sort -V | tail -n 1)"
-                if [[ "$highest" == "$REF_NAME" ]]; then tags="$tags latest"; fi
+                echo "final=true" >> "$GITHUB_OUTPUT"
               elif [[ "$REF_NAME" =~ $candidate ]]; then
                 on_line "${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
                 tags="${REF_NAME#v}"
@@ -195,10 +195,6 @@ jobs:
     needs: [gate, build]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    # One publication at a time across every ref, so two tags cannot race for :latest.
-    concurrency:
-      group: home-image-publish
-      cancel-in-progress: false
     permissions:
       contents: read
       packages: write
@@ -220,21 +216,8 @@ jobs:
           TAGS: ${{ needs.gate.outputs.tags }}
         run: |
           set -euo pipefail
-          read -r -a wanted <<< "$TAGS"
-          [[ ${#wanted[@]} -gt 0 ]] || { echo "::error::no tags to publish"; exit 1; }
-          # The gate chose :latest some time ago. Ask again now, with publication serialised:
-          # a higher final version tagged since then keeps :latest.
-          final='^v[0-9]+\.[0-9]+\.[0-9]+$'
-          highest="$(git ls-remote --tags --refs "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" 'v*' \
-            | sed 's#.*refs/tags/##' | grep -E "$final" | sort -V | tail -n 1)"
-          tags=()
-          for tag in "${wanted[@]}"; do
-            if [[ "$tag" == latest && "$highest" != "$GITHUB_REF_NAME" ]]; then
-              echo "::notice::$highest is the highest final version; :latest is left with it"
-              continue
-            fi
-            tags+=("$tag")
-          done
+          read -r -a tags <<< "$TAGS"
+          [[ ${#tags[@]} -gt 0 ]] || { echo "::error::no tags to publish"; exit 1; }
           args=()
           for tag in "${tags[@]}"; do
             [[ "$tag" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] || { echo "::error::unexpected tag"; exit 1; }
@@ -247,3 +230,41 @@ jobs:
           done
           docker buildx imagetools create "${args[@]}" "${sources[@]}"
           docker buildx imagetools inspect "$IMAGE:${tags[0]}"
+
+  # :latest follows the highest final version. It is set apart from the versions themselves:
+  # those are published once and never lost, while this job may be cancelled by a newer one,
+  # which recomputes the same answer.
+  latest:
+    if: needs.gate.outputs.final == 'true'
+    needs: [gate, manifest]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    concurrency:
+      group: home-image-latest
+      cancel-in-progress: true
+    steps:
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Point :latest at the highest final version
+        run: |
+          set -euo pipefail
+          final='^v[0-9]+\.[0-9]+\.[0-9]+$'
+          listing="$(git ls-remote --tags --refs "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" 'v*')"
+          highest="$(sed 's#.*refs/tags/##' <<< "$listing" | { grep -E "$final" || true; } | sort -V | tail -n 1)"
+          [[ -n "$highest" ]] || { echo "::error::no final version tag found"; exit 1; }
+          version="${highest#v}"
+          # The highest version's own run publishes its image; if it has not yet, that run
+          # sets :latest when it gets here.
+          if ! docker buildx imagetools inspect "$IMAGE:$version" > /dev/null 2>&1; then
+            echo "::notice::$version is not published yet; its own run will set :latest"
+            exit 0
+          fi
+          docker buildx imagetools create -t "$IMAGE:latest" "$IMAGE:$version"
+          docker buildx imagetools inspect "$IMAGE:latest"
