@@ -46,12 +46,15 @@ curl http://127.0.0.1:8080/healthz          # {"ok":true}
 | `COLOPHON_HOST` | `0.0.0.0` | Listen address. Use `::` where the platform's private network is IPv6. |
 | `COLOPHON_PROVISION` | `on` | `off` turns off the door at `POST /v1/provision`. |
 | `COLOPHON_PROVISION_GATE` | `token` | `token`, `open`, `grant`, or a list such as `grant,token` (relay README, "Provisioning"). |
-| `COLOPHON_PROVISION_TOKEN_SHA256` | made on first start | The SHA-256 of a token you made (`bun relay/server.js token`). Leave it unset to have a token made and printed once. |
+| `COLOPHON_PROVISION_TOKEN_SHA256` | made on first start | The SHA-256 of a token you made (`bun relay/server.js token`). Leave it unset to have a token made and printed once (not in hosted mode). |
+| `COLOPHON_PRIVATE_LISTEN` | none | A private listener that alone serves `/v1/provision` and `/v1/operator/*`; the public port then answers 404 for both. `unix:/run/colophon/private.sock` (recommended), or `host:port` on loopback or a private address (a public or wildcard address is refused unless `COLOPHON_PRIVATE_LISTEN_ALLOW_PUBLIC=1`). Setting it turns on hosted mode. |
+| `COLOPHON_HOSTED` | off | Hosted mode: with gate `token`, `COLOPHON_PROVISION_TOKEN_SHA256` is required, and no token is ever made or printed (a hash left on the volume is not used). |
 | `COLOPHON_PROVISION_OPERATOR_ACCOUNT`, `COLOPHON_PROVISION_OPERATOR_SLOT` | none | Required with gate `grant`. The audience is `<origin>/v1/provision`. |
 | `COLOPHON_MAX_SLOTS` | `200` | `provision.maxSlots` |
 | `COLOPHON_PROVISION_PER_ADDRESS_PER_HOUR` | `10` | `provision.perAddressPerHour` |
 | `COLOPHON_PROVISION_UNCLAIMED_HOURS` | `24` | `provision.unclaimedHours` |
-| `COLOPHON_SLOT_BYTES` | `0` (no quota) | `limits.slotBytes`: the most bytes one slot may hold |
+| `COLOPHON_SLOT_HISTORY_BYTES` | `67108864` (64 MiB) | `limits.historyBytes`: the most bytes of one slot's history (authority entries, receipts, heads). Writes past it answer 507 `refused:historyQuota`; reads never are. Real histories are far smaller; `0` turns it off. |
+| `COLOPHON_SLOT_BYTES` | `0` (no quota) | `limits.slotBytes`: the most bytes of data one slot may hold. Only data counts (records, live values, blob chunks); a write over it answers 507 `refused:overQuota`, while the account's history and every read go on. Set it on a hosted home. |
 | `COLOPHON_CORS_ORIGINS` | none | A comma-separated list of exact `scheme://host[:port]` origins |
 | `COLOPHON_METRICS_TOKEN_SHA256` | none (off) | The SHA-256 of a token (`bun relay/server.js token`) that may read `GET /metrics` (see "Metrics"). |
 | `COLOPHON_MODULE_MEMORY_MB` | `128` | The home module's memory, in MiB, past which its instance is replaced after a request (see "Memory"). At least 16. |
@@ -129,6 +132,51 @@ If you lose the volume, you lose the key, and those accounts must appoint a new 
 
 ## The provisioning token
 
+**Hosted deployments** (a home you run for other people) must set `COLOPHON_HOSTED=1` and a
+private listener, make the token themselves, keep it in their secret manager, and pass only its
+hash in `COLOPHON_PROVISION_TOKEN_SHA256`. The container then refuses to start without that hash
+and never prints a token.
+
+- **Rotate any token printed before.** If this volume ever started without hosted mode, a token
+  was printed to its log: treat it as known. Make a new one (`bun relay/server.js token`), set its
+  hash, restart, and give the new token to your tools. The old one stops working at that restart.
+- **Keep the private listener off the network.** Prefer a Unix socket on a volume the
+  provisioner's container also mounts (below), or loopback, or an address on a container-internal
+  network only the provisioner joins. Never publish its port.
+
+**The shared socket.** The image runs as UID and GID 65532 (`USER 65532:65532`, the distroless
+`nonroot` user) and has `/run/colophon`, owned by 65532:65532 with mode 0700. Mount one named
+volume at `/run/colophon` in both the home and the provisioner, set
+`COLOPHON_PRIVATE_LISTEN=unix:/run/colophon/private.sock` on the home, and run the provisioner as
+`65532:65532` too: the home makes the socket mode 0600, so only that user can connect. A new
+named volume starts with the image directory's owner and mode; a volume made otherwise (a bind
+mount, or a volume first used by another image) must be given to 65532:65532 first. On a platform
+that starts the container as root (see "Railway and similar platforms"), the entry point gives
+`/data` to 65532 and becomes that user before the socket is made; `/run/colophon` must already be
+65532's.
+
+```yaml
+services:
+  home:
+    image: colophon-home
+    user: "65532:65532"
+    environment:
+      COLOPHON_PUBLIC_URL: https://home.example.org
+      COLOPHON_HOSTED: "1"
+      COLOPHON_PRIVATE_LISTEN: unix:/run/colophon/private.sock
+      COLOPHON_PROVISION_TOKEN_SHA256: ${COLOPHON_PROVISION_TOKEN_SHA256}
+    volumes: [colophon-home:/data, colophon-run:/run/colophon]
+  provisioner:
+    image: your-provisioner   # it calls the home at unix:/run/colophon/private.sock
+    user: "65532:65532"
+    volumes: [colophon-run:/run/colophon]
+volumes:
+  colophon-home:
+  colophon-run:
+```
+
+For a home of your own:
+
 On the first start with gate `token` and no `COLOPHON_PROVISION_TOKEN_SHA256`, the log shows:
 
 ```
@@ -146,9 +194,12 @@ docker run --rm -v colophon-home:/data --entrypoint /usr/local/bin/bun colophon-
   -e 'require("fs").unlinkSync("/data/secrets/provision-token.sha256")'
 ```
 
-The token only lets someone create new slots. Slots already provisioned are not affected. It
-is meant for one operator's own tools. Do not ship it in an app; see the relay README,
-"Self-hosting".
+The token lets someone create new slots and, through the operator API (`/v1/operator/slots/<slot>`,
+relay README, "The operator API, and read-only slots"), make a slot's data read-only and writable
+again; the account's authority changes are always taken. With `COLOPHON_PRIVATE_LISTEN` set, the
+door and the operator API are served only on the private listener. The token never reads or
+deletes what a slot holds. It is meant for one operator's own tools. Do not ship it in an app; see
+the relay README, "Self-hosting".
 
 ## Back up, restore, update
 
