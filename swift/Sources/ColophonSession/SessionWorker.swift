@@ -1413,11 +1413,11 @@ actor SessionWorker {
 
     /// Persists a write's stores in one all-or-none batch. A store can throw after its commit point (a folder batch that
     /// is recorded and completes on the next open): the write is then durable, and reporting it as failed would invite a
-    /// retry that writes it twice. So on a failure each written path is read back, which completes such a batch: when
-    /// every one holds exactly these bytes the write stands. Otherwise the engine is discarded, as `persist` does, so the
-    /// next operation reconciles with what the store holds. When a path holds other bytes nothing was written and the
-    /// error is thrown. When a path cannot be read (missing, not downloaded yet, a locked device) the outcome is unknown,
-    /// and the error is `StorageError.unavailable` saying the write may have been recorded.
+    /// retry that writes it twice. So on a failure each written path is looked up again, which completes such a batch:
+    /// when every one holds exactly these bytes the write stands. Otherwise the engine is discarded, as `persist` does, so
+    /// the next operation reconciles with what the store holds. When a path is absent or holds other bytes nothing was
+    /// written, and the error is thrown. When a lookup itself fails (a file not downloaded yet, a locked device, an I/O
+    /// error) the outcome is unknown, and the error is `StorageError.unavailable` saying the write may have been recorded.
     private func persistWrite(_ stores: [Store]) async throws {
         guard !stores.isEmpty else { return }
         do { try storage().write(stores.map { MediumWrite(path: $0.path, bytes: $0.bytes) }) }
@@ -1430,9 +1430,20 @@ actor SessionWorker {
         }
     }
     private enum ReadBack { case durable, absent, unknown }
-    /// Reads only the written paths, so an unrelated file that cannot be read never makes the outcome unknown.
+    /// Looks up only the written paths: each one's directory is listed (a missing record reads as an ambiguous
+    /// `unavailable`, a listing tells absent apart), then the present ones are read. Unrelated directories are untouched.
     private func readBack(_ stores: [Store]) -> ReadBack {
         guard let medium = try? storage() else { return .unknown }
+        var listed: [String: Set<String>] = [:]
+        for store in stores {
+            let directory = (store.path as NSString).deletingLastPathComponent
+            let prefix = directory.isEmpty ? "" : directory + "/"
+            if listed[prefix] == nil {
+                guard let entries = try? medium.listing(prefix: prefix) else { return .unknown }
+                listed[prefix] = Set(entries.map(\.path))
+            }
+            if listed[prefix]?.contains(store.path) != true { return .absent }
+        }
         for store in stores {
             guard let bytes = try? medium.read(store.path) else { return .unknown }
             if bytes != store.bytes { return .absent }

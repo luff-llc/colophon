@@ -48,17 +48,25 @@ private final class SnapshotFailingMedium: RecordMedium, @unchecked Sendable {
     func changes() -> AsyncStream<Void> { base.changes() }
 }
 
-/// A store whose next write fails without writing anything: read back, its paths are missing, so the outcome is unknown.
+/// A store whose next write fails without writing anything. With `unreadable`, the listing that looks the written
+/// paths up again fails once too, so the outcome cannot be told.
 private final class UnverifiableMedium: RecordMedium, @unchecked Sendable {
     let base = MemoryMedium()
     private let lock = NSLock()
-    private var armed = false
-    func arm() { lock.withLock { armed = true } }
+    private var armed = false, unreadable = false, failing = false
+    func arm(unreadable: Bool) { lock.withLock { armed = true; self.unreadable = unreadable } }
     func listing() throws -> [MediumEntry] { try base.listing() }
+    func listing(prefix: String) throws -> [MediumEntry] {
+        if lock.withLock({ let fail = failing; failing = false; return fail }) { throw StorageError.unavailable("the lookup failed") }
+        return try base.listing(prefix: prefix)
+    }
     func read(_ path: String) throws -> Data { try base.read(path) }
     func readBlob(_ path: String) throws -> Data { try base.readBlob(path) }
     func write(_ writes: [MediumWrite]) throws {
-        if lock.withLock({ let fire = armed; armed = false; return fire }) { throw StorageError.unavailable("the disk went away") }
+        if lock.withLock({ () -> Bool in
+            guard armed else { return false }
+            armed = false; failing = unreadable; return true
+        }) { throw StorageError.unavailable("the disk went away") }
         try base.write(writes)
     }
     func changes() -> AsyncStream<Void> { base.changes() }
@@ -201,8 +209,9 @@ private final class CountingMedium: RecordMedium, @unchecked Sendable {
     }
 
 
-    /// A store failure whose outcome cannot be read back is reported as possibly recorded, not as nothing written.
-    @Test func aWriteWhoseOutcomeCannotBeReadBackSaysSo() async throws {
+    /// A failed store write whose paths are absent when looked up again throws the store's own error; one whose lookup
+    /// fails too is reported as possibly recorded. Either way the next refresh shows nothing was written.
+    @Test(arguments: [false, true]) func aFailedWriteIsSettledByLookingItsPathsUp(unreadable: Bool) async throws {
         let medium = UnverifiableMedium()
         let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: home) }
@@ -210,14 +219,14 @@ private final class CountingMedium: RecordMedium, @unchecked Sendable {
             privateContainer: home, keys: SoftwareKeys(), ownerController: SoftwareKeys(), createWithoutHome: true, deviceSecrets: MemoryDeviceSecrets()))
         await session.create()
         try #require(session.phase == .ready)
-        medium.arm()
+        medium.arm(unreadable: unreadable)
         do {
             try await session.perform(try link("a"), observed: session.observedRevision)
             Issue.record("the write was reported as saved")
         } catch StorageError.unavailable(let reason) {
-            #expect(reason.contains("may have been recorded"), "\(reason)")
+            if unreadable { #expect(reason.contains("may have been recorded"), "\(reason)") }
+            else { #expect(reason == "the disk went away", "\(reason)") }
         }
-        // The next refresh settles it: here the write never reached the store.
         await session.refresh()
         #expect(session.phase == .ready, "\(session.phase)")
         #expect(try await ids(session).isEmpty)
