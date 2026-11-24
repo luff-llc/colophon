@@ -10,8 +10,8 @@
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use colophon_core::v05::account::{Account, Identity};
 use colophon_core::v05::calls::{
-    home_purposes, home_record_writes, verify_call, verify_home_batch, verify_home_request,
-    AccountView, Call, CallConfig, CallSigner, HomeRequest, HomeWrite,
+    home_purposes, home_record_writes, verify_call, verify_home_batch_parsed,
+    verify_home_request_parsed, AccountView, Call, CallConfig, CallSigner, HomeRequest, HomeWrite,
 };
 use colophon_core::v05::descriptor::{HistoryAccess, Role};
 use colophon_core::v05::encoding::{bounds, canonical, digest, parse_date, strict_parse};
@@ -21,7 +21,9 @@ use colophon_core::v05::history::envelope::AuthEnvelope;
 use colophon_core::v05::history::home::{
     admit, admit_first_with, admit_pending_batch_notices, admit_predecessor, admit_with, stage_predecessor, FirstUpload, HomeState, ReceiptToSign, Refusal,
 };
-use colophon_core::v05::history::{verify_history, Claim, Objects, Persisted, Principal, State, Stop};
+use colophon_core::v05::history::{
+    verify_history, Claim, Objects, Persisted, Principal, State, Stop, Verdict,
+};
 use colophon_core::v05::home_stream::{
     self, check_session_frame, check_subscription, parse_route, stream_namespaces, FrameRefusal,
     RouteVerdict,
@@ -272,9 +274,11 @@ struct View {
     /// The seq of the unresolved fork the history stops at (§8.6 rule 3), if any.
     fork: Option<u64>,
     stopped: bool,
+    /// The verdict the view was read from, its state moved to `state`.
+    verdict: Verdict,
 }
 fn view(h: &HomeState, now_ms: i64) -> R<View> {
-    let (persisted, v) = h.verified_history(now_ms).map_err(|e| e.to_string())?;
+    let (persisted, mut v) = h.verified_history(now_ms).map_err(|e| e.to_string())?;
     let stopped = v.is_stopped();
     let fork = match &v.stop {
         None => None,
@@ -282,8 +286,28 @@ fn view(h: &HomeState, now_ms: i64) -> R<View> {
         Some(_) if stopped => None,
         Some(_) => return Err(format!("history: {}", v.code())),
     };
-    let state = v.state.ok_or("no verified history")?;
-    Ok(View { persisted, state, fork, stopped })
+    let state = v.state.take().ok_or("no verified history")?;
+    Ok(View { persisted, state, fork, stopped, verdict: v })
+}
+impl View {
+    /// The objects the home holds (its checkpoint's).
+    fn held(&self) -> Objects {
+        self.persisted.objects().cloned().unwrap_or_default()
+    }
+    /// The verdict over the held objects at `now_ms` (the view's own clock), as
+    /// `verify_history(held, checkpoint, now_ms)` gives it, for a call's view of the account.
+    /// Without a recorded stop the view was verified at `now_ms` from the same checkpoint, and
+    /// the held objects are exactly the checkpoint's (so they add nothing to it and leave its
+    /// resumption as it is): that verdict is this one, and the history is not verified again.
+    fn held_verdict(&self, objects: &Objects, now_ms: i64) -> Verdict {
+        if self.persisted.stop_floor().is_none() && self.persisted.stopped().is_none() {
+            let mut v = self.verdict.clone();
+            v.state = Some(self.state.clone());
+            v
+        } else {
+            verify_history(objects, &self.persisted, now_ms)
+        }
+    }
 }
 
 fn status(req: &Value) -> R<Value> {
@@ -553,10 +577,11 @@ fn access(req: &Value) -> R<Value> {
         }
         _ => return answer(404),
     };
-    let l = load(req)?;
+    // Open to anyone whatever the slot holds: nothing of the state is read.
     if matches!(class, Class::Identity | Class::Admit) {
         return Ok(json!({"allowed": true, "via": "open"}));
     }
+    let l = load(req)?;
     // Before the first upload nobody can make a call this home could verify, and a successor's
     // genesis needs its predecessor first: the `PUT` is taken, held, and judged with the upload.
     if matches!(class, Class::PredecessorPut) && l.home.is_none() {
@@ -600,14 +625,14 @@ fn access(req: &Value) -> R<Value> {
     // method and path (the core's rule, checked again in `verify_home_request`: only a path that
     // serves the history takes `colophon.history.read`), is refused at once.
     let path = str_of(req, "path")?;
-    match Call::parse(&call) {
-        Ok(c) if home_purposes(method, path).contains(&c.purpose.as_str()) => {}
+    let call = match Call::parse(&call) {
+        Ok(c) if home_purposes(method, path).contains(&c.purpose.as_str()) => c,
         Ok(_) => return refuse("refused:outOfScope".into()),
         Err(f) => return refuse(f.code()),
-    }
+    };
     let base = str_of(req, "base")?.to_string();
-    let objects = held(h)?;
-    let verdict = verify_history(&objects, &v.persisted, now_ms);
+    let objects = v.held();
+    let verdict = v.held_verdict(&objects, now_ms);
     let account_view = AccountView::from_history_verifier(&verdict, &objects, now_ms)
         .map_err(|e| e.to_string())?;
     let existing = req.get("existing").filter(|e| !e.is_null()).map(|e| {
@@ -647,9 +672,9 @@ fn access(req: &Value) -> R<Value> {
     // each path as a single GET of it would carry them, or the whole batch is refused.
     let verified = match &batch {
         Some((_, paths)) => {
-            verify_home_batch(&call, &account_view, &cfg, &mut store, &request, paths)
+            verify_home_batch_parsed(call, &account_view, &cfg, &mut store, &request, paths)
         }
-        None => verify_home_request(&call, &account_view, &cfg, &mut store, &request),
+        None => verify_home_request_parsed(call, &account_view, &cfg, &mut store, &request),
     };
     let vc = match verified {
         Ok(vc) => vc,
@@ -2537,8 +2562,8 @@ fn provision_access(req: &Value) -> R<Value> {
     if v.stopped {
         return unavailable();
     }
-    let objects = held(h)?;
-    let verdict = verify_history(&objects, &v.persisted, now_ms);
+    let objects = v.held();
+    let verdict = v.held_verdict(&objects, now_ms);
     let Ok(account_view) = AccountView::from_history_verifier(&verdict, &objects, now_ms) else {
         return unavailable();
     };

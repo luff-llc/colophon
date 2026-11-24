@@ -1321,6 +1321,19 @@ pub fn verify_home_request(
     home_request(envelope, view, cfg, store, req, false)
 }
 
+/// [`verify_home_request`] for a call the home has already parsed with [`Call::parse`] from the
+/// envelope that came with the request (to look at its purpose before any history work, say): the
+/// same rule and the same refusals in the same order, without parsing the envelope again.
+pub fn verify_home_request_parsed(
+    call: Call,
+    view: &AccountView,
+    cfg: &CallConfig<'_>,
+    store: &mut dyn ReplayStore,
+    req: &HomeRequest<'_>,
+) -> Result<VerifiedCall> {
+    home_request_with(call, view, cfg, store, req, false, &[])
+}
+
 /// The signer's own judgement of a call it built for a request at a home, before it sends it:
 /// [`verify_home_request`] with a fresh replay store, except where the signer cannot know what
 /// the home knows because it is behind the home's fresh head (it has not fetched the history the
@@ -1349,7 +1362,7 @@ pub fn check_home_batch_as_signer(
     paths: &[String],
 ) -> Result<()> {
     let mut store = super::replay::MemoryReplayStore::new();
-    home_request_with(envelope, view, cfg, &mut store, req, true, paths).map(|_| ())
+    home_request_with(Call::parse(envelope)?, view, cfg, &mut store, req, true, paths).map(|_| ())
 }
 
 /// [`verify_home_request`] for `POST /records/batch` serving `paths` (record paths relative to
@@ -1366,7 +1379,19 @@ pub fn verify_home_batch(
     req: &HomeRequest<'_>,
     paths: &[String],
 ) -> Result<VerifiedCall> {
-    home_request_with(envelope, view, cfg, store, req, false, paths)
+    home_request_with(Call::parse(envelope)?, view, cfg, store, req, false, paths)
+}
+
+/// [`verify_home_batch`] for a call parsed already ([`verify_home_request_parsed`]).
+pub fn verify_home_batch_parsed(
+    call: Call,
+    view: &AccountView,
+    cfg: &CallConfig<'_>,
+    store: &mut dyn ReplayStore,
+    req: &HomeRequest<'_>,
+    paths: &[String],
+) -> Result<VerifiedCall> {
+    home_request_with(call, view, cfg, store, req, false, paths)
 }
 
 fn home_request(
@@ -1377,11 +1402,11 @@ fn home_request(
     req: &HomeRequest<'_>,
     signer: bool,
 ) -> Result<VerifiedCall> {
-    home_request_with(envelope, view, cfg, store, req, signer, &[])
+    home_request_with(Call::parse(envelope)?, view, cfg, store, req, signer, &[])
 }
 
 fn home_request_with(
-    envelope: &[u8],
+    call: Call,
     view: &AccountView,
     cfg: &CallConfig<'_>,
     store: &mut dyn ReplayStore,
@@ -1396,8 +1421,8 @@ fn home_request_with(
     } else {
         &[]
     };
-    verify(
-        envelope,
+    verify_parsed(
+        call,
         view,
         cfg,
         store,
@@ -1498,10 +1523,20 @@ fn verify(
     store: &mut dyn ReplayStore,
     mode: Mode<'_>,
 ) -> Result<VerifiedCall> {
+    // 1. Parse.
+    verify_parsed(Call::parse(envelope)?, view, cfg, store, mode)
+}
+
+/// [`verify`] from step 2, for a call parsed already.
+fn verify_parsed(
+    call: Call,
+    view: &AccountView,
+    cfg: &CallConfig<'_>,
+    store: &mut dyn ReplayStore,
+    mode: Mode<'_>,
+) -> Result<VerifiedCall> {
     let writes = mode.writes;
     let v = &view.v;
-    // 1. Parse.
-    let call = Call::parse(envelope)?;
     // 2. Possession, under `key`, before anything is looked up.
     call.verify_possession()?;
     // 3. Audience, window, read-only replay look-up.

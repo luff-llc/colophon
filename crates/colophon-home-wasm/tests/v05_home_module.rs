@@ -1058,3 +1058,74 @@ fn a_stopped_home_refuses_every_record_check_as_before() {
         }
     }
 }
+
+/// A call with its signature bytes changed (the body is the same).
+fn forge_signature(call: &[u8]) -> Vec<u8> {
+    let mut v: Value = serde_json::from_slice(call).unwrap();
+    let mut sig = STANDARD.decode(v["signature"].as_str().unwrap()).unwrap();
+    let last = sig.len() - 1;
+    sig[last] ^= 1;
+    v["signature"] = json!(b(&sig));
+    serde_json::to_vec(&v).unwrap()
+}
+
+/// One authenticated read verifies the home's history once (the call's view of the account is
+/// read from the same verdict), and its refusals keep their order: a call that does not parse is
+/// `malformed`; a purpose that does not fit the request is `refused:outOfScope` before its
+/// signature is looked at; then a bad signature is `badSignature`. The identity and the
+/// admission requests read nothing of the slot's state.
+#[test]
+fn an_authenticated_read_verifies_the_history_once_and_keeps_its_refusal_order() {
+    use colophon_core::v05::history::work;
+    let mut f = create_with(&[NS], "members", 1);
+    let member = f.host.identity(31);
+    admit(&mut f, &member, "Reader", "device", terms_for(&[(NS, "read")]), terms_for(&[(NS, "read")]));
+    let keys = HomeKeys::new(0x77);
+    appoint_homes(&mut f, &[(&keys, BASE_A)]);
+    let mut home = Home::new(keys, f.account.id().as_str());
+    let entries: Vec<Value> = entries_json(&f).into_iter().map(|(_, e)| e).collect();
+    assert_eq!(home.authority(1, &entries, NOW)["appointed"], true);
+    assert!(home.head(NOW).is_some());
+    let rest = format!("ops/{member}/{NS}/000000000001-{}.json", "a".repeat(32));
+    let path = format!("/records/{rest}");
+    let signed = |purpose: &str, n: u8| {
+        call_as(&f.host, &f.account, "member", &member, BASE_A, purpose,
+                home_call_args("GET", &path, &digest(b"")), NOW, [n; 32])
+    };
+    let ask = |call: &[u8]| {
+        json!({"op": "access", "state": home.state, "now": NOW, "base": BASE_A, "method": "GET",
+               "section": "records", "rest": rest, "path": path, "bodySha256": digest(b""),
+               "call": b(call)})
+    };
+    work::reset();
+    let allowed = call(ask(&signed("colophon.home.read", 1)));
+    assert_eq!(work::get().verifications, 1, "one verification of the history");
+    assert_eq!(allowed["allowed"], true, "{allowed}");
+    assert_eq!(allowed["via"], "call");
+    assert_eq!(allowed["signer"], format!("member:{member}"));
+    let refused = |call: &[u8]| {
+        let r = call_op(ask(call));
+        (r["status"].clone(), r["result"].clone())
+    };
+    assert_eq!(refused(b"{}"), (json!(403), json!("malformed")));
+    assert_eq!(refused(&forge_signature(&signed("colophon.home.read", 2))), (json!(403), json!("badSignature")));
+    assert_eq!(
+        refused(&forge_signature(&signed("colophon.home.write", 3))),
+        (json!(403), json!("refused:outOfScope")),
+        "the purpose is judged before the signature"
+    );
+    assert_eq!(refused(&signed("colophon.home.write", 4)), (json!(403), json!("refused:outOfScope")));
+    // Open routes: allowed whatever the state holds, and nothing of it is decoded.
+    for (method, section, rest) in [("GET", "", Value::Null), ("POST", "authority", Value::Null),
+                                    ("POST", "pending", Value::Null),
+                                    ("PUT", "records", json!(format!("heads/{}.json", "b".repeat(32))))] {
+        let r = call(json!({"op": "access", "state": "not a state", "now": NOW, "method": method,
+                            "section": section, "rest": rest}));
+        assert_eq!((r["allowed"].clone(), r["via"].clone()), (json!(true), json!("open")), "{method} {section}");
+    }
+}
+
+/// `call`, without asserting the module answered `ok` (a refusal is still an answer).
+fn call_op(req: Value) -> Value {
+    serde_json::from_slice(&handle(req.to_string().as_bytes())).unwrap()
+}
