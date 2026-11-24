@@ -187,28 +187,24 @@ import Observation
         }
     }
     /// Writes `commands` in order as one batch: for an import, a backfill or any run of many writes. Each command is
-    /// signed and admitted on its own, as `perform(_:observed:claimed:)` admits it, but the batch reconciles once, persists
-    /// what it signed in one all-or-none write to the store, publishes one snapshot and asks for one sync. Returns a
-    /// receipt per command, in order.
+    /// signed and admitted on its own, as `perform(_:observed:claimed:)` admits it, and its records are stored before the
+    /// next command is signed. The batch reconciles once, publishes one snapshot and asks for one sync. Returns a receipt
+    /// per command, in order.
     ///
     /// The whole batch is refused, with nothing written, by the errors a single write gives before it signs:
     /// `SessionError.destinationChanged`, `.notReady` and `.staleRevision`, and `.invalidCommand` for more than
-    /// `maximumBatchCount` commands. A command that fails after that (a namespace this session does not write, a payload
-    /// over its ceiling, a refusal of the engine such as a spent write budget, or a failure of the keys) stops the batch:
-    /// the commands before it are persisted and visible, and the error is a `BatchInterruption` that carries their receipts
-    /// and the failing command's own error. If the store refuses the batch, nothing of it is durable and that error is
-    /// thrown as for a single write. An empty batch writes nothing and returns no receipts. Claimed dates are not taken
-    /// here; write those with `perform(_:observed:claimed:)`.
-    ///
-    /// Once the batch is durable its receipts are returned, or carried by the `BatchInterruption`, whatever happens next:
-    /// a snapshot that cannot be built afterwards is reported in `lastError` and followed by a refresh, and a session that
-    /// moved to another library meanwhile still returns the receipts of the one it wrote to. The engine's clock advances
-    /// before each command, as between separate writes, so a grant that expires during the batch refuses the commands
-    /// after it. Reads (`query`, `view`) made while the batch holds signed commands that are not yet stored wait until it
-    /// is stored or discarded; once it is stored they are `SessionError.staleRevision`, to be read again at the new
-    /// revision. A key provider that reads the session while it signs is not held, and sees the commands signed so far.
-    /// A store failure whose outcome cannot be read back is `StorageError.unavailable` saying the batch may have been
-    /// recorded; the next refresh shows whether it was.
+    /// `maximumBatchCount` commands. After that the batch stops at the first command that fails: one this session does not
+    /// write (its namespace, a payload over its ceiling), one the engine refuses (a spent write budget, an expired grant;
+    /// the engine's clock advances before each command, as between separate writes), a failure of the keys, or a store
+    /// that refuses its records. The error is then a `BatchInterruption`: `index` names that command, `error` is what the
+    /// single write would have thrown for it, and `receipts` are those of the commands before it, which are durable and
+    /// visible. That command and every one after it are not written, except when the store failed in a way that cannot
+    /// be read back: then `error` is `StorageError.unavailable` saying the command may have been recorded, and the next
+    /// refresh shows whether it was. Once a command is durable its receipt is returned, or carried by the
+    /// `BatchInterruption`, whatever happens next: a snapshot that cannot be built afterwards is reported in `lastError`
+    /// and followed by a refresh, and a session that moved to another library meanwhile still returns the receipts of the
+    /// one it wrote to. An empty batch writes nothing and returns no receipts. Claimed dates are not taken here; write
+    /// those with `perform(_:observed:claimed:)`.
     @discardableResult public func perform(_ commands: [DomainCommand], observed: ObservedRevision) async throws -> [WriteReceipt] {
         await restore()
         guard observed.context == context else { throw SessionError.destinationChanged }
