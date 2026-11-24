@@ -44,6 +44,11 @@ public final class FolderMedium: RecordMedium, @unchecked Sendable {
     /// presenter's callbacks never take it (they take `lock`), so Foundation can call them while it is held.
     private let registration = NSLock()
     private var hook: (@Sendable (FolderBatchStep) throws -> Void)?
+    /// The folder (device and inode) last found not to be an iCloud item: its ubiquity resource values need not be
+    /// read again while the same folder is there. Placeholders and dataless flags are still checked on every open.
+    private var localFolder: FileIdentity?
+    /// The journal directory (device and inode) this medium last gave its file protection class.
+    private var protectedJournal: FileIdentity?
     static let journalName = ".colophon.nosync"
 
     public init(folder: URL) {
@@ -229,16 +234,21 @@ public final class FolderMedium: RecordMedium, @unchecked Sendable {
 
     private func publish(_ writes: [MediumWrite], root: DirectoryHandle, journal: DirectoryHandle) throws {
         // Nothing is staged until no write conflicts.
-        var plan: [(path: String, bytes: Data, replace: Bool)] = []
+        // A path written twice keeps its last bytes, at the position of its last write. Superseded slots are
+        // emptied in place (found through `slot`) and dropped at the end, so this stays linear in the batch.
+        var slots: [(path: String, bytes: Data, replace: Bool)?] = []
+        var slot: [String: Int] = [:]
         var pending: [String: Data] = [:]
         for item in writes {
             var previous = pending[item.path]
             if previous == nil { previous = try readFile(root, item.path, maximumBytes: RecordPaths.maximumBytes) }
             if previous == item.bytes { continue }
             if previous != nil, !RecordPaths.isReplaceable(item.path) { throw StorageError.conflict(item.path) }
-            if let index = plan.firstIndex(where: { $0.path == item.path }) { plan.remove(at: index) }
-            plan.append((item.path, item.bytes, RecordPaths.isReplaceable(item.path))); pending[item.path] = item.bytes
+            if let index = slot[item.path] { slots[index] = nil }
+            slot[item.path] = slots.count
+            slots.append((item.path, item.bytes, RecordPaths.isReplaceable(item.path))); pending[item.path] = item.bytes
         }
+        let plan = slots.compactMap { $0 }
         guard !plan.isEmpty else { return }
         let id = UUID().uuidString.lowercased()
         var record = BatchRecord(entries: [])
@@ -283,6 +293,10 @@ public final class FolderMedium: RecordMedium, @unchecked Sendable {
     private func complete(_ id: String, _ record: BatchRecord, root: DirectoryHandle, journal: DirectoryHandle) throws {
         guard let staging = try journal.directory(id, create: false) else { throw StorageError.unavailable("The staging directory of batch \(id) is missing") }
         var linked: [(DirectoryHandle, String)] = []
+        // Each parent directory is synchronised once, after every entry is in place and before the record is removed
+        // (the batch stays recorded until then, so an interrupted batch is completed on the next open).
+        var parents: [String] = []
+        var parentHandles: [String: DirectoryHandle] = [:]
         for (index, entry) in record.entries.enumerated() {
             let (parentHandle, leaf) = try resolveParent(root, entry.path, create: true)
             guard let parent = parentHandle else { throw StorageError.unavailable("Cannot create the directory of \(entry.path)") }
@@ -311,9 +325,11 @@ public final class FolderMedium: RecordMedium, @unchecked Sendable {
                     throw StorageError.conflict(entry.path)
                 }
             }
-            try parent.sync()
+            let parentPath = String(entry.path.dropLast(leaf.count))
+            if parentHandles.updateValue(parent, forKey: parentPath) == nil { parents.append(parentPath) }
             try step(.applied(index))
         }
+        for parentPath in parents { try parentHandles[parentPath]?.sync() }
         try journal.remove(id + ".record")
         try journal.sync()
         try step(.recordRemoved)
@@ -366,8 +382,18 @@ public final class FolderMedium: RecordMedium, @unchecked Sendable {
     private func openJournal(_ root: DirectoryHandle) throws -> DirectoryHandle {
         guard let journal = try root.directory(Self.journalName, create: true) else { throw StorageError.unavailable("Cannot open the batch journal") }
         #if os(iOS) || os(visionOS)
-        try? FileManager.default.setAttributes([.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
-                                               ofItemAtPath: folder.appendingPathComponent(Self.journalName).path)
+        // Once per journal directory: when it is created, or when this medium first meets it (an existing journal
+        // keeps or regains the class). A journal replaced since then has another inode and is protected again.
+        let identity = FileIdentity(fd: journal.fd)
+        if identity == nil || lock.withLock({ protectedJournal }) != identity {
+            do {
+                try FileManager.default.setAttributes([.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
+                                                      ofItemAtPath: folder.appendingPathComponent(Self.journalName).path)
+                lock.withLock { protectedJournal = identity }
+            } catch {
+                // As before: a journal that cannot take the class is still usable; the next open tries again.
+            }
+        }
         #endif
         return journal
     }
@@ -496,14 +522,31 @@ public final class FolderMedium: RecordMedium, @unchecked Sendable {
         }
         if info.st_mode & S_IFMT == S_IFLNK { throw StorageError.invalidPath(url.path) }
         try checkDataless(info, "")
+        // A folder already found not to be an iCloud item has no download status to read.
+        let identity = FileIdentity(info)
+        if lock.withLock({ localFolder }) == identity { return }
         do {
             let values = try url.resourceValues(forKeys: [.isUbiquitousItemKey, .ubiquitousItemDownloadingStatusKey])
-            if values.isUbiquitousItem == true && values.ubiquitousItemDownloadingStatus != .current {
-                throw DownloadPending(url: url, name: name)
+            if values.isUbiquitousItem == true {
+                if values.ubiquitousItemDownloadingStatus != .current { throw DownloadPending(url: url, name: name) }
+            } else {
+                lock.withLock { localFolder = identity }
             }
         } catch let error as CocoaError where error.code == .fileReadNoSuchFile || error.code == .fileNoSuchFile {
             return
         }
+    }
+}
+
+/// A file's device and inode: the same item while both match.
+private struct FileIdentity: Equatable {
+    let device: dev_t
+    let inode: ino_t
+    init(_ info: stat) { device = info.st_dev; inode = info.st_ino }
+    init?(fd: Int32) {
+        var info = stat()
+        guard fstat(fd, &info) == 0 else { return nil }
+        self.init(info)
     }
 }
 
