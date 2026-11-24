@@ -169,7 +169,7 @@ func hex(_ data: Data) -> String { SHA256.hash(data: data).map { String(format: 
     }
 
     @Test func theResultGrammarIsBoundedAndNothingElseIsRead() {
-        for good in ["refused:overQuota", "refused:noEntitlement", "refused:closed", "refused:notProvisioned", "refused:somethingNew2", "unavailable"] {
+        for good in ["refused:overQuota", "refused:noEntitlement", "refused:closed", "refused:notProvisioned", "refused:subscriptionLapsed", "refused:somethingNew2", "unavailable"] {
             #expect(HomeRefusal.isValid(good), "\(good)")
         }
         for bad in ["refused:", "refused:Upper", "refused:a-b", "refused:<script>", "refused:" + String(repeating: "a", count: 49), "nope", "refused:é"] {

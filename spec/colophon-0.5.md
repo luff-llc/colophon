@@ -2076,8 +2076,10 @@ replay store or rate limit refuses (§12.4) answers 429 `{"result":"refused:wind
 `Retry-After`. `limit` outside 1–64 is clamped; `after` beyond the head returns no entries.
 
 **Refusals a paid home may give** (reserved; no behaviour is defined in 0.5): `refused:overQuota`
-(507), `refused:noEntitlement` (402), `refused:closed` (410) and `refused:notProvisioned` (403), in a
-JSON body `{"result":"refused:<reason>"}`. Any `refused:` result a client does not know refuses only
+(507), `refused:noEntitlement` (402), `refused:closed` (410), `refused:notProvisioned` (403) and
+`refused:subscriptionLapsed` (403: the home holds the library's data read-only, and refuses a
+record, blob chunk or live value write while it still serves every read and still takes the
+account's authority history), in a JSON body `{"result":"refused:<reason>"}`. Any `refused:` result a client does not know refuses only
 that request and is shown to the person as received. `refused:closed` is not evidence that anything
 was deleted.
 
@@ -2638,7 +2640,7 @@ account set up that way may fail to make progress. What 0.5.0 does not do is lis
 | Evidence (§8.6, §15.1) | equivocation evidence; `malformed` entries after a final entry |
 | Transitions (§8.7) | pending, due, vetoed, activated (provisional or final), void |
 | Calls (§12.3) | `refused:audience`, `refused:window`, `refused:replay`, `refused:conflict`, `refused:fork`, `refused:revoked` (also for a member no grant names, §20), `refused:expired`, `refused:ended`, `refused:notNarrower`, `refused:outOfScope`, `refused:origin`; `unavailable` (no history, too few fresh heads, or a stopped reader) |
-| Homes, reserved (§14) | `refused:overQuota`, `refused:noEntitlement`, `refused:closed`, `refused:notProvisioned`; any other `refused:` from a home refuses that request only and is shown raw |
+| Homes, reserved (§14) | `refused:overQuota`, `refused:noEntitlement`, `refused:closed`, `refused:notProvisioned`, `refused:subscriptionLapsed`; any other `refused:` from a home refuses that request only and is shown raw |
 | Heads (§13.3) | `refused:fork`, `refused:rollback`; `unavailable` |
 | Succession (§15) | `refused:fork`; unverified claim |
 
@@ -2690,7 +2692,7 @@ authority before the raise.
 | --- | --- | --- |
 | `account`, `organisation` | a call's `signer` (§12.2); a descriptor's `form` (§3.1); a request's `kind` (§9.1) | refused as any unknown value is today: a call signer `malformed`; a form or kind `newerFormat` |
 | `colophon.home.export`, `colophon.home.close` | purposes (§12.2) | a 0.5 home refuses them, `refused:outOfScope` |
-| `refused:overQuota`, `refused:noEntitlement`, `refused:closed`, `refused:notProvisioned` | home answers (§14) | refuse that request only |
+| `refused:overQuota`, `refused:noEntitlement`, `refused:closed`, `refused:notProvisioned`, `refused:subscriptionLapsed` | home answers (§14) | refuse that request only |
 | kinds and namespaces beginning `colophon.` | records and namespaces | reserved for this protocol; only this document defines them; met in 0.5, judged as today |
 | `layouts` | `GET {base}` (§14) | as §14 says |
 | `refused:notGranted` for a call | §12.3 step 5 | reserved for "not yet a member"; in 0.5 a call by a member ID that no grant names is `refused:revoked`, and hosts word it as waiting for approval |

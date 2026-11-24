@@ -16,18 +16,23 @@ WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 RUN cargo build --locked --target wasm32-unknown-unknown --release -p colophon-home-wasm \
- && mkdir -p /out/app /out/data \
+ && mkdir -p /out/app /out/data /out/run/colophon \
  && cp target/wasm32-unknown-unknown/release/colophon_home_wasm.wasm /out/app/ \
  && chmod 0644 /out/app/colophon_home_wasm.wasm \
- && chown 65532:65532 /out/data && chmod 0700 /out/data
+ && chown 65532:65532 /out/data && chmod 0700 /out/data \
+ && chown 65532:65532 /out/run/colophon && chmod 0700 /out/run/colophon
 COPY relay/*.js relay/package.json /out/app/
 RUN chmod 0644 /out/app/*
 
 # --- Stage 2: Bun and the relay's files only. No shell, no package manager. ---
 FROM oven/bun:1.4.5-distroless@sha256:3a210956422ad81cf7532e1fc1f2eb9275d6ef4c2337a9d25d530f798e80726a
-# Code and module are root's and read-only to the relay; only /data is its own.
+# Code and module are root's and read-only to the relay; only /data and /run/colophon are its own.
+# /run/colophon holds the private listener's socket (COLOPHON_PRIVATE_LISTEN=unix:/run/colophon/
+# private.sock): a named volume mounted there starts as this directory, owned by 65532:65532, so a
+# provisioner sharing the volume as the same user can open the mode-0600 socket.
 COPY --from=module /out/app /app
 COPY --from=module --chown=65532:65532 /out/data /data
+COPY --from=module --chown=65532:65532 /out/run /run
 USER 65532:65532
 WORKDIR /data
 ENV PORT=8080 COLOPHON_DATA=/data NODE_ENV=production

@@ -33,6 +33,8 @@ export const PROVISION_DEFAULTS = Object.freeze({
   unclaimedHours: 24,
   slotPattern: '^[a-z0-9][a-z0-9._-]{7,63}$',
   gate: 'open',
+  operatorPerMinute: 600,
+  operatorRefusedPerMinute: 10,
 });
 /** Defaults that apply only with gate "grant". */
 export const GRANT_DEFAULTS = Object.freeze({
@@ -63,7 +65,7 @@ function gateSet(gate) {
 export function provisionConfig(raw) {
   if (raw === undefined || raw === null) return { ...PROVISION_DEFAULTS, gates: new Set(['open']), slotRegex: new RegExp(PROVISION_DEFAULTS.slotPattern) };
   if (typeof raw !== 'object' || Array.isArray(raw)) throw new Error('provision must be an object');
-  const known = new Set(['enabled', 'prefix', 'maxSlots', 'perAddressPerHour', 'unclaimedHours', 'slotPattern', 'gate', 'tokenSha256', ...GRANT_FIELDS]);
+  const known = new Set(['enabled', 'prefix', 'maxSlots', 'perAddressPerHour', 'unclaimedHours', 'slotPattern', 'gate', 'tokenSha256', 'operatorPerMinute', 'operatorRefusedPerMinute', ...GRANT_FIELDS]);
   for (const k of Object.keys(raw)) if (!known.has(k)) throw new Error(`provision.${k} is not a setting`);
   const c = { ...PROVISION_DEFAULTS, ...raw };
   if (typeof c.enabled !== 'boolean') throw new Error('provision.enabled must be true or false');
@@ -77,6 +79,10 @@ export function provisionConfig(raw) {
     throw new Error('provision.gate "token" needs provision.tokenSha256, the 64-hex SHA-256 of the token (bun relay/server.js token prints one)');
   }
   if (!c.gates.has('token') && c.tokenSha256 !== undefined) throw new Error('provision.tokenSha256 is used only with gate "token"');
+  for (const k of ['operatorPerMinute', 'operatorRefusedPerMinute']) {
+    if (!c.gates.has('token') && raw[k] !== undefined) throw new Error(`provision.${k} is used only with gate "token" (the operator API answers 404 without it)`);
+    if (!positiveInt(c[k])) throw new Error(`provision.${k} must be a positive integer`);
+  }
   if (c.gates.has('grant')) grantConfig(c);
   else for (const k of GRANT_FIELDS) if (raw[k] !== undefined) throw new Error(`provision.${k} is used only with gate "grant"`);
   if (c.enabled && c.prefix === undefined) throw new Error('provision.prefix is required when provisioning is on: the public https URL prefix of the slots, ending in "/" (base = prefix + slot)');
@@ -215,6 +221,54 @@ export function clientAddressResolver(cfg) {
     if (net.isIP(text) === 0) return SHARED_BUCKET;
     return normalIp(text);
   };
+}
+
+/**
+ * The private listener's address (operator behaviour): `unix:/absolute/path` (a Unix domain
+ * socket, preferred: nothing on the network carries the token) or `host:port` (an IPv6 host in
+ * brackets). Returns `{path}` or `{host, port}`; throws naming `name` otherwise.
+ */
+export function parsePrivateListen(text, name = 'privateListen') {
+  const t = String(text ?? '').trim();
+  if (t.startsWith('unix:')) {
+    const file = t.slice(5);
+    if (!path.isAbsolute(file) || file.includes('\0')) throw new Error(`${name}: a Unix socket is unix:/absolute/path, not ${JSON.stringify(text)}`);
+    return { path: file };
+  }
+  const m = /^(?:\[([0-9A-Fa-f:.]+)\]|([^:\s\[\]]+)):(\d{1,5})$/.exec(t);
+  if (!m || Number(m[3]) > 65535) throw new Error(`${name} must be unix:/path/to.sock or host:port (for example 127.0.0.1:8788), not ${JSON.stringify(text)}`);
+  return { host: m[1] ?? m[2], port: Number(m[3]) };
+}
+
+/** Whether an address is loopback or private (RFC 1918, RFC 4193 unique local, link-local), or
+ * `localhost`. A wildcard (`0.0.0.0`, `::`) is neither: it binds every interface. */
+export function isPrivateHost(host) {
+  if (host === 'localhost') return true;
+  const bits = ipBits(host);
+  if (!bits) return false;
+  const inRange = (text) => { const r = parseRange(text); return r.family === bits.family && (bits.value >> r.shift) === r.network; };
+  const ranges = bits.family === 4
+    ? ['127.0.0.0/8', '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '169.254.0.0/16']
+    : ['::1/128', 'fc00::/7', 'fe80::/10'];
+  if (bits.family === 6 && /^::ffff:/i.test(host)) return isPrivateHost(normalIp(host));
+  return ranges.some(inRange);
+}
+
+/** Checks a private listener's setting: `{path}` (absolute) or `{host, port}`, the host loopback
+ * or private unless `allowPublic`. Throws otherwise (the relay refuses to start). */
+export function checkPrivateListen(v, allowPublic = false) {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) throw new Error('privateListen must be {"path": "/run/colophon/private.sock"} or {"host": "<address>", "port": <port>}');
+  if (v.path !== undefined) {
+    if (Object.keys(v).join() !== 'path' || typeof v.path !== 'string' || !path.isAbsolute(v.path)) throw new Error('privateListen.path must be an absolute path, and alone');
+    return v;
+  }
+  if (Object.keys(v).sort().join() !== 'host,port' || typeof v.host !== 'string' || !Number.isSafeInteger(v.port) || v.port < 0 || v.port > 65535) {
+    throw new Error('privateListen must be {"host": "<address>", "port": <port>}');
+  }
+  if (!allowPublic && !isPrivateHost(v.host)) {
+    throw new Error(`privateListen host ${JSON.stringify(v.host)} is not a loopback or private address: the token crosses it in plain text. Use a Unix socket (unix:/path), loopback, or a private network address, or allow it explicitly (COLOPHON_PRIVATE_LISTEN_ALLOW_PUBLIC=1, privateListenAllowPublic)`);
+  }
+  return v;
 }
 
 /** The most bytes a stored member request may hold (decoded); its body is bounded at 16 KiB. */
@@ -370,6 +424,59 @@ function hourly() {
   };
 }
 
+/** Whether `authorization` is exactly `Bearer <token>` with the token whose SHA-256 is
+ * `tokenSha256`, compared in constant time (a missing header hashes the empty string, so every
+ * request costs the same). Only with gate "token". */
+export function tokenMatcher(cfg) {
+  const expected = Buffer.from(cfg.tokenSha256, 'hex');
+  return (authorization) => {
+    const m = /^Bearer (\S+)$/.exec(typeof authorization === 'string' ? authorization : '');
+    const given = createHash('sha256').update(m ? m[1] : '').digest();
+    return timingSafeEqual(given, expected) && m !== null;
+  };
+}
+
+/**
+ * The operator API's gate (`/v1/operator/...`, gate "token" only). The token is checked first (a
+ * SHA-256 and a constant-time compare: the token is 256 random bits, so there is nothing to learn
+ * by guessing), and the two kinds of request never share a limit:
+ *
+ * - An authenticated request counts against `operatorPerMinute`, one share for the whole home
+ *   (there is one operator), kept in no per-address table: unauthenticated traffic from any
+ *   address, the same one included, can neither spend it nor crowd it out.
+ * - A refused request counts against `operatorRefusedPerMinute` for its client address, in a
+ *   bounded table; a full table refuses new addresses' unauthenticated requests only.
+ *
+ * Resolves to null (admitted) or a refusal `{status, result, retryAfter?}`. Apart from the door's
+ * shares: neither spends the other's.
+ */
+export function operatorGate(cfg, clock) {
+  const tokenOk = tokenMatcher(cfg);
+  let admitted = { start: -Infinity, count: 0 }; // the operator's own share, this minute
+  const refused = new Map(); // address -> {start, count}
+  const wait = (row, now) => Math.max(1, Math.ceil((row.start + 60_000 - now) / 1000));
+  const fresh = (row, now) => row && now - row.start < 60_000 && now >= row.start;
+  return function admitOperator({ address, authorization }) {
+    const now = clock();
+    if (tokenOk(authorization)) {
+      if (!fresh(admitted, now)) admitted = { start: now, count: 0 };
+      admitted.count += 1;
+      if (admitted.count > cfg.operatorPerMinute) return { status: 429, result: 'refused:overQuota', retryAfter: wait(admitted, now) };
+      return null;
+    }
+    if (refused.size >= 10_000) for (const [a, r] of refused) if (!fresh(r, now)) refused.delete(a);
+    let row = refused.get(address);
+    if (!fresh(row, now)) {
+      if (!row && refused.size >= 10_000) return { status: 429, result: 'refused:overQuota', retryAfter: 60 };
+      row = { start: now, count: 0 };
+      refused.set(address, row);
+    }
+    row.count += 1;
+    if (row.count > cfg.operatorRefusedPerMinute) return { status: 429, result: 'refused:overQuota', retryAfter: wait(row, now) };
+    return { status: 403, result: 'refused:noEntitlement' };
+  };
+}
+
 /** Which path of the gate a request takes, by its `Authorization`: a `Colophon` call to the grant
  * path when "grant" is listed (its refusal is final); a `Bearer` token to the token path when
  * "token" is listed; otherwise the open path when "open" is listed; otherwise none (403
@@ -413,12 +520,7 @@ export function provisionGate(cfg, clock) {
   const open = hourly(); // the open and token paths: new slots, refused tokens
   const attempts = hourly(); // the grant path: every request
   const refusals = hourly(); // the grant path: refused requests
-  const expected = cfg.gates.has('token') ? Buffer.from(cfg.tokenSha256, 'hex') : null;
-  const tokenOk = (authorization) => {
-    const m = /^Bearer (\S+)$/.exec(authorization ?? '');
-    const given = createHash('sha256').update(m ? m[1] : '').digest();
-    return timingSafeEqual(given, expected) && m !== null;
-  };
+  const tokenOk = cfg.gates.has('token') ? tokenMatcher(cfg) : () => false;
   const wellFormed = ({ slot, account, base }) => typeof slot === 'string' && SLOT.test(slot) && slot !== TABLE_FILE
     && !(cfg.gates.has('grant') && slot === REPLAY_DIR) && cfg.slotRegex.test(slot)
     && typeof account === 'string' && HEX64.test(account) && base === cfg.prefix + slot;
@@ -456,26 +558,53 @@ export function provisionGate(cfg, clock) {
     return { admit: true, existing: r.existing, by: { gate: 'grant', member: v.member, key: v.key, call: v.reserve.digest }, grant: v };
   }
 
-  return async function admitProvision({ slot, account, base, address, authorization, held, grant }) {
+  /** The checks the open and token paths make before any work under the door's lock (a sweep of
+   * unclaimed slots included): the address's share, then the token. Null when the request may go
+   * on (it is judged again, whole, under the lock), or the refusal. A grant request goes on: its
+   * call is judged under the lock. */
+  /** A request no path admits (no listed path takes it, or the token is missing or wrong): 429
+   * once its address is over its share, else 403, counted. Null when the request is authorized
+   * (the open path, or the right token). */
+  const refuseUnauthorized = (route, address, authorization, now) => {
+    if (route !== 'none' && !(route === 'token' && !tokenOk(authorization))) return null;
+    const wait = open.over(address, now, cfg.perAddressPerHour);
+    if (wait) return { status: 429, result: 'refused:overQuota', retryAfter: wait };
+    open.count(address, now);
+    return { status: 403, result: 'refused:noEntitlement' };
+  };
+
+  const preflight = ({ address, authorization }) => {
+    if (!cfg.enabled) return { status: 404, error: 'Not found' };
+    const route = provisionRoute(cfg, authorization);
+    if (route === 'grant') return null;
+    return refuseUnauthorized(route, address, authorization, clock());
+  };
+
+  const admitProvision = async function admitProvision({ slot, account, base, address, authorization, held, grant }) {
     const now = clock();
     if (!cfg.enabled) return { status: 404, error: 'Not found' };
     const asked = { slot, account, base };
     const route = provisionRoute(cfg, authorization);
     if (route === 'grant') return grantPath(asked, address, held, grant, now);
-    // The share first: a guesser over its share learns nothing about its token.
-    const wait = open.over(address, now, cfg.perAddressPerHour);
-    if (wait) return { status: 429, result: 'refused:overQuota', retryAfter: wait };
-    if (route === 'none' || (route === 'token' && !tokenOk(authorization))) {
-      open.count(address, now);
-      return { status: 403, result: 'refused:noEntitlement' };
-    }
+    // Unauthorized: refused, against the address's share. The token is 256 random bits, so it is
+    // compared first; a refused one is counted.
+    const refused = refuseUnauthorized(route, address, authorization, now);
+    if (refused) return refused;
     if (!wellFormed(asked)) return { status: 400, result: 'malformed' };
     const r = room(asked, held);
     if (r.status) return r;
+    // The same slot for the same account again: idempotent, it makes nothing, so it spends no
+    // share and no share refuses it (a provisioner behind one address, or one Unix socket,
+    // re-provisions as often as it must).
     if (r.existing) return { admit: true, existing: r.existing };
+    // A new slot: the address's share of new slots an hour.
+    const wait = open.over(address, now, cfg.perAddressPerHour);
+    if (wait) return { status: 429, result: 'refused:overQuota', retryAfter: wait };
     open.count(address, now);
     return { admit: true, existing: null, by: { gate: route } };
   };
+  admitProvision.preflight = preflight;
+  return admitProvision;
 }
 
 /**
