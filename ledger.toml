@@ -135,3 +135,25 @@ steps = [
   "publish v0.5.4: exit 0",
   "open a pull request merging release/0.5 into main: exit 0",
 ]
+
+[[entry]]
+id = "2026-11-24T07:43:04Z/open-pr/26c4703dea/60170adb"
+at = "2026-11-24T07:43:04Z"
+by = "Xinchen Liu"
+action = "open-pr"
+product = "colophon"
+ref = "release/0.5"
+commit = "26c4703deaa92e3619cd1df88529c02b8627b888"
+tree = "ae97d1fac3a63d4b767fc3ebc011e8bc90b5522b"
+result = "ok"
+prev = "1658b9de2a45804d04c89b1f935fcaf74a0c2fdd03ef0c5ec76f5636d992b9b9"
+receipt = "60170adb2b3acc68270b24019618bb2f"
+note = "forward merge of release/0.5 into main"
+command = [
+  "open a pull request merging release/0.5 into main: gh pr create --repo github.com/luff-llc/colophon --base main --head release/0.5 --title Merge release/0.5 forward into main --body Brings the commits shipped on release/0.5 into main, as of 26c4703deaa92e3619cd1df88529c02b8627b888. Release lines merge forward only; main is never merged into release/0.5.\n\nOpened by edition.",
+]
+steps = [
+  "tag 26c4703dea as v0.5.4: exit 0",
+  "publish v0.5.4: exit 0",
+  "open a pull request merging release/0.5 into main: exit 0",
+]
