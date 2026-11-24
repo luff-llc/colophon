@@ -325,18 +325,48 @@ enum Input0 {
     Receive(Vec<u8>),
     Link(bool),
     Command(Command),
+    /// Only run from the outage summary, never taken from the host.
+    Outage {
+        down_ms: u64,
+        ended: bool,
+    },
 }
 
-/// The most link transitions kept while a `Persist` waits. Repeated transitions (down after
-/// down, up after up) are no-ops to the machine and are not kept; past the bound a new down
-/// removes the up before it, so the outage runs from the earliest down (the more cautious
-/// reading: a longer outage can only make a holder lapse).
-const MAX_LINK_EVENTS: usize = 16;
-
-/// An input kept while a `Persist` waits, with the clock it arrived at.
-enum Kept {
-    Frame(Vec<u8>, Clock),
-    Link(bool, Clock),
+/// The link changes seen while a `Persist` waits, as a constant-size summary: the link's state
+/// now, when the current outage began (if it began while waiting), and the longest outage that
+/// began and ended while waiting. The machine learns it at the processing clock, through
+/// `Input::Outage`, never at a past clock.
+#[derive(Default)]
+struct OutageSummary {
+    /// The link's state after the changes seen; none when no change was seen.
+    up: Option<bool>,
+    /// When the current outage began, if it began while waiting.
+    down_since: Option<u64>,
+    /// An outage ended while waiting (one that began before is counted too, as 0 ms: the
+    /// machine keeps its own start for it).
+    ended: bool,
+    /// The longest outage that began and ended while waiting.
+    longest: u64,
+}
+impl OutageSummary {
+    fn seen(&self) -> bool {
+        self.up.is_some()
+    }
+    fn change(&mut self, up: bool, at: u64, machine_up: bool) {
+        let was = self.up.unwrap_or(machine_up);
+        if was == up {
+            return;
+        }
+        self.up = Some(up);
+        if up {
+            self.ended = true;
+            if let Some(d) = self.down_since.take() {
+                self.longest = self.longest.max(at.saturating_sub(d));
+            }
+        } else {
+            self.down_since = Some(at);
+        }
+    }
 }
 
 /// What one call hands back, accumulated across the inputs it ran.
@@ -377,14 +407,16 @@ struct EndpointState {
     /// The body `begin_delegation` returned and `finish_delegation` has not installed yet.
     delegation: Option<Vec<u8>>,
     pending: Option<Pending>,
-    /// Inputs that arrived while a `Persist` waited, in arrival order with their clocks (frames
-    /// and link transitions), and whether a tick fell due.
-    kept: std::collections::VecDeque<Kept>,
-    frames: usize,
+    /// Inputs that arrived while a `Persist` waited: the frames in arrival order, the link
+    /// changes as a summary, and whether a tick fell due. All run at the clock of the call
+    /// that drains them.
+    frames: std::collections::VecDeque<Vec<u8>>,
     frame_bytes: usize,
-    links: usize,
+    outage: OutageSummary,
     tick: bool,
     next_ack: u64,
+    /// The last monotonic clock given to the machine: a call with an earlier one is refused.
+    last_mono: u64,
 }
 
 fn count(n: usize) -> u32 {
@@ -423,6 +455,7 @@ impl EndpointState {
             Input0::Receive(b) => self.e.receive(&b, clock, epochs),
             Input0::Link(true) => self.e.link_up(clock, epochs),
             Input0::Link(false) => self.e.link_down(clock, epochs),
+            Input0::Outage { down_ms, ended } => self.e.outage(down_ms, ended, clock, epochs),
             Input0::Command(c) => self.e.command(c, clock, epochs),
         };
         if let Some(d) = step.dropped.as_ref() {
@@ -430,23 +463,43 @@ impl EndpointState {
         }
         self.absorb(step.effects, out)
     }
-    /// Run what waited until a `Persist`: the frames and link transitions in arrival order,
-    /// each with the clock it arrived at (as if it had run then), then one tick with this
-    /// call's clock.
+    /// Run what waited, all at this call's clock, until a `Persist`: first the link changes
+    /// (an outage that ended, then one still under way, as `Input::Outage`, so a holder that
+    /// lapsed is gated before it acts on anything), then the frames in arrival order, then one
+    /// tick. Running the outage before frames that arrived earlier is a deliberate, cautious
+    /// reordering.
     fn drain(&mut self, clock: Clock, epochs: &SessionEpochs, out: &mut Out) -> R<()> {
-        while let Some(k) = self.kept.pop_front() {
-            let (input, at) = match k {
-                Kept::Frame(b, at) => {
-                    self.frames -= 1;
-                    self.frame_bytes = self.frame_bytes.saturating_sub(b.len());
-                    (Input0::Receive(b), at)
-                }
-                Kept::Link(up, at) => {
-                    self.links -= 1;
-                    (Input0::Link(up), at)
-                }
-            };
-            if self.run(input, at, epochs, out)? {
+        let o = std::mem::take(&mut self.outage);
+        if o.ended
+            && self.run(
+                Input0::Outage {
+                    down_ms: o.longest,
+                    ended: true,
+                },
+                clock,
+                epochs,
+                out,
+            )?
+        {
+            return Ok(());
+        }
+        if let (Some(false), Some(since)) = (o.up, o.down_since) {
+            let down_ms = clock.mono_ms.saturating_sub(since);
+            if self.run(
+                Input0::Outage {
+                    down_ms,
+                    ended: false,
+                },
+                clock,
+                epochs,
+                out,
+            )? {
+                return Ok(());
+            }
+        }
+        while let Some(b) = self.frames.pop_front() {
+            self.frame_bytes = self.frame_bytes.saturating_sub(b.len());
+            if self.run(Input0::Receive(b), clock, epochs, out)? {
                 return Ok(());
             }
         }
@@ -455,46 +508,24 @@ impl EndpointState {
         }
         Ok(())
     }
-    /// The link state the kept transitions end in, or none when none is kept.
-    fn last_link(&self) -> Option<bool> {
-        self.kept.iter().rev().find_map(|k| match k {
-            Kept::Link(up, _) => Some(*up),
-            Kept::Frame(..) => None,
-        })
-    }
     /// Keep an input that arrived at `clock` while a `Persist` waits; a command is refused.
     fn hold(&mut self, input: Input0, clock: Clock, out: &mut Out) -> R<()> {
         match input {
             Input0::Command(_) => Err(persist_pending()),
+            Input0::Outage { .. } => Err(AccountError::internal("an outage is not an input")),
             Input0::Tick => {
                 self.tick = true;
                 out.queued = true;
                 Ok(())
             }
             Input0::Link(up) => {
+                let machine_up = self.e.machine().link_is_up();
+                self.outage.change(up, clock.mono_ms, machine_up);
                 out.queued = true;
-                let last = self.last_link().unwrap_or(self.e.machine().link_is_up());
-                if last == up {
-                    return Ok(());
-                }
-                if !up && self.links >= MAX_LINK_EVENTS {
-                    // Keep the earliest down: drop the up that ended it, and this down.
-                    if let Some(i) = self
-                        .kept
-                        .iter()
-                        .rposition(|k| matches!(k, Kept::Link(true, _)))
-                    {
-                        self.kept.remove(i);
-                        self.links -= 1;
-                    }
-                    return Ok(());
-                }
-                self.kept.push_back(Kept::Link(up, clock));
-                self.links += 1;
                 Ok(())
             }
             Input0::Receive(b) => {
-                if self.frames >= MAX_QUEUED
+                if self.frames.len() >= MAX_QUEUED
                     || self.frame_bytes.saturating_add(b.len()) > MAX_QUEUED_BYTES
                 {
                     // The newest frame is lost, as on any carrier.
@@ -503,17 +534,30 @@ impl EndpointState {
                         hello_to: None,
                     });
                 } else {
-                    self.frames += 1;
                     self.frame_bytes += b.len();
-                    self.kept.push_back(Kept::Frame(b, clock));
+                    self.frames.push_back(b);
                     out.queued = true;
                 }
                 Ok(())
             }
         }
     }
+    /// Refuse a monotonic clock earlier than the last one given, changing nothing; else record it.
+    fn advance(&mut self, clock: &Clock) -> R<()> {
+        if clock.mono_ms < self.last_mono {
+            return Err(AccountError::Malformed {
+                code: "session:clockBackwards".into(),
+                detail: format!(
+                    "the monotonic clock went back from {} to {} ms",
+                    self.last_mono, clock.mono_ms
+                ),
+            });
+        }
+        self.last_mono = clock.mono_ms;
+        Ok(())
+    }
     fn queued(&self) -> usize {
-        self.kept.len() + usize::from(self.tick)
+        self.frames.len() + usize::from(self.tick) + usize::from(self.outage.seen())
     }
 }
 
@@ -600,12 +644,12 @@ impl SessionEndpoint {
                         installed: view.stamp.clone(),
                         delegation: None,
                         pending: None,
-                        kept: Default::default(),
-                        frames: 0,
+                        frames: Default::default(),
                         frame_bytes: 0,
-                        links: 0,
+                        outage: OutageSummary::default(),
                         tick: false,
                         next_ack: 0,
+                        last_mono: clock.mono_ms,
                     }),
                 }),
                 Err(EndpointError::Key(k)) => Err(key_error(k)),
@@ -662,6 +706,7 @@ impl SessionEndpoint {
         self.gated(engine, |s, p, epochs| {
             let current = s.installed.seq == p.seq && s.installed.digest == p.digest;
             let mut out = Out::new();
+            s.advance(&clock)?;
             if s.pending.is_some() {
                 s.hold(input, clock, &mut out)?;
                 return Ok(out.step(s.pending.is_some()));
@@ -762,6 +807,7 @@ impl SessionEndpoint {
             if stamp.seq != p.seq || stamp.digest != p.digest {
                 return Err(stale());
             }
+            s.advance(&clock)?;
             let mut out = Out::new();
             let step = s.e.set_account(view.v.clone(), clock, epochs);
             s.installed = stamp.clone();
@@ -796,7 +842,7 @@ impl SessionEndpoint {
     ) -> Result<SessionStep, AccountError> {
         self.driven(engine, &clock, Input0::Tick)
     }
-    /// Some carrier works again. While a `Persist` waits only the latest link state is kept.
+    /// Some carrier works again. While a `Persist` waits it updates the outage summary.
     pub fn link_up(
         &self,
         engine: &AccountEngine,
@@ -804,7 +850,7 @@ impl SessionEndpoint {
     ) -> Result<SessionStep, AccountError> {
         self.driven(engine, &clock, Input0::Link(true))
     }
-    /// No carrier works. While a `Persist` waits only the latest link state is kept.
+    /// No carrier works. While a `Persist` waits it updates the outage summary.
     pub fn link_down(
         &self,
         engine: &AccountEngine,
@@ -827,7 +873,8 @@ impl SessionEndpoint {
     /// The host stored the `Persist` whose acknowledgement ID is `ack` (the step's
     /// `awaiting_persist`); any other ID, or one already acknowledged, is `session:wrongAck`.
     /// If the engine's head is still the installed view's, the effects held behind it are
-    /// released and the inputs that waited run, with this call's clock, up to the next
+    /// released and the inputs that waited run (the outage summary, the frames in order, one
+    /// tick), all with this call's clock, up to the next
     /// `Persist`. If the head has moved, the held effects are discarded (`discarded`), the
     /// inputs keep waiting, and the next call that runs the session is `session:staleAccount`
     /// until `set_account`.
@@ -844,6 +891,7 @@ impl SessionEndpoint {
                 Some(p) if p.ack == ack => {}
                 _ => return Err(wrong_ack()),
             }
+            s.advance(&clock)?;
             let mut out = Out::new();
             let rest = s.pending.take().map(|p| p.rest).unwrap_or_default();
             if !current {

@@ -312,7 +312,7 @@ fn v06_through_the_engine(
     ] {
         assert!(q.queued && q.persist_outstanding && q.awaiting_persist.is_none());
     }
-    assert_eq!(ep.queued().unwrap(), 3, "one tick and two transitions (a repeated down is a no-op)");
+    assert_eq!(ep.queued().unwrap(), 2, "one tick and one outage summary");
     assert_eq!(ep.next_deadline().unwrap(), deadline);
     let big = vec![b' '; 400 << 10];
     for f in [b"x".to_vec(), vec![b' '; 20_000], own_hello.clone(), big.clone(), big.clone()] {
@@ -328,7 +328,7 @@ fn v06_through_the_engine(
     let lost = ep.receive(b"z".to_vec(), ea, clock(1_300)).unwrap();
     assert!(!lost.queued, "past 64 frames the newest is lost");
     assert_eq!(lost.drops[0].reason, "queueFull");
-    assert_eq!(ep.queued().unwrap(), 67);
+    assert_eq!(ep.queued().unwrap(), 66, "64 frames, a tick and the outage summary");
     assert_eq!(
         ep.persisted(ack + 1, ea, clock(1_400)).err().unwrap().code(),
         "session:wrongAck"
@@ -427,9 +427,9 @@ fn v06_through_the_engine(
     // head the engine had installed or is refused as stale, never after one was refused; and
     // nothing deadlocks.
     let mut seen_stale = false;
+    let mut t = 3_000;
     std::thread::scope(|scope| {
         let writer = scope.spawn(|| bump(ctl, auth, ea, sa, sim, host, d, home, 15));
-        let mut t = 3_000;
         while !writer.is_finished() {
             t += 1;
             match ep.tick(ea, clock(t)) {
@@ -442,14 +442,13 @@ fn v06_through_the_engine(
         }
         writer.join().unwrap();
     });
-    assert_eq!(ep.tick(ea, clock(9_000)).err().unwrap().code(), "session:staleAccount");
+    let t = t + 1;
+    assert_eq!(ep.tick(ea, clock(t)).err().unwrap().code(), "session:staleAccount");
     let after = ea.session_account("notes".into(), NOW).unwrap();
-    ep.set_account(&after, ea, clock(9_000)).unwrap();
+    ep.set_account(&after, ea, clock(t)).unwrap();
 
-    // An outage while a Persist waits: down then up, kept with their own clocks, leave the
-    // holder lapsed and gated after the acknowledgement exactly as the same transitions run at
-    // once would.
-    let holder = |queue: bool| -> (Value, Vec<String>) {
+    // Outages while a Persist waits. A holder endpoint with its first Persist outstanding.
+    let pending_holder = |seed: u8| {
         let ep = SessionEndpoint::new(
             account.into(),
             "notes".into(),
@@ -458,8 +457,8 @@ fn v06_through_the_engine(
             session_default_policy().unwrap(),
             None,
             after.clone(),
-            vec![if queue { 3 } else { 4 }; 32],
-            vec![5; 16],
+            vec![seed; 32],
+            vec![seed; 16],
             clock(10_000),
         )
         .unwrap();
@@ -472,39 +471,74 @@ fn v06_through_the_engine(
             .command(r#"{"command":"take","state":null}"#.into(), ea, clock(10_100))
             .unwrap();
         let ack = taken.awaiting_persist.expect("a take persists its claim");
-        let mut kinds = Vec::new();
-        let after_ack = |r: SessionStep, kinds: &mut Vec<String>| {
-            let mut next = r.awaiting_persist;
-            kinds.extend(r.effects.iter().filter_map(|e| e.frame_kind.clone()));
-            while let Some(id) = next {
-                let r = ep.persisted(id, ea, clock(40_000)).unwrap();
-                next = r.awaiting_persist;
-                kinds.extend(r.effects.iter().filter_map(|e| e.frame_kind.clone()));
-            }
-        };
-        if queue {
-            ep.link_down(ea, clock(12_000)).unwrap();
-            ep.link_up(ea, clock(32_000)).unwrap();
-            let r = ep.persisted(ack, ea, clock(40_000)).unwrap();
-            after_ack(r, &mut kinds);
-        } else {
-            let r = ep.persisted(ack, ea, clock(10_200)).unwrap();
-            after_ack(r, &mut kinds);
-            kinds.clear();
-            ep.link_down(ea, clock(12_000)).unwrap();
-            let r = ep.link_up(ea, clock(32_000)).unwrap();
-            after_ack(r, &mut kinds);
-        }
-        let v: Value = serde_json::from_str(&ep.view_json().unwrap()).unwrap();
-        (v, kinds)
+        (ep, ack)
     };
-    let (direct, direct_kinds) = holder(false);
-    let (kept, kept_kinds) = holder(true);
-    assert_eq!(direct["gated"], true, "an outage past holderTimeoutMs gates the holder");
-    assert_eq!(kept["gated"], true, "the kept down and up gate it too");
-    assert_eq!(kept["gated"], direct["gated"]);
-    assert!(direct_kinds.iter().any(|k| k == "hello"), "{direct_kinds:?}");
-    assert!(kept_kinds.iter().any(|k| k == "hello"), "{kept_kinds:?}");
+    let ack_all = |ep: &SessionEndpoint, ack: u64, t: u64| -> Vec<String> {
+        let mut kinds = Vec::new();
+        let mut next = Some(ack);
+        while let Some(id) = next {
+            let r = ep.persisted(id, ea, clock(t)).unwrap();
+            next = r.awaiting_persist;
+            kinds.extend(r.effects.iter().filter_map(|e| e.frame_kind.clone()));
+        }
+        kinds
+    };
+    let gated = |ep: &SessionEndpoint| -> bool {
+        let v: Value = serde_json::from_str(&ep.view_json().unwrap()).unwrap();
+        v["gated"] == true
+    };
+    // The same outage run at once gates the holder: the reference for what follows.
+    let (direct, ack) = pending_holder(4);
+    ack_all(&direct, ack, 10_200);
+    direct.link_down(ea, clock(12_000)).unwrap();
+    direct.link_up(ea, clock(32_000)).unwrap();
+    assert!(gated(&direct), "an outage past holderTimeoutMs gates the holder");
+
+    // The review's scenario: a down at 12 s and an up at 32 s while the Persist waits, then
+    // set_account and the acknowledgement at 40 s. Everything reaches the machine at 40 s: the
+    // 20 s outage gates the holder, and its deadlines count from 40 s.
+    let (ep, ack) = pending_holder(3);
+    ep.link_down(ea, clock(12_000)).unwrap();
+    ep.link_up(ea, clock(32_000)).unwrap();
+    let r = ep.set_account(&after, ea, clock(40_000)).unwrap();
+    assert!(r.awaiting_persist.is_none() && r.persist_outstanding);
+    let kinds = ack_all(&ep, ack, 40_000);
+    assert!(gated(&ep), "the kept outage gates the holder");
+    assert!(kinds.iter().any(|k| k == "hello"), "{kinds:?}");
+    assert!(ep.next_deadline().unwrap().is_some_and(|d| d >= 40_000), "deadlines from 40 s");
+    assert!(ep.tick(ea, clock(40_000)).is_ok(), "nothing ran at a later clock than 40 s");
+
+    // Hundreds of short flaps with one long outage among them still gate; short flaps alone
+    // do not.
+    for long in [true, false] {
+        let (ep, ack) = pending_holder(if long { 5 } else { 6 });
+        let mut t = 11_000;
+        for k in 0..300 {
+            ep.link_down(ea, clock(t)).unwrap();
+            t += if long && k == 150 { 20_000 } else { 10 };
+            ep.link_up(ea, clock(t)).unwrap();
+            t += 10;
+        }
+        assert_eq!(ep.queued().unwrap(), 1, "one summary, whatever the number of flaps");
+        ack_all(&ep, ack, t + 100);
+        assert_eq!(gated(&ep), long, "long outage among the flaps: {long}");
+    }
+
+    // An outage still under way at the acknowledgement keeps its true start: down at 12 s, the
+    // ack at 20 s, up at 30 s is an 18 s outage, and gates.
+    let (ep, ack) = pending_holder(7);
+    ep.link_down(ea, clock(12_000)).unwrap();
+    ack_all(&ep, ack, 20_000);
+    assert!(!gated(&ep));
+    ep.link_up(ea, clock(30_000)).unwrap();
+    assert!(gated(&ep), "measured from 12 s, not from the acknowledgement");
+
+    // A host clock that goes back is refused and changes nothing.
+    let before = ep.digest().unwrap();
+    let e = ep.tick(ea, clock(29_000)).err().unwrap();
+    assert_eq!(e.code(), "session:clockBackwards");
+    assert_eq!(ep.digest().unwrap(), before);
+    assert!(ep.tick(ea, clock(30_000)).is_ok(), "the same clock again is fine");
 
     // A long engine call (every record read slow, the engine's lock held throughout) does not
     // hold up a tick: endpoint calls read the gate, never the engine's lock.
@@ -529,7 +563,7 @@ fn v06_through_the_engine(
             std::thread::yield_now();
         }
         let t0 = std::time::Instant::now();
-        ep.tick(ea, clock(9_100)).unwrap();
+        ep.tick(ea, clock(t + 100)).unwrap();
         let took = t0.elapsed();
         assert!(!slow.is_finished(), "the long call was still running");
         assert!(took.as_millis() < 100, "a tick waited {took:?} for the engine");

@@ -916,15 +916,22 @@ After every exchange pass that moved the head, call `set_account` before deliver
   stored.
 * *Inputs while a `Persist` waits.* A `command` is refused with `session:persistPending` and
   changes nothing (retry it after `persisted`). A `tick` is kept as one pending tick however many
-  arrive. Received frames and link transitions are kept in arrival order, each with the clock it
-  arrived at: frames up to 64 and 1 MiB together (a durable write takes milliseconds to a few
-  hundred, and this covers several seconds of a busy cell), past which the newest frame is lost (a
-  `queueFull` drop); a repeated transition (down after down, up after up) is a no-op to the machine
-  and is not kept, and past 16 transitions a new down removes the up before it, so the outage runs
-  from the earliest down. They run at `persisted` (or at `set_account` when the head had moved) in
-  that order, each with its own arrival clock, exactly as if they had run when they arrived (a down
-  then up still leaves a holder lapsed and gated); then the tick, with that call's clock.
+  arrive. Received frames are kept in arrival order, up to 64 frames and 1 MiB together (a durable
+  write takes milliseconds to a few hundred, and this covers several seconds of a busy cell); past
+  either bound the newest frame is lost (a `queueFull` drop). Link changes are not kept as events
+  but as a constant-size summary: the link's state now, when the current outage began, and the
+  longest outage that began and ended while waiting, so no number of flaps fills anything. When
+  the `Persist` is acknowledged (or at `set_account` when the head had moved) what waited runs,
+  **all at that call's clock**, in this order: the outage summary (an ended outage, then one still
+  under way, as the core's `Outage` input), so a holder that lapsed is gated before it acts on
+  anything; then the frames in arrival order; then the tick. Running the outage before frames
+  that arrived earlier is a deliberate, cautious reordering, and a frame judged after the write
+  gives a later receive time than its arrival (a worse clock-offset sample, which the best-of-8
+  filter absorbs; a holder heard later is lapsed later, a liveness delay bounded by the write).
   `next_deadline` stays the machine's deadline throughout.
+* *Time.* Every clock the endpoint gives the machine is the clock of the call it runs in, and
+  never earlier than the last: a call whose monotonic clock is earlier than the endpoint's last is
+  refused with `session:clockBackwards` and changes nothing. Nothing is replayed at a past clock.
 
 **Host loops.** Stream: §2 of the sync-stream document, with these names; after every exchange pass call
 `on_history(head_seq())`; while `polling()` is true keep the existing poll timer. Session: the reference
