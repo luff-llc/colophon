@@ -1334,7 +1334,8 @@ actor SessionWorker {
             }
             let claimedMs = claimed.map { Int64(($0.timeIntervalSince1970 * 1000).rounded(.down)) }
             let written = try await sign(command, claimedMs: claimedMs, engine: engine, custody: custody)
-            try await persist(written)
+            observeAuthorityChanges(written.changes, from: engine)
+            try await persistWrite(written.stores)
             let operation = Self.operationID(in: written.stores) ?? ""
             if let ingress {
                 // Receipts only matter while an envelope can still be drained (they expire within 7 days): keep the newest few thousand.
@@ -1367,12 +1368,32 @@ actor SessionWorker {
             }
             // Each signed command is already admitted by the engine: persist them before reporting a failure, so the
             // engine and the store agree. A store that refuses discards the engine and nothing of the batch is durable.
-            try await persist(stores)
+            try await persistWrite(stores)
             let snapshot = receipts.isEmpty ? nil : try await build()
             if let failure { throw BatchStop(receipts: receipts, index: failure.index, error: failure.error, snapshot: snapshot) }
             if let snapshot { return (receipts, snapshot) }
             return (receipts, try await build())
         }
+    }
+
+    /// Persists a write's stores in one all-or-none batch. A store can throw after its commit point (a folder batch that
+    /// is recorded and completes on the next open): the write is then durable, and reporting it as failed would invite a
+    /// retry that writes it twice. So on a failure the stores are read back, which completes such a batch, and when every
+    /// one holds exactly these bytes the write stands. Otherwise the engine is discarded, as `persist` does, and the error
+    /// is thrown.
+    private func persistWrite(_ stores: [Store]) async throws {
+        guard !stores.isEmpty else { return }
+        do { try storage().write(stores.map { MediumWrite(path: $0.path, bytes: $0.bytes) }) }
+        catch {
+            if (try? holds(stores)) == true { return }
+            await engine?.discard(); engine = nil
+            throw error
+        }
+    }
+    private func holds(_ stores: [Store]) throws -> Bool {
+        let medium = try storage()
+        for store in stores where try medium.read(store.path) != store.bytes { return false }
+        return true
     }
 
     /// Reconciles and checks a write may go ahead (inside the gate): the session is ready and `observed` is the current
@@ -1411,9 +1432,11 @@ actor SessionWorker {
         let seconds = claimed.timeIntervalSince1970
         return seconds.isFinite && seconds >= -62_135_596_800 && seconds < 253_402_300_800 && claimed <= now
     }
-    /// `ops/<author>/<namespace>/<clock>-<id>.json`: the operation ID is the part after the clock.
+    /// `ops/<author>/<namespace>/<clock>-<id>.json`: the operation ID is the part after the clock. A write that relies on
+    /// a live head retains that head under `ops/` too, and the engine lists retained records before the new operation,
+    /// so the new operation is the last `ops/` store.
     static func operationID(in stores: [Store]) -> String? {
-        for store in stores where store.path.hasPrefix("ops/") {
+        for store in stores.reversed() where store.path.hasPrefix("ops/") {
             let name = (store.path as NSString).lastPathComponent.replacingOccurrences(of: ".json", with: "")
             if let dash = name.firstIndex(of: "-") { return String(name[name.index(after: dash)...]) }
         }
