@@ -1140,10 +1140,16 @@ fn files_of(objects: &Objects, now_ms: i64) -> R<BTreeMap<String, Vec<u8>>> {
     // state, `authority_page`).
     let mut by_seq: BTreeMap<u64, Vec<(String, &Vec<u8>)>> = BTreeMap::new();
     for e in &objects.entries {
-        let d = AuthEnvelope::parse(e, bounds::AUTHORITY_BODY, bounds::AUTHORITY_BODY * 2, false)
-            .map_err(|e| e.to_string())?
-            .digest;
-        let at = by_seq.entry(entry_seq(e)?).or_default();
+        // Parsed once for its digest and its seq ([`entry_seq`] parses it the same way).
+        let env = AuthEnvelope::parse(e, bounds::AUTHORITY_BODY, bounds::AUTHORITY_BODY * 2, false)
+            .map_err(|e| e.to_string())?;
+        let seq = env
+            .value
+            .get("seq")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| "entry without seq".to_string())?;
+        let d = env.digest;
+        let at = by_seq.entry(seq).or_default();
         if !at.iter().any(|(x, _)| *x == d) {
             at.push((d, e));
         }
