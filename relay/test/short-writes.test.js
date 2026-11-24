@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, test } from 'node:test';
 import { HomeSlot } from '../home.js';
 import { ProvisionReplay, ProvisionTable } from '../provision.js';
 import { startRelay } from '../relay.js';
+import { writeAllSync } from '../container-entry.js';
 
 /** Every file handle opened from now on writes at most 5 bytes per call. */
 function shortWrites() {
@@ -105,5 +106,45 @@ describe('short writes', () => {
     assert.equal(await readFile(path.join(root, 'replay.log'), 'utf8'), before, 'no part of a line is left');
     await h.reserve(row('c'), null);
     assert.deepEqual((await lines(path.join(root, 'replay.log'))).map((l) => l.r), ['a', 'c']);
+  });
+});
+
+describe('the change log after an append it could not cut back', () => {
+  test('takes no further row: no row ever follows a part of a line', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'colophon-log-'));
+    const running = await startRelay({ port: 0, dataDir: root, libraries: { test: { open: true } } });
+    const put = (p) => fetch(`http://127.0.0.1:${running.port}/v1/libraries/test/records/${p}`, { method: 'PUT', body: 'x', headers: { 'if-none-match': '*' } });
+    const open = fsp.open;
+    try {
+      assert.equal((await put('ops/a/1.json')).status, 201);
+      // The next append writes part of its line, fails, and cannot be cut back.
+      fsp.open = async (file, ...rest) => {
+        const handle = await open.call(fsp, file, ...rest);
+        if (!String(file).endsWith('log.jsonl')) return handle;
+        const write = handle.write.bind(handle);
+        handle.write = async (data, offset = 0, length = data.length, position = null) => {
+          await write(data, offset, Math.min(5, length), position);
+          throw Object.assign(new Error('i/o error'), { code: 'EIO' });
+        };
+        handle.truncate = async () => { throw Object.assign(new Error('i/o error'), { code: 'EIO' }); };
+        return handle;
+      };
+      assert.equal((await put('ops/a/2.json')).status, 500);
+      fsp.open = open;
+      assert.equal((await put('ops/a/3.json')).status, 500, 'the log takes nothing after the fragment');
+      const text = await readFile(path.join(root, 'test', 'log.jsonl'), 'utf8');
+      assert.ok(!/\n[^\n]*\{[^\n]*\n.+/.test(text.slice(text.indexOf('\n') + 1)), JSON.stringify(text));
+      assert.equal(text.split('\n').filter(Boolean).length, 2, 'one whole line and the fragment');
+    } finally { fsp.open = open; await running.close(); await rm(root, { recursive: true, force: true }); }
+  });
+});
+
+describe('synchronous writes in the entry point', () => {
+  test('write every byte however few each call takes', () => {
+    const out = [];
+    const short = (fd, buf, offset, length) => { const n = Math.min(3, length); out.push(...buf.subarray(offset, offset + n)); return n; };
+    writeAllSync(7, 'a token hash, in full\n', short);
+    assert.equal(Buffer.from(out).toString(), 'a token hash, in full\n');
+    assert.throws(() => writeAllSync(7, 'x', () => 0), /no progress/);
   });
 });

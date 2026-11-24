@@ -119,11 +119,23 @@ export function relayConfig(s, { dataDir, keyFile, tokenSha256 }) {
   return config;
 }
 
+/** Write all of `data` (a string or bytes) to `fd`: a write may take fewer bytes than it is
+ * given, so the rest is written until none is left. */
+export function writeAllSync(fd, data, write = writeSync) {
+  const bytes = typeof data === 'string' ? Buffer.from(data) : data;
+  let done = 0;
+  while (done < bytes.length) {
+    const n = write(fd, bytes, done, bytes.length - done);
+    if (!(n > 0)) throw new Error('a write made no progress');
+    done += n;
+  }
+}
+
 /** Writes `bytes` to `file` (mode 0600) by a staged, fsynced file renamed into place. */
 function writeAtomic(file, bytes) {
   const staged = `${file}.${process.pid}.new`;
   const fd = openSync(staged, fsc.O_WRONLY | fsc.O_CREAT | fsc.O_TRUNC | fsc.O_NOFOLLOW, 0o600);
-  try { writeSync(fd, bytes); fsyncSync(fd); } finally { closeSync(fd); }
+  try { writeAllSync(fd, bytes); fsyncSync(fd); } finally { closeSync(fd); }
   renameSync(staged, file);
   syncDir(path.dirname(file));
 }
@@ -132,7 +144,7 @@ function writeAtomic(file, bytes) {
 function writeNew(file, bytes) {
   const staged = `${file}.${process.pid}.new`;
   const fd = openSync(staged, fsc.O_WRONLY | fsc.O_CREAT | fsc.O_EXCL | fsc.O_NOFOLLOW, 0o600);
-  try { writeSync(fd, bytes); fsyncSync(fd); } finally { closeSync(fd); }
+  try { writeAllSync(fd, bytes); fsyncSync(fd); } finally { closeSync(fd); }
   try { linkSync(staged, file); } finally { unlinkSync(staged); }
   syncDir(path.dirname(file));
 }
@@ -255,7 +267,7 @@ export function acquireContainerLock(dataRoot, { staleMs = 30_000, beatMs = 5_00
   const ownStaleMs = Math.min(staleMs, 2 * beatMs + 1_000);
   const take = () => {
     const fd = openSync(file, fsc.O_WRONLY | fsc.O_CREAT | fsc.O_EXCL | fsc.O_NOFOLLOW, 0o600);
-    try { writeSync(fd, owner); fsyncSync(fd); } finally { closeSync(fd); }
+    try { writeAllSync(fd, owner); fsyncSync(fd); } finally { closeSync(fd); }
     return true;
   };
   let taken = false;
