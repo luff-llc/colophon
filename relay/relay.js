@@ -4,6 +4,7 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { constants as fsc, promises as fsp, writeSync } from 'node:fs';
 import http from 'node:http';
 import https from 'node:https';
+import { appendLines, writeAll } from './files.js';
 import { HomeKey, HomeModule, HomeSlot, ModuleError } from './home.js';
 import {
   ProvisionReplay, ProvisionTable, REPLAY_DIR, TABLE_FILE, clientAddressConfig, tableKind, clientAddressResolver, isJsonType, memberRequest,
@@ -260,7 +261,7 @@ class Slot {
     const st = await fsp.lstat(file).catch((e) => { if (e.code !== 'ENOENT') throw e; });
     if (st && !st.isFile()) throw new Error('Relay log must be a regular file');
     const handle = await fsp.open(file, fsc.O_WRONLY | fsc.O_APPEND | fsc.O_CREAT | fsc.O_NOFOLLOW, 0o600);
-    try { await handle.write(JSON.stringify(e) + '\n'); await handle.sync(); } finally { await handle.close(); }
+    try { await appendLines(handle, JSON.stringify(e) + '\n', true); } finally { await handle.close(); }
     this.indexEntry(e);
     for (const waiter of [...this.waiters]) {
       if (!waiter.namespaces.length || waiter.namespaces.some((ns) => pathInNamespace(e.path, ns))) waiter.wake();
@@ -402,7 +403,7 @@ class Slot {
   async stage(body) {
     const staged = path.join(this.root, 'tmp', randomBytes(12).toString('hex'));
     const handle = await fsp.open(staged, fsc.O_WRONLY | fsc.O_CREAT | fsc.O_EXCL | fsc.O_NOFOLLOW, 0o600);
-    try { await handle.write(body); await handle.sync(); } finally { await handle.close(); }
+    try { await writeAll(handle, body); await handle.sync(); } finally { await handle.close(); }
     return staged;
   }
 }
@@ -422,7 +423,7 @@ async function syncDir(dir) {
 async function writeDurable(file, bytes, tmpDir) {
   const staged = path.join(tmpDir, randomBytes(12).toString('hex'));
   const handle = await fsp.open(staged, fsc.O_WRONLY | fsc.O_CREAT | fsc.O_EXCL | fsc.O_NOFOLLOW, 0o600);
-  try { await handle.write(bytes); await handle.sync(); } finally { await handle.close(); }
+  try { await writeAll(handle, bytes); await handle.sync(); } finally { await handle.close(); }
   try { await fsp.rename(staged, file); }
   catch (error) { await fsp.rm(staged, { force: true }); throw error; }
   await syncDir(path.dirname(file));

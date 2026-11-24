@@ -10,7 +10,7 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { constants as fsc, promises as fsp } from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
-import { readLogRows, replayRow } from './files.js';
+import { appendLines, readLogRows, replayRow, writeAll } from './files.js';
 
 const HEX64 = /^[0-9a-f]{64}$/;
 const KEY_ID = /^[0-9a-f]{32}$/; // a member or key ID: the first 32 hex characters of SHA-256 of its point
@@ -337,7 +337,7 @@ export class ProvisionTable {
     const bytes = Buffer.from(serialize(next));
     const staged = path.join(this.dataDir, `.${TABLE_FILE}.${randomBytes(8).toString('hex')}`);
     const handle = await fsp.open(staged, 'wx', 0o600);
-    try { await handle.write(bytes); await handle.sync(); } finally { await handle.close(); }
+    try { await writeAll(handle, bytes); await handle.sync(); } finally { await handle.close(); }
     await fsp.rename(staged, path.join(this.dataDir, TABLE_FILE));
     const dir = await fsp.open(this.dataDir, 'r');
     try { await dir.sync(); } catch (error) { if (error.code !== 'EINVAL' && error.code !== 'EPERM') throw error; } finally { await dir.close(); }
@@ -579,7 +579,7 @@ export class ProvisionReplay {
     for (const e of extra) lines.push(JSON.stringify(e));
     const staged = this.file(`.replay.${randomBytes(8).toString('hex')}`);
     const handle = await fsp.open(staged, 'wx', 0o600);
-    try { await handle.write(lines.map((l) => l + '\n').join('')); await handle.sync(); } finally { await handle.close(); }
+    try { await writeAll(handle, lines.map((l) => l + '\n').join('')); await handle.sync(); } finally { await handle.close(); }
     await fsp.rename(staged, this.file('replay.log'));
     const dir = await fsp.open(this.dir, 'r');
     try { await dir.sync(); } catch (error) { if (error.code !== 'EINVAL' && error.code !== 'EPERM') throw error; } finally { await dir.close(); }
@@ -587,8 +587,11 @@ export class ProvisionReplay {
   }
 
   async append(entry, durable) {
-    const handle = await fsp.open(this.file('replay.log'), 'a', 0o600);
-    try { await handle.write(JSON.stringify(entry) + '\n'); if (durable) await handle.sync(); } finally { await handle.close(); }
+    if (this.broken) throw this.broken; // a part of a line could not be cut back
+    const handle = await fsp.open(this.file('replay.log'), fsc.O_WRONLY | fsc.O_APPEND | fsc.O_CREAT | fsc.O_NOFOLLOW, 0o600);
+    try { await appendLines(handle, JSON.stringify(entry) + '\n', durable); }
+    catch (error) { if (error.unrepaired) this.broken = error; throw error; }
+    finally { await handle.close(); }
     this.logLines += 1;
   }
 

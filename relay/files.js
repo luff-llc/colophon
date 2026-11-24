@@ -40,3 +40,34 @@ export function replayRow(effect) {
     return str(e.c) && str(e.t);
   };
 }
+
+/** Write all of `data` (a string or bytes) to `handle` at its position: a write may take fewer
+ * bytes than it is given, so the rest is written until none is left. */
+export async function writeAll(handle, data) {
+  const bytes = typeof data === 'string' ? Buffer.from(data) : data;
+  let done = 0;
+  while (done < bytes.length) {
+    const { bytesWritten } = await handle.write(bytes, done, bytes.length - done, null);
+    if (!(bytesWritten > 0)) throw new Error('a write made no progress');
+    done += bytesWritten;
+  }
+}
+
+/**
+ * Append `text` (whole lines) to the open `handle` of a line log, synced when `durable`. If the
+ * write or sync fails, the log is cut back to where it ended before, so a part of a line never
+ * stays in front of the next append; if even that fails, the error says so and the next
+ * appends go on failing until the log is reopened (its next load drops an unterminated line,
+ * and refuses a damaged one).
+ */
+export async function appendLines(handle, text, durable) {
+  const before = (await handle.stat()).size;
+  try {
+    await writeAll(handle, text);
+    if (durable) await handle.sync();
+  } catch (error) {
+    try { await handle.truncate(before); await handle.sync(); }
+    catch (cut) { error.message += `; the log could not be cut back to its last whole line: ${cut.message}`; error.unrepaired = true; }
+    throw error;
+  }
+}
