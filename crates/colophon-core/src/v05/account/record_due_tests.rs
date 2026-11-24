@@ -1,7 +1,8 @@
 //! `record_due` against a reference copy of its earlier body, which took the rollback snapshot
 //! before looking for anything due. The two must agree on every recording, its bytes and order,
 //! every error, and the account they leave behind: when nothing is due, when some is, and when a
-//! recording fails partway through.
+//! recording fails partway through. The reference does not restore the live set on failure, so
+//! the case where a commit settles live candidates is checked against the earlier state instead.
 #![allow(clippy::unwrap_used)]
 use super::*;
 use crate::v05::account::{CreateParams, CreateProgress, Creation, Identity};
@@ -170,12 +171,14 @@ fn account_with(windows: &[u64]) -> (Account, String) {
 /// Everything observable about an account that `record_due` can change.
 fn state(a: &Account) -> String {
     format!(
-        "{:?}\n{:?}\n{:?}\n{}\n{:?}\n{:?}\n{:?}\n{:?}",
+        "{:?}\n{:?}\n{:?}\n{}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}",
         a.objects,
         a.records,
         a.persisted,
         a.now_ms,
         a.first_seen,
+        a.live,
+        a.d.live.verdicts,
         a.status(),
         a.pending(),
         a.policy()
@@ -259,4 +262,66 @@ fn record_due_called_again_after_recording_finds_nothing() {
     let before = state(&a);
     assert!(a.record_due().unwrap().is_empty());
     assert_eq!(state(&a), before);
+}
+
+/// Hold a live candidate that is no live record, judged as such, as an account that has not
+/// settled its live set since would. The next commit's `settle_live` drops it.
+fn hold_unsettled_live(a: &mut Account, author: &str) {
+    a.live = vec![HeldRecord {
+        path: format!("state/{author}/notes/slot.json"),
+        bytes: b"not a live record".to_vec(),
+    }];
+    a.d = a
+        .candidate(&a.objects, &a.records, &a.persisted, a.now_ms)
+        .unwrap();
+    assert_eq!(a.d.live.verdicts.len(), 1, "the candidate is judged");
+}
+
+/// A recording's commit prunes the live set; when a later recording is refused, the call
+/// returns the error with the live set as it was too, not only the history.
+#[test]
+fn record_due_failing_after_a_commit_prunes_live_candidates_applies_nothing() {
+    let (base, d) = account_with(&[600, 700, 800]);
+    let mut a = Account::open(
+        base.objects().clone(),
+        Vec::new(),
+        None,
+        Identity::Controller(d.clone()),
+        base.now_ms(),
+    )
+    .unwrap();
+    hold_unsettled_live(&mut a, &d);
+    let before = state(&a);
+    // Without a fault the first commit drops the candidate: the case below is not vacuous.
+    let mut clean = Account::open(
+        base.objects().clone(),
+        Vec::new(),
+        None,
+        Identity::Controller(d.clone()),
+        base.now_ms(),
+    )
+    .unwrap();
+    hold_unsettled_live(&mut clean, &d);
+    assert_eq!(clean.record_due().unwrap().len(), 3);
+    assert!(clean.live.is_empty(), "a commit settles the live set");
+    for at in [1usize, 2] {
+        let mut a = Account::open(
+            base.objects().clone(),
+            Vec::new(),
+            None,
+            Identity::Controller(d.clone()),
+            base.now_ms(),
+        )
+        .unwrap();
+        hold_unsettled_live(&mut a, &d);
+        FAULT_AT.with(|f| f.set(Some(at)));
+        let got = a.record_due();
+        FAULT_AT.with(|f| f.set(None));
+        assert!(got.is_err(), "the fault at {at} fails the call");
+        assert_eq!(
+            state(&a),
+            before,
+            "nothing applied, live set included, after a fault at {at}"
+        );
+    }
 }

@@ -1455,13 +1455,16 @@ impl Account {
         let Some(first) = self.next_recording() else {
             return Ok(Vec::new());
         };
-        // `next_recording` reads only, so this is still the state before any recording.
+        // `next_recording` reads only, so this is still the state before any recording. It holds
+        // every field a recording's `finish` changes (through `commit`, which also settles the
+        // live set); recordings carry no seed or epoch key.
         let snapshot = (
             self.objects.clone(),
             self.records.clone(),
             self.persisted.clone(),
             self.now_ms,
             self.first_seen.clone(),
+            self.live.clone(),
         );
         let mut out = Vec::new();
         // Bounded by the number of held pending objects and activations.
@@ -1490,14 +1493,19 @@ impl Account {
             Some(e) => {
                 // Put back what was applied: the same inputs rebuild the same account.
                 if !out.is_empty() {
-                    let (o, r, p, n, seen) = snapshot;
-                    if let Ok(d) = self.candidate(&o, &r, &p, n) {
-                        self.d = d;
-                        self.objects = o;
-                        self.records = r;
-                        self.persisted = p;
-                        self.now_ms = n;
-                        self.first_seen = seen;
+                    let (o, r, p, n, seen, live) = snapshot;
+                    // The candidate is built over the earlier live set, so it goes back first.
+                    let settled = std::mem::replace(&mut self.live, live);
+                    match self.candidate(&o, &r, &p, n) {
+                        Ok(d) => {
+                            self.d = d;
+                            self.objects = o;
+                            self.records = r;
+                            self.persisted = p;
+                            self.now_ms = n;
+                            self.first_seen = seen;
+                        }
+                        Err(_) => self.live = settled,
                     }
                 }
                 Err(e)
