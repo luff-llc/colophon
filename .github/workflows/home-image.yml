@@ -195,6 +195,10 @@ jobs:
     needs: [gate, build]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    # One publication at a time across every ref, so two tags cannot race for :latest.
+    concurrency:
+      group: home-image-publish
+      cancel-in-progress: false
     permissions:
       contents: read
       packages: write
@@ -216,8 +220,21 @@ jobs:
           TAGS: ${{ needs.gate.outputs.tags }}
         run: |
           set -euo pipefail
-          read -r -a tags <<< "$TAGS"
-          [[ ${#tags[@]} -gt 0 ]] || { echo "::error::no tags to publish"; exit 1; }
+          read -r -a wanted <<< "$TAGS"
+          [[ ${#wanted[@]} -gt 0 ]] || { echo "::error::no tags to publish"; exit 1; }
+          # The gate chose :latest some time ago. Ask again now, with publication serialised:
+          # a higher final version tagged since then keeps :latest.
+          final='^v[0-9]+\.[0-9]+\.[0-9]+$'
+          highest="$(git ls-remote --tags --refs "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" 'v*' \
+            | sed 's#.*refs/tags/##' | grep -E "$final" | sort -V | tail -n 1)"
+          tags=()
+          for tag in "${wanted[@]}"; do
+            if [[ "$tag" == latest && "$highest" != "$GITHUB_REF_NAME" ]]; then
+              echo "::notice::$highest is the highest final version; :latest is left with it"
+              continue
+            fi
+            tags+=("$tag")
+          done
           args=()
           for tag in "${tags[@]}"; do
             [[ "$tag" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] || { echo "::error::unexpected tag"; exit 1; }
