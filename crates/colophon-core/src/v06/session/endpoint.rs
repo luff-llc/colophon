@@ -91,6 +91,8 @@ pub enum EndpointError {
     /// This member is not current in the account view, or has no `records` entry for the
     /// namespace.
     NotEntitled,
+    /// The account view is of another account than the cell's.
+    WrongAccount,
     /// The cell policy is out of bounds, or its largest frame would not fit (§S1, §S3).
     Policy(String),
 }
@@ -234,6 +236,9 @@ impl Endpoint {
     ) -> Result<Self, EndpointError> {
         let key = SessionKey::generate(key_random).map_err(EndpointError::Key)?;
         validate_policy(&policy, &cell).map_err(EndpointError::Policy)?;
+        if account.account() != cell.account {
+            return Err(EndpointError::WrongAccount);
+        }
         let access = account
             .access(me, &cell.namespace, clock.wall_ms)
             .ok_or(EndpointError::NotEntitled)?;
@@ -315,7 +320,11 @@ impl Endpoint {
     /// new entitled writers; and this member's own access is applied: promoted, it may take;
     /// reduced to read, it releases and seals only what a reader may send; without the
     /// namespace, it leaves and seals nothing. A new session number retires its key.
+    /// A view of another account than the cell's changes nothing.
     pub fn set_account(&mut self, account: SessionAccount, clock: Clock, epochs: &dyn EpochKeys) -> Step {
+        if account.account() != self.cell.account {
+            return Step::default();
+        }
         let outs = self.apply_account(account, clock);
         Step {
             effects: self.run(outs, clock, epochs),
@@ -388,6 +397,16 @@ impl Endpoint {
     /// No carrier works.
     pub fn link_down(&mut self, clock: Clock, epochs: &dyn EpochKeys) -> Step {
         let outs = self.machine.handle(Input::LinkDown, clock.mono_ms);
+        Step {
+            effects: self.run(outs, clock, epochs),
+            dropped: None,
+        }
+    }
+
+    /// A link outage reported after the fact ([`Input::Outage`]): no carrier worked for the
+    /// last `down_ms`, and, when `ended`, one works again now.
+    pub fn outage(&mut self, down_ms: u64, ended: bool, clock: Clock, epochs: &dyn EpochKeys) -> Step {
+        let outs = self.machine.handle(Input::Outage { down_ms, ended }, clock.mono_ms);
         Step {
             effects: self.run(outs, clock, epochs),
             dropped: None,

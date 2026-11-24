@@ -1,0 +1,26 @@
+[package]
+name = "colophon-conformance-wasm"
+description = "The 0.6 session conformance surface (wasm-bindgen), for host conformance tests only. Not published; nothing shipped depends on it."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["web05"]
+web05 = []
+native05 = []
+
+[dependencies]
+colophon-core = { path = "../colophon-core", version = "=0.6.0-dev" }
+# Linked so one conformance artifact carries the shipping surface beside the conformance one.
+colophon-wasm = { path = "../colophon-wasm", version = "=0.6.0-dev" }
+serde_json.workspace = true
+wasm-bindgen.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,29 @@
+[package]
+name = "colophon-conformance"
+description = "The 0.6 session conformance surface (UniFFI), for host conformance tests only. Not published; nothing shipped depends on it."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[features]
+default = ["native05"]
+native05 = []
+web05 = []
+
+[dependencies]
+colophon-core = { path = "../colophon-core", version = "=0.6.0-dev" }
+# Linked so one conformance artifact carries the shipping surface beside the conformance one.
+colophon-ffi = { path = "../colophon-ffi", version = "=0.6.0-dev" }
+serde_json.workspace = true
+uniffi = { version = "=0.32.2", default-features = false }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+base64.workspace = true

@@ -803,3 +803,206 @@ optionals. `AccountDenial.reason` and `AccountError.Denied.reason` are `AccountD
 `AccountError.BadSignature.check` is the failed WebAuthn check (`SignatureCheck`) beside the code.
 `Controller.key` is the key descriptor. `account_map_swift_role(role)` is the core's role-to-kind map
 for the migration.
+
+## 10. The 0.6 home stream and sessions (stage 1)
+
+The proposed 0.6 home stream client (`docs/colophon-0.6-stream.md`, host contract in
+[colophon-0.6-sync-stream.md](colophon-0.6-sync-stream.md) §2) and the 0.6 session endpoint
+(`spec/colophon-0.6-sessions.md`, wire in [colophon-0.6-sessions-wire.md](colophon-0.6-sessions-wire.md))
+are part of this surface: `api/stream.rs` and `api/sessions.rs`, in both crates, held to
+`surface-names.txt` like the rest. Both are the core's sans-IO state machines behind a handle: the host owns
+the WebSocket, the HTTP client, the carriers and the clocks; the binding converts values and adds no protocol
+policy. Errors are `AccountError`, as everywhere else.
+
+| Object or call | What it is |
+| --- | --- |
+| `HomeStream` | one stream client per home: `next(now)` returns a `StreamStep` (`Wake`, `NeedTicketCall`, `Connect`, `Send`, `Close`, `Waiting`, `Sleep`); `ticket_request`, `ticket_call_failed`, `on_ticket`, `on_open`, `on_refused`, `on_frame`, `on_closed`, `on_history`, `retry_now` take what happened and return `StreamEvent`s; `status`, `polling`, `cursor`, `config`, `attempts`, `unstable_mints`; `subscribe`, `unsubscribe`, `session_frame` build client frames |
+| `AccountEngine.stream_client(home, config, cursor)` | the client at the home's endpoint, with the account's safety-poll floor and the verified seq applied (`HomeStream.new` takes a base directly) |
+| `AccountEngine.stream_begin_call(home, key, entropy)` | the `colophon.home.stream` call that mints a ticket: an `AccountAction` signed and finished like any other; `artifact` goes to `ticket_request` |
+| `stream_default_config`, `stream_redact_url` | the documented `StreamConfig`; a URL with its ticket redacted |
+| `SessionEndpoint` | one member of one cell: `new(…, view, key_random, fresh_seed, clock)`; `begin_delegation` / `finish_delegation`; `set_account(view, engine, clock)`, `command(json, engine, clock)`, `tick(engine, clock)`, `link_up`, `link_down`, `receive(bytes, engine, clock)`, each returning a `SessionStep`; `persisted(ack, engine, clock)` (only when the durable write of that `Persist` has completed), `awaiting_persist`, `queued`. Read-only: `next_deadline`, `me`, `key_id`, `last_n`, `entitled`, `can_write`, `joined`, `holder`, `is_holder`, `claim_json`, `view_json`, `digest` |
+| `AccountEngine.session_account(namespace, at_ms)` | the `SessionAccountView` of the verified history at `at_ms` for an endpoint of `namespace`, stamped with this engine, the account, the namespace and the authority head (sequence and digest) |
+| `session_default_policy`, `session_validate_policy`, `session_clock_sample` | the §S1 default policy (JSON); the policy check the endpoint applies; the §S7 sample |
+
+**What crosses.** A `StreamStep.url` of a `Connect` carries the ticket, a bearer credential: the host opens the
+socket with it and logs `log_url` (the core's `redact_url`). No record or object here implements `Debug`;
+no error carries a ticket, a call, a frame or a payload. Session commands, events, claims, the policy and the
+persisted claim cross as the JSON the conformance vectors use, tagged by `command`, `event`, `input` and
+`output`; every such argument is decoded strictly (a known variant, no unknown or missing field, canonical
+base64: it must read back to exactly the JSON given), and anything else is `Malformed` and changes nothing. A
+`SessionEffect` is `Send` (broadcast `bytes` to every member; `to` is advice), `Persist` (`persisted_json`),
+`Event` (`event` names the tag of `event_json`) or `Unsent` (a stable reason: `noDelegation`,
+`delegationWindow`, `noEpoch`, `notEntitled`, `notWriter`, `retired`, `oversize`, `key:<reason>`, ...). A
+dropped frame is in `SessionStep.drops` with the §S3 code the wire vectors use.
+
+**Keys.** No key crosses in either direction. The member key never enters: `begin_delegation` returns the
+exact `colophon/session-key/6` body, the host signs it as it signs a `Raw` `AccountSigningStep` (P-256,
+`r||s`), and `finish_delegation` installs it after verifying it under the member's key in the view. Only the
+body the last `begin_delegation` returned can be finished, once: any other body (a changed member, key,
+window, namespace or session number) is `session:delegation`, and a second finish is `consumed`. The epoch
+keys stay in the engine: every call that seals or opens takes the engine and reads the namespace's keys it
+published as the core's opaque `SessionEpochs` capability (no `Debug`, `Clone` or serialization, wiped on drop, no
+way to its bytes outside the core), so an unlock or a rekey is seen at the next call. The session key's
+randomness and the `fresh` seed are host randomness, new on every process start, and are wiped.
+
+**The endpoint's step.** Every call that runs the session returns one `SessionStep`: `effects` in
+order; `awaiting_persist`, set only on the step whose last effect is a `Persist` (that `Persist`'s
+acknowledgement ID; no other step ever carries an ID); `persist_outstanding`, true while some
+`Persist` is still unacknowledged after the call; `drops`, the frames this call judged and dropped,
+in order, with their reasons; `queued`, true when this call's input is kept to run after the
+acknowledgement; and `discarded`, the number of effects decided under an older authority head that
+were dropped instead of released.
+
+**The reference host loop.** The acknowledgement is issued only by the completion of the durable
+write of the `Persist` effect it names, never by seeing a step:
+
+```text
+on any input (a frame, a timer at next_deadline, a carrier change, an application command):
+    step = endpoint.<call>(…, engine, clock)
+      error session:staleAccount   → step = endpoint.set_account(engine.session_account(ns, now), engine, clock)
+                                     handle(step), then retry the input
+      error session:persistPending → (only a command) retry it after the next write completes
+    handle(step)
+
+handle(step):
+    for effect in step.effects, in order:
+        Send:    broadcast effect.bytes
+        Event:   tell the application
+        Persist: start the durable write of effect.persisted_json, tagged with step.awaiting_persist
+    log step.drops
+
+on the durable write of a Persist tagged id completing:
+    step = endpoint.persisted(id, engine, clock)
+    handle(step)                          # it may end in the next Persist, with its own id
+
+on the durable write failing:
+    retry it; never call persisted for it
+```
+
+While a write is in progress (`persist_outstanding`), the other calls go on as usual: frames, ticks and
+link changes are kept and run after the acknowledgement; a command is refused and retried after it.
+After every exchange pass that moved the head, call `set_account` before delivering anything else.
+
+**Orders the endpoint enforces.**
+
+* *The view.* A view carries the engine, account, namespace and authority head (sequence and body
+  digest) it was taken at. An endpoint refuses, with `session:wrongView`, a view of another engine,
+  account or namespace, at construction and at `set_account` (the core `Endpoint::new` refuses a
+  view of another account too). A view that is not of the engine's current head is refused with
+  `session:staleAccount` by every call that runs the session, changing nothing.
+* *The head and the locks.* Endpoints never take the engine's lock. The engine owns a
+  `SessionGate`, a read-write lock over its installed head and the published epoch keys of each
+  namespace a view was taken for. The engine takes the write side only to install a new head or
+  key set, for the instant of the assignment, at the end of an engine call while it still holds its
+  own lock, so the call returns only once the head is visible to endpoints; an endpoint call holds
+  the read side for its whole run, then locks the endpoint. Order: engine, then gate (write); gate
+  (read), then endpoint; nothing takes them otherwise, so there is no cycle. A tick can wait only
+  for one installation in progress, and an installation only for the endpoint calls in progress,
+  each bounded (one input, or one acknowledgement and its bounded queue); a long exchange pass or a
+  slow host callback never delays a tick. `std::sync::RwLock` promises no fairness, so a writer
+  announces itself first and new endpoint calls wait while it does: a stream of endpoint calls
+  cannot starve an installation.
+* *Persist before what reveals it.* A step's effects end at the first `Persist`. Store
+  `persisted_json` durably, then call `persisted(id, engine, clock)`; any other ID, or one already
+  acknowledged, is `session:wrongAck`. If the head is still the installed view's, the effects held
+  behind the `Persist` are released, then what waited runs, up to the next `Persist`. If the head
+  has moved, the held effects are discarded (`discarded`): they were decided under the old view,
+  and dropping them is loss, as a crash before the acknowledgement would be. `set_account` is
+  allowed while a `Persist` waits: it installs the new view, discards what the `Persist` held, and
+  what it decides itself waits behind that `Persist` instead; the `Persist` still needs its
+  acknowledgement. So after `set_account` nothing decided under an older head is ever released,
+  even by a member whose storage keeps failing. A process that stops with a `Persist`
+  unacknowledged loses what was held, never more: on restart pass the last claim the host knows it
+  stored.
+* *Inputs while a `Persist` waits.* A `command` is refused with `session:persistPending` and
+  changes nothing (retry it after `persisted`). A `tick` is kept as one pending tick however many
+  arrive. Received frames are kept in arrival order, up to 64 frames and 1 MiB together (a durable
+  write takes milliseconds to a few hundred, and this covers several seconds of a busy cell); past
+  either bound the newest frame is lost (a `queueFull` drop). Link changes are kept in their true
+  place among the frames, as constant-size summaries: one before each kept frame and one after
+  the last, each holding an up that ended an earlier outage, the longest outage that began and
+  ended in it, and a down still open at its end; no number of flaps fills anything, and a lost
+  frame leaves its summary to merge with the next. When the `Persist` is acknowledged (or at
+  `set_account` when the head had moved) what waited runs **in its true order and all at that
+  call's clock**: for each kept frame, the link changes before it (as the core's `Outage` input)
+  and then the frame; then the changes after the last frame; then the tick; stopping at the next
+  `Persist`, with the rest kept for its acknowledgement. An outage that spans kept frames reaches
+  the machine as one outage of its true length. Two cases come out longer than true, so a holder
+  can only lapse sooner: an outage that began before the `Persist`, and one whose drain stopped at
+  a `Persist` between its down and its up (each keeps the machine's earlier start). A frame judged
+  after the write gives a later receive time than its arrival (a worse clock-offset sample, which
+  the best-of-8 filter absorbs; a holder heard later is lapsed later, a liveness delay bounded by
+  the write). `next_deadline` stays the machine's deadline throughout.
+* *Time.* Every clock the endpoint gives the machine is the clock of the call it runs in, and
+  never earlier than the last: a call whose monotonic clock is earlier than the endpoint's last is
+  refused with `session:clockBackwards` and changes nothing, the endpoint's clock included.
+  Nothing is replayed at a past clock. A monotonic clock that resets (a reboot, a new process)
+  makes every later call fail this way; the recovery is to discard the endpoint and make a new
+  one from the last `persisted_json` the host stored, which applies the restart rules of §S6: a
+  member that held the role does not act as holder until it has waited out `askTimeoutMs` and
+  retaken, so the reset fails closed.
+
+**Host loops.** Stream: §2 of the sync-stream document, with these names; after every exchange pass call
+`on_history(head_seq())`; while `polling()` is true keep the existing poll timer. Session: the reference
+loop above; `tick` at `next_deadline` (within 250 ms); `link_up` and `link_down` when the carriers change.
+
+**The core is a protocol engine, not the trust boundary.** The core's session types let a Rust caller
+supply the account view and the epoch keys directly (`SessionAccount::with_member`, `EpochTable::with`),
+which tests, tools and the conformance vectors need, and the core `Endpoint` leaves the ordering duties
+above to its caller. A production embedder takes the view and the keys from the verified history
+(`Account::session_account`, `Account::session_epochs`); the shipping bindings enforce that and the
+orders above, and expose no way to supply either.
+
+**The home carrier.** The home accepts the codec's frame form (stream §5.2,
+`home_stream::check_session_frame`): the bytes of a `Send` effect, as UTF-8 text, go to
+`HomeStream.session_frame`, which carries them verbatim in a `session` message. The home forwards
+the frame text unchanged as the message's `frame` value; a host hands exactly that text, as bytes, to
+`SessionEndpoint.receive` (re-serializing parsed JSON can change the bytes, and the receiver accepts
+only the canonical form).
+
+**Threads and ownership.** Every object is `Send + Sync` and serializes its calls (a second thread waits),
+which gives the one-call-at-a-time rule of the wire document. Nothing here calls back into the host. The
+engine never calls an endpoint, and an endpoint reads the engine's gate, never its lock (see above).
+Neither object holds the other. Drop the endpoint to end the session; its session key is wiped.
+
+**Conformance crates.** The vectors need what an application must never have: a view built from
+supplied members, epoch keys supplied as bytes, and the machine, the receiver and the sender's key
+on their own. These live in two separate crates, `colophon-conformance` (UniFFI) and
+`colophon-conformance-wasm` (wasm-bindgen), sharing one source (`crates/colophon-conformance/src/api.rs`):
+`ConformanceView`, `ConformanceEpochs`, `ConformanceMachine`, `ConformanceReceiver`,
+`ConformanceSender` and their records, with `ConformanceError` (the shipping surface's codes).
+They are `publish = false`, use only the core's public API, and depend on the shipping crates so
+that one conformance artifact carries both surfaces; nothing shipped depends on them, and the
+shipping crates declare no conformance feature, so no feature in a dependency graph can switch a
+bypass on in a release artifact. Their names are in `crates/colophon-conformance/surface-names.txt`;
+the shipping names test fails if a conformance name reaches `surface-names.txt`, or if a shipping
+manifest declares a conformance feature or dependency. A host's conformance tests link the
+conformance crate's artifact; shipped artifacts (the XCFramework, the AAR, the npm package) are
+built from `colophon-ffi` and `colophon-wasm` only.
+
+Through the conformance crates, `conformance/0.6-sessions/*.json` replays through `ConformanceMachine` (`new` from a
+vector's `members[]` entry with the file's `policy`, `fixes` and `freshSeed`; `handle(input, at)` returns
+the outputs as JSON; a `restart` rebuilds it from `persisted_json`; compare `view_json` and `digest` at the
+end), the `offset.json` cases through `session_clock_sample`, and `wire/vectors.json` through
+`ConformanceReceiver` (`open` returns the canonical plaintext, the writer flag, `n` and the epoch, or the
+drop code; `set_account` returns what a view removed; `keys` and `window_high` show that a drop changed
+nothing) with a `ConformanceView` and `ConformanceEpochs`, and the session key and the delegation
+body through a `ConformanceSender` made from the file's scalar. Not exposed, so not replayed by a host: the wire file's
+intermediate values (frame key, HKDF info, nonce, AAD, signed body), `offset.json`'s best-of-8 sequence,
+and `bridge.json` (§S9 bridging, not part of 0.6 conformance).
+
+**What was run.** `colophon-ffi/tests/v06_bindings.rs` and its web twin: the stream transcripts of the
+core's own tests, and that the handles are `Send + Sync` and serialize a race for one ticket call. The
+conformance crates' `tests/vectors.rs`: every machine vector, the offset cases, the wire file and strict
+decoding, in both builds. `v05_journeys` signs a real `colophon.home.stream` call through
+`stream_begin_call` and drives an endpoint on the engine: views of another account, namespace or engine
+refused; a delegation installed once and only as returned (changed fields refused); a `Persist` holding
+back what follows it; a command refused while it waits and run after; ticks and link changes coalesced;
+frames kept in order and run after the acknowledgement; the 64-frame and 1 MiB bounds; a wrong or repeated
+acknowledgement refused; held effects discarded when the head moves before the acknowledgement, and at
+`set_account` while a `Persist` waits; a new head refusing every call that runs the session until
+`set_account`; a head change racing endpoint calls on another thread; and a tick answered while another
+thread holds the engine in a slow host callback. The core's `v06_session_engine` shows two member engines' endpoints opening each
+other's frames, and that the epoch capability and `EpochSecret` are not `Debug`, `Clone` or serializable
+(at compile time). The WebSocket transports of Swift, Kotlin and JavaScript are the next stage and were not
+run.

@@ -18,6 +18,15 @@
 //! (revision 17); signatures, sealing and the 128-wide `n` window of each cached key are in
 //! [`codec`], which caches only keys the machine knows ([`Session::knows_key`]).
 //! [`endpoint`] wires the two for the bindings.
+//!
+//! **This module is a protocol engine, not a trust boundary.** Its types let a Rust caller
+//! supply the account view and the epoch keys directly ([`keys::SessionAccount::with_member`],
+//! [`codec::EpochTable::with`]), which tests, tools and the conformance vectors need. A
+//! production embedder takes both from the verified 0.5 history instead
+//! ([`crate::v05::account::Account::session_account`] and
+//! [`crate::v05::account::Account::session_epochs`]); the shipping bindings enforce that, and
+//! also the ordering duties [`endpoint::Endpoint`] leaves to its caller (a view of the current
+//! authority head before each call, `Persist` stored before the frames that reveal it).
 
 pub mod clock;
 pub mod codec;
@@ -452,6 +461,14 @@ impl Session {
     pub fn me(&self) -> &str {
         &self.me
     }
+    /// Whether this member's carriers work, as the last `LinkUp` or `LinkDown` said.
+    pub fn link_is_up(&self) -> bool {
+        self.link_up
+    }
+    /// When the current outage began (monotonic ms), while the link is down.
+    pub fn link_down_since(&self) -> Option<u64> {
+        self.link_down_since
+    }
     /// Whether it has joined.
     pub fn joined(&self) -> bool {
         self.joined
@@ -696,6 +713,21 @@ impl Session {
                 if self.link_up {
                     self.link_up = false;
                     self.link_down_since = Some(now);
+                }
+            }
+            Input::Outage { down_ms, ended } => {
+                // What `LinkDown` at `now - down_ms` does, then `LinkUp` at `now`. An outage
+                // already under way is one continuous outage: it starts at the earlier of its
+                // own start and `now - down_ms`.
+                let start = now.saturating_sub(down_ms);
+                if self.link_up {
+                    self.link_up = false;
+                    self.link_down_since = Some(start);
+                } else {
+                    self.link_down_since = Some(self.link_down_since.map_or(start, |d| d.min(start)));
+                }
+                if ended {
+                    self.on_link_up(now, &mut out);
                 }
             }
             Input::App { command } => self.on_command(command, now, &mut out),
