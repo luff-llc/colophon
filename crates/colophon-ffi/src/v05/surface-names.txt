@@ -207,6 +207,7 @@ SessionEndpoint.command
 SessionEndpoint.digest
 SessionEndpoint.entitled
 SessionEndpoint.finish_delegation
+SessionEndpoint.gated
 SessionEndpoint.holder
 SessionEndpoint.is_holder
 SessionEndpoint.joined
@@ -892,6 +893,7 @@ record:SessionStep.awaiting_persist
 record:SessionStep.discarded
 record:SessionStep.drops
 record:SessionStep.effects
+record:SessionStep.next_deadline
 record:SessionStep.persist_outstanding
 record:SessionStep.queued
 record:Signature
@@ -964,6 +966,7 @@ record:StreamStep.log_url
 record:StreamStep.text
 record:StreamStep.until
 record:StreamStep.url
+record:StreamStep.wake_at
 record:SuccessionTiming
 record:SuccessionTiming.due_ms
 record:SuccessionTiming.homes

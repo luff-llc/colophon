@@ -9,6 +9,7 @@ declare module 'bun:test' {
   interface Matchers {
     toBe(expected: unknown): void; toEqual(expected: unknown): void; toBeInstanceOf(type: unknown): void; toContain(expected: unknown): void;
     toMatchObject(expected: object): void; toBeLessThan(n: number): void; toBeUndefined(): void; toThrow(expected?: unknown): void;
+    toBeDefined(): void; toBeGreaterThan(n: number | bigint): void; toBeGreaterThanOrEqual(n: number | bigint): void; toBeLessThanOrEqual(n: number | bigint): void;
     not: Matchers; rejects: { [K in keyof Matchers]: Matchers[K] extends (...args: infer A) => void ? (...args: A) => Promise<void> : never };
   }
   export function expect(actual: unknown): Matchers;
@@ -18,7 +19,9 @@ declare module 'node:fs' {
   export function mkdtempSync(prefix: string): string;
   export function writeFileSync(path: string, data: string | Uint8Array): void;
   export function readFileSync(path: string, encoding: 'utf8'): string;
+  export function readFileSync(path: string | URL): Uint8Array;
   export function readdirSync(path: string): string[];
+  export function readdirSync(path: string, options: { withFileTypes: true }): { name: string; isDirectory(): boolean }[];
 }
 interface BunSubprocess { exited: Promise<number>; kill(signal?: string | number): void; stdout: ReadableStream<Uint8Array>; exitCode: number | null; stdin?: unknown }
 interface BunServer { port: number | undefined; stop(force?: boolean): Promise<void> }

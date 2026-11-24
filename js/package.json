@@ -16,6 +16,10 @@
     "./session/node": {
       "types": "./dist/session/node.d.ts",
       "import": "./dist/session/node.js"
+    },
+    "./hosts": {
+      "types": "./dist/hosts/index.d.ts",
+      "import": "./dist/hosts/index.js"
     }
   },
   "files": [
@@ -24,7 +28,8 @@
   "scripts": {
     "build": "bash scripts/build.sh",
     "test": "node scripts/key-security.mjs && node scripts/smoke.mjs",
-    "test:session": "bash ../scripts/test-js.sh"
+    "test:session": "bash ../scripts/test-js.sh",
+    "test:hosts": "bash scripts/test-hosts.sh"
   },
   "engines": {
     "node": ">=24"

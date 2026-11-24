@@ -12,4 +12,5 @@ fn the_web_build_runs_the_stream_transcripts() {
     stream::backoff_is_seeded_and_capped();
     stream::refusals_fall_back_to_polling();
     stream::misuse_is_typed();
+    stream::one_ticket_call_at_a_time();
 }

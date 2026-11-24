@@ -883,6 +883,16 @@ While a write is in progress (`persist_outstanding`), the other calls go on as u
 link changes are kept and run after the acknowledgement; a command is refused and retried after it.
 After every exchange pass that moved the head, call `set_account` before delivering anything else.
 
+**The timer.** Arm the tick timer from the `next_deadline` of the latest step (or the endpoint's
+`next_deadline`). While a `Persist` is outstanding it is absent, so a host does not spin ticking an
+endpoint that only keeps them; the step `persisted` returns carries the real deadline to arm next.
+
+**Holding the role.** `is_holder` is true for a holder that is gated (out of contact, or restarted
+from a persisted claim): it sends no holder frames until it has waited out `askTimeoutMs` and
+retaken, and `gated` says so; show the role as held only when `is_holder` and not `gated`. `take`
+never displaces a live holder: it takes only when §S5 allows (no holder, or one lapsed), so a
+handoff from one device to another is `ask` on the new device, answered by `pass` on the holder.
+
 **Orders the endpoint enforces.**
 
 * *The view.* A view carries the engine, account, namespace and authority head (sequence and body
@@ -943,7 +953,20 @@ After every exchange pass that moved the head, call `set_account` before deliver
   retaken, so the reset fails closed.
 
 **Host loops.** Stream: §2 of the sync-stream document, with these names; after every exchange pass call
-`on_history(head_seq())`; while `polling()` is true keep the existing poll timer. Session: the reference
+`on_history(head_seq())`; while `polling()` is true keep the existing poll timer. Every `StreamStep`
+carries `wake_at`, when to call `next` again at the latest even if nothing happens; arm one timer from
+it. A `NeedTicketCall` is handed out once: until the host answers it with `ticket_request` (or
+`ticket_call_failed`), `next` returns `Waiting` (with a `wake_at`, so a wake that falls due while the
+call is signed is still reported), and an answer that has not come after 60 s (`SIGN_TIMEOUT_MS`)
+counts as a failed call under the usual backoff (a later answer is refused). A runtime that cannot
+see a refused upgrade's HTTP status (a browser `WebSocket` reports only that the connection closed)
+calls `on_closed(None, now)` for it: a transport failure, never treated as success, which backs off
+and counts against the ticket budget and the breaker, so a home that refuses forever cannot make the
+device sign without bound (it is not recognized as `Blocked`, so it is retried within those bounds
+rather than stopped until the history changes). A runtime that cannot send the close code a `Close`
+step names closes with any code it can (1000) and still reports `on_closed(Some(code), now)` or
+`on_closed(None, now)`: a close the stream asked for is judged by the stream's own reason, not by the
+code. Session: the reference
 loop above; `tick` at `next_deadline` (within 250 ms); `link_up` and `link_down` when the carriers change.
 
 **The core is a protocol engine, not the trust boundary.** The core's session types let a Rust caller
@@ -1004,5 +1027,6 @@ acknowledgement refused; held effects discarded when the head moves before the a
 `set_account`; a head change racing endpoint calls on another thread; and a tick answered while another
 thread holds the engine in a slow host callback. The core's `v06_session_engine` shows two member engines' endpoints opening each
 other's frames, and that the epoch capability and `EpochSecret` are not `Debug`, `Clone` or serializable
-(at compile time). The WebSocket transports of Swift, Kotlin and JavaScript are the next stage and were not
-run.
+(at compile time). The WebSocket transports are the next stage: the JavaScript hosts, their tests and the
+end-to-end proof against the real relay are in [hosts-06.md](hosts-06.md); the Swift and Kotlin hosts are not
+built yet.

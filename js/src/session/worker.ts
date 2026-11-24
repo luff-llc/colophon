@@ -8,7 +8,7 @@ import type {
   PrfRequest, RemovalFollowUp, Report, RequestInfo, SealedSeed, SigningStep, SlotInfo, Standing, Status, Store, UnlockInput, Written, NamespaceRevision,
 } from './records.js';
 import { closeAll, withEntropy } from './secrets.js';
-import { homeRefusal, HomeLimits, type HomeAnswer, type HomeIssue, type HomeProblem, type HomeRequest } from './transport.js';
+import { homeRefusal, HomeLimits, type HomeAnswer, type HomeIssue, type HomeProblem, type HomeRequest, type HomeTransport } from './transport.js';
 import {
   ConfiguredHome, emptyNotices, noDuties, noticesFrom, phaseUsable, samePhase, SessionRefusal,
   type AccessRequest, type ApprovalStart, type DeadTransition, type DomainCommand, type HomeFault, type HostDuties, type RemovalCard, type RouteState,
@@ -1235,6 +1235,31 @@ export class SessionWorker {
       if (!written.artifact) throw makeFault('Internal', 'internal', 'a call returned no envelope');
       return written.artifact;
     });
+  }
+
+  /**
+   * The `colophon.home.stream` call that mints a stream ticket at `home` (0.6 stream §1.1), signed by this device's
+   * member key and judged by the core with the home's own rule, as the envelope's bytes (`HomeStream.ticket_request`
+   * takes them). Before the first pass with the home the core refuses it (`Unavailable`: no fresh head).
+   */
+  streamCall(home: string, signal?: AbortSignal): Promise<Uint8Array> {
+    return this.gated(async () => {
+      if (!this.engine) await this.reconcile(signal);
+      const engine = this.engine; const custody = this.memberCustody; const id = this.memberId;
+      if (!engine || !custody || id === undefined) throw new SessionError('notReady');
+      const signing = (await custody.provider(id).publicKeys()).signing;
+      plain(engine.run(e => e.advance(BigInt(this.nowMs))));
+      const written = await engine.execute(custody, e => withEntropy(32, entropy => e.stream_begin_call(home, signing, entropy)), undefined, this.waiting(signal));
+      if (!written.artifact) throw makeFault('Internal', 'internal', 'a call returned no envelope');
+      return written.artifact;
+    });
+  }
+  /** The configured transport of the home `home` (matched by its endpoints), if any. */
+  transportOf(home: string): HomeTransport | undefined {
+    const engine = this.engine;
+    if (!engine) return undefined;
+    const found = plain<Home[]>(engine.run(e => e.exchange_homes())).find(h => h.id === home);
+    return found ? this.transportFor(found)?.transport : undefined;
   }
 
   /** Records transitions that came due (§8.7). A schedule calls it; refresh calls it too. */
