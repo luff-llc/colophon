@@ -21,6 +21,10 @@ fn a_refused_or_ended_stream_falls_back_to_polling() {
     stream::refusals_fall_back_to_polling();
 }
 #[test]
+fn one_ticket_call_is_out_at_a_time() {
+    stream::one_ticket_call_at_a_time();
+}
+#[test]
 fn stream_misuse_is_a_typed_error() {
     stream::misuse_is_typed();
 }

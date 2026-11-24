@@ -299,7 +299,7 @@ fn v06_through_the_engine(
     let e = ep.command(presence.into(), ea, clock(1_150)).err().unwrap();
     assert_eq!(e.code(), "session:persistPending");
     assert_eq!(ep.queued().unwrap(), 0);
-    let deadline = ep.next_deadline().unwrap();
+    assert_eq!(ep.next_deadline().unwrap(), None, "no tick is due while a Persist waits");
     for t in [1_200, 1_300] {
         let q = ep.tick(ea, clock(t)).unwrap();
         assert!(q.queued && q.effects.is_empty() && q.persist_outstanding);
@@ -313,7 +313,7 @@ fn v06_through_the_engine(
         assert!(q.queued && q.persist_outstanding && q.awaiting_persist.is_none());
     }
     assert_eq!(ep.queued().unwrap(), 2, "one tick and one outage summary");
-    assert_eq!(ep.next_deadline().unwrap(), deadline);
+    assert_eq!(ep.next_deadline().unwrap(), None);
     let big = vec![b' '; 400 << 10];
     for f in [b"x".to_vec(), vec![b' '; 20_000], own_hello.clone(), big.clone(), big.clone()] {
         let q = ep.receive(f, ea, clock(1_300)).unwrap();
@@ -342,6 +342,8 @@ fn v06_through_the_engine(
     while let Some(id) = next {
         let r = ep.persisted(id, ea, clock(1_500)).unwrap();
         assert_eq!(r.discarded, 0);
+        assert_eq!(r.next_deadline, ep.next_deadline().unwrap(), "the ack's step re-arms the timer");
+        assert_eq!(r.next_deadline.is_none(), r.persist_outstanding);
         assert_ack_only_with_persist(&r);
         next = r.awaiting_persist;
         effects.extend(r.effects);
@@ -504,6 +506,7 @@ fn v06_through_the_engine(
     assert!(r.awaiting_persist.is_none() && r.persist_outstanding);
     let kinds = ack_all(&ep, ack, 40_000);
     assert!(gated(&ep), "the kept outage gates the holder");
+    assert!(ep.gated().unwrap() && ep.is_holder().unwrap(), "holder, gated");
     assert!(kinds.iter().any(|k| k == "hello"), "{kinds:?}");
     assert!(ep.next_deadline().unwrap().is_some_and(|d| d >= 40_000), "deadlines from 40 s");
     assert!(ep.tick(ea, clock(40_000)).is_ok(), "nothing ran at a later clock than 40 s");

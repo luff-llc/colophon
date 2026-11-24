@@ -1149,7 +1149,11 @@ cenum! {
 record! {
     /// The next thing to do. `url` (Connect) carries the ticket, a bearer credential: open the
     /// socket with it and log `log_url` (the ticket redacted) instead. `text` is set for Send,
-    /// `code` for Close, `until` for Sleep (absent: nothing is scheduled).
+    /// `code` for Close, `until` for Sleep (absent: nothing is scheduled). `wake_at`, on every
+    /// step, is when to call `next` again at the latest even if nothing happens (absent: only an
+    /// answer, a frame, a close or a new history moves the stream). A `NeedTicketCall` is handed
+    /// out once: until the host answers it, `next` returns `Waiting`, and an answer that never
+    /// comes counts as a failed call after `SIGN_TIMEOUT_MS`.
     pub struct StreamStep {
         pub kind: StreamStepKind,
         pub url: Option<String>,
@@ -1157,6 +1161,7 @@ record! {
         pub text: Option<String>,
         pub code: Option<u32>,
         pub until: Option<i64>,
+        pub wake_at: Option<i64>,
     }
 }
 cenum! {
@@ -1247,6 +1252,8 @@ record! {
     /// `persist_outstanding` says a `Persist` is still unacknowledged after this call (this one's
     /// or an earlier one's); `queued` says this call's input is kept to run after it. `discarded`
     /// counts effects decided under an older authority head that were dropped, not released.
+    /// `next_deadline` is when to call `tick` next after this call (absent while a `Persist` is
+    /// outstanding: the step that acknowledges it carries the real one).
     pub struct SessionStep {
         pub effects: Vec<SessionEffect>,
         pub drops: Vec<SessionDrop>,
@@ -1254,6 +1261,7 @@ record! {
         pub persist_outstanding: bool,
         pub queued: bool,
         pub discarded: u32,
+        pub next_deadline: Option<u64>,
     }
 }
 record! {

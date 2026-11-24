@@ -417,3 +417,33 @@ pub fn misuse_is_typed() {
     assert_eq!(cfg.max_mints_per_day, 96);
     assert_eq!(s.home().unwrap(), "h");
 }
+
+/// A ticket call is handed out once; `next` then waits, saying when to ask again, until the host
+/// answers, and a call never answered fails after the timeout and backs off.
+pub fn one_ticket_call_at_a_time() {
+    let s = HomeStream::new("h".into(), BASE.into(), stream_default_config(), None).unwrap();
+    let first = s.next(0).unwrap();
+    assert_eq!(first.kind, StreamStepKind::NeedTicketCall);
+    assert_eq!(first.wake_at, Some(60_000), "the call's timeout");
+    for t in [1, 10, 1_000, 59_999] {
+        let st = s.next(t).unwrap();
+        assert_eq!(st.kind, StreamStepKind::Waiting, "no second call at {t}");
+        assert_eq!(st.wake_at, Some(60_000));
+    }
+    let st = s.next(60_000).unwrap();
+    assert_eq!(st.kind, StreamStepKind::Sleep, "the unanswered call failed");
+    assert_eq!(s.status().unwrap().kind, StreamStatusKind::Backoff);
+    assert_eq!(s.unstable_mints().unwrap(), 1, "counted as a mint");
+    assert!(
+        st.wake_at.is_some_and(|w| w > 60_000),
+        "ask again when the backoff ends"
+    );
+    assert_eq!(
+        s.ticket_request(b"late".to_vec(), 60_001)
+            .err()
+            .unwrap()
+            .code(),
+        "malformed",
+        "a late answer is refused"
+    );
+}

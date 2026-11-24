@@ -398,6 +398,7 @@ impl Out {
             persist_outstanding: outstanding,
             queued: self.queued,
             discarded: self.discarded,
+            next_deadline: None,
         }
     }
 }
@@ -588,6 +589,21 @@ impl EndpointState {
     fn advance(&mut self, clock: &Clock) {
         self.last_mono = self.last_mono.max(clock.mono_ms);
     }
+    /// The step of a call, with the deadline it leaves.
+    fn finish(&self, out: Out) -> SessionStep {
+        let mut step = out.step(self.pending.is_some());
+        step.next_deadline = self.deadline();
+        step
+    }
+    /// When to tick next: none while a `Persist` is outstanding (nothing runs until it is
+    /// acknowledged, and the acknowledgement's step carries the real deadline).
+    fn deadline(&self) -> Option<u64> {
+        if self.pending.is_some() {
+            None
+        } else {
+            self.e.next_deadline()
+        }
+    }
     fn queued(&self) -> usize {
         self.frames.len()
             + usize::from(self.tick)
@@ -707,7 +723,7 @@ impl SessionEndpoint {
     }
     /// Run `f` under the engine's gate (read side) with the endpoint locked, given whether the
     /// installed view is the engine's current head and the namespace's keys.
-    fn gated<T>(
+    fn under_gate<T>(
         &self,
         engine: &AccountEngine,
         f: impl FnOnce(&mut EndpointState, &Published, &SessionEpochs) -> R<T>,
@@ -738,14 +754,14 @@ impl SessionEndpoint {
         input: Input0,
     ) -> R<SessionStep> {
         let clock = clock_in(clock);
-        self.gated(engine, |s, p, epochs| {
+        self.under_gate(engine, |s, p, epochs| {
             let current = s.installed.seq == p.seq && s.installed.digest == p.digest;
             let mut out = Out::new();
             s.check(&clock)?;
             if s.pending.is_some() {
                 s.hold(input, clock, &mut out)?;
                 s.advance(&clock);
-                return Ok(out.step(s.pending.is_some()));
+                return Ok(s.finish(out));
             }
             if !current {
                 return Err(stale());
@@ -757,7 +773,7 @@ impl SessionEndpoint {
             } else {
                 s.run(input, clock, epochs, &mut out)?;
             }
-            Ok(out.step(s.pending.is_some()))
+            Ok(s.finish(out))
         })
     }
 }
@@ -831,7 +847,7 @@ impl SessionEndpoint {
         clock: SessionClock,
     ) -> Result<SessionStep, AccountError> {
         let clock = clock_in(&clock);
-        self.gated(engine, |s, p, epochs| {
+        self.under_gate(engine, |s, p, epochs| {
             let stamp = &view.stamp;
             if stamp.owner != engine.owner
                 || stamp.account != s.installed.account
@@ -852,12 +868,12 @@ impl SessionEndpoint {
             if let Some(pending) = s.pending.as_mut() {
                 out.discarded = count(pending.rest.len());
                 pending.rest = step.effects;
-                return Ok(out.step(s.pending.is_some()));
+                return Ok(s.finish(out));
             }
             if !s.absorb(step.effects, &mut out)? {
                 s.drain(clock, epochs, &mut out)?;
             }
-            Ok(out.step(s.pending.is_some()))
+            Ok(s.finish(out))
         })
     }
     /// An application command (§S10), as JSON tagged by `command`. While a `Persist` waits it
@@ -923,7 +939,7 @@ impl SessionEndpoint {
         clock: SessionClock,
     ) -> Result<SessionStep, AccountError> {
         let clock = clock_in(&clock);
-        self.gated(engine, |s, p, epochs| {
+        self.under_gate(engine, |s, p, epochs| {
             let current = s.installed.seq == p.seq && s.installed.digest == p.digest;
             match &s.pending {
                 Some(p) if p.ack == ack => {}
@@ -935,12 +951,12 @@ impl SessionEndpoint {
             let rest = s.pending.take().map(|p| p.rest).unwrap_or_default();
             if !current {
                 out.discarded = count(rest.len());
-                return Ok(out.step(s.pending.is_some()));
+                return Ok(s.finish(out));
             }
             if !s.absorb(rest, &mut out)? {
                 s.drain(clock, epochs, &mut out)?;
             }
-            Ok(out.step(s.pending.is_some()))
+            Ok(s.finish(out))
         })
     }
     /// The acknowledgement ID of the `Persist` waiting for `persisted`, if any.
@@ -951,10 +967,10 @@ impl SessionEndpoint {
     pub fn queued(&self) -> Result<u32, AccountError> {
         guard(|| Ok(count(self.s.lock()?.queued())))
     }
-    /// When to call `tick` next (monotonic ms), if ever. While a `Persist` waits this is still
-    /// the machine's deadline: a tick then is kept and runs at `persisted`.
+    /// When to call `tick` next (monotonic ms), if ever. None while a `Persist` is
+    /// outstanding: arm the timer again from the step `persisted` returns.
     pub fn next_deadline(&self) -> Result<Option<u64>, AccountError> {
-        guard(|| Ok(self.s.lock()?.e.next_deadline()))
+        guard(|| Ok(self.s.lock()?.deadline()))
     }
     /// This member.
     pub fn me(&self) -> Result<String, AccountError> {
@@ -984,7 +1000,12 @@ impl SessionEndpoint {
     pub fn holder(&self) -> Result<Option<String>, AccountError> {
         guard(|| Ok(self.s.lock()?.e.machine().holder().map(str::to_string)))
     }
-    /// Whether this member acts as holder.
+    /// Whether this member, as holder, is gated: out of contact or restarted, it waits out
+    /// `askTimeoutMs` before acting as holder (§S6). A gated holder sends no holder frames.
+    pub fn gated(&self) -> Result<bool, AccountError> {
+        guard(|| Ok(self.s.lock()?.e.machine().view().gated))
+    }
+    /// Whether this member acts as holder (it may still be gated: see `gated`).
     pub fn is_holder(&self) -> Result<bool, AccountError> {
         guard(|| Ok(self.s.lock()?.e.machine().is_holder()))
     }
