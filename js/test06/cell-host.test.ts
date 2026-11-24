@@ -60,7 +60,8 @@ async function pair(clock = new ManualClock(), extra: Partial<CellHostOptions> =
     store: stores[which], clock, ...(which === 'a' ? extra : {}) }, e => logs[which].push(e));
   const a = await open(first, 'a'); const b = await open(second, 'b');
   await settle();
-  return { clock, carrier, stores, logs, a, b, open, close: () => { a.close(); b.close(); } };
+  // No test ever has two saves of one cell in flight.
+  return { clock, carrier, stores, logs, a, b, open, close: () => { a.close(); b.close(); expect([stores.a.maxInflight, stores.b.maxInflight].every(n => n <= 1)).toBe(true); } };
 }
 const shape = (e: CellHostEvent): string => e.type === 'session' ? `event:${e.event.event}` : e.type === 'sent' ? `sent:${e.kind}` : e.type === 'persist' ? `persist:${e.phase}` : e.type;
 
@@ -383,28 +384,93 @@ describe('the cell host', () => {
     r.close();
   });
 
-  test('a write that succeeds after its deadline is not acknowledged; the retry is', async () => {
+  test('one save at a time: an overdue attempt is waited for, a late success is saved again, and the store ends with the latest claim', async () => {
     const clock = new ManualClock();
     const r = await pair(clock, { persistTimeoutMs: 1_000 });
-    let late: () => void = () => {};
-    let saves = 0;
-    (r.a as unknown as { store: unknown }).store = {
-      load: async () => undefined,
-      save: () => { saves++; return saves === 1 ? new Promise<void>(resolve => { late = resolve; }) : Promise.resolve(); },
-    };
+    const store = r.stores.a;
+    const before = store.writes.length;
+    store.hang = 1;
     await r.a.command('take', { command: 'take', state: null });
     await settle();
-    await clock.advance(1_000 + 250);
-    const stored = (): number => r.logs.a.filter(e => e.type === 'persist' && e.phase === 'stored').length;
-    expect(saves).toBe(2);
-    expect(stored()).toBe(1);
-    expect(r.logs.a.filter(e => e.type === 'sent' && e.kind === 'take').length).toBe(1);
-    const before = r.logs.a.length;
-    late();
+    await clock.advance(1_000);
+    // Attempt A is overdue: counted as failed, and no other save is issued while it is in flight.
+    expect(r.logs.a.filter(e => e.type === 'persist' && e.phase === 'failed').length).toBe(1);
+    expect(store.writes.length - before).toBe(1);
+    await clock.advance(3_000);
+    expect(store.writes.length - before).toBe(1);
+    // A settles late: not acknowledged; the claim is saved again (B) under the next fence, and B is acknowledged.
+    store.hung.shift()!();
     await settle();
-    expect(stored()).toBe(1);
-    expect(r.logs.a.slice(before).filter(e => e.type === 'persist')).toEqual([]);
+    await clock.advance(0);
+    const stored = r.logs.a.filter(e => e.type === 'persist' && e.phase === 'stored').length;
+    expect(stored).toBe(1);
+    expect(store.writes.length - before).toBe(2);
+    // A later claim C (the holder releases): the store ends with C, under the greatest fence.
+    await r.a.command('release', { command: 'release' });
+    await settle();
+    expect(JSON.parse(store.value!).released).toBe(true);
+    expect(store.maxInflight).toBe(1);
+    const fences = store.fences.map(f => [f.generation, f.seq]);
+    for (let k = 1; k < fences.length; k++) expect(fences[k]![0]! > fences[k - 1]![0]! || (fences[k]![0] === fences[k - 1]![0] && fences[k]![1]! > fences[k - 1]![1]!)).toBe(true);
     r.close();
   });
-});
 
+  test('across a replacement instance: an old instance\'s save that settles late is refused and the newer claim stays', async () => {
+    const clock = new ManualClock();
+    const carrier = new LoopCarrier();
+    const store = new TestStore(undefined, (run, ms) => { clock.setTimer(run, ms); });
+    const options = { account: accountOf(first.session), carrier: carrier.for(), namespace: NS, cell: CELL, store, clock, persistTimeoutMs: 1_000 };
+    const old = await SessionCellHost.open(options);
+    store.hang = 1;
+    await old.command('take', { command: 'take', state: null });
+    await settle();
+    old.close();
+    // A new instance opens from the same store while the old one's save is still pending.
+    const replacement = await SessionCellHost.open({ ...options, carrier: carrier.for() });
+    await replacement.command('take', { command: 'take', state: null });
+    await settle();
+    await clock.advance(1_000);
+    await replacement.command('release', { command: 'release' });
+    await settle();
+    const newest = store.value;
+    expect(JSON.parse(newest!).released).toBe(true);
+    store.hung.shift()!();
+    await settle();
+    expect(store.refused).toBe(1);
+    expect(store.value).toBe(newest);
+    replacement.close();
+  });
+
+  test('an instance whose fence reservation is refused does not open', async () => {
+    const store = new TestStore();
+    store.save = async () => 'stale';
+    const carrier = new LoopCarrier();
+    let failed: unknown;
+    try { await SessionCellHost.open({ account: accountOf(first.session), carrier, namespace: NS, cell: CELL, store, clock: new ManualClock() }); } catch (error) { failed = error; }
+    expect((failed as CellHostError).code).toBe('failed');
+    expect(carrier.cells.size).toBe(0);
+  });
+
+  test('close and failure cancel the retry and deadline timers', async () => {
+    for (const ending of ['close', 'fail'] as const) {
+      const clock = new ManualClock();
+      const store = new TestStore(undefined, (run, ms) => { clock.setTimer(run, ms); });
+      const host = await SessionCellHost.open({ account: accountOf(first.session), carrier: new LoopCarrier().for(), namespace: NS, cell: CELL, store, clock,
+        persistAttempts: 2, persistTimeoutMs: 1_000 });
+      store.failures = 1; store.hang = 1;
+      await host.command('take', { command: 'take', state: null });
+      await settle();
+      // The first attempt failed: a retry timer waits; then the second hangs under a deadline.
+      if (ending === 'close') {
+        host.close();
+      } else {
+        await clock.advance(250);
+        await clock.advance(1_000);
+        expect(host.state).toBe('failed');
+      }
+      expect(clock.pending).toBe(0);
+      expect(store.maxInflight).toBe(1);
+      host.close();
+    }
+  });
+});

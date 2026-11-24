@@ -1,6 +1,6 @@
 // Fakes for the host unit tests: a manual clock with timers, scripted sockets, a ticket transport, and claim stores
 // whose writes the test completes, delays or fails.
-import type { ClaimStore, HostClock, HostSocket, SocketFactory, SocketHandlers } from '../src/hosts/index.js';
+import { fenceAfter, type ClaimStore, type Fence, type HostClock, type HostSocket, type SocketFactory, type SocketHandlers, type StoredClaim } from '../src/hosts/index.js';
 import type { HomeAnswer, HomeRequest, HomeTransport } from '../src/session/index.js';
 
 /** A clock the test moves. Timers fire, in due order, only inside `advance`. */
@@ -74,22 +74,45 @@ export class TicketTransport implements HomeTransport {
 export const answer = (status: number, body: unknown = {}, headers: { name: string; value: string }[] = []): HomeAnswer =>
   ({ status, headers, body: new TextEncoder().encode(JSON.stringify(body)) });
 
-/** A claim store whose writes complete when the test says (`hold`), after a delay, or fail. */
+/**
+ * A claim store whose writes complete when the test says (`hold`, `hang`), after a delay, or fail. It applies the
+ * fence check when a write lands, as the contract requires, and records how many saves were ever in flight at once.
+ */
 export class TestStore implements ClaimStore {
+  /** The claim last stored (none: nothing, or only a reservation). */
   value: string | undefined;
+  fence: Fence | undefined;
   readonly writes: string[] = [];
+  readonly fences: Fence[] = [];
   hold = false;
   delayMs = 0;
   failures = 0;
+  /** Saves that will each wait for their own release (see `hung`). */
+  hang = 0;
+  inflight = 0;
+  maxInflight = 0;
+  refused = 0;
   private waiting: (() => void)[] = [];
-  constructor(initial?: string, private readonly timer: (run: () => void, ms: number) => void = (run, ms) => { setTimeout(run, ms); }) { this.value = initial; }
-  async load(): Promise<string | undefined> { return this.value; }
-  async save(json: string): Promise<void> {
-    this.writes.push(json);
-    if (this.failures > 0) { this.failures--; throw new Error('the disk is full'); }
-    if (this.hold) await new Promise<void>(resolve => this.waiting.push(resolve));
-    if (this.delayMs > 0) await new Promise<void>(resolve => this.timer(resolve, this.delayMs));
-    this.value = json;
+  readonly hung: (() => void)[] = [];
+  constructor(initial?: StoredClaim, private readonly timer: (run: () => void, ms: number) => void = (run, ms) => { setTimeout(run, ms); }) {
+    this.value = initial?.claim ?? undefined; this.fence = initial?.fence;
+  }
+  async load(): Promise<StoredClaim | undefined> { return this.fence ? { claim: this.value ?? null, fence: { ...this.fence } } : undefined; }
+  async save(record: StoredClaim): Promise<'stored' | 'stale'> {
+    this.inflight++; this.maxInflight = Math.max(this.maxInflight, this.inflight);
+    try {
+      if (record.claim !== null) this.writes.push(record.claim);
+      this.fences.push(record.fence);
+      if (this.failures > 0) { this.failures--; throw new Error('the disk is full'); }
+      if (this.hang > 0) { this.hang--; await new Promise<void>(resolve => this.hung.push(resolve)); }
+      if (this.hold) await new Promise<void>(resolve => this.waiting.push(resolve));
+      if (this.delayMs > 0) await new Promise<void>(resolve => this.timer(resolve, this.delayMs));
+      if (this.fence && !fenceAfter(record.fence, this.fence)) { this.refused++; return 'stale'; }
+      this.value = record.claim ?? undefined; this.fence = { ...record.fence };
+      return 'stored';
+    } finally {
+      this.inflight--;
+    }
   }
   /** Completes every held write. */
   release(): void { this.hold = false; for (const w of this.waiting.splice(0)) w(); }

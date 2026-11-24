@@ -16,7 +16,8 @@ own, and it never reads, rewrites or logs a ticket, an unredacted URL or a frame
 | --- | --- |
 | `HostAccount` | What the hosts need from the account: `account`, `member`, `engine()` (read again for every call), `streamCall(home)` (the `colophon.home.stream` call, signed and judged by the core), `exchange()` (one ordinary pass), `signRaw(body)` (the member key's `r‖s` over a delegation body). `accountOf(session)` makes one from a restored `ColophonSession`; its `exchange` is the session's own `syncNow`, so passes never overlap the app's poll loop. |
 | `HomeStreamHost` | One per home. `start`, `stop`, `status`, `polling`, `cursor`, `live`, `retryNow` (foreground entry, a network change, a user action; never a timer), `historyChanged` (the app's own poll moved the history), `attach(cell)` / `detach(cell)`, `sendSession(frame)`, `on(listener)`, `onPass(listener)`. Options: the account, the home's member ID, the ticket `transport` (default `FetchHomeTransport`), the `socket` factory (default the runtime's `WebSocket`), the `clock`, `configure` (adjusts `stream_default_config()`), a saved `cursor` and `saveCursor`. |
-| `SessionCellHost` | One member of one cell: `SessionCellHost.open(options, listener)` loads the stored claim, makes the endpoint, has the member key sign its delegation, attaches to the carrier and joins. `command(name, json)` (resolves once the endpoint ran it), `deliver`, `linkUp`, `linkDown`, `accountChanged`, `leave`, `close`, `current` (the endpoint, for its read-only calls), `stats`. Options: account, carrier, namespace, cell, `store` (`ClaimStore`: `load`, and a `save` that resolves only once durable), `policy`, `clock`, `state` (the application's state for `join`), `delegationMs`, `persistRetryMs`, `random`. |
+| `SessionCellHost` | One member of one cell: `SessionCellHost.open(options, listener)` loads the stored claim, makes the endpoint, has the member key sign its delegation, attaches to the carrier and joins. `command(name, json)` (resolves once the endpoint ran it), `deliver`, `linkUp`, `linkDown`, `accountChanged`, `leave`, `close`, `current` (the endpoint, for its read-only calls), `stats`. Options: account, carrier, namespace, cell, `store` (a fenced `ClaimStore`, §3), `policy`, `clock`, `state` (the application's state for `join`), `delegationMs`, `persistRetryMs`, `persistTimeoutMs`, `persistAttempts`, `maxCommands`, `random`. |
+| `ClaimStore`, `MemoryClaimStore`, `privateClaimStore(store, name)`, `FencedClaimStore` | The fenced claim store contract and the reference stores that apply it: in memory, in one file of a session's `PrivateStore`, or over any `read`/`write` of the record. |
 | `CellSession` | The small typed API over a cell host: `CellSession.join(options)`; `state` (`joined`, `holder`, `isHolder`, `gated`, `claim`, `state`, `seq`, `entitled`, `canWrite`) and `subscribe`; `events` (the core's events with bytes decoded); `take`, `ask`, `pass`, `decline`, `release`, `publish`, `submit`, `presence`, `ping`, `leave`, `close`. |
 | `sessionFrameText(message)` | The exact text of a `session` message's `frame` value, or none (no `frame`, `frame` twice, or not one JSON object). |
 | `webSocketFactory(class?)` | The standard `WebSocket` behind `SocketFactory` (see §5 for what a browser cannot report). |
@@ -68,12 +69,24 @@ jobs, so nothing a listener, store, socket or timer does can re-enter the endpoi
   the `Persist` and runs them at the acknowledgement, so they run before the held commands. Among
   commands the admission order is never changed.
 - A `Persist` is acknowledged with `persisted(id)` only when its `save` resolved, as a later job.
-  The write is marked in progress before any store code runs. A save that fails, or does not settle
-  within `persistTimeoutMs` (default 10 s), is a failed attempt: it is retried after
-  `persistRetryMs` and never acknowledged, and an overdue save that completes later acknowledges
-  nothing (the retry saves the same claim). So the `ClaimStore` contract is: saving the same claim
-  twice is harmless, and the last save called wins over an earlier one that completes late. Only the completed save becomes the claim a new endpoint
-  starts from.
+  The write is marked in progress before any store code runs. **One save is in flight at a time.**
+  A save that fails is a failed attempt, retried after `persistRetryMs`. A save that has not settled
+  within `persistTimeoutMs` (default 10 s) is a failed attempt too, but the next save starts only
+  once it has settled: each further deadline it passes counts again, so a save that never settles
+  ends in `failed` (`store`) without a second save ever being issued. A save that succeeds only
+  after its deadline acknowledges nothing; the claim is saved again under the next fence. Only a
+  completed save becomes the claim a new endpoint starts from.
+- **Fencing.** Every save carries a fence `{generation, seq}` (`js/src/hosts/claim-store.ts`).
+  An instance's generation is one more than the one the store holds when it opens, and it reserves
+  it before saving any claim, by saving the claim it loaded under `{generation, 0}`; saves are then
+  numbered within it, and a rebuilt endpoint moves to the next generation (after the last save has
+  settled). The store refuses (`stale`) any save whose fence is not greater than the one it holds,
+  so the held fence never goes back, and since every instance's generation is in the store before
+  it saves a claim, a save from an earlier instance or attempt that settles late is refused instead
+  of overwriting a newer claim. The fence is stored with the claim, so it survives restarts. The
+  reference stores apply the check; a custom store must. A refused reservation means another
+  instance holds the cell: `open` fails. A refused claim save means the same, and the cell fails
+  with reason `superseded`. One live host per cell and store is assumed.
 - **A store that keeps failing fails the cell.** After `persistAttempts` consecutive failed or
   overdue attempts of one write (default 20) the host stops acting: its endpoint is freed, it is detached
   from the carrier and sends nothing more, every held and new command is refused (`CellHostError`
@@ -139,8 +152,12 @@ relay's home module, typecheck strictly and run `bun test test06`:
   commands; a store that keeps failing failing the cell; bounded command admission keeping order;
   a command, a frame and a command admitted from a listener running in exactly that order, and
   behind a write the held commands keeping their order with the frame run at the acknowledgement;
-  a save that never settles counted as failed at its deadline until the cell fails; a save that
-  succeeds after its deadline acknowledging nothing while its retry is acknowledged once;
+  a save that never settles counted as failed at its deadline until the cell fails; an overdue
+  save waited for (no second save in flight), its late success saved again under the next fence,
+  and the store ending with the latest claim; an older instance's save settling late after a
+  replacement instance saved a newer claim, refused by the store; a refused reservation failing
+  `open`; close and failure cancelling every retry and deadline timer; and in every test at most
+  one save in flight;
   and, at unit level, a revoked member's frames dropped by a member holding the new head.
 - `conformance.test.ts`: through `colophon-conformance-wasm`, every machine transcript in
   `conformance/0.6-sessions/` (26), the 9 `offset.json` cases, and `wire/vectors.json` (19 frames,
