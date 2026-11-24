@@ -36,11 +36,3 @@ test('the host counts a principal\'s replay rows exactly as the module keeps the
   assert.deepEqual(HomeSlot.prototype.signerShare.call(slot, [], now), { live: 0, oldest: null, expired: [] });
   assert.equal(HomeSlot.prototype.signerShare.call(slot, rows, now), null, 'an unsafe integer time sends the rows');
 });
-  const share = HomeSlot.prototype.signerShare.call(slot, 'member:a', now);
-  const mine = rows.filter((_, i) => i % 3);
-  const live = mine.filter((r) => keep.has(r.key));
-  assert.equal(share.live, live.length);
-  assert.equal(share.oldest, Math.min(...live.map((r) => r.at)));
-  assert.deepEqual(share.expired, mine.filter((r) => !keep.has(r.key)).map((r) => r.key));
-  assert.deepEqual(HomeSlot.prototype.signerShare.call(slot, 'member:nobody', now), { live: 0, oldest: null, expired: [] });
-});
