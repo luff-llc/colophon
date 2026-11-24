@@ -27,5 +27,13 @@ describe('the module build', { skip: existsSync(wasm) ? false : 'build colophon-
       assert.throws(() => small.call({ op: 'build', fingerprint: '0'.repeat(64) }), ModuleError);
     }
     assert.ok(small.resets >= 6);
+    // An instance that could not be named is dropped, never used unnamed.
+    const wrong = await HomeModule.load(wasm);
+    wrong.fingerprint = 'not a fingerprint';
+    assert.throws(() => wrong.call({ op: 'limits' }), ModuleError);
+    assert.equal(wrong.instance, null);
+    wrong.fingerprint = fingerprint;
+    assert.ok(wrong.call({ op: 'build', fingerprint }).ok);
+    assert.throws(() => wrong.call({ op: 'build', fingerprint: '0'.repeat(64) }), ModuleError);
   });
 });

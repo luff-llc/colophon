@@ -145,8 +145,14 @@ export class HomeModule {
     if (this.instance) return;
     this.instance = new WebAssembly.Instance(this.module, {});
     if (!this.fingerprint) return;
-    this.takesBuild ??= this.invoke({ op: 'limits' }).build === true;
-    if (this.takesBuild) this.invoke({ op: 'build', fingerprint: this.fingerprint });
+    try {
+      this.takesBuild ??= this.invoke({ op: 'limits' }).build === true;
+      if (this.takesBuild) this.invoke({ op: 'build', fingerprint: this.fingerprint });
+    } catch (error) {
+      // An instance that was not named is never kept: the next call makes and names another.
+      this.instance = null;
+      throw error;
+    }
   }
 
   /** The current instance's memory, in bytes (0 with no instance). */
