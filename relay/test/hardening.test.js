@@ -168,7 +168,7 @@ test('log refuses symlinks and durable metadata staging uses exclusive no-follow
   const rename = fs.rename, open = fs.open;
   let checked = false;
   fs.open = async (file, mode, ...rest) => {
-    if (String(file).includes('/tmp/')) {
+    if (String(file).includes('/test/tmp/')) {
       expect(mode & (flags.O_WRONLY | flags.O_CREAT | flags.O_EXCL | flags.O_NOFOLLOW)).toBe(flags.O_WRONLY | flags.O_CREAT | flags.O_EXCL | flags.O_NOFOLLOW);
       checked = true;
     }
