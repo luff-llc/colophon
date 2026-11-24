@@ -86,11 +86,13 @@ describe('the replay log', () => {
     // A crash now: at start-up the write is found not to have happened.
     const again = await slotAt(root);
     await again.openReplay();
-    const recovered = (await lines(root)).filter((l) => l.c === 'w1');
+    const recovered = (await lines(root)).filter((l) => l.c === 'w1' || (l.r === 'w1' && l.t));
     assert.deepEqual(recovered.map((l) => l.t), ['abandoned']);
   });
 
-  test('a write that fails is recorded as recovery would record it, not as completed', async () => {
+  test('a write that fails stays pending, and the next start decides by what is on disk', async () => {
+    // The file may be durable though the write failed after it (its index line could not be
+    // logged): only the effect's own record can say, at the next start.
     for (const [stored, expected] of [[false, 'abandoned'], [true, 'completed']]) {
       await rm(path.join(root, 'replay.log'), { force: true });
       const h = await slotAt(root);
@@ -100,15 +102,46 @@ describe('the replay log', () => {
         await h.reserve(row('w2'), effect);
         return { reserve: row('w2') };
       };
-      h.putRecord = async () => {
-        if (stored) h.slot.current.set(p, { size: 1, sha256: 'e'.repeat(64) });
-        throw new Error('the disk failed');
-      };
+      h.putRecord = async () => { throw new Error('the disk failed'); };
       const req = { headers: {}, method: 'PUT' };
       await assert.rejects(h.lockedWrite(req, {}, new URL('http://relay.invalid/'), 'records', p, Buffer.from('x')), /the disk failed/);
-      const done = (await lines(root)).filter((l) => l.c === 'w2').map((l) => l.t);
-      assert.deepEqual(done, [expected], `stored: ${stored}`);
+      assert.deepEqual((await lines(root)).filter((l) => l.c === 'w2'), [], 'no completion is recorded for it');
+      await h.compactReplay();
+      assert.deepEqual((await lines(root)).find((l) => l.r === 'w2').e, { path: p, prior: null }, 'still pending after a compaction');
+      const again = await slotAt(root);
+      if (stored) again.slot.current.set(p, { size: 1, sha256: 'e'.repeat(64) });
+      await again.openReplay();
+      assert.deepEqual((await lines(root)).filter((l) => l.c === 'w2' || (l.r === 'w2' && l.t)).map((l) => l.t), [expected], `stored: ${stored}`);
     }
+  });
+
+  test('a compaction keeps each row\'s outcome, and a completion that could not be written leaves it pending', async () => {
+    const h = await slotAt(root);
+    await h.reserve(row('x1'), { path: 'ops/a.json', prior: null });
+    await h.complete('x1', 'abandoned');
+    await h.compactReplay();
+    assert.equal((await lines(root)).find((l) => l.r === 'x1').t, 'abandoned', 'an abandoned row stays abandoned');
+    await h.reserve(row('x2'), { path: 'ops/b.json', prior: null });
+    const append = h.appendReplay;
+    h.appendReplay = async () => { throw new Error('no space left on device'); };
+    await assert.rejects(h.complete('x2', 'completed'), /no space/);
+    h.appendReplay = append;
+    await h.compactReplay();
+    const x2 = (await lines(root)).find((l) => l.r === 'x2');
+    assert.deepEqual(x2.e, { path: 'ops/b.json', prior: null }, 'its completion was not written: still pending');
+    assert.equal(x2.t, undefined);
+  });
+
+  test('provisioning: a reservation that compacts the log stays pending with its effect', async () => {
+    const r = await ProvisionReplay.open(root, { wasm: stubWasm, clock: () => 1_000_000, table: { get: () => undefined } });
+    r.logLines = 5_000;
+    await r.reserve(row('p1'), { slot: 'tslot00000a' });
+    const written = (await lines(path.join(root, 'provision-replay'))).find((l) => l.r === 'p1');
+    assert.deepEqual(written.e, { slot: 'tslot00000a' }, JSON.stringify(written));
+    assert.equal(written.t, undefined);
+    await r.complete('p1', 'completed');
+    await r.compact();
+    assert.equal((await lines(path.join(root, 'provision-replay'))).find((l) => l.r === 'p1').t, 'completed');
   });
 
   // Loading: only a log that is not there yet is empty, and only an unterminated last line (an

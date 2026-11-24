@@ -618,18 +618,22 @@ export class HomeSlot {
     for (const e of entries) {
       this.logLines += 1;
       if (e.r) {
-        this.addRow(e.r, { digest: e.d, at: e.at, signer: e.s });
+        this.addRow(e.r, { digest: e.d, at: e.at, signer: e.s, t: e.t });
         if (e.e && !e.t) pending.set(e.r, e.e); else pending.delete(e.r);
-      } else if (e.c) pending.delete(e.c);
+      } else if (e.c) {
+        pending.delete(e.c);
+        const row = this.rows.get(e.c);
+        if (row) row.t = e.t;
+      }
     }
-    // A reservation left pending by a crash: completed if its effect is there, else abandoned.
-    // Either way the row stays and the call is a replay.
+    // A reservation left pending (by a crash, or a write that failed): completed if its effect
+    // is there, else abandoned. Either way the row stays and the call is a replay.
     const rows = [...pending].map(([key, effect]) => {
       const now = this.slot.current.get(effect.path)?.sha256 ?? null;
       return { key, present: now !== null && now !== (effect.prior ?? null) };
     });
-    const lines = rows.length ? this.wasm.call({ op: 'replay_recover', rows }).states.map((s) => ({ c: s.key, t: s.state })) : [];
-    await this.compactReplay(lines);
+    if (rows.length) for (const s of this.wasm.call({ op: 'replay_recover', rows }).states) this.rows.get(s.key).t = s.state;
+    await this.compactReplay();
   }
 
   addRow(key, row) {
@@ -643,23 +647,24 @@ export class HomeSlot {
       const row = this.rows.get(key);
       if (!row) continue;
       this.rows.delete(key);
+      this.inFlight?.delete(key);
       const set = this.bySigner.get(row.signer);
       set?.delete(key);
       if (set && set.size === 0) this.bySigner.delete(row.signer);
     }
   }
 
-  /** Rewrite the log with the rows the module keeps (§12.4 retention), plus `extra` lines. A
-   * write whose effect has not ended keeps its reservation line (its effect, no completion), so
-   * a crash before it ends is recovered from the effect's own record. The new log replaces the
-   * old durably, like every append to it. */
+  /** Rewrite the log with the rows the module keeps (§12.4 retention), plus `extra` lines. Each
+   * row keeps its outcome; a write whose effect has not ended keeps its reservation line (its
+   * effect, no outcome), so it is recovered from the effect's own record. The new log replaces
+   * the old durably, like every append to it. */
   async compactReplay(extra = []) {
     const all = [...this.rows].map(([key, r]) => ({ key, at: r.at }));
     const keep = new Set(this.wasm.call({ op: 'replay_keep', now: this.clock(), rows: all }).keep);
     this.dropRows(all.map((r) => r.key).filter((k) => !keep.has(k)));
     const lines = [...this.rows].map(([key, r]) => {
       const effect = this.inFlight?.get(key);
-      return JSON.stringify({ r: key, d: r.digest, s: r.signer, at: r.at, ...(effect ? { e: effect } : { t: 'completed' }) });
+      return JSON.stringify({ r: key, d: r.digest, s: r.signer, at: r.at, ...(effect ? { e: effect } : { t: r.t ?? 'completed' }) });
     });
     for (const e of extra) lines.push(JSON.stringify(e));
     const staged = path.join(this.slot.root, 'tmp', `replay.${randomBytes(12).toString('hex')}`);
@@ -686,26 +691,19 @@ export class HomeSlot {
   async reserve(row, effect) {
     const line = { r: row.key, d: row.digest, s: row.signer, at: row.at, ...(effect ? { e: effect } : { t: 'completed' }) };
     await this.appendReplay(line, true);
-    this.addRow(row.key, { digest: row.digest, at: row.at, signer: row.signer });
+    this.addRow(row.key, { digest: row.digest, at: row.at, signer: row.signer, t: effect ? undefined : 'completed' });
     if (effect) (this.inFlight ??= new Map()).set(row.key, effect);
     if (this.logLines > 2 * this.rows.size + 1024) await this.compactReplay();
   }
-  /** The completion line of a reservation (under the replay lock, so a compaction never drops it). */
+  /** The completion line of a reservation (under the replay lock, so a compaction never drops
+   * it). Only once it is written is the reservation no longer pending. */
   async complete(key, t) {
     await this.replayLock(async () => {
-      this.inFlight?.delete(key);
       await this.appendReplay({ c: key, t }, false);
+      this.inFlight?.delete(key);
+      const row = this.rows.get(key);
+      if (row) row.t = t;
     });
-  }
-  /** A reserved write that ended with an error: its completion is what the recovery at start-up
-   * would find, by the effect's own record (the module decides), never `completed` unseen. */
-  async completeFailed(key) {
-    const effect = this.inFlight?.get(key);
-    if (!effect) return this.complete(key, 'completed');
-    const now = this.slot.current.get(effect.path)?.sha256 ?? null;
-    const present = now !== null && now !== (effect.prior ?? null);
-    const [{ state }] = this.wasm.call({ op: 'replay_recover', rows: [{ key, present }] }).states;
-    return this.complete(key, state);
   }
 
   // -------------------------------------------------------------------------------------------
@@ -945,7 +943,9 @@ export class HomeSlot {
         }
         ended = true;
       } finally {
-        if (key) await (ended ? this.complete(key, 'completed') : this.completeFailed(key));
+        // A write that ended with an error may still have stored its file (its index line could
+        // not be logged, say): it stays pending, and the next start decides by what is on disk.
+        if (key && ended) await this.complete(key, 'completed');
       }
     });
   }
