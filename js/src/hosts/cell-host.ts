@@ -24,7 +24,14 @@ import { Deadline, systemClock, type HostClock } from './clock.js';
 import { frameBytes, frameText } from './frames.js';
 import type { StreamCell } from './stream-host.js';
 
-/** Where a cell's persisted claim lives. `save` resolves only once the bytes are durable. */
+/**
+ * Where a cell's persisted claim lives. `save` resolves only once the bytes are durable.
+ *
+ * The host saves one claim at a time, and saves the same claim again after a failed or overdue attempt. A save it gave
+ * up on (rejected, or not settled within `persistTimeoutMs`) may still complete later: a store must let the last save
+ * it was called with win (apply saves in call order, or drop one that a later call superseded). Saving the same claim
+ * twice must be harmless.
+ */
 export interface ClaimStore {
   load(): Promise<string | undefined>;
   save(persistedJson: string): Promise<void>;
@@ -104,8 +111,10 @@ export interface CellHostOptions {
   delegationMs?: number;
   /** How long to wait before writing a `Persist` again after its write failed (default 250 ms). */
   persistRetryMs?: number;
-  /** Consecutive failed writes of one `Persist` after which the cell fails (default 20: about five seconds). */
+  /** Consecutive failed writes of one `Persist` after which the cell fails (default 20). */
   persistAttempts?: number;
+  /** How long one write may take before it counts as failed (default 10,000 ms); a late success is not acknowledged. */
+  persistTimeoutMs?: number;
   /** The most commands held at once (default 64); one more is refused with `commandQueueFull`. */
   maxCommands?: number;
   /** Host randomness (default `crypto.getRandomValues`). The session key and the `fresh` seed are new on every start. */
@@ -114,7 +123,7 @@ export interface CellHostOptions {
 
 /** A command the host refused or could not run. */
 export class CellHostError extends Error {
-  constructor(readonly code: 'closed' | 'failed' | 'commandQueueFull' | 'notRun', message: string) { super(message); this.name = 'CellHostError'; }
+  constructor(readonly code: 'closed' | 'failed' | 'commandQueueFull' | 'notRun' | 'timeout', message: string) { super(message); this.name = 'CellHostError'; }
 }
 
 interface HeldCommand { name: string; json: string; resolve(): void; reject(error: unknown): void }
@@ -137,6 +146,7 @@ export class SessionCellHost implements StreamCell {
   private readonly delegationMs: number;
   private readonly persistRetryMs: number;
   private readonly persistAttempts: number;
+  private readonly persistTimeoutMs: number;
   private readonly maxCommands: number;
   private readonly random: (length: number) => Uint8Array;
   private readonly listeners = new Set<(event: CellHostEvent) => void>();
@@ -150,7 +160,10 @@ export class SessionCellHost implements StreamCell {
   private lastStored: string | undefined;
   /** Settles when the write in progress has ended (stored, or given up); set before any store code runs. */
   private writing: Promise<void> | undefined;
-  private readonly commands: HeldCommand[] = [];
+  /** Commands admitted and not yet settled (bounded by `maxCommands`). */
+  private readonly admitted = new Set<HeldCommand>();
+  /** Commands that wait, in admission order: one the endpoint refused with `persistPending`, and every later one. */
+  private readonly held: HeldCommand[] = [];
   /** The serial queue: every endpoint call runs in one of these jobs, one at a time. */
   private readonly jobs: (() => void)[] = [];
   private readonly outbox: CellHostEvent[] = [];
@@ -175,6 +188,7 @@ export class SessionCellHost implements StreamCell {
     this.delegationMs = Math.min(options.delegationMs ?? DAY, DAY);
     this.persistRetryMs = options.persistRetryMs ?? 250;
     this.persistAttempts = Math.max(1, options.persistAttempts ?? 20);
+    this.persistTimeoutMs = Math.max(1, options.persistTimeoutMs ?? 10_000);
     this.maxCommands = Math.max(1, options.maxCommands ?? 64);
     this.random = options.random ?? (n => crypto.getRandomValues(new Uint8Array(n)));
     this.tickTimer = new Deadline(this.clock, () => this.enqueue(() => this.whenOpen(() => this.run('tick', (e, engine, clock) => e.tick(engine, clock), 'tick'))));
@@ -257,9 +271,15 @@ export class SessionCellHost implements StreamCell {
   command(name: string, command: Record<string, unknown>): Promise<void> {
     return new Promise<void>((resolve, reject) => {
       if (this.phase === 'closed' || this.phase === 'failed') { reject(new CellHostError(this.phase, `the cell host is ${this.phase}`)); return; }
-      if (this.commands.length >= this.maxCommands) { reject(new CellHostError('commandQueueFull', `${this.maxCommands} commands are already waiting`)); return; }
-      this.commands.push({ name, json: JSON.stringify(command), resolve, reject });
-      this.enqueue(() => this.drainCommands());
+      if (this.admitted.size >= this.maxCommands) { reject(new CellHostError('commandQueueFull', `${this.maxCommands} commands are already waiting`)); return; }
+      const c: HeldCommand = {
+        name, json: JSON.stringify(command),
+        resolve: () => { this.admitted.delete(c); resolve(); },
+        reject: error => { this.admitted.delete(c); reject(error); },
+      };
+      this.admitted.add(c);
+      // Its place in the one input queue is taken now, among frames, ticks and link changes.
+      this.enqueue(() => this.admit(c));
     });
   }
   deliver(frame: string): void {
@@ -302,7 +322,8 @@ export class SessionCellHost implements StreamCell {
     this.tickTimer.clear(); this.renewTimer.clear();
     this.stopPassListener?.(); this.stopPassListener = undefined;
     if (this.attached) { this.attached = false; try { this.carrier.detach(this); } catch { /* the carrier is gone */ } }
-    for (const c of this.commands.splice(0)) c.reject(why);
+    this.held.length = 0;
+    for (const c of [...this.admitted]) c.reject(why);
     if (phase === 'closed') this.jobs.length = 0;
     const e = this.endpoint; this.endpoint = undefined;
     try { e?.free(); } catch { /* freed */ }
@@ -398,14 +419,15 @@ export class SessionCellHost implements StreamCell {
     void (async () => {
       try {
         for (let failures = 0; ;) {
-          try { await this.store.save(json); break; } catch (error) {
-            failures++;
-            this.emit({ type: 'persist', phase: 'failed', ack, error });
-            if (failures >= this.persistAttempts) { this.enqueue(() => { this.writing = undefined; this.fail('store', error); }); return; }
-            if (this.over) return;
-            await new Promise<void>(resolve => this.clock.setTimer(resolve, this.persistRetryMs));
-            if (this.over) return;
-          }
+          const outcome = await this.attempt(json);
+          if (outcome.ok) break;
+          const error = outcome.error;
+          failures++;
+          this.emit({ type: 'persist', phase: 'failed', ack, error });
+          if (failures >= this.persistAttempts) { this.enqueue(() => { this.writing = undefined; this.fail('store', error); }); return; }
+          if (this.over) return;
+          await new Promise<void>(resolve => this.clock.setTimer(resolve, this.persistRetryMs));
+          if (this.over) return;
         }
         // Stored: a restart starts from it, whatever happens to this endpoint.
         this.lastStored = json;
@@ -423,22 +445,47 @@ export class SessionCellHost implements StreamCell {
     })();
   }
 
+  /** A command at its place in the input queue: run now, or held behind an earlier held command. */
+  private admit(c: HeldCommand): void {
+    if (this.over) { c.reject(new CellHostError(this.phase === 'failed' ? 'failed' : 'closed', `the cell host is ${this.phase}`)); return; }
+    this.held.push(c);
+    if (this.held.length === 1) this.drainCommands();
+  }
+  /**
+   * One save, bounded by `persistTimeoutMs`. An overdue save counts as failed; if it completes later, nothing is
+   * acknowledged for it (the next attempt saves the same claim).
+   */
+  private attempt(json: string): Promise<{ ok: true } | { ok: false; error: unknown }> {
+    return new Promise(resolve => {
+      let settled = false;
+      const cancel = this.clock.setTimer(() => {
+        if (settled) return;
+        settled = true;
+        resolve({ ok: false, error: new CellHostError('timeout', `the store did not finish a write within ${this.persistTimeoutMs} ms`) });
+      }, this.persistTimeoutMs);
+      Promise.resolve().then(() => this.store.save(json)).then(
+        () => { if (settled) return; settled = true; cancel(); resolve({ ok: true }); },
+        error => { if (settled) return; settled = true; cancel(); resolve({ ok: false, error }); },
+      );
+    });
+  }
+
   /** Runs held commands in order; one refused with `session:persistPending` waits for the write to complete. */
   private drainCommands(): void {
-    while (this.commands.length > 0 && this.phase === 'open' && this.endpoint) {
-      const c = this.commands[0] as HeldCommand;
+    while (this.held.length > 0 && this.phase === 'open' && this.endpoint) {
+      const c = this.held[0] as HeldCommand;
       let ran: boolean;
       try {
         ran = this.run('command', (e, engine, clock) => e.command(c.json, engine, clock));
       } catch (error) {
         if (code(error) === 'session:persistPending') { this.stats.held++; this.emit({ type: 'commandHeld', command: c.name }); return; }
-        this.commands.shift();
+        this.held.shift();
         c.reject(error);
         continue;
       }
       // Not run because the endpoint is being made again (or the host ended): it stays first in line, or was refused.
       if (!ran && this.phase !== 'open') return;
-      this.commands.shift();
+      this.held.shift();
       if (ran) c.resolve(); else c.reject(new CellHostError('notRun', `the ${c.name} command could not be run`));
     }
   }
@@ -549,7 +596,7 @@ export class SessionCellHost implements StreamCell {
       this.enqueue(() => {
         if (this.phase !== 'rebuilding') return;
         this.phase = 'open';
-        this.commands.unshift({ name: 'join', json: JSON.stringify({ command: 'join', state: this.stateValue() }), resolve: () => {}, reject: () => {} });
+        this.held.unshift({ name: 'join', json: JSON.stringify({ command: 'join', state: this.stateValue() }), resolve: () => {}, reject: () => {} });
         this.armTick(this.endpoint?.next_deadline());
         if (this.carrierUp) this.run('linkUp', (e, engine, clock) => e.link_up(engine, clock), 'link');
         this.drainCommands();
