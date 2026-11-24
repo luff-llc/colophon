@@ -1,0 +1,232 @@
+name: Home image
+
+# Builds the home's container image (relay/Dockerfile) for amd64 and arm64, each on a runner of
+# its own architecture, and publishes it to the GitHub Container Registry:
+#
+#   push to main        ghcr.io/<owner>/colophon-home:main and :sha-<commit>
+#   tag vX.Y.Z          :X.Y.Z, and :latest when it is the highest final version
+#   tag vX.Y.Z-rc.N     its version only
+#   pull request        builds both architectures, starts the image, publishes nothing
+#
+# Nothing is published until Colophon CI has passed on the same commit, and a version tag must
+# sit on its release line (release/X.Y). Deploy by commit or version, not by :main, so a
+# restart never changes what runs.
+
+'on':
+  push:
+    branches: [main]
+    tags: ['v*']
+    paths-ignore: ['docs/**', '**/*.md']
+  pull_request:
+    branches: [main, 'release/**']
+    paths: ['relay/**', 'crates/**', 'Cargo.toml', 'Cargo.lock', '.dockerignore', '.github/workflows/home-image.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/colophon-home
+
+jobs:
+  # Pull requests: build and start the image with a read-only token. Nothing is pushed.
+  check:
+    if: github.event_name == 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Build
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: relay/Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          cache-from: type=gha,scope=home-${{ matrix.arch }}
+          outputs: type=docker
+      - name: Start it and ask for its health
+        env:
+          IMAGE_ID: ${{ steps.build.outputs.imageid }}
+        run: |
+          docker run -d --name home -p 127.0.0.1:8080:8080 -e COLOPHON_PUBLIC_URL=https://home.example.org "$IMAGE_ID"
+          for _ in $(seq 1 30); do curl -fsS http://127.0.0.1:8080/healthz && exit 0; sleep 1; done
+          docker logs home; exit 1
+
+  # Decides what may be published, with a read-only token: the ref must be main or a
+  # well-formed version tag on its release line, and Colophon CI must have passed on this
+  # commit. Everything that publishes needs this job.
+  gate:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 100
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      tags: ${{ steps.tags.outputs.tags }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - name: Choose the tags
+        id: tags
+        env:
+          REF: ${{ github.ref }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          short="${GITHUB_SHA::7}"
+          final='^v([0-9]+)\.([0-9]+)\.([0-9]+)$'
+          candidate='^v([0-9]+)\.([0-9]+)\.([0-9]+)-rc\.([0-9]+)$'
+          on_line() {
+            git merge-base --is-ancestor "$GITHUB_SHA" "origin/release/$1" 2>/dev/null \
+              || { echo "::error::this tag is not on release/$1"; exit 1; }
+          }
+          case "$REF" in
+            refs/heads/main)
+              tags="main sha-$short" ;;
+            refs/tags/*)
+              if [[ "$REF_NAME" =~ $final ]]; then
+                on_line "${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
+                tags="${REF_NAME#v}"
+                highest="$(git tag --list 'v*' | grep -E "$final" | sort -V | tail -n 1)"
+                if [[ "$highest" == "$REF_NAME" ]]; then tags="$tags latest"; fi
+              elif [[ "$REF_NAME" =~ $candidate ]]; then
+                on_line "${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
+                tags="${REF_NAME#v}"
+              else
+                echo "::error::not a version tag: expected vX.Y.Z or vX.Y.Z-rc.N"; exit 1
+              fi ;;
+            *)
+              echo "::error::images are published from main and from version tags only"; exit 1 ;;
+          esac
+          echo "tags=$tags" >> "$GITHUB_OUTPUT"
+      - name: Wait for Colophon CI on this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # A run for this commit from a branch push or a manual run; a pull request's run tests
+          # a merge that is not this commit.
+          query='[.workflow_runs[] | select(.event == "push" or .event == "workflow_dispatch")]
+                 | sort_by(.created_at) | last
+                 | if . == null then "none none" else "\(.status) \(.conclusion // "none")" end'
+          for _ in $(seq 1 180); do
+            read -r status conclusion < <(gh api \
+              "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$GITHUB_SHA&per_page=50" \
+              --jq "$query")
+            if [[ "$status" == completed ]]; then
+              if [[ "$conclusion" == success ]]; then exit 0; fi
+              echo "::error::Colophon CI ended with $conclusion on this commit"; exit 1
+            fi
+            sleep 30
+          done
+          echo "::error::Colophon CI did not finish on this commit in time"; exit 1
+
+  build:
+    needs: gate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Log in to the registry
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: relay/Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.licenses=Apache-2.0
+          cache-from: type=gha,scope=home-${{ matrix.arch }}
+          cache-to: type=gha,scope=home-${{ matrix.arch }},mode=max
+          # Published by digest; the manifest job gives the two digests their tags.
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+      - name: Keep the digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::unexpected digest"; exit 1; }
+          mkdir -p "$RUNNER_TEMP/digests"
+          touch "$RUNNER_TEMP/digests/${DIGEST#sha256:}"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: digest-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  manifest:
+    needs: [gate, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digest-*
+          merge-multiple: true
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish the multi-architecture image
+        working-directory: ${{ runner.temp }}/digests
+        env:
+          TAGS: ${{ needs.gate.outputs.tags }}
+        run: |
+          set -euo pipefail
+          read -r -a tags <<< "$TAGS"
+          [[ ${#tags[@]} -gt 0 ]] || { echo "::error::no tags to publish"; exit 1; }
+          args=()
+          for tag in "${tags[@]}"; do
+            [[ "$tag" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] || { echo "::error::unexpected tag"; exit 1; }
+            args+=(-t "$IMAGE:$tag")
+          done
+          sources=()
+          for digest in *; do
+            [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::unexpected digest file"; exit 1; }
+            sources+=("$IMAGE@sha256:$digest")
+          done
+          docker buildx imagetools create "${args[@]}" "${sources[@]}"
+          docker buildx imagetools inspect "$IMAGE:${tags[0]}"
