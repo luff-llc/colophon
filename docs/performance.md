@@ -159,6 +159,32 @@ relay or its kills; the kill loop's own saved states measured 40 ms and 951 ms a
 What remains is linear in the state: every call passes and parses the whole state, and
 `record_due` replays the history once to find what is due.
 
+## Session exchange scans and refreshes (0.5.4)
+
+The Swift session's exchange listed the folder and refreshed the engine once per home, and each
+change it brought in was reconciled twice: once by the folder watcher's refresh (the hint for its
+own writes) and again by the refresh after the pass.
+
+- One exchange lists the folder and refreshes the engine once, before its first home; later homes
+  start from what the engine holds after the earlier ones (everything they brought in was persisted
+  by the session). A change another device makes to the folder meanwhile reaches the engine through
+  the watcher. A test counts one listing for a pass with two homes (two before).
+- The session keeps a folder mark: the listing the engine last read, and the paths it has written
+  since (a replaceable `state/` or `heads/` path by its digest). A watcher refresh, or the refresh
+  after a pass, lists once and reconciles only when the folder holds something the engine has not
+  read or the engine holds something not yet shown. A hint during a pass that finds only the pass's
+  own writes is left to the refresh after the pass. Any other phase than `ready`, a refresh that
+  would supersede one in flight, and any failure take the full refresh as before.
+- Each request no longer recomputes the home's base or searches every configured home for a head
+  URL, and the engine's next step is fetched in the same gate as the answer before it, so a request
+  enters the session gate once instead of twice.
+
+Batched record transfer is a follow-up, not part of 0.5.4. A home moves records one `GET` or `PUT
+{base}/records/{path}` at a time (spec 0.3 §8.2); `POST /authority` (1–64 entries) and `POST
+/pending` (1–16 objects) are already batched. The plain relay's `POST {base}/records/batch` read
+(1–256 paths) has no home call format, and a home slot refuses it (`relay/home.js`), so a batched
+home read or write needs a call format and a spec change first.
+
 # Engine performance — Colophon 0.3
 
 ## Native session engine migration
