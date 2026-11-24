@@ -36,7 +36,13 @@ public final class FolderMedium: RecordMedium, @unchecked Sendable {
     public let folder: URL
     private let coordinated: Bool
     private let lock = NSLock()
-    private var presenters: [UUID: FolderPresenter] = [:]
+    /// One presenter for the whole medium, registered while any `changes()` stream is open. Coordinated writes name it
+    /// as their own presenter, so the coordinator never waits on this process's presenter for this process's writes.
+    private var presenter: FolderPresenter?
+    private var observers: [UUID: AsyncStream<Void>.Continuation] = [:]
+    /// Serialises registering and removing the presenter, so `changes()` returns only once it is registered. The
+    /// presenter's callbacks never take it (they take `lock`), so Foundation can call them while it is held.
+    private let registration = NSLock()
     private var hook: (@Sendable (FolderBatchStep) throws -> Void)?
     static let journalName = ".colophon.nosync"
 
@@ -74,10 +80,8 @@ public final class FolderMedium: RecordMedium, @unchecked Sendable {
     }
 
     deinit {
-        for presenter in presenters.values {
-            NSFileCoordinator.removeFilePresenter(presenter)
-            presenter.continuation.finish()
-        }
+        if let presenter { NSFileCoordinator.removeFilePresenter(presenter) }
+        for continuation in observers.values { continuation.finish() }
     }
 
     // MARK: Reading
@@ -188,6 +192,8 @@ public final class FolderMedium: RecordMedium, @unchecked Sendable {
             if clean { return try withExtendedLifetime(shared) { try body(root) } }
         }
         // A batch was left behind: complete or discard it under the exclusive lock, then read under that lock.
+        // Completing it changes the folder, and this medium's own presenter is not told: wake the observers.
+        defer { signal() }
         return try coordinate { () -> T in
             let exclusive = try FolderFiles.Lock(journal, exclusive: true)
             return try withExtendedLifetime(exclusive) {
@@ -205,6 +211,8 @@ public final class FolderMedium: RecordMedium, @unchecked Sendable {
             try RecordPaths.validate(item.path)
         }
         guard !writes.isEmpty else { return }
+        // Also after a failure: recovering an earlier batch may have changed the folder before this one failed.
+        defer { signal() }
         try downloadAfterUnlock {
             try coordinate {
                 try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
@@ -217,7 +225,6 @@ public final class FolderMedium: RecordMedium, @unchecked Sendable {
                 }
             }
         }
-        signal()
     }
 
     private func publish(_ writes: [MediumWrite], root: DirectoryHandle, journal: DirectoryHandle) throws {
@@ -430,7 +437,10 @@ public final class FolderMedium: RecordMedium, @unchecked Sendable {
         guard coordinated else { return try body() }
         var coordinationError: NSError?
         var result: Result<T, any Error>?
-        NSFileCoordinator().coordinate(writingItemAt: folder, options: [], error: &coordinationError) { _ in
+        // Name this medium's own presenter: a coordinator that does not know it waits on it (about half a second per
+        // write on macOS and iOS). Observers still hear about this write, from `signal()` after it.
+        let own = lock.withLock { presenter }
+        NSFileCoordinator(filePresenter: own).coordinate(writingItemAt: folder, options: [], error: &coordinationError) { _ in
             result = Result { try body() }
         }
         if let coordinationError { throw StorageError.unavailable("File coordination is unavailable: " + coordinationError.localizedDescription) }
@@ -446,16 +456,32 @@ public final class FolderMedium: RecordMedium, @unchecked Sendable {
     public func changes() -> AsyncStream<Void> {
         let id = UUID()
         let (stream, continuation) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
-        let presenter = FolderPresenter(folder: folder, continuation: continuation)
-        lock.withLock { presenters[id] = presenter }
-        NSFileCoordinator.addFilePresenter(presenter)
+        registration.withLock {
+            let added: FolderPresenter? = lock.withLock {
+                observers[id] = continuation
+                guard presenter == nil else { return nil }
+                let created = FolderPresenter(folder: folder) { [weak self] in self?.signal() }
+                presenter = created
+                return created
+            }
+            // Outside `lock`: the presenter's callbacks take it.
+            if let added { NSFileCoordinator.addFilePresenter(added) }
+        }
         continuation.onTermination = { [weak self] _ in
             guard let self else { return }
-            if let presenter = self.lock.withLock({ self.presenters.removeValue(forKey: id) }) { NSFileCoordinator.removeFilePresenter(presenter) }
+            self.registration.withLock {
+                let removed: FolderPresenter? = self.lock.withLock {
+                    self.observers.removeValue(forKey: id)
+                    guard self.observers.isEmpty, let current = self.presenter else { return nil }
+                    self.presenter = nil
+                    return current
+                }
+                if let removed { NSFileCoordinator.removeFilePresenter(removed) }
+            }
         }
         return stream
     }
-    private func signal() { for presenter in lock.withLock({ Array(presenters.values) }) { presenter.signal() } }
+    private func signal() { for continuation in lock.withLock({ Array(observers.values) }) { continuation.yield(()) } }
 
     private func checkAvailability(_ url: URL) throws {
         let name = url.lastPathComponent
@@ -485,19 +511,18 @@ public final class FolderMedium: RecordMedium, @unchecked Sendable {
 private final class FolderPresenter: NSObject, NSFilePresenter, Sendable {
     let presentedItemURL: URL?
     let presentedItemOperationQueue: OperationQueue
-    let continuation: AsyncStream<Void>.Continuation
-    init(folder: URL, continuation: AsyncStream<Void>.Continuation) {
+    private let changed: @Sendable () -> Void
+    init(folder: URL, changed: @escaping @Sendable () -> Void) {
         presentedItemURL = folder
-        self.continuation = continuation
+        self.changed = changed
         let queue = OperationQueue()
         queue.maxConcurrentOperationCount = 1
         presentedItemOperationQueue = queue
     }
-    func signal() { continuation.yield(()) }
-    func presentedItemDidChange() { signal() }
-    func presentedSubitemDidAppear(at url: URL) { signal() }
-    func presentedSubitemDidChange(at url: URL) { signal() }
+    func presentedItemDidChange() { changed() }
+    func presentedSubitemDidAppear(at url: URL) { changed() }
+    func presentedSubitemDidChange(at url: URL) { changed() }
     func accommodatePresentedSubitemDeletion(at url: URL, completionHandler: @escaping (Error?) -> Void) {
-        signal(); completionHandler(nil)
+        changed(); completionHandler(nil)
     }
 }
