@@ -23,7 +23,7 @@ use colophon_core::v05::history::home::{
     admit, admit_first_with, admit_pending_batch_notices, admit_predecessor, admit_with, stage_predecessor, FirstUpload, HomeState, ReceiptToSign, Refusal,
 };
 use colophon_core::v05::history::{
-    verify_history, Claim, Objects, Persisted, Principal, State, Stop, Verdict,
+    verify_history, Claim, Objects, Persisted, Principal, State, Stop, Verdict, FOLD_RULES,
 };
 use colophon_core::v05::home_stream::{
     self, check_session_frame, check_subscription, parse_route, stream_namespaces, FrameRefusal,
@@ -169,6 +169,13 @@ struct Slot {
     booting_predecessor: Vec<String>,
     /// `HomeState::to_bytes`, base64, once appointed.
     home_state: Option<String>,
+    /// Proof that this build folded the checkpoint `home_state` holds from genesis:
+    /// `{"rules": FOLD_RULES, "checkpoint": its SHA-256}` ([`fold_mark`]). Absent when it is not
+    /// known, and read as absent when it is not that shape. Additive: a reader without the field
+    /// ignores it and writes its state without it, so a checkpoint another build replaces is never
+    /// left with a proof it did not earn; and the proof names the checkpoint's exact bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fold: Option<Value>,
 }
 struct Loaded {
     slot: Slot,
@@ -190,9 +197,11 @@ impl Loaded {
             booting: self.slot.booting.clone(),
             booting_predecessor: self.slot.booting_predecessor.clone(),
             home_state: None,
+            fold: None,
         };
         if let Some(h) = &self.home {
             slot.home_state = Some(b64(&h.to_bytes().map_err(|e| e.to_string())?));
+            slot.fold = fold_mark(h);
             slot.booting = Vec::new();
             slot.booting_predecessor = Vec::new();
         }
@@ -206,13 +215,25 @@ fn load(req: &Value) -> R<Loaded> {
         return Err(format!("unknown state version {}", slot.v));
     }
     let home = match &slot.home_state {
-        Some(s) => Some(
-            HomeState::from_bytes(&B64.decode(s).map_err(|e| e.to_string())?)
-                .map_err(|e| e.to_string())?,
-        ),
+        Some(s) => {
+            let mut h = HomeState::from_bytes(&B64.decode(s).map_err(|e| e.to_string())?)
+                .map_err(|e| e.to_string())?;
+            let mark = slot.fold.as_ref().and_then(|m| Some((m.get("rules")?.as_str()?, m.get("checkpoint")?.as_str()?)));
+            if let Some((rules, checkpoint)) = mark {
+                h.vouch_fold(rules, checkpoint);
+            }
+            Some(h)
+        }
         None => None,
     };
     Ok(Loaded { slot, home })
+}
+/// The proof stored beside a home state whose checkpoint this build folded from genesis
+/// (`HomeState::fold_vouched`), naming the rules and the checkpoint's exact bytes; `None` when it
+/// did not, so a checkpoint is never stored with a proof it did not earn.
+fn fold_mark(h: &HomeState) -> Option<Value> {
+    h.fold_vouched()
+        .then(|| json!({"rules": FOLD_RULES, "checkpoint": h.checkpoint_digest()}))
 }
 /// What the home holds as verifier input (its checkpoint's objects, which are never stale).
 fn held(h: &HomeState) -> R<Objects> {
@@ -238,6 +259,7 @@ fn init(req: &Value) -> R<Value> {
             booting: Vec::new(),
             booting_predecessor: Vec::new(),
             home_state: None,
+            fold: None,
         },
         home: None,
     };
@@ -375,22 +397,32 @@ fn lease(req: &Value) -> R<Value> {
 /// - a lease that reaches now or later (a restart inside it, or a clock that went backwards):
 ///   the open interval stays open;
 /// - otherwise the open interval closes at the lease's end and a new one opens now.
+///
+/// It is also where a checkpoint stored without this build's proof of its fold (`fold`: an older
+/// build's, or one whose proof does not match) is verified again from genesis, once per start: when
+/// the replay gives exactly the checkpoint, the state is returned with the proof, and the calls
+/// after it may answer from the fold ([`check_record`]); otherwise it stays without one.
 fn resume(req: &Value) -> R<Value> {
     let mut l = load(req)?;
     let now_ms = i64_of(req, "now")?;
     let alive = req.get("alive").and_then(Value::as_i64);
-    let (Some(h), Some(alive)) = (l.home.take(), alive) else {
+    let Some(mut h) = l.home.take() else {
         return Ok(json!({"state": req["state"], "changed": false}));
     };
+    let mut changed = !h.fold_vouched() && h.verify_fold().map_err(|e| e.to_string())?;
     let mut serving = h.serving().to_vec();
     let open = serving.last().is_some_and(|i| i.through_ms.is_none());
-    if !open || alive >= now_ms {
+    if let (true, Some(alive)) = (open, alive.filter(|a| *a < now_ms)) {
+        let last = serving.last_mut().ok_or("no serving interval")?;
+        last.through_ms = Some(alive.max(last.from_ms));
+        serving.push(colophon_core::v05::history::home::ServingInterval { from_ms: now_ms, through_ms: None });
+        h = h.with_serving(serving).map_err(|e| e.to_string())?;
+        changed = true;
+    }
+    if !changed {
         return Ok(json!({"state": req["state"], "changed": false}));
     }
-    let last = serving.last_mut().ok_or("no serving interval")?;
-    last.through_ms = Some(alive.max(last.from_ms));
-    serving.push(colophon_core::v05::history::home::ServingInterval { from_ms: now_ms, through_ms: None });
-    l.home = Some(h.with_serving(serving).map_err(|e| e.to_string())?);
+    l.home = Some(h);
     Ok(json!({"state": l.dump()?, "changed": true}))
 }
 
@@ -1446,6 +1478,7 @@ fn post_pending(req: &Value) -> R<Value> {
             booting: vec![],
             booting_predecessor: vec![],
             home_state: None,
+            fold: None,
         },
         home: Some(next),
     };
@@ -2357,11 +2390,19 @@ fn check_record(req: &Value) -> R<Value> {
         }
         Kind::Op { .. } | Kind::Live { .. } | Kind::History => {
             let (persisted, _) = verified.as_ref().ok_or("no home state")?;
-            // Who may write is decided by a replay of the held entries from genesis, not by the
-            // fold the checkpoint carries: that fold is local memory, which a verifier under other
-            // rules (or one that kept an inconsistent copy) may have written.
-            let objects = persisted.objects().cloned().unwrap_or_default();
-            let ra = RecordAuthority::from_objects(&objects, now_ms).map_err(|e| e.to_string())?;
+            // Who may write is decided by a replay of the held entries from genesis. The fold the
+            // checkpoint carries is local memory, which a verifier under other rules (or one that
+            // kept an inconsistent copy) may have written, so it answers only where it is this
+            // build's own fold, proved for these exact bytes, and the replay's answer
+            // (`RecordAuthority::from_vouched`: a quiet history, no successor, no `/4` prefix).
+            let ra = match RecordAuthority::from_vouched(persisted, now_ms) {
+                Some(ra) => ra,
+                None => {
+                    let objects = persisted.objects().cloned().unwrap_or_default();
+                    RecordAuthority::from_objects(&objects, now_ms)
+                }
+            }
+            .map_err(|e| e.to_string())?;
             let Ok((header, env)) = OperationHeader::parse(&bytes) else {
                 return refuse("malformed");
             };

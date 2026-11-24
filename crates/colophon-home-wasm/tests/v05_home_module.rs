@@ -1314,3 +1314,472 @@ fn a_record_check_does_not_trust_the_fold_a_checkpoint_carries() {
     assert_eq!(r, check_record_by_replay(&doctored, NOW + 1_000, &path, &bytes), "the replay's answer");
     assert_ne!(r["allowed"], true, "{r}");
 }
+
+// ---------------------------------------------------------------------------------------------
+// The slot's proof of its fold (`fold`): a home state whose checkpoint this build folded from
+// genesis carries `{"rules": FOLD_RULES, "checkpoint": SHA-256 of the checkpoint}`, and with it
+// the module answers from the fold where that is the replay's answer.
+
+fn slot_of(state: &str) -> Value {
+    serde_json::from_slice(&STANDARD.decode(state).unwrap()).unwrap()
+}
+fn state_of(slot: &Value) -> String {
+    b(&serde_json::to_vec(slot).unwrap())
+}
+/// The state without its proof.
+fn unproved(state: &str) -> String {
+    let mut slot = slot_of(state);
+    slot.as_object_mut().unwrap().remove("fold");
+    state_of(&slot)
+}
+/// The state with `fold` set to `mark` (`null` removes it).
+fn with_fold(state: &str, mark: Value) -> String {
+    let mut slot = slot_of(state);
+    slot.as_object_mut().unwrap().remove("fold");
+    if !mark.is_null() {
+        slot["fold"] = mark;
+    }
+    state_of(&slot)
+}
+/// The checkpoint bytes of a slot state.
+fn checkpoint_of(state: &str) -> Vec<u8> {
+    let slot = slot_of(state);
+    let hs: Value = serde_json::from_slice(&STANDARD.decode(slot["home_state"].as_str().unwrap()).unwrap()).unwrap();
+    STANDARD.decode(hs["checkpoint"].as_str().unwrap()).unwrap()
+}
+/// The state with its checkpoint replaced by `checkpoint` and no proof.
+fn with_checkpoint(state: &str, checkpoint: &[u8]) -> String {
+    let mut slot = slot_of(state);
+    let mut hs: Value = serde_json::from_slice(&STANDARD.decode(slot["home_state"].as_str().unwrap()).unwrap()).unwrap();
+    hs["checkpoint"] = json!(b(checkpoint));
+    slot["home_state"] = json!(b(&serde_json::to_vec(&hs).unwrap()));
+    slot.as_object_mut().unwrap().remove("fold");
+    state_of(&slot)
+}
+/// The module's raw answer.
+fn raw(req: &Value) -> Vec<u8> {
+    handle(req.to_string().as_bytes())
+}
+/// `req` over `state`, and over `state` without its proof: the same bytes, returned with the
+/// number of history replays (verifications that parsed the held objects) the proved state's
+/// answer took.
+fn same_as_unproved(req: &Value, when: &str) -> (Value, usize) {
+    use colophon_core::v05::history::work;
+    let state = req["state"].as_str().unwrap();
+    let mut cold = req.clone();
+    cold["state"] = json!(unproved(state));
+    work::reset();
+    let warm = raw(req);
+    let verifications = work::get().replays;
+    let want = raw(&cold);
+    assert_eq!(String::from_utf8_lossy(&warm), String::from_utf8_lossy(&want), "{when}");
+    (serde_json::from_slice(&warm).unwrap(), verifications)
+}
+
+/// A home state is written with the proof of its fold whenever this build folded its checkpoint,
+/// and the proof names this build's rules and the checkpoint's exact bytes.
+fn assert_proved(state: &str) {
+    use colophon_core::v05::history::FOLD_RULES;
+    let mark = &slot_of(state)["fold"];
+    assert_eq!(mark["rules"], FOLD_RULES, "{mark}");
+    assert_eq!(mark["checkpoint"], digest(&checkpoint_of(state)), "{mark}");
+}
+
+/// With the proof of its fold, a home answers every record check and every call exactly as it
+/// does without it (by the replay from genesis), byte for byte: over a home with current members,
+/// a member revoked after writing and a member the home has not seen admitted, before and after
+/// the revocation, at clock readings behind, at and after the checkpoint's; good records, a
+/// swapped signature, a record at another's path, a stranger's, blobs and paths outside the store;
+/// reads and writes by call. Where the history is quiet the record check is answered from the
+/// fold: one verification of the history instead of two.
+#[test]
+fn a_proved_fold_answers_record_checks_and_calls_as_the_replay() {
+    let mut f = create_with(&[NS], "members", 1);
+    let writer = f.host.identity(41);
+    let leaver = f.host.identity(42);
+    for (id, label) in [(&writer, "Writer"), (&leaver, "Leaver")] {
+        admit(&mut f, id, label, "device", terms_for(&[(NS, "write")]), terms_for(&[(NS, "write")]));
+    }
+    let keys = HomeKeys::new(0x77);
+    appoint_homes(&mut f, &[(&keys, BASE_A)]);
+    let mut home = Home::new(keys, f.account.id().as_str());
+    let entries: Vec<Value> = entries_json(&f).into_iter().map(|(_, e)| e).collect();
+    let uploaded = entries.len() as u64;
+    assert_eq!(home.authority(1, &entries, NOW)["appointed"], true);
+    assert_proved(&home.state);
+    assert!(home.head(NOW).is_some());
+    assert_proved(&home.state);
+    let late = f.host.identity(43);
+    f.account.advance(NOW).unwrap();
+    admit(&mut f, &late, "Late", "device", terms_for(&[(NS, "write")]), terms_for(&[(NS, "write")]));
+    let src = MemSource::new();
+    src.store_account(&f.account);
+    let mut host = std::mem::replace(&mut f.host, Host::new());
+    let mut records: Vec<(String, Vec<u8>)> = Vec::new();
+    for id in [&writer, &leaver, &late] {
+        let mut e = member_engine(&f, &host, &src, id, NOW);
+        let w = engine_write(&mut e, &mut host, &src, NS, "follow", json!({"id": "show", "url": "https://example.org/feed", "title": "Show"}));
+        records.extend(w.stores.into_iter().filter(|(p, _)| p.starts_with("ops/")));
+        if id == &writer {
+            let l = engine_live(&mut e, &mut host, &src, json!({"id": "e1", "show": "show", "seconds": 1.0}));
+            records.extend(l.stores);
+        }
+    }
+    f.host = host;
+    let (op_w, op_l) = (records[0].clone(), records.iter().find(|(p, _)| p.contains(&leaver)).unwrap().clone());
+    let mut swapped: Value = serde_json::from_slice(&op_w.1).unwrap();
+    swapped["signature"] = serde_json::from_slice::<Value>(&op_l.1).unwrap()["signature"].clone();
+    records.push((op_w.0.clone(), serde_json::to_vec(&swapped).unwrap()));
+    records.push((op_l.0.clone(), op_w.1.clone()));
+    let blob = vec![9u8; 64];
+    records.push((format!("blobs/{}", digest(&blob)), blob.clone()));
+    records.push((format!("blobs/{}", "0".repeat(64)), blob));
+    records.push((format!("ops/{writer}/{NS}/000000000001-{}.json", "a".repeat(32)), b"{}".to_vec()));
+    records.push(("x/y.json".into(), b"{}".to_vec()));
+    // Calls: the writer's read and write of its record, the late member's write of its own.
+    let calls: Vec<(String, &str, String, Vec<u8>)> = [(&writer, &op_w), (&late, records.iter().find(|(p, _)| p.contains(&late)).unwrap())]
+        .into_iter()
+        .enumerate()
+        .flat_map(|(i, (who, (rest, bytes)))| {
+            let path = format!("/records/{rest}");
+            let get = call_as(&f.host, &f.account, "member", who, BASE_A, "colophon.home.read",
+                              home_call_args("GET", &path, &digest(b"")), NOW, [i as u8 * 2 + 1; 32]);
+            let put = call_as(&f.host, &f.account, "member", who, BASE_A, "colophon.home.write",
+                              home_call_args("PUT", &path, &digest(bytes)), NOW, [i as u8 * 2 + 2; 32]);
+            [(rest.clone(), "GET", digest(b""), get), (rest.clone(), "PUT", digest(bytes), put)]
+        })
+        .collect();
+
+    let mut from_fold = 0;
+    let mut compare = |home: &Home, at: i64, when: &str| {
+        for now in [at - 1_000, at, at + 1, at + HOUR, at + 30 * 24 * HOUR] {
+            for (path, bytes) in &records {
+                let req = json!({"op": "check_record", "state": home.state, "now": now, "path": path, "bytes": b(bytes)});
+                let (answer, verifications) = same_as_unproved(&req, &format!("{when} at {now}: {path}"));
+                assert_eq!(answer, check_record_by_replay(&home.state, now, path, bytes), "{when} at {now}: {path}");
+                if verifications == 0 && answer.get("code").is_none_or(|c| c != "malformed") {
+                    from_fold += 1;
+                }
+            }
+            for (rest, method, sha, call) in &calls {
+                let req = json!({"op": "access", "state": home.state, "now": now, "base": BASE_A, "method": method,
+                                 "section": "records", "rest": rest, "path": format!("/records/{rest}"),
+                                 "bodySha256": sha, "call": b(call), "existing": null, "replayRows": 65_536});
+                same_as_unproved(&req, &format!("{when} at {now}: {method} {rest}"));
+            }
+        }
+    };
+    compare(&home, NOW, "all current");
+    f.account.advance(NOW + 1_000).unwrap();
+    let revoke = f.account.begin_revoke(&leaver, &RevokeKeep::Nothing, &[f.d.clone()], [0x7a; 32]).unwrap();
+    run(&mut f.account, &f.host, revoke);
+    let rest: Vec<Value> = entries_json(&f).into_iter().filter(|(s, _)| *s > uploaded).map(|(_, e)| e).collect();
+    assert_eq!(home.authority(uploaded + 1, &rest, NOW + 2_000)["outcome"], "ok");
+    assert_proved(&home.state);
+    home.head(NOW + 2_000);
+    assert_proved(&home.state);
+    compare(&home, NOW + 2_000, "after the revocation");
+    // Good records at the checkpoint's clock and after: answered from the fold, without a replay;
+    // behind the checkpoint's clock, by the replay.
+    let ok = |home: &Home, now: i64| {
+        let req = json!({"op": "check_record", "state": home.state, "now": now, "path": op_w.0, "bytes": b(&op_w.1)});
+        same_as_unproved(&req, "the writer's record")
+    };
+    assert_eq!(ok(&home, NOW + 2_000 - 1).1, 2, "behind the checkpoint's clock it replays");
+    assert!(from_fold > 0);
+}
+
+/// The conformance vectors' history files of one kind of case, as a home holds them.
+fn vector_objects(dir: &std::path::Path) -> Objects {
+    let files = |d: std::path::PathBuf| -> Vec<Vec<u8>> {
+        let mut v: Vec<std::path::PathBuf> = std::fs::read_dir(d)
+            .map(|r| r.map(|e| e.unwrap().path()).collect())
+            .unwrap_or_default();
+        v.sort();
+        v.into_iter().filter(|p| p.extension().is_some_and(|x| x == "json")).map(|p| std::fs::read(p).unwrap()).collect()
+    };
+    if dir.join("successor").exists() {
+        let mut o = Objects {
+            entries: files(dir.join("successor/authority")),
+            predecessor: files(dir.join("predecessor/authority")),
+            ..Default::default()
+        };
+        for (name, list) in [("genesis-receipt.json", &mut o.pending), ("successor-head.json", &mut o.heads)] {
+            if dir.join(name).exists() {
+                list.push(std::fs::read(dir.join(name)).unwrap());
+            }
+        }
+        return o;
+    }
+    let mut o = Objects { entries: files(dir.join("records/authority")), ..Default::default() };
+    let mut subs: Vec<_> = std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().path()).collect();
+    subs.sort();
+    for p in subs {
+        if p.file_name().unwrap().to_string_lossy().starts_with("branch-") {
+            o.entries.extend(files(p.join("authority")));
+        }
+    }
+    let mut held: Vec<_> = std::fs::read_dir(dir.join("objects")).map(|r| r.map(|e| e.unwrap().path()).collect()).unwrap_or_default();
+    held.sort();
+    for p in held {
+        let n = p.file_name().unwrap().to_string_lossy().to_string();
+        if n.starts_with("head") {
+            o.heads.push(std::fs::read(&p).unwrap());
+        } else if n != "call.json" {
+            o.pending.push(std::fs::read(&p).unwrap());
+        }
+    }
+    o
+}
+fn vectors_dir() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../conformance/0.5")
+}
+
+/// A home whose checkpoint holds each kind of history this build folds (ordinary, forked, held,
+/// failed, stopped, upgraded in place from `/4`, a successor, a suspended key's refused suspend),
+/// checkpointed at several clock readings: verified again when the home starts (`resume`), it is
+/// stored with the proof, and with it every record check and call is answered as without it, byte
+/// for byte, at clock readings behind, at and long after the checkpoint's.
+#[test]
+fn a_proved_fold_of_any_history_answers_as_the_replay() {
+    use colophon_core::v05::encoding::parse_date;
+    const DAY: i64 = 24 * HOUR;
+    let mut f = create_with(&[NS], "members", 1);
+    let writer = f.host.identity(41);
+    admit(&mut f, &writer, "Writer", "device", terms_for(&[(NS, "write")]), terms_for(&[(NS, "write")]));
+    let keys = HomeKeys::new(0x77);
+    appoint_homes(&mut f, &[(&keys, BASE_A)]);
+    let mut home = Home::new(keys, f.account.id().as_str());
+    let entries: Vec<Value> = entries_json(&f).into_iter().map(|(_, e)| e).collect();
+    assert_eq!(home.authority(1, &entries, NOW)["appointed"], true);
+    let src = MemSource::new();
+    src.store_account(&f.account);
+    let mut host = std::mem::replace(&mut f.host, Host::new());
+    let mut e = member_engine(&f, &host, &src, &writer, NOW);
+    let w = engine_write(&mut e, &mut host, &src, NS, "follow", json!({"id": "show", "url": "https://example.org/feed", "title": "Show"}));
+    f.host = host;
+    let (rest, bytes) = w.stores.into_iter().find(|(p, _)| p.starts_with("ops/")).unwrap();
+    let path = format!("/records/{rest}");
+    let get = call_as(&f.host, &f.account, "member", &writer, BASE_A, "colophon.home.read",
+                      home_call_args("GET", &path, &digest(b"")), NOW, [5; 32]);
+    let blob = vec![3u8; 16];
+    let records = [(rest.clone(), bytes.clone()), (format!("blobs/{}", digest(&blob)), blob)];
+
+    // History vectors of every kind, at the clock each case is judged at. (Every vector's record
+    // view is compared with the replay's in the core, `a_vouched_record_view_is_the_replays`.)
+    const PICKED: &[&str] = &[
+        "rules/f2-suspended-key-suspends", "rules/call-suspension-expired", "rules/t-resolve-second-fork",
+        "rules/t-activate-early", "rules/t-conflict-no-evidence", "rules/f3-layout-2", "rules/f3-layout-3",
+        "rules/f3-raise-provisional", "rules/f3-raise-vetoed", "upgrade/accept", "upgrade/then-v4-entry",
+        "succession/authority5-successor", "succession/authority5-successor-provisional",
+        "succession/swift-migration", "succession/swift-keyring",
+    ];
+    let mut cases: Vec<(String, std::path::PathBuf, i64)> = Vec::new();
+    for (top, default) in [("rules", "2026-11-20T00:00:00Z"), ("upgrade", "2026-12-01T00:00:00Z"), ("succession", "2026-11-14T10:15:00Z")] {
+        let mut dirs: Vec<_> = std::fs::read_dir(vectors_dir().join(top)).unwrap().map(|e| e.unwrap().path())
+            .filter(|d| d.join("case.json").exists() && (top != "rules" || d.join("records/authority").exists()))
+            .collect();
+        dirs.sort();
+        for d in dirs {
+            let case: Value = serde_json::from_slice(&std::fs::read(d.join("case.json")).unwrap()).unwrap();
+            let now = case["verifier"]["now"].as_str().or(case["expected"]["now"].as_str()).unwrap_or(default);
+            cases.push((format!("{top}/{}", d.file_name().unwrap().to_string_lossy()), d, parse_date(now).unwrap()));
+        }
+    }
+    cases.push(("account".into(), vectors_dir().join("account"), parse_date("2026-11-11T09:01:00Z").unwrap()));
+    cases.retain(|(name, _, _)| name == "account" || PICKED.contains(&name.as_str()));
+    assert_eq!(cases.len(), PICKED.len() + 1);
+    let mut kinds = std::collections::BTreeSet::new();
+    let mut proved = 0;
+    for (name, dir, now) in &cases {
+        let objects = vector_objects(dir);
+        let cold = verify_history(&objects, &Persisted::default(), *now);
+        kinds.insert(match &cold.stop {
+            _ if name.starts_with("succession") => "successor",
+            _ if name.starts_with("upgrade") && cold.state.as_ref().is_some_and(|s| s.upgrade_seq.is_some()) => "upgraded",
+            _ if name.contains("suspended-key") => "suspended-key",
+            None => "ok",
+            Some(colophon_core::v05::history::Stop::Held { .. }) => "held",
+            Some(colophon_core::v05::history::Stop::Fork { .. }) => "fork",
+            Some(_) if cold.stopped.is_some() => "stopped",
+            Some(_) => "failed",
+        });
+        for at in [*now - 60_000, *now + 7 * DAY] {
+            let cp = Persisted::checkpoint(&objects, &Persisted::default(), at).to_bytes().unwrap();
+            let injected = with_checkpoint(&home.state, &cp);
+            let started = call(json!({"op": "resume", "state": injected, "now": at}));
+            let state = started["state"].as_str().unwrap().to_string();
+            if started["changed"] == true {
+                assert_proved(&state);
+                proved += 1;
+            }
+            for now in [at - 1, at, at + 30 * DAY] {
+                for (p, bytes) in &records {
+                    let req = json!({"op": "check_record", "state": state, "now": now, "path": p, "bytes": b(bytes)});
+                    same_as_unproved(&req, &format!("{name} checkpointed at {at}, at {now}: {p}"));
+                }
+                let req = json!({"op": "access", "state": state, "now": now, "base": BASE_A, "method": "GET",
+                                 "section": "records", "rest": rest, "path": path, "bodySha256": digest(b""),
+                                 "call": b(&get), "existing": null, "replayRows": 65_536});
+                same_as_unproved(&req, &format!("{name} checkpointed at {at}, at {now}: GET"));
+                let req = json!({"op": "status", "state": state, "now": now});
+                same_as_unproved(&req, &format!("{name} checkpointed at {at}, at {now}: status"));
+            }
+        }
+    }
+    for k in ["ok", "held", "fork", "failed", "stopped", "upgraded", "successor", "suspended-key"] {
+        assert!(kinds.contains(k), "no {k} history: {kinds:?}");
+    }
+    assert_eq!(proved, cases.len() * 2, "every checkpoint this build folded is verified again");
+}
+
+/// A proof is taken only when it names this build's rules and exactly the checkpoint held. Here
+/// the checkpoint's fold has lost a member its held entries approve (as a fold under other rules,
+/// or an inconsistent copy, may): the replay takes the member's record, the fold would not. With
+/// the proof the state was written with (over the checkpoint before it changed), a proof naming
+/// other rules, a proof lost by a reader that does not know the field, a truncated or malformed
+/// one, the record is taken as the replay takes it, and starting the home does not prove the
+/// fold (the replay differs). Only a proof naming this build's rules and these exact bytes, which
+/// only this build writes, would take the fold: local state is trusted as a whole.
+#[test]
+fn a_proof_for_other_bytes_or_rules_is_not_taken() {
+    use colophon_core::v05::history::FOLD_RULES;
+    let mut f = create_with(&[NS], "members", 1);
+    let writer = f.host.identity(31);
+    admit(&mut f, &writer, "Writer", "device", terms_for(&[(NS, "write")]), terms_for(&[(NS, "write")]));
+    let keys = HomeKeys::new(0x77);
+    appoint_homes(&mut f, &[(&keys, BASE_A)]);
+    let mut home = Home::new(keys, f.account.id().as_str());
+    let entries: Vec<(u64, Value)> = entries_json(&f);
+    let values: Vec<Value> = entries.iter().map(|(_, e)| e.clone()).collect();
+    assert_eq!(home.authority(1, &values, NOW)["appointed"], true);
+    assert_proved(&home.state);
+    let src = MemSource::new();
+    src.store_account(&f.account);
+    let mut host = std::mem::replace(&mut f.host, Host::new());
+    let mut e = member_engine(&f, &host, &src, &writer, NOW);
+    let w = engine_write(&mut e, &mut host, &src, NS, "follow", json!({"id": "show", "url": "https://example.org/feed", "title": "Show"}));
+    f.host = host;
+    let (path, bytes) = w.stores.into_iter().find(|(p, _)| p.starts_with("ops/")).unwrap();
+    let now = NOW + 1_000;
+    let check = |state: &str| call_op(json!({"op": "check_record", "state": state, "now": now, "path": path, "bytes": b(&bytes)}));
+    assert_eq!(check(&home.state)["allowed"], true);
+    // The fold forgets the writer; its held entries, and so the replay, still approve it.
+    let mut cp: Value = serde_json::from_slice(&checkpoint_of(&home.state)).unwrap();
+    let fold = verify_history(&Objects::default(), &Persisted::from_bytes(&checkpoint_of(&home.state)).unwrap(), now).state.unwrap();
+    let at = fold.members().iter().position(|m| m.request.member_id() == writer).unwrap();
+    cp["state"]["members"].as_array_mut().unwrap().remove(at);
+    let doctored_cp = serde_json::to_vec(&cp).unwrap();
+    let doctored = with_checkpoint(&home.state, &doctored_cp);
+    let replayed = check_record_by_replay(&doctored, now, &path, &bytes);
+    assert_eq!(replayed["allowed"], true, "the replay takes the record: {replayed}");
+    let original = slot_of(&home.state)["fold"].clone();
+    let here = digest(&doctored_cp);
+    // A reader that does not know the field: it reads the state and writes it without it.
+    #[derive(serde::Serialize, serde::Deserialize)]
+    struct OlderSlot {
+        v: u32,
+        home: String,
+        account: String,
+        booting: Vec<String>,
+        #[serde(default)]
+        booting_predecessor: Vec<String>,
+        home_state: Option<String>,
+    }
+    let proved_here = with_fold(&doctored, json!({"rules": FOLD_RULES, "checkpoint": here}));
+    let older: OlderSlot = serde_json::from_slice(&STANDARD.decode(&proved_here).unwrap()).unwrap();
+    let round_tripped = b(&serde_json::to_vec(&older).unwrap());
+    assert!(slot_of(&round_tripped).get("fold").is_none(), "an older reader drops what it does not know");
+    for (what, state) in [
+        ("no proof", with_fold(&doctored, Value::Null)),
+        ("the proof of the checkpoint before", with_fold(&doctored, original.clone())),
+        ("other rules", with_fold(&doctored, json!({"rules": "colophon-0.5-fold/r0/0000000000000000", "checkpoint": here}))),
+        ("other rules, same name", with_fold(&doctored, json!({"rules": format!("{FOLD_RULES}x"), "checkpoint": here}))),
+        ("through an older reader", round_tripped.clone()),
+        ("a truncated digest", with_fold(&doctored, json!({"rules": FOLD_RULES, "checkpoint": &here[..63]}))),
+        ("an upper-case digest", with_fold(&doctored, json!({"rules": FOLD_RULES, "checkpoint": here.to_uppercase()}))),
+        ("no digest", with_fold(&doctored, json!({"rules": FOLD_RULES}))),
+        ("no rules", with_fold(&doctored, json!({"checkpoint": here}))),
+        ("a number", with_fold(&doctored, json!(7))),
+        ("a string", with_fold(&doctored, json!(format!("{FOLD_RULES} {here}")))),
+        ("a list", with_fold(&doctored, json!([FOLD_RULES, here]))),
+        ("rules of another type", with_fold(&doctored, json!({"rules": 1, "checkpoint": here}))),
+    ] {
+        assert_eq!(check(&state), replayed, "{what}");
+        let started = call(json!({"op": "resume", "state": state, "now": now}));
+        assert_eq!(started["changed"], false, "{what}: the replay differs, so nothing is proved");
+    }
+    // This build's own proof for these exact bytes is taken (the state is trusted as a whole):
+    // the fold answers, and refuses the writer. So the cases above were answered by the replay.
+    assert_eq!(check(&proved_here)["code"], "notGranted");
+}
+
+/// An older verifier with the same checkpoint format, under other rules, accepted the suspend that
+/// a suspended key signed (`f2-suspended-key-suspends`, seq 3); these rules refuse it
+/// (`badSignature`). A home holding that older fold, with no proof or a proof of other rules,
+/// answers as the replay does (here, an error for every record check), and starting it does not
+/// prove the fold.
+#[test]
+fn a_fold_under_other_rules_is_refused_as_the_replay_refuses_it() {
+    use colophon_core::v05::encoding::parse_date;
+    use colophon_core::v05::history::FOLD_RULES;
+    let mut f = create_with(&[NS], "members", 1);
+    let keys = HomeKeys::new(0x77);
+    appoint_homes(&mut f, &[(&keys, BASE_A)]);
+    let mut home = Home::new(keys, f.account.id().as_str());
+    let values: Vec<Value> = entries_json(&f).into_iter().map(|(_, e)| e).collect();
+    assert_eq!(home.authority(1, &values, NOW)["appointed"], true);
+    let objects = vector_objects(&vectors_dir().join("rules/f2-suspended-key-suspends"));
+    let now = parse_date("2026-11-20T00:00:00Z").unwrap();
+    let older = older_rules_fold(&objects, now);
+    let state = with_checkpoint(&home.state, &older);
+    let path = format!("ops/{}/{NS}/000000000001-{}.json", "a".repeat(32), "b".repeat(32));
+    let refused = check_record_by_replay(&state, now, &path, b"{}");
+    assert_eq!(refused["ok"], false, "the replay fails at seq 3: {refused}");
+    assert!(!refused["error"].as_str().unwrap().is_empty(), "{refused}");
+    for (what, state) in [
+        ("no proof", state.clone()),
+        ("other rules", with_fold(&state, json!({"rules": "colophon-0.5-fold/r0/0000000000000000", "checkpoint": digest(&older)}))),
+    ] {
+        for t in [now, now + HOUR] {
+            let got = call_op(json!({"op": "check_record", "state": state, "now": t, "path": path, "bytes": b(b"{}")}));
+            assert_eq!(got, check_record_by_replay(&state, t, &path, b"{}"), "{what}");
+            assert_eq!(got["ok"], false, "{what}: {got}");
+        }
+        assert_eq!(call(json!({"op": "resume", "state": state, "now": now}))["changed"], false, "{what}");
+    }
+    // Under this build's proof the older fold would be taken: the record check would reach the
+    // record. That is the answer the cases above did not give.
+    let forged = with_fold(&state, json!({"rules": FOLD_RULES, "checkpoint": digest(&older)}));
+    let taken = call_op(json!({"op": "check_record", "state": forged, "now": now, "path": path, "bytes": b(b"{}")}));
+    assert_eq!(taken["ok"], true, "{taken}");
+}
+
+/// The checkpoint an older verifier would write for `objects` if it accepted their third entry:
+/// this build's fold through seq 2, with seq 3 appended to the state as accepted. Bytes, as a
+/// home stores them.
+fn older_rules_fold(objects: &Objects, now: i64) -> Vec<u8> {
+    use colophon_core::v05::encoding::parse_date;
+    let two = Objects { entries: objects.entries[..2].to_vec(), ..objects.clone() };
+    let p = Persisted::checkpoint(&two, &Persisted::default(), now);
+    let mut cp: Value = serde_json::from_slice(&p.to_bytes().unwrap()).unwrap();
+    let third = &objects.entries[2];
+    let env: Value = serde_json::from_slice(third).unwrap();
+    let body = STANDARD.decode(env["body"].as_str().unwrap()).unwrap();
+    let issued = parse_date(serde_json::from_slice::<Value>(&body).unwrap()["issued"].as_str().unwrap()).unwrap();
+    let st = &mut cp["state"];
+    st["digests"].as_array_mut().unwrap().push(json!(digest(&body)));
+    st["issued"].as_array_mut().unwrap().push(json!(issued));
+    for k in ["keyring_at", "delay_at", "rule_at"] {
+        let a = st[k].as_array_mut().unwrap();
+        let last = a.last().unwrap().clone();
+        a.push(last);
+    }
+    cp["objects"]["entries"].as_array_mut().unwrap().push(serde_json::to_value(third).unwrap());
+    cp["high_water"] = json!([3, digest(&body)]);
+    let bytes = serde_json::to_vec(&cp).unwrap();
+    let back = Persisted::from_bytes(&bytes).unwrap();
+    assert_eq!(verify_history(&Objects::default(), &back, now).branch.len(), 3, "the older fold took seq 3");
+    bytes
+}
+
