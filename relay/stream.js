@@ -251,6 +251,7 @@ export class HomeStream {
   }
 
   drop(conn) {
+    conn.live = false; // a message already queued for it is not taken
     clearTimeout(conn.timer);
     this.conns.delete(conn);
     if (!this.conns.size) this.stopTimers();
@@ -268,7 +269,7 @@ export class HomeStream {
 
   /** Send one frame with the connection's next `n`. False when the frame was not sent; a
    * connection that cannot keep up is closed rather than sent less (no gap in `n`). */
-  send(conn, frame) {
+  send(conn, frame, text = frameText(frame)) {
     const { ws } = conn;
     if (!ws || ws.readyState !== ws.OPEN) return false;
     if (ws.bufferedAmount > this.o.bufferedBytes) {
@@ -277,14 +278,14 @@ export class HomeStream {
       return false;
     }
     conn.n += 1;
-    const { type, ...rest } = frame;
-    try { ws.send(JSON.stringify({ type, n: conn.n, ...rest })); } catch { ws.terminate(); return false; }
+    try { ws.send(text(conn.n)); } catch { ws.terminate(); return false; }
     return true;
   }
 
   /** A frame to every live connection, filtered by `want` (default all). */
   broadcast(frame, want = () => true) {
     const now = this.clock();
+    const text = frameText(frame); // serialised once, for every receiver
     for (const conn of [...this.conns]) {
       if (!conn.live) continue;
       // Past its grant (a clock that moved before the expiry timer fired): closed, not sent to.
@@ -293,7 +294,7 @@ export class HomeStream {
         this.close(conn, CLOSE.policy, 'Stream authorization ended');
         continue;
       }
-      if (want(conn)) this.send(conn, frame);
+      if (want(conn)) this.send(conn, frame, text);
     }
   }
 
@@ -336,7 +337,7 @@ export class HomeStream {
 
   receive(conn, data, isBinary) {
     conn.lastSeen = Date.now();
-    if (!conn.live) return;
+    if (!conn.live || !this.conns.has(conn)) return;
     const size = data.length ?? data.byteLength ?? 0;
     // Over the rate: dropped and counted, never queued. The sender hears of it at most once a
     // second, with its running total.
@@ -586,6 +587,33 @@ export function nestingOver(bytes, max) {
     else if (b === 0x7d || b === 0x5d) depth -= 1;
   }
   return false;
+}
+
+/**
+ * A frame's wire text as a function of the receiver's number `n`: exactly
+ * `JSON.stringify({ type, n, ...rest })`, with everything after `n` serialised once (on first
+ * use) however many receivers there are. A frame whose other keys could change that order (a key
+ * `type` or `n`, or an integer-like key, which an object puts first) is serialised whole for each.
+ */
+export function frameText(frame) {
+  const { type, ...rest } = frame;
+  const keys = Object.keys(rest);
+  const whole = (n) => JSON.stringify({ type, n, ...rest });
+  // The splice holds for the frames the stream makes: a string type, plain keys, no toJSON of
+  // the frame's own, and a finite receiver number. Anything else is serialised whole.
+  if (typeof type !== 'string' || typeof frame.toJSON === 'function'
+      || keys.some((k) => k === 'n' || k === 'type' || /^(0|[1-9][0-9]*)$/.test(k))) {
+    return whole;
+  }
+  let head; let tail;
+  return (n) => {
+    if (tail === undefined) {
+      head = `{"type":${JSON.stringify(type)},"n":`;
+      const body = JSON.stringify(rest);
+      tail = body === '{}' ? '}' : `,${body.slice(1)}`;
+    }
+    return Number.isFinite(n) ? `${head}${n}${tail}` : whole(n);
+  };
 }
 
 function minExpiry(a, b) {

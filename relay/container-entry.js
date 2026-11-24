@@ -21,7 +21,8 @@
 //   bun container-entry.js identity <key file>   print {"member": "<home ID>"} for a key (used at start)
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { closeSync, constants as fsc, fsyncSync, lchownSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, utimesSync, writeSync, chmodSync, existsSync } from 'node:fs';
+import { closeSync, constants as fsc, fstat, fstatSync, fsyncSync, futimes, lchownSync, linkSync, lstatSync, mkdirSync, openSync, promises as fsp, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeSync, chmodSync, existsSync } from 'node:fs';
+import { promisify } from 'node:util';
 import { hostname } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -119,11 +120,23 @@ export function relayConfig(s, { dataDir, keyFile, tokenSha256 }) {
   return config;
 }
 
+/** Write all of `data` (a string or bytes) to `fd`: a write may take fewer bytes than it is
+ * given, so the rest is written until none is left. */
+export function writeAllSync(fd, data, write = writeSync) {
+  const bytes = typeof data === 'string' ? Buffer.from(data) : data;
+  let done = 0;
+  while (done < bytes.length) {
+    const n = write(fd, bytes, done, bytes.length - done);
+    if (!(n > 0)) throw new Error('a write made no progress');
+    done += n;
+  }
+}
+
 /** Writes `bytes` to `file` (mode 0600) by a staged, fsynced file renamed into place. */
 function writeAtomic(file, bytes) {
   const staged = `${file}.${process.pid}.new`;
   const fd = openSync(staged, fsc.O_WRONLY | fsc.O_CREAT | fsc.O_TRUNC | fsc.O_NOFOLLOW, 0o600);
-  try { writeSync(fd, bytes); fsyncSync(fd); } finally { closeSync(fd); }
+  try { writeAllSync(fd, bytes); fsyncSync(fd); } finally { closeSync(fd); }
   renameSync(staged, file);
   syncDir(path.dirname(file));
 }
@@ -132,7 +145,7 @@ function writeAtomic(file, bytes) {
 function writeNew(file, bytes) {
   const staged = `${file}.${process.pid}.new`;
   const fd = openSync(staged, fsc.O_WRONLY | fsc.O_CREAT | fsc.O_EXCL | fsc.O_NOFOLLOW, 0o600);
-  try { writeSync(fd, bytes); fsyncSync(fd); } finally { closeSync(fd); }
+  try { writeAllSync(fd, bytes); fsyncSync(fd); } finally { closeSync(fd); }
   try { linkSync(staged, file); } finally { unlinkSync(staged); }
   syncDir(path.dirname(file));
 }
@@ -185,6 +198,7 @@ export function prepare(dataRoot, env) {
     return { configFile: userConfig, dataDir, generated: false, memberId, env: set, unset: [] };
   }
   const s = readSettings(env);
+  refuseLegacyDataDir(dataRoot);
   const secrets = path.join(dataRoot, 'secrets');
   const dataDir = path.join(dataRoot, 'records-dir');
   const run = path.join(dataRoot, 'run');
@@ -244,7 +258,7 @@ export function prepare(dataRoot, env) {
  * container (restarted after a hard stop): no other container has its host name. A live holder
  * beats every `beatMs`, so such a lock is stale after two missed beats rather than `staleMs`.
  */
-export function acquireContainerLock(dataRoot, { staleMs = 30_000, beatMs = 5_000, now = Date.now, onLost, host = hostname(), pid = process.pid } = {}) {
+export function acquireContainerLock(dataRoot, { staleMs = 30_000, beatMs = 5_000, now = Date.now, onLost, host = hostname(), pid = process.pid, schedule = later, io = LOCK_IO } = {}) {
   const file = path.join(dataRoot, '.container.lock');
   // Each lock file carries a random ID: a file system may give a new file a removed one's inode
   // number at once (Linux does), so the inode cannot say whose lock a file is.
@@ -252,9 +266,14 @@ export function acquireContainerLock(dataRoot, { staleMs = 30_000, beatMs = 5_00
   const owner = JSON.stringify({ host, pid, at: new Date(now()).toISOString(), id }) + '\n';
   const idOf = (f) => { try { return JSON.parse(readFileSync(f, 'utf8'))?.id ?? null; } catch { return null; } };
   const ownStaleMs = Math.min(staleMs, 2 * beatMs + 1_000);
+  // The holder keeps its lock file open: the heartbeat touches it through this descriptor, so it
+  // can only ever touch this holder's own file, and while it is open that file's inode is not
+  // reused, so a path that names another inode is another owner's lock.
+  let fd = null;
   const take = () => {
-    const fd = openSync(file, fsc.O_WRONLY | fsc.O_CREAT | fsc.O_EXCL | fsc.O_NOFOLLOW, 0o600);
-    try { writeSync(fd, owner); fsyncSync(fd); } finally { closeSync(fd); }
+    const opened = openSync(file, fsc.O_WRONLY | fsc.O_CREAT | fsc.O_EXCL | fsc.O_NOFOLLOW, 0o600);
+    try { writeAllSync(opened, owner); fsyncSync(opened); } catch (e) { closeSync(opened); throw e; }
+    fd = opened;
     return true;
   };
   let taken = false;
@@ -278,8 +297,11 @@ export function acquireContainerLock(dataRoot, { staleMs = 30_000, beatMs = 5_00
     // above, not one another starter made meanwhile; if not, put it back and refuse.
     const aside = `${file}.stale.${process.pid}`;
     try { renameSync(file, aside); } catch (e) { if (e.code === 'ENOENT') continue; throw e; }
-    // `held.id` is the stale lock's (undefined for one that was torn or written before IDs).
-    if (idOf(aside) !== (held.id ?? null)) {
+    // `held.id` is the stale lock's (undefined for one that was torn or written before IDs); a
+    // lock its holder touched since it was judged stale is not stale any more.
+    let movedAge = 0;
+    try { movedAge = now() - statSync(aside).mtimeMs; } catch { movedAge = 0; }
+    if (idOf(aside) !== (held.id ?? null) || movedAge < limit) {
       try { linkSync(aside, file); } catch { /* the new owner's lock is back or replaced */ }
       unlinkSync(aside);
       const err = new Error(`another container took this volume while this one was starting (${file})`);
@@ -289,31 +311,113 @@ export function acquireContainerLock(dataRoot, { staleMs = 30_000, beatMs = 5_00
     unlinkSync(aside);
   }
   if (!taken) throw new Error(`could not take ${file}`);
-  let lost = false;
-  const mine = () => idOf(file) === id;
-  const timer = setInterval(() => {
-    if (!mine()) { lost = true; clearInterval(timer); (onLost ?? (() => { console.error(`colophon-home: ${file} was taken by another container; stopping at once`); process.exit(70); }))(); return; }
+  let lost = false; let stopped = false; let cancel = null;
+  const same = (a, b) => a.ino === b.ino && a.dev === b.dev;
+  const mine = () => { try { return same(lstatSync(file), fstatSync(fd)); } catch { return false; } };
+  /** Whether the path still names this holder's file: false only for a verified other file (or
+   * none); an I/O error is thrown, a failed beat, not a lost lock. */
+  const owned = async () => {
+    const [at, own] = await Promise.all([io.lstat(file).catch((e) => { if (e.code === 'ENOENT') return null; throw e; }), io.fstat(fd)]);
+    return at !== null && same(at, own);
+  };
+  // The beats run off the event loop's thread (asynchronous file calls), one at a time: the next
+  // is scheduled only when this one has ended, so a slow disk delays beats and never stacks them.
+  const health = { lastBeatAt: now(), failures: 0, error: null };
+  const beat = async () => {
+    cancel = null;
     const t = new Date(now());
-    try { utimesSync(file, t, t); } catch (e) { console.error(`colophon-home: heartbeat failed: ${e.message}`); }
-  }, beatMs);
-  timer.unref?.();
+    try {
+      await io.futimes(fd, t, t); // this holder's own file, whatever the path names now
+      if (stopped) return;
+      if (!(await owned())) {
+        if (stopped) return;
+        lost = true;
+        (onLost ?? (() => { console.error(`colophon-home: ${file} was taken by another container; stopping at once`); process.exit(70); }))();
+        return;
+      }
+      Object.assign(health, { lastBeatAt: t.getTime(), failures: 0, error: null });
+    } catch (e) {
+      if (stopped) return;
+      health.failures += 1; health.error = e.message;
+      console.error(`colophon-home: heartbeat failed: ${e.message}`);
+    }
+    if (!stopped) cancel = schedule(beat, beatMs);
+  };
+  cancel = schedule(beat, beatMs);
   return {
     file,
+    /** `ok` while the last beat succeeded and it is no older than two beats and a second (what
+     * this container's own restart would take as stale); when it last did; failures since. */
+    health() {
+      const ageMs = now() - health.lastBeatAt;
+      return { ok: health.failures === 0 && ageMs <= ownStaleMs, ...health, ageMs };
+    },
     release() {
-      clearInterval(timer);
+      stopped = true;
+      cancel?.(); cancel = null;
       if (!lost && mine()) { try { unlinkSync(file); } catch { /* already gone */ } }
+      if (fd !== null) { try { closeSync(fd); } catch { /* closed */ } fd = null; }
     },
   };
 }
 
-/** Removes a relay lock left by a container that is gone (call only while holding the container lock). */
-export function clearDeadRelayLock(dataDir) {
-  const removed = [];
+/** The lock's asynchronous file calls (a test replaces them). */
+const LOCK_IO = { futimes: promisify(futimes), fstat: promisify(fstat), lstat: (f) => fsp.lstat(f) };
+
+/** `fn` after `ms`, on a timer that does not keep the process alive; returns its cancel. */
+function later(fn, ms) {
+  const timer = setTimeout(fn, ms);
+  timer.unref?.();
+  return () => clearTimeout(timer);
+}
+
+/**
+ * Generated mode keeps the relay's data under `records-dir/`. A relay data directory mounted at
+ * the volume's root instead (an existing home's slots, its provisioning table, or its lock) is
+ * refused, never started beside as a new, empty home with a new key.
+ */
+function refuseLegacyDataDir(dataRoot) {
+  const ours = new Set(['secrets', 'records-dir', 'run', 'config.json', '.container.lock', 'lost+found']);
+  const found = [];
+  for (const entry of readdirSync(dataRoot, { withFileTypes: true })) {
+    const name = entry.name;
+    if (ours.has(name) || name.startsWith('.container.lock.')) continue;
+    if (['provisioned.json', 'provision-replay', '.relay.lock', '.relay.lock.reclaim'].includes(name)) found.push(name);
+    else if (entry.isDirectory() && ['meta.json', 'home-state.json', 'log.jsonl'].some((f) => existsSync(path.join(dataRoot, name, f)))) found.push(`${name}/`);
+  }
+  if (found.length) {
+    throw new SettingError(`${dataRoot} already holds a relay data directory (${found.slice(0, 5).join(', ')}): this image keeps its own under ${path.join(dataRoot, 'records-dir')} and would start a new, empty home with a new key beside it. To move an existing home in, stop the relay that serves it first, then add ${path.join(dataRoot, 'config.json')} naming its dataDir and its home key (docs/self-hosting/docker.md, "Moving an existing home into the container").`);
+  }
+}
+
+/**
+ * The relay locks (`.relay.lock`, `.relay.lock.reclaim`) in `dataDir`, removed only when they can
+ * only be this container's own from an earlier run: in the container's data root, and naming
+ * this process's ID (the relay runs in this process, so an earlier run of this container wrote
+ * that ID; a relay outside the container, whose process cannot be seen from here, did not). Any
+ * other relay lock is left in place and the start refused: the relay that wrote it may be
+ * running. Call only while holding the container lock.
+ */
+export function clearDeadRelayLock(dataDir, { dataRoot, pid = process.pid } = {}) {
+  const inside = dataRoot !== undefined && !path.relative(path.resolve(dataRoot), path.resolve(dataDir)).startsWith('..');
+  const removable = [];
   for (const name of ['.relay.lock', '.relay.lock.reclaim']) {
     const f = path.join(dataDir, name);
-    try { unlinkSync(f); removed.push(name); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+    let text;
+    try { text = readFileSync(f, 'utf8'); } catch (e) { if (e.code === 'ENOENT') continue; throw e; }
+    let owner = null;
+    try { owner = JSON.parse(text); } catch { owner = null; }
+    if (!inside || !Number.isSafeInteger(owner?.pid) || owner.pid !== pid) {
+      const err = new Error(`${f} may belong to another relay serving this data directory (${owner && Number.isSafeInteger(owner.pid) ? `process ${owner.pid}` : 'no readable owner'}), which this container cannot see. A relay never shares its data directory: stop the other relay (it removes its lock), or, if you are sure none is running, remove ${f} yourself; then start again.`);
+      err.code = 'ELOCKED';
+      throw err;
+    }
+    removable.push(name);
   }
-  return removed;
+  for (const name of removable) {
+    try { unlinkSync(path.join(dataDir, name)); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+  }
+  return removable;
 }
 
 /** The user the image runs the home as (distroless "nonroot"). */
@@ -361,14 +465,24 @@ async function main() {
     privateDir(dataRoot);
     lock = acquireContainerLock(dataRoot);
     process.on('exit', () => lock.release());
+    // /healthz answers 503 while the lock's heartbeat fails: another container could take the
+    // volume over once the lock looks stale.
+    const { addHealthCheck } = await import('./health.js');
+    addHealthCheck('container lock', () => lock.health());
     prepared = prepare(dataRoot, process.env);
   } catch (error) {
     console.error(`colophon-home: ${error.message}`);
     lock?.release();
     process.exit(error instanceof SettingError || error.code === 'ELOCKED' ? 2 : 1);
   }
-  const removed = clearDeadRelayLock(prepared.dataDir);
-  if (removed.length) console.error(`colophon-home: removed ${removed.join(', ')} left by a container that is gone`);
+  let removed;
+  try { removed = clearDeadRelayLock(prepared.dataDir, { dataRoot }); }
+  catch (error) {
+    console.error(`colophon-home: ${error.message}`);
+    lock.release();
+    process.exit(error.code === 'ELOCKED' ? 2 : 1);
+  }
+  if (removed.length) console.error(`colophon-home: removed ${removed.join(', ')} left by an earlier run of this container`);
   const s = prepared.settings;
   const info = { colophonHome: { config: prepared.generated ? 'generated' : prepared.configFile, member: prepared.memberId ?? null,
     ...(s ? { base: s.prefix + '<slot>', provisioning: s.provisioning ? s.gates : false } : {}) } };

@@ -53,6 +53,8 @@ curl http://127.0.0.1:8080/healthz          # {"ok":true}
 | `COLOPHON_PROVISION_UNCLAIMED_HOURS` | `24` | `provision.unclaimedHours` |
 | `COLOPHON_SLOT_BYTES` | `0` (no quota) | `limits.slotBytes`: the most bytes one slot may hold |
 | `COLOPHON_CORS_ORIGINS` | none | A comma-separated list of exact `scheme://host[:port]` origins |
+| `COLOPHON_METRICS_TOKEN_SHA256` | none (off) | The SHA-256 of a token (`bun relay/server.js token`) that may read `GET /metrics` (see "Metrics"). |
+| `COLOPHON_MODULE_MEMORY_MB` | `128` | The home module's memory, in MiB, past which its instance is replaced after a request (see "Memory"). At least 16. |
 | `COLOPHON_CLIENT_IP_HEADER`, `COLOPHON_TRUSTED_PROXIES` | none | Set both or neither. The header holding the client's address (for example `X-Real-IP` or `CF-Connecting-IP`), and the peers it is read from: IP addresses or CIDR ranges, comma-separated. A `/0` range is refused. |
 
 Those are read again at every start, and the relay config is rewritten from them. The relay's
@@ -65,6 +67,44 @@ removed before the relay starts.
 Relative paths in it are resolved against `/data`. `host`, `port` and `home.wasm` default to
 `0.0.0.0`, `PORT` and the image's module if the file leaves them out. Use this for settings the
 variables do not cover, such as `resolve` or `limits.requestsPerMinute`.
+
+## Memory
+
+The home's rules run in one WebAssembly instance of the home module, and a WebAssembly memory
+never shrinks: after a large request (a big history upload, a large batch) the instance keeps
+the memory it grew to. Once its memory is past `COLOPHON_MODULE_MEMORY_MB` (128 MiB by default)
+after a request, the instance is dropped and the next request makes a new one, which costs a
+few milliseconds. The bound does not limit a single request, which may use more while it runs.
+
+Give the container a memory limit, so the host stays responsive if something grows: 1 GiB is
+enough for a home serving a handful of accounts (`docker run --memory 1g`, or `mem_limit: 1g` in
+Compose). The module's 128 MiB, the relay's own heap, request bodies (up to 16 MiB each), and the
+memory of a replaced instance until it is collected all fit in it. On a machine with more
+memory, raise both together; on a smaller one, lower the bound (64 MiB) before the limit.
+
+## Metrics
+
+`GET /metrics` is off unless `COLOPHON_METRICS_TOKEN_SHA256` (or `metrics.tokenSha256` in your
+own config) is set. Then it answers the bearer token with that SHA-256, and 401 to anyone else,
+with a few counters kept in memory. It names no slot or account:
+
+```sh
+curl -H "Authorization: Bearer $METRICS_TOKEN" http://127.0.0.1:8080/metrics
+```
+
+| Field | Meaning |
+| --- | --- |
+| `uptimeSeconds` | Since the relay started |
+| `rssBytes` | The process's resident memory |
+| `moduleMemoryBytes`, `moduleResets` | The home module's memory now, and how often its instance was replaced (see "Memory") |
+| `requestsInFlight` | Requests being handled, other than this one |
+| `eventLoopLagMs` | How late the last once-a-second timer ran: the event loop's recent delay |
+| `slots`, `stoppedSlots` | Slots this relay holds, and homes whose last scheduler pass found them stopped (they need an update) |
+| `containerLockAgeSeconds` | Since the container lock's last successful update (see "One container per volume"); `null` outside the container |
+
+Use a token of its own, not the provisioning token: it lets its holder read these numbers
+only. Alert on `stoppedSlots` above 0, `containerLockAgeSeconds` above 15, and `rssBytes` near
+the container's memory limit.
 
 ## What the volume holds
 
@@ -112,8 +152,34 @@ is meant for one operator's own tools. Do not ship it in an app; see the relay R
 
 ## Back up, restore, update
 
-The home is consistent on disk only while no relay is writing to it. To back it up, stop the
-container, archive the volume, then start it again:
+**Copying files out of a running home is not a backup.** A change touches several files in
+turn (the slot's `home-state.json`, then its records and `log.jsonl`; `replay.log` before a
+write), and a copy made file by file takes each at a different moment. Restored, such a copy
+can make every client list the slot again from the start, forget calls the home already took
+(so they could be presented again), or hold a record its state does not match, which stops the
+slot from opening. `tar`, `rsync` or `docker cp` against a running container all copy this way.
+
+Two kinds of copy are consistent:
+
+- **A copy of a stopped home.** `docker stop` lets the relay finish what is in flight and
+  release its locks; a copy made then is exact.
+- **An atomic snapshot of the whole volume**, taken in one instant while it runs (a ZFS or Btrfs
+  snapshot, an LVM snapshot, a cloud disk snapshot). Restored, it is what a power cut at that
+  instant would have left, and the home recovers from that at start-up as it does from any
+  crash. Every file must be in the one snapshot: separate snapshots of parts of the volume are
+  not consistent.
+
+A snapshot of a running home holds its locks: `/data/.container.lock` and
+`/data/records-dir/.relay.lock` (and `.relay.lock.reclaim`, if present). The container takes
+over a stale container lock on its own after 30 seconds (11 for the same container) and removes
+a relay lock its own relay left; delete these files from the restored copy, before anything
+runs on it, to start at once, and always before running the relay outside the container on it,
+where an old relay lock can name a process ID that is now another process.
+
+A restored home is the home as it was when the copy was made: what it took, signed or stored
+since is not in it.
+
+To back it up by stopping it, stop the container, archive the volume, then start it again:
 
 ```sh
 docker stop colophon-home
@@ -137,6 +203,22 @@ the container again with the same volume). The volume holds all state, so the co
 replaced at any time. Read the release notes before moving between minor versions: a home's
 state belongs to the format its module writes.
 
+## Moving an existing home into the container
+
+Moving a home that already runs (with `bun relay/server.js`, or in another container) into this
+image is an offline handover: stop the old relay first, and start the container only once it
+has exited. Two relays must never serve one data directory, and this container cannot see a
+relay running outside it.
+
+- Keep the home's key: it is the home's identity. Put it on the volume (for example
+  `/data/secrets/home-key.jwk`, mode 0600, owned by UID 65532).
+- Put the old data directory on the volume (for example `/data/relay-data/`) and add
+  `/data/config.json` with your relay settings, `"dataDir": "./relay-data"` and
+  `"home": {"keyFile": "./secrets/home-key.jwk"}`. The container then uses that config as-is.
+- Without a `config.json`, the container generates its own layout under `/data/records-dir/`.
+  If it finds a relay data directory at `/data` itself (slots, `provisioned.json`, a relay
+  lock), it refuses to start rather than create a new, empty home with a new key beside it.
+
 ## One container per volume
 
 A relay must never share its data directory. The relay's own lock (`records-dir/.relay.lock`)
@@ -148,13 +230,25 @@ and refuse to start, every time. The entry point therefore keeps a lock of its o
 - A second container started on the same volume exits at once (status 2), saying another
   container holds it.
 - After a clean stop (SIGTERM, as `docker stop` sends) the lock is released, and the next start
-  is immediate. `docker stop` took about 0.4 s in testing.
+  is immediate. `docker stop` took about 0.4 s in testing. On SIGTERM the relay stops taking
+  requests (503 with `Retry-After: 1`, long polls included), cuts its calls to other homes
+  short, and waits up to 8 seconds for what is in flight: requests, forwarding passes and
+  their saved state, and the slot's queued writes. Give the container at least 10 seconds to
+  stop (Docker's default; the Compose file gives 15).
 - After an unclean stop, a start is refused until the lock is stale. Then the lock is taken
-  over, and the dead container's relay lock is removed. The same container restarted (same host
+  over, and the relay lock the dead container's relay left (one naming the relay's process ID
+  in the container) is removed. A relay lock written by any other process, such as a relay
+  running outside the container on the same data directory, is never removed: the start is
+  refused (status 2) until that relay is stopped or its lock removed by hand. The same container restarted (same host
   name) waits for two missed updates, 11 seconds; a different container waits 30 seconds. With
   `restart: unless-stopped`, Docker keeps retrying, so the home comes back on its own.
 - If a running container finds its lock taken (for example, it was paused for more than 30
   seconds and another container started meanwhile), it exits at once.
+- While updating the lock fails (a full or read-only volume), or an update has not completed
+  for more than 11 seconds (a stalled disk), the container keeps serving and logs each failure,
+  and `GET /healthz` answers 503 `{"ok":false,"failing":["container lock"]}`
+  instead of `{"ok":true}`, so Docker marks it unhealthy. The image's health check runs once a
+  minute.
 
 This lock works only for containers on one machine that see the same file system clock. Do not
 put the volume on network storage that two hosts mount.
