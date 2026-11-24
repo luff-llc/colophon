@@ -20,22 +20,10 @@
  */
 import { isAccountFault, glue, plain } from '../session/wasm.js';
 import type { HostAccount } from './account.js';
+import type { ClaimStore, StoredClaim } from './claim-store.js';
 import { Deadline, systemClock, type HostClock } from './clock.js';
 import { frameBytes, frameText } from './frames.js';
 import type { StreamCell } from './stream-host.js';
-
-/**
- * Where a cell's persisted claim lives. `save` resolves only once the bytes are durable.
- *
- * The host saves one claim at a time, and saves the same claim again after a failed or overdue attempt. A save it gave
- * up on (rejected, or not settled within `persistTimeoutMs`) may still complete later: a store must let the last save
- * it was called with win (apply saves in call order, or drop one that a later call superseded). Saving the same claim
- * twice must be harmless.
- */
-export interface ClaimStore {
-  load(): Promise<string | undefined>;
-  save(persistedJson: string): Promise<void>;
-}
 
 /** What carries a cell's frames: a `HomeStreamHost`, or anything with the same three calls. */
 export interface CellCarrier {
@@ -60,7 +48,8 @@ export interface SessionEffectValue {
 /** Why an endpoint was made again. */
 export type RebuildReason = 'clockBackwards' | 'wrongView' | 'sessionChanged';
 /** Why a cell host stopped acting. */
-export type FailReason = 'store' | 'rebuild';
+/** `store`: its writes kept failing; `superseded`: the store holds a newer save (another instance owns the cell). */
+export type FailReason = 'store' | 'rebuild' | 'superseded';
 
 /** What the host reports. Session events carry application state: show them, never log them. */
 export type CellHostEvent =
@@ -160,6 +149,11 @@ export class SessionCellHost implements StreamCell {
   private lastStored: string | undefined;
   /** Settles when the write in progress has ended (stored, or given up); set before any store code runs. */
   private writing: Promise<void> | undefined;
+  /** This instance's fencing generation (above what the store held when it opened or rebuilt) and its save count. */
+  private generation = 1;
+  private seq = 0;
+  /** Cancels every retry and deadline timer that is waiting (on close and on failure). */
+  private readonly waits = new Set<() => void>();
   /** Commands admitted and not yet settled (bounded by `maxCommands`). */
   private readonly admitted = new Set<HeldCommand>();
   /** Commands that wait, in admission order: one the endpoint refused with `persistPending`, and every later one. */
@@ -204,7 +198,11 @@ export class SessionCellHost implements StreamCell {
     const host = new SessionCellHost(options);
     if (listener) host.on(listener);
     try {
-      host.lastStored = await host.store.load();
+      const held = await host.store.load();
+      host.lastStored = held?.claim ?? undefined;
+      host.generation = (held?.fence.generation ?? 0) + 1;
+      // Reserve this instance's generation before any claim is saved under it (see claim-store.ts).
+      await host.reserve(held?.claim ?? null);
       await host.build();
       if (host.phase !== 'opening') throw new CellHostError('closed', 'the cell host was closed while it opened');
       host.phase = 'open';
@@ -320,6 +318,7 @@ export class SessionCellHost implements StreamCell {
     if (this.phase === 'closed' || this.phase === 'failed') return;
     this.phase = phase;
     this.tickTimer.clear(); this.renewTimer.clear();
+    for (const stop of [...this.waits]) stop();
     this.stopPassListener?.(); this.stopPassListener = undefined;
     if (this.attached) { this.attached = false; try { this.carrier.detach(this); } catch { /* the carrier is gone */ } }
     this.held.length = 0;
@@ -409,7 +408,12 @@ export class SessionCellHost implements StreamCell {
     this.armTick(step.nextDeadline);
   }
 
-  /** The durable write of one `Persist`; only its completion, as a later job, acknowledges it. */
+  /**
+   * The durable write of one `Persist`; only its completion, as a later job, acknowledges it. One save is in flight
+   * at a time: an attempt that passes its deadline counts as failed, and the next one starts only once it has settled
+   * (a save that never settles uses up the attempts and fails the cell without another save being issued). A save that
+   * succeeds only after its deadline is not acknowledged: the claim is saved again under the next fence.
+   */
   private write(json: string, ack: bigint): void {
     const endpoint = this.endpoint;
     let ended: () => void = () => {};
@@ -418,16 +422,40 @@ export class SessionCellHost implements StreamCell {
     this.emit({ type: 'persist', phase: 'started', ack });
     void (async () => {
       try {
-        for (let failures = 0; ;) {
-          const outcome = await this.attempt(json);
-          if (outcome.ok) break;
-          const error = outcome.error;
+        let failures = 0;
+        const failed = (error: unknown): boolean => {
           failures++;
           this.emit({ type: 'persist', phase: 'failed', ack, error });
-          if (failures >= this.persistAttempts) { this.enqueue(() => { this.writing = undefined; this.fail('store', error); }); return; }
+          if (failures < this.persistAttempts) return false;
+          this.enqueue(() => { this.writing = undefined; this.fail('store', error); });
+          return true;
+        };
+        for (;;) {
           if (this.over) return;
-          await new Promise<void>(resolve => this.clock.setTimer(resolve, this.persistRetryMs));
-          if (this.over) return;
+          const save = this.save({ claim: json, fence: { generation: this.generation, seq: ++this.seq } });
+          let late = false;
+          let result: { status: 'stored' | 'stale' } | { error: unknown };
+          for (;;) {
+            const deadline = this.timer(this.persistTimeoutMs);
+            const r = await Promise.race([save, deadline.done]);
+            deadline.cancel();
+            if (r === 'cancelled') return;
+            if (r === 'fired') {
+              late = true;
+              if (failed(new CellHostError('timeout', `the store did not finish a write within ${this.persistTimeoutMs} ms`))) return;
+              continue;
+            }
+            result = r;
+            break;
+          }
+          if ('error' in result) {
+            if (failed(result.error)) return;
+            if (await this.timer(this.persistRetryMs).done === 'cancelled') return;
+            continue;
+          }
+          if (result.status === 'stale') { this.enqueue(() => { this.writing = undefined; this.fail('superseded'); }); return; }
+          if (late) continue;
+          break;
         }
         // Stored: a restart starts from it, whatever happens to this endpoint.
         this.lastStored = json;
@@ -444,6 +472,32 @@ export class SessionCellHost implements StreamCell {
       }
     })();
   }
+  /** Saves `claim` under `{generation, 0}`: this instance's fence is in the store before it saves anything else. */
+  private async reserve(claim: string | null): Promise<void> {
+    const deadline = this.timer(this.persistTimeoutMs);
+    const r = await Promise.race([this.save({ claim, fence: { generation: this.generation, seq: 0 } }), deadline.done]);
+    deadline.cancel();
+    if (r === 'fired' || r === 'cancelled') throw new CellHostError('timeout', 'the store did not reserve this host\'s fence in time');
+    if ('error' in r) throw r.error;
+    if (r.status === 'stale') throw new CellHostError('failed', 'another instance of this cell holds a newer fence (superseded)');
+  }
+  /** One save; never rejects. */
+  private save(record: StoredClaim): Promise<{ status: 'stored' | 'stale' } | { error: unknown }> {
+    return Promise.resolve().then(() => this.store.save(record)).then(status => ({ status }), (error: unknown) => ({ error }));
+  }
+  /** A timer that close and failure cancel. */
+  private timer(ms: number): { done: Promise<'fired' | 'cancelled'>; cancel(): void } {
+    let cancel: () => void = () => {};
+    const done = new Promise<'fired' | 'cancelled'>(resolve => {
+      if (this.over) { resolve('cancelled'); return; }
+      let stopTimer: () => void = () => {};
+      const stop = (): void => { stopTimer(); this.waits.delete(stop); resolve('cancelled'); };
+      stopTimer = this.clock.setTimer(() => { this.waits.delete(stop); resolve('fired'); }, ms);
+      this.waits.add(stop);
+      cancel = () => { stopTimer(); this.waits.delete(stop); };
+    });
+    return { done, cancel };
+  }
 
   /** A command at its place in the input queue: run now, or held behind an earlier held command. */
   private admit(c: HeldCommand): void {
@@ -451,25 +505,6 @@ export class SessionCellHost implements StreamCell {
     this.held.push(c);
     if (this.held.length === 1) this.drainCommands();
   }
-  /**
-   * One save, bounded by `persistTimeoutMs`. An overdue save counts as failed; if it completes later, nothing is
-   * acknowledged for it (the next attempt saves the same claim).
-   */
-  private attempt(json: string): Promise<{ ok: true } | { ok: false; error: unknown }> {
-    return new Promise(resolve => {
-      let settled = false;
-      const cancel = this.clock.setTimer(() => {
-        if (settled) return;
-        settled = true;
-        resolve({ ok: false, error: new CellHostError('timeout', `the store did not finish a write within ${this.persistTimeoutMs} ms`) });
-      }, this.persistTimeoutMs);
-      Promise.resolve().then(() => this.store.save(json)).then(
-        () => { if (settled) return; settled = true; cancel(); resolve({ ok: true }); },
-        error => { if (settled) return; settled = true; cancel(); resolve({ ok: false, error }); },
-      );
-    });
-  }
-
   /** Runs held commands in order; one refused with `session:persistPending` waits for the write to complete. */
   private drainCommands(): void {
     while (this.held.length > 0 && this.phase === 'open' && this.endpoint) {
@@ -583,6 +618,8 @@ export class SessionCellHost implements StreamCell {
     this.tickTimer.clear(); this.renewTimer.clear();
     const old = this.endpoint; this.endpoint = undefined;
     try { old?.free(); } catch { /* freed */ }
+    // The new endpoint saves under a new generation, above every save this instance has issued.
+    this.generation++; this.seq = 0;
     const writing = this.writing;
     void (async () => {
       try {
