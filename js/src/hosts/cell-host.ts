@@ -529,31 +529,33 @@ export class SessionCellHost implements StreamCell {
   /**
    * Checks, every beat, that the store still holds this instance's fence, by reading the fence alone. It is never
    * skipped: while a write is in flight the held fence may be that write's (one of this instance's own fences, which
-   * counts as its own). Another instance's fence fails the cell as `superseded` within one beat. Each read has a
-   * deadline of one beat; after `watchMisses` consecutive reads that failed or were overdue the cell fails closed
-   * (`store`): a host that cannot tell whether it still holds the cell stops acting.
+   * counts as its own). Another instance's fence fails the cell as `superseded` within one beat. One read starts each
+   * beat and must answer within it; after `watchMisses` consecutive beats whose read failed or did not answer, the cell
+   * fails closed (`store`): a host that cannot tell whether it still holds the cell stops acting.
    */
   private watch(): void {
     void (async () => {
       let misses = 0;
+      if (await this.timer(this.watchMs).done === 'cancelled') return;
+      // One read per beat: each read must answer within its beat, and the next starts when that beat ends.
       while (!this.over) {
-        if (await this.timer(this.watchMs).done === 'cancelled') return;
-        const deadline = this.timer(this.watchMs);
+        const beat = this.timer(this.watchMs);
         const read = Promise.resolve().then(() => this.store.fence()).then(f => ({ f }), (error: unknown) => ({ error }));
-        const r = await Promise.race([read, deadline.done]);
-        deadline.cancel();
-        if (r === 'cancelled' || this.over) return;
-        if (r === 'fired' || 'error' in r) {
+        const r = await Promise.race([read, beat.done]);
+        if (r === 'cancelled' || this.over) { beat.cancel(); return; }
+        if (r !== 'fired' && !('error' in r)) {
+          misses = 0;
+          if (!this.mine(r.f)) { beat.cancel(); this.enqueue(() => this.fail('superseded')); return; }
+        } else {
           misses++;
           if (misses >= this.watchMisses) {
+            beat.cancel();
             const error = r === 'fired' ? new CellHostError('timeout', 'the store did not answer a fence check in time') : r.error;
             this.enqueue(() => this.fail('store', error));
             return;
           }
-          continue;
         }
-        misses = 0;
-        if (!this.mine(r.f)) { this.enqueue(() => this.fail('superseded')); return; }
+        if (r !== 'fired' && await beat.done === 'cancelled') return;
       }
     })();
   }

@@ -17,7 +17,7 @@ own, and it never reads, rewrites or logs a ticket, an unredacted URL or a frame
 | `HostAccount` | What the hosts need from the account: `account`, `member`, `engine()` (read again for every call), `streamCall(home)` (the `colophon.home.stream` call, signed and judged by the core), `exchange()` (one ordinary pass), `signRaw(body)` (the member key's `r‖s` over a delegation body). `accountOf(session)` makes one from a restored `ColophonSession`; its `exchange` is the session's own `syncNow`, so passes never overlap the app's poll loop. |
 | `HomeStreamHost` | One per home. `start`, `stop`, `status`, `polling`, `cursor`, `live`, `retryNow` (foreground entry, a network change, a user action; never a timer), `historyChanged` (the app's own poll moved the history), `attach(cell)` / `detach(cell)`, `sendSession(frame)`, `on(listener)`, `onPass(listener)`. Options: the account, the home's member ID, the ticket `transport` (default `FetchHomeTransport`), the `socket` factory (default the runtime's `WebSocket`), the `clock`, `configure` (adjusts `stream_default_config()`), a saved `cursor` and `saveCursor`. |
 | `SessionCellHost` | One member of one cell: `SessionCellHost.open(options, listener)` loads the stored claim, makes the endpoint, has the member key sign its delegation, attaches to the carrier and joins. `command(name, json)` (resolves once the endpoint ran it), `deliver`, `linkUp`, `linkDown`, `accountChanged`, `leave`, `close`, `current` (the endpoint, for its read-only calls), `stats`. Options: account, carrier, namespace, cell, `store` (a fenced `ClaimStore`, §3), `policy`, `clock`, `state` (the application's state for `join`), `delegationMs`, `persistRetryMs`, `persistTimeoutMs`, `persistAttempts`, `maxCommands`, `random`. |
-| `ClaimStore`, `MemoryClaimStore`, `privateClaimStore(store, name)`, `FileClaimStore` | The claim store contract (a linearizable compare-and-set and a cheap `fence()` read, §3) and the stores that provide it: in memory; in one record of an `AtomicPrivateStore` (`IndexedDBPrivateStore`, `MemoryPrivateStore`, which gain `update`, an atomic read-decide-write); and, from `@colophon/core/hosts/node`, in a directory by hard links. |
+| `ClaimStore`, `MemoryClaimStore`, `privateClaimStore(store, name)` | The claim store contract (a linearizable compare-and-set and a cheap `fence()` read, §3) and the two stores that provide it: `MemoryClaimStore`, and `privateClaimStore` over an `AtomicPrivateStore` (`IndexedDBPrivateStore`, `MemoryPrivateStore`, which gain `update`, an atomic read-decide-write). There is no file-backed claim store yet: `privateClaimStore` refuses a store without `update`, such as `FilePrivateStore`, and a Node or Bun host supplies its own `ClaimStore` (§3a). |
 | `CellSession` | The small typed API over a cell host: `CellSession.join(options)`; `state` (`joined`, `holder`, `isHolder`, `gated`, `claim`, `state`, `seq`, `entitled`, `canWrite`) and `subscribe`; `events` (the core's events with bytes decoded); `take`, `ask`, `pass`, `decline`, `release`, `publish`, `submit`, `presence`, `ping`, `leave`, `close`. |
 | `sessionFrameText(message)` | The exact text of a `session` message's `frame` value, or none (no `frame`, `frame` twice, or not one JSON object). |
 | `webSocketFactory(class?)` | The standard `WebSocket` behind `SocketFactory` (see §5 for what a browser cannot report). |
@@ -83,23 +83,11 @@ jobs, so nothing a listener, store, socket or timer does can re-enter the endpoi
   new one is greater, else it is `stale` and writes nothing. A store that reads, compares and writes
   as separate steps is incorrect: two clients could both read fence F and both write, and two hosts
   would each believe they hold the cell. The shipped stores make it one step: `MemoryClaimStore`
-  synchronously; `privateClaimStore` through `AtomicPrivateStore.update`, which
-  `IndexedDBPrivateStore` runs as one `readwrite` transaction (get, compare, put); and
-  `FileClaimStore`, which uses no lock at all. Each claim is its own file named by its fence
-  (zero-padded, so names sort as fences do), written to a temporary file and committed with a hard
-  link, which fails with EEXIST if that fence's file exists; no claim file is ever replaced. A save
-  from E to N lists the directory (the highest fence must be E), links N, and lists again: it is
-  stored only if N is then the highest and no fence lies between E and N, and otherwise removes its
-  file and is `stale`. Of two savers from one E at most one succeeds, in every interleaving: each
-  lists after its own link, so the one that lists later sees the other's file (unless its owner had
-  already decided to fail and removed it), which is either higher than its own or between E and its
-  own; equal fences cannot both link. Both can fail, which only means both try again (an open that
-  loses fails). A crash leaves the old state or one complete new file: before the link only an
-  ignored temporary file exists (removed after an hour), and a linked file was written and synced
-  before it got its name. A read takes the highest fence file; a highest file that does not parse,
-  or whose content names another fence, is an error rather than being skipped (which would lower
-  the held fence). A directory that cannot hard-link cannot hold a `FileClaimStore`: it is refused
-  when the store is made. `FilePrivateStore` has no `update`, so it cannot back a claim store.
+  synchronously, and `privateClaimStore` through `AtomicPrivateStore.update`, which
+  `IndexedDBPrivateStore` runs as one `readwrite` transaction (get, compare, put).
+  `privateClaimStore` refuses a private store without `update` (the file-backed `FilePrivateStore`)
+  with an error saying that file-backed claim persistence is not available yet and that a
+  `ClaimStore` must be supplied; nothing falls back to separate steps.
 - **Unfenced claims.** 0.6 has not been released, so no claim was ever stored without a fence and
   there is nothing to migrate: a stored record without a valid fence is refused.
 - A host **opens and rebuilds by reserving** the next generation: a compare-and-set of the claim it
@@ -115,11 +103,12 @@ jobs, so nothing a listener, store, socket or timer does can re-enter the endpoi
   the held fence alone (`ClaimStore.fence()`: a directory listing, or one small record). The check
   is never skipped: while a write is in flight the held fence may already be that write's, which is
   one of the host's own fences (its current generation, at most its latest seq) and counts as its
-  own. Any other fence fails the cell with `superseded` at once. Each read has one beat to answer;
-  after `fenceCheckMisses` (3) consecutive reads that failed or were overdue, the cell fails closed
-  with reason `store`, since a host that cannot tell whether it still holds the cell must stop. A
-  host that another instance replaced sends for at most one beat after the replacement reserved its
-  generation, plus the reads it is allowed to miss when the store does not answer.
+  own. Any other fence fails the cell with `superseded` at once. One read starts each beat and must
+  answer within it; when `fenceCheckMisses` (3) consecutive beats end with a read that failed or did
+  not answer, the cell fails closed with reason `store`, three beats after the first such read
+  began, since a host that cannot tell whether it still holds the cell must stop. A host that
+  another instance replaced sends for at most one beat after the replacement reserved its
+  generation, or three when the store also stops answering.
 - **A store that keeps failing fails the cell.** After `persistAttempts` consecutive failed or
   overdue attempts of one write (default 20) the host stops acting: its endpoint is freed, it is detached
   from the carrier and sends nothing more, every held and new command is refused (`CellHostError`
@@ -153,6 +142,27 @@ jobs, so nothing a listener, store, socket or timer does can re-enter the endpoi
   `JSON.stringify(JSON.parse(…))` turns into the sender's canonical bytes, while the carried text is
   refused by the receiver.
 
+## 3a. Implementing a `ClaimStore`
+
+A `ClaimStore` for other storage (files, a database, a platform key-value store) must provide the
+contract of §3 (`load`, `fence`, and `save(record, expected)` as a compare-and-set linearizable
+across every client of the same storage) and these three properties:
+
+1. **No reader sees a commit before it is irrevocable.** From the moment `load` or `fence` of any
+   client can return a new fence, that fence is held: no step of the save that wrote it, nor any
+   other save, may withdraw it. A design that makes a candidate visible and then validates it (and
+   removes it on failure) breaks "a stale save writes nothing": a reader can observe a fence that
+   then disappears, a host can be judged superseded by a save that failed, and another client can
+   reserve from a predecessor that is withdrawn.
+2. **Success is reported only once the commit is durable.** `stored` means the record, and
+   whatever makes it findable (for files, the directory entry, synced), survives a crash. A step
+   whose durability cannot be confirmed (a failed directory sync, for example) makes the save fail,
+   never `stored`.
+3. **Anything unrecognised in the store's namespace fails closed.** An entry the store cannot
+   read, parse or validate (a malformed name or record, a fence outside the safe-integer range, a
+   link or other unexpected kind of entry) is an error from `load`, `fence` and `save`, never
+   skipped: skipping it could report a lower fence than the one held.
+
 ## 4. What was run
 
 `scripts/test-js.sh` runs these with the rest of the JavaScript tests, and `js/scripts/test-hosts.sh`
@@ -173,19 +183,14 @@ relay's home module, typecheck strictly and run `bun test test06`:
 - `claim-fence.test.ts`: two clients of one storage (a fake whose reads and compare-and-sets are
   separate transactions, run in every one of the six interleavings of two opens) racing to open,
   leaving exactly one holder after one beat; a rebuild racing an open in all three interleavings;
-  the real `FileClaimStore` through two handles on one folder (one of two racing saves stored,
-  one of two racing opens left); a superseded holder failing within one beat and sending nothing
-  after; fences that are not non-negative safe integers refused. The browser run adds eight
-  `IndexedDBPrivateStore` clients of one database racing from one fence, twice: one stored each time.
-- `file-claim-store.test.ts`: two real `FileClaimStore` handles on one directory in all 20
-  interleavings of their three steps (hooks between the first listing, the link and the second
-  listing), with different new fences (never two stored; the held fence is the winner's) and with
-  the same one (exactly one stored, the second link refused); six handles racing for 40 rounds
-  (never two stored); a crash between the temporary write and the link, and after the link;
-  EEXIST; an intermediate fence; a malformed highest file; an unfenced claim refused.
+  a private store without `update` (the file store) refused by `privateClaimStore`; a superseded
+  holder failing within one beat and sending nothing after; fences that are not non-negative safe
+  integers refused. The browser run adds eight `IndexedDBPrivateStore` clients of one database
+  racing from one fence, twice: one stored each time.
 - Fence checks in `cell-host.test.ts`: run every beat while a write is in flight without mistaking
   the host's own write for another instance; three rejected or three unanswered checks failing the
-  cell closed; one miss alone not.
+  cell closed, measured on the fake clock (rejected reads at beats one to three fail it at the third;
+  unanswered ones three beats after the first began); one miss alone not.
 - `frames.test.ts`: `sessionFrameText` on escaped quotes, `frame` inside strings and nested
   objects, duplicate and escaped-duplicate `frame` names, unicode escapes, whitespace, invalid
   tokens and numbers, bad escapes, control characters, trailing data and deep nesting.

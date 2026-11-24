@@ -1,13 +1,13 @@
 // The fence across independent store clients: two clients of the same underlying storage racing to open (in every
-// interleaving of their transactions a fake can produce, and through the real file store with two handles), a rebuild
-// racing an open, a superseded holder stopping within one beat, and fences that are not safe integers refused.
+// interleaving of their transactions a fake can produce), a rebuild racing an open, a private store without an atomic
+// update refused, a superseded holder stopping within one beat, and fences that are not safe integers refused.
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { accountOf, compareAndSet, MemoryClaimStore, privateClaimStore, SessionCellHost, type CellCarrier, type CellHostEvent, type ClaimStore, type StreamCell } from '../src/hosts/index.js';
 import { init, MemoryPrivateStore, type AtomicPrivateStore } from '../src/session/index.js';
-import { FileClaimStore } from '../src/hosts/node.js';
+import { FilePrivateStore } from '../src/session/node.js';
 import { Device } from '../test05/support.ts';
 import { ManualClock, settle } from './fakes.ts';
 
@@ -118,18 +118,12 @@ describe('the claim fence across independent clients', () => {
     });
   }
 
-  test('the real file claim store, two handles on one folder: two opens at once leave one holder', async () => {
+  test('a private store without an atomic update (the file store) cannot back a claim store', () => {
     const folder = mkdtempSync(join(tmpdir(), 'colophon-js-claims-'));
-    const clock = new ManualClock();
-    const one = new FileClaimStore(folder);
-    const two = new FileClaimStore(folder);
-    // The compare-and-set itself: two saves from the same observed fence, one stored.
-    const results = await Promise.all([one.save({ claim: null, fence: { generation: 1, seq: 0 } }, undefined), two.save({ claim: null, fence: { generation: 1, seq: 0 } }, undefined)]);
-    expect(results.sort()).toEqual(['stale', 'stored']);
-    const hosts = (await Promise.all([open(one, clock), open(two, clock)].map(p => p.then(h => h, () => undefined)))).filter((h): h is SessionCellHost => h !== undefined);
-    const left = await survivors(clock, hosts);
-    expect(left.length).toBe(1);
-    for (const h of hosts) h.close();
+    let message = '';
+    try { privateClaimStore(new FilePrivateStore(folder) as unknown as AtomicPrivateStore, 'cell'); } catch (error) { message = (error as Error).message; }
+    expect(message).toContain('file-backed claim persistence is not available yet');
+    expect(message).toContain('supply a ClaimStore');
   });
 
   test('a superseded holder stops within one beat and sends nothing after', async () => {

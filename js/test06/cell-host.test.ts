@@ -490,20 +490,26 @@ describe('the cell host', () => {
     r.close();
   });
 
-  test('fence checks that keep failing, or never answer, fail the cell closed; one miss alone does not', async () => {
+  test('fence checks that keep failing, or never answer, fail the cell closed three beats after the first miss; one miss alone does not', async () => {
     for (const mode of ['reject', 'hang', 'once'] as const) {
       const clock = new ManualClock();
       const r = await pair(clock);
+      // The first check reads one beat after the open; from then on, one read a beat.
+      const opened = clock.mono;
       if (mode === 'reject') r.stores.a.fenceFailures = 3;
       if (mode === 'once') r.stores.a.fenceFailures = 1;
       if (mode === 'hang') r.stores.a.fenceHang = true;
-      // Each check waits a beat, and a read has a beat to answer.
-      for (let k = 0; k < 6; k++) await clock.advance(5_000);
+      let failedAt: number | undefined;
+      r.a.on(e => { if (e.type === 'failed' && failedAt === undefined) failedAt = clock.mono; });
+      for (let k = 0; k < 8; k++) await clock.advance(1_000);
+      for (let k = 0; k < 40; k++) await clock.advance(1_000);
       const failed = r.logs.a.find(e => e.type === 'failed');
-      if (mode === 'once') expect(failed).toBeUndefined();
-      else expect({ mode, reason: (failed as { reason?: string } | undefined)?.reason }).toEqual({ mode, reason: 'store' });
+      if (mode === 'once') { expect(failed).toBeUndefined(); r.close(); continue; }
+      expect({ mode, reason: (failed as { reason?: string } | undefined)?.reason }).toEqual({ mode, reason: 'store' });
+      const firstRead = opened + 5_000;
+      // A rejected read is a miss at once (reads at beats 1, 2 and 3); an unanswered one at the end of its beat.
+      expect({ mode, elapsed: failedAt! - firstRead }).toEqual({ mode, elapsed: mode === 'hang' ? 15_000 : 10_000 });
       r.close();
     }
   });
 });
-

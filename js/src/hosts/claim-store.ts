@@ -90,11 +90,15 @@ const decode = (bytes: Uint8Array | undefined, name: string): StoredClaim | unde
 };
 
 /**
- * A claim store in one record of an `AtomicPrivateStore` (`IndexedDBPrivateStore`, `MemoryPrivateStore`; for files
- * use `FileClaimStore` from `@colophon/core/hosts/node`): `{claim, fence}` as JSON under `name`, saved through the store's `update`, so the comparison
+ * A claim store in one record of an `AtomicPrivateStore` (`IndexedDBPrivateStore`, `MemoryPrivateStore`). A private
+ * store without the atomic `update` is refused: there is no file-backed claim store yet.: `{claim, fence}` as JSON under `name`, saved through the store's `update`, so the comparison
  * and the write are one atomic step against every client of the same database or folder.
  */
 export function privateClaimStore(store: AtomicPrivateStore, name: string): ClaimStore {
+  // A store without an atomic update (the file-backed `FilePrivateStore`) would make the compare-and-set two steps.
+  if (typeof (store as Partial<AtomicPrivateStore>).update !== 'function') {
+    throw new TypeError('file-backed claim persistence is not available yet: this private store has no atomic update, so supply a ClaimStore (MemoryClaimStore, or privateClaimStore over IndexedDBPrivateStore)');
+  }
   return {
     load: async () => decode(await store.read(name), name),
     // The record is one small file, so its fence is read with it.
