@@ -14,7 +14,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { constants as fsc, promises as fsp, writeSync } from 'node:fs';
 import path from 'node:path';
-import { readLogRows, replayRow } from './files.js';
+import { appendLines, readLogRows, replayRow, writeAll } from './files.js';
 import { HomeStream } from './stream.js';
 
 const b64 = (bytes) => Buffer.from(bytes).toString('base64');
@@ -663,7 +663,7 @@ export class HomeSlot {
     for (const e of extra) lines.push(JSON.stringify(e));
     const staged = path.join(this.slot.root, 'tmp', `replay.${randomBytes(12).toString('hex')}`);
     const handle = await fsp.open(staged, fsc.O_WRONLY | fsc.O_CREAT | fsc.O_EXCL | fsc.O_NOFOLLOW, 0o600);
-    try { await handle.write(lines.map((l) => l + '\n').join('')); await handle.sync(); } finally { await handle.close(); }
+    try { await writeAll(handle, lines.map((l) => l + '\n').join('')); await handle.sync(); } finally { await handle.close(); }
     try { await fsp.rename(staged, this.file('replay.log')); }
     catch (error) { await fsp.rm(staged, { force: true }); throw error; }
     await syncDir(this.slot.root);
@@ -671,8 +671,11 @@ export class HomeSlot {
   }
 
   async appendReplay(entry, durable) {
-    const handle = await fsp.open(this.file('replay.log'), 'a', 0o600);
-    try { await handle.write(JSON.stringify(entry) + '\n'); if (durable) await handle.sync(); } finally { await handle.close(); }
+    if (this.replayBroken) throw this.replayBroken; // a part of a line could not be cut back
+    const handle = await fsp.open(this.file('replay.log'), fsc.O_WRONLY | fsc.O_APPEND | fsc.O_CREAT | fsc.O_NOFOLLOW, 0o600);
+    try { await appendLines(handle, JSON.stringify(entry) + '\n', durable); }
+    catch (error) { if (error.unrepaired) this.replayBroken = error; throw error; }
+    finally { await handle.close(); }
     this.logLines += 1;
   }
 
