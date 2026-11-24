@@ -104,7 +104,11 @@ import Observation
         restoreTask = task
         await task.value
     }
-    public func refresh() async {
+    public func refresh() async { await refresh(coalescing: false) }
+    /// `coalescing`: a refresh for a hint (the folder watcher, the end of an exchange) while the session is ready lists
+    /// the folder once and reconciles only when it holds something the engine has not read, or the engine holds
+    /// something not yet shown (`SessionWorker.refreshIfStale`). Any other phase takes the full refresh.
+    private func refresh(coalescing: Bool) async {
         guard !suspended, !Task.isCancelled else { return }
         let id = UUID(), lease = context, lockEpoch = lockGeneration
         refreshWaiters[id] = []
@@ -129,9 +133,14 @@ import Observation
         // leaves the refresh's own outcome to decide.
         var failureHoldsPhase: Bool { failureRevision != commandFailureRevision && phase != .refreshing }
         do {
-            let snapshot = try await worker.refresh()
+            // Only a refresh with no other in flight answers from the folder mark: one that re-marks over an unmarked
+            // refresh makes that one stale, so it must bring a snapshot of its own.
+            let coalesce = coalescing && marked && refreshWaiters.count == 1
+            let fresh = coalesce ? try await worker.refreshIfStale() : try await worker.refresh()
             try await refreshWillFinish?()
             guard current, !Task.isCancelled else { return }
+            // Nothing new: what is shown is current.
+            guard let snapshot = fresh else { return }
             if snapshot.phase == .ready, failureHoldsPhase { return }
             apply(snapshot)
             await startWatching()
@@ -636,9 +645,15 @@ import Observation
             if result.stopped { syncState = .disabled; await refresh(); return true }
             // A home that answered `503 {"result":"unavailable"}` is not available: shown so, retried with backoff (never as
             // this device being stopped, which only its own verified history decides).
-            if result.homeUnavailable, !result.changed { syncState = .offline(reason: HomeWords.unavailable); return false }
+            if result.homeUnavailable, !result.changed {
+                syncState = .offline(reason: HomeWords.unavailable)
+                if result.owesRefresh { await refresh(coalescing: true) }
+                return false
+            }
             syncState = result.unauthorized ? .unauthorized : result.failed ? .error(reason: "a pass could not finish: the engine was still waiting") : .idle
-            if result.changed || phase != .ready { await refresh() }
+            // A folder hint answered during the pass left its refresh to this one, so a change is reconciled once.
+            if phase != .ready { await refresh() }
+            else if result.changed || result.owesRefresh { await refresh(coalescing: true) }
             else if let snapshot = try? await worker.currentSnapshot(), canPublish(lease, generation) { apply(snapshot) }
             return !result.unauthorized && !result.failed
         } catch is CancellationError {
@@ -646,17 +661,23 @@ import Observation
         } catch let error as HomeTransportError {
             guard canPublish(lease, generation) else { return false }
             if case .offline(let reason) = error { syncState = .offline(reason: reason) } else { syncState = .error(reason: error.localizedDescription) }
+            await refreshOwed()
             return false
         } catch let error as ColophonError {
             guard canPublish(lease, generation) else { return false }
             syncState = .error(reason: error.localizedDescription)
-            if error.isNewerFormat { fail(error) }
+            if error.isNewerFormat { fail(error) } else { await refreshOwed() }
             return false
         } catch {
             guard canPublish(lease, generation) else { return false }
             syncState = .error(reason: error.localizedDescription)
+            await refreshOwed()
             return false
         }
+    }
+    /// An exchange that failed after a folder hint was answered during it: the refresh that hint skipped runs now.
+    private func refreshOwed() async {
+        if await worker.owesRefresh { await refresh(coalescing: true) }
     }
 
     /// Wakes the background exchange loop, for example after a host learns the network returned.
@@ -802,7 +823,7 @@ import Observation
                 do { try await Task.sleep(for: .milliseconds(75)) } catch { return }
                 guard let self, !Task.isCancelled else { return }
                 batchNeedsRefresh = false
-                await refresh()
+                await refresh(coalescing: true)
                 guard !Task.isCancelled else { return }
                 if !batchNeedsRefresh { batchTask = nil; return }
             }

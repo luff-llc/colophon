@@ -258,7 +258,7 @@ actor SessionWorker {
     /// the disk: discard it so the next operation reopens over what is really stored, then fail.
     private func persist(_ stores: [Store], on target: ColophonEngine? = nil) async throws {
         guard !stores.isEmpty else { return }
-        do { try storage().write(stores.map { MediumWrite(path: $0.path, bytes: $0.bytes) }) }
+        do { try storage().write(stores.map { MediumWrite(path: $0.path, bytes: $0.bytes) }); noteOwnWrites(stores) }
         catch {
             if let target, target !== engine { await target.discard() } else { await engine?.discard(); engine = nil }
             throw error
@@ -346,19 +346,20 @@ actor SessionWorker {
 
     private func listed(_ entries: [MediumEntry]) -> [ListedPath] { entries.map { ListedPath(path: $0.path, version: $0.version) } }
 
-    private func reconcile() async throws -> SessionSnapshot {
-        if let settled = try await reconcileEngine() { return settled }
+    private func reconcile(listing given: [MediumEntry]? = nil) async throws -> SessionSnapshot {
+        if let settled = try await reconcileEngine(listing: given) { return settled }
         return try await build()
     }
 
-    /// Brings the engine up to the store. Returns the snapshot when that alone decides it (no library, locked, an update
-    /// required); nil when the engine is current and `build()` (or `readyForWrite()`) decides the rest.
-    private func reconcileEngine() async throws -> SessionSnapshot? {
+    /// Brings the engine up to the store (from `given` when the caller already listed it). Returns the snapshot when
+    /// that alone decides it (no library, locked, an update required); nil when the engine is current and `build()`
+    /// (or `readyForWrite()`) decides the rest.
+    private func reconcileEngine(listing given: [MediumEntry]? = nil) async throws -> SessionSnapshot? {
         try loadJournal()
         if journal.left { return snapshot(phase: .noLibrary) }
         if locked { return snapshot(phase: .locked) }
         let medium = try storage()
-        let entries = try medium.listing()
+        let entries = try given ?? medium.listing()
         guard entries.contains(where: { $0.path.hasPrefix("authority/") }) else {
             if journal.account != nil { throw StorageError.unavailable("Selected library is unavailable") }
             return snapshot(phase: .noLibrary)
@@ -1662,6 +1663,109 @@ actor SessionWorker {
         return homeConfigurations.first { configured in home.endpoints.contains { base($0) == base(configured.endpoint.absoluteString) } }
     }
 
+    // MARK: Coalesced refreshes
+
+    /// What an engine last read from the folder: the listing it was refreshed with, and that engine.
+    private struct FolderMark {
+        weak var engine: ColophonEngine?
+        var versions: [String: String?]
+        init(engine: ColophonEngine, entries: [MediumEntry]) {
+            self.engine = engine
+            versions = Dictionary(entries.map { ($0.path, $0.version) }, uniquingKeysWith: { first, _ in first })
+        }
+    }
+    /// A path this worker wrote since the mark: an immutable one cannot be replaced by different bytes, so any version of
+    /// it holds what the engine wrote; a replaceable one (`state/`, `heads/`) is identified by its digest.
+    private enum OwnWrite { case immutable, replaceable(SHA256.Digest) }
+    private var folderMark: FolderMark?
+    private var ownWrites: [String: OwnWrite] = [:]
+    /// The engine holds something the last snapshot this worker built after a marked reconcile does not show: a write
+    /// persisted since, or an exchange step that changed the engine.
+    private var unpublished = false
+    /// A refresh hint was answered from the mark while an exchange was running and the engine held unpublished state: the
+    /// exchange's caller refreshes when it ends.
+    private var deferredHint = false
+    /// Exchanges in flight (a test may run two at once).
+    private var exchanges = 0
+    /// Tests: refreshes that ran a full reconcile, and those answered from the mark.
+    private(set) var markedReconciles = 0
+    private(set) var coalescedRefreshes = 0
+    /// Tests: engine refreshes before a later home of an exchange, for a folder change made while an earlier one ran.
+    private(set) var laterHomeRefreshes = 0
+    /// Whether an exchange that ended without publishing left a refresh owed to a hint it answered.
+    var owesRefresh: Bool { deferredHint }
+
+    private func noteOwnWrites(_ stores: [Store]) {
+        for store in stores {
+            ownWrites[store.path] = RecordPaths.isReplaceable(store.path) ? .replaceable(SHA256.hash(data: store.bytes)) : .immutable
+        }
+        unpublished = true
+        // A long run of writes with no marked reconcile: forget the mark rather than track every path.
+        if ownWrites.count > 4096 { folderMark = nil; ownWrites = [:] }
+    }
+
+    /// Whether `entries` hold nothing `engine` has not already read or written itself: every path is as the mark listed
+    /// it, or is one this worker wrote since (a replaceable one still holding the bytes it wrote). A deleted path, a new
+    /// path from elsewhere, a version this worker did not write or a replaceable path with no version is a change.
+    private func engineHasRead(_ entries: [MediumEntry], _ engine: ColophonEngine) -> Bool {
+        guard let mark = folderMark, mark.engine === engine else { return false }
+        var seen = 0
+        for entry in entries {
+            if let listed = mark.versions[entry.path] {
+                seen += 1
+                if listed == entry.version, entry.version != nil || !RecordPaths.isReplaceable(entry.path) { continue }
+            }
+            switch ownWrites[entry.path] {
+            case .immutable?: continue
+            case .replaceable(let digest)?:
+                guard let bytes = try? storage().read(entry.path), SHA256.hash(data: bytes) == digest else { return false }
+            case nil: return false
+            }
+        }
+        return seen == mark.versions.count
+    }
+
+    /// The engine read `entries` (an exchange's own refresh): they become the mark. A change the mark did not hold is
+    /// unpublished until the exchange's caller refreshes.
+    private func markRead(_ entries: [MediumEntry], by engine: ColophonEngine) {
+        if !engineHasRead(entries, engine) { unpublished = true }
+        folderMark = FolderMark(engine: engine, entries: entries)
+        ownWrites = [:]
+    }
+
+    /// One listing, then a full reconcile only when the folder holds something the engine has not read, or the engine
+    /// holds something not yet shown. Nil: nothing to show. A hint that arrives during an exchange and finds only what the
+    /// exchange itself wrote is left to the refresh that follows the exchange. Never answers from the mark when the last
+    /// built phase is not `ready`, and any failure forgets the mark, so the next refresh reconciles.
+    func refreshIfStale() async throws -> SessionSnapshot? {
+        try await gated {
+            do {
+                try loadJournal()
+                let entries = try storage().listing()
+                if let engine, !locked, !journal.left, phaseIsReady, exchanges > 0 || !unpublished, engineHasRead(entries, engine) {
+                    if unpublished { deferredHint = true }
+                    coalescedRefreshes += 1
+                    return nil
+                }
+                return try await reconcileMarked(entries)
+            } catch {
+                folderMark = nil
+                throw error
+            }
+        }
+    }
+
+    /// A full reconcile over `entries` (inside the gate), which become the mark. Writes the reconcile itself makes (due
+    /// writes) are tracked against it.
+    private func reconcileMarked(_ entries: [MediumEntry]) async throws -> SessionSnapshot {
+        folderMark = nil; ownWrites = [:]
+        let snapshot = try await reconcile(listing: entries)
+        markedReconciles += 1
+        if let engine { folderMark = FolderMark(engine: engine, entries: entries) }
+        unpublished = false; deferredHint = false
+        return snapshot
+    }
+
     struct ExchangeResult: Sendable {
         var passes = 0; var faults: [HomeFault] = []; var issues: [HomeIssue] = []; var changed = false; var unauthorized = false
         /// A pass that did not finish (the engine still waited after its one recovery): the exchange failed.
@@ -1671,6 +1775,9 @@ actor SessionWorker {
         var stopped = false
         /// A home answered `503 {"result":"unavailable"}`: the home is not available. Retried with backoff; not about this device.
         var homeUnavailable = false
+        /// A folder hint arrived during the exchange and was left to the refresh after it (`refreshIfStale`): the caller
+        /// refreshes even when nothing changed.
+        var owesRefresh = false
     }
     /// One pass with every home. The network calls run outside the gate; each engine step and the
     /// persistence of its stores run inside it, so an unpersisted answer is never visible to a refresh.
@@ -1680,7 +1787,17 @@ actor SessionWorker {
     func setNextStepOverride(_ override: (@Sendable (String) -> ExchangeStep?)?) { nextStepOverride = override }
 
     func exchange(nowMsOverride: Int64? = nil) async throws -> ExchangeResult {
-        try await gated { if engine == nil { _ = try await reconcile() } }
+        exchanges += 1
+        defer { exchanges -= 1 }
+        // Each home starts from the folder as it is now. The engine is refreshed from it before the first home, and
+        // before a later home only when the folder holds something besides what this worker wrote since (a revocation,
+        // a fork, a head or a record another device or the file provider put there while an earlier home ran).
+        var folderRead = try await gated { () -> Bool in
+            guard engine == nil else { return false }
+            let entries = try storage().listing()
+            _ = try await reconcileMarked(entries)
+            return true
+        }
         var result = ExchangeResult()
         guard let engine else { return result }
         let homes = try await engine.run { try $0.exchangeHomes() }
@@ -1703,14 +1820,25 @@ actor SessionWorker {
                 continue
             }
             if let token = configured.bearerToken { _ = try await engine.run { try $0.exchangeSetBearer(home: home.id, token: token) } }
-            // The pass starts from fresh local state.
-            try await gated {
+            // The pass starts from fresh local state: the folder as listed now, the time now.
+            let laterHome = folderRead
+            folderRead = try await gated { () -> Bool in
                 guard self.engine === engine else { throw SessionError.destinationChanged }
                 let entries = try storage().listing()
                 try await advance(engine, to: nowMs)
-                try await refresh(engine, listing: listed(entries))
+                if !laterHome || !engineHasRead(entries, engine) {
+                    try await refresh(engine, listing: listed(entries))
+                    markRead(entries, by: engine)
+                    if laterHome { laterHomeRefreshes += 1 }
+                }
                 try await unlockIfPossible()
+                return true
             }
+            // Computed once per home rather than per request: this home's base, and the public head URL of every
+            // configured home (`headQuorum` above 1), the first configuration for a URL winning as `first(where:)` did.
+            let homePrefix = Self.base(configured.endpoint.absoluteString) + "/"
+            let heads = Dictionary(homeConfigurations.map { (Self.base($0.endpoint.absoluteString) + "/head", $0) },
+                                   uniquingKeysWith: { first, _ in first })
             // A stopped account runs no exchange pass (spec §1 "A stop": it accepts no head and asks no call).
             if try await Self.isStopped(engine) { result.stopped = true; break }
             let started = ContinuousClock.now
@@ -1720,6 +1848,12 @@ actor SessionWorker {
             var recovered = false
             // The pass was left for a `Retry-After`: the answer was not given to the engine, so its request is abandoned.
             var abandon = false
+            // The engine's next step, fetched in the same gate as the answer before it rather than in a second one.
+            var prefetched: Result<ExchangeStep, any Error>?
+            func nextStep() async throws -> ExchangeStep {
+                if let override = nextStepOverride, let step = override(home.id) { return step }
+                return try await engine.run { try $0.exchangeNext(home: home.id) }
+            }
             do {
             // A pass can end before everything moved (the engine plans the next stage from what the home just
             // said): run passes until one moves nothing, at most `HomeLimits.passes`.
@@ -1733,10 +1867,9 @@ actor SessionWorker {
                 if ContinuousClock.now - started > HomeLimits.exchangeTime {
                     stopped = .tooSlow(seconds: Int(HomeLimits.exchangeTime.components.seconds)); break homeLoop
                 }
-                let step = try await gated { () -> ExchangeStep in
-                    if let override = nextStepOverride, let step = override(home.id) { return step }
-                    return try await engine.run { try $0.exchangeNext(home: home.id) }
-                }
+                let step: ExchangeStep
+                if let ready = prefetched { prefetched = nil; step = try ready.get() }
+                else { step = try await gated { try await nextStep() } }
                 switch step.kind {
                 case .done: break loop
                 // This loop answers every request it is given, so an outstanding one belongs to a pass that was interrupted
@@ -1756,9 +1889,9 @@ actor SessionWorker {
                     // A request is for this home, except another home's public head (`headQuorum` above 1), which goes
                     // to the transport configured for the home its URL names, with no credential.
                     let target: HomeConfiguration
-                    if request.url.hasPrefix(Self.base(configured.endpoint.absoluteString) + "/") { target = configured }
+                    if request.url.hasPrefix(homePrefix) { target = configured }
                     else if request.method == .get, request.url.hasSuffix("/head"), !request.headers.contains(where: { $0.name.lowercased() == "authorization" }),
-                            let other = homeConfigurations.first(where: { request.url == Self.base($0.endpoint.absoluteString) + "/head" }), other.isAllowed {
+                            let other = heads[request.url], other.isAllowed {
                         target = other
                     } else {
                         stopped = .callNotBound("a request for another host than the configured home"); break homeLoop
@@ -1809,21 +1942,25 @@ actor SessionWorker {
                             abandon = true; break homeLoop
                         }
                     }
-                    let report = try await gated { () -> Report in
+                    let (report, next) = try await gated { () -> (Report, Result<ExchangeStep, any Error>?) in
                         guard self.engine === engine else { throw SessionError.destinationChanged }
                         let report = try await trackInterruptedAuthorityChange(in: engine) {
                             try await engine.run { try $0.exchangeAnswer(home: home.id, ticket: request.ticket, answer: answer) }
                         }
                         try await persist(report, on: engine)
-                        return report
+                        // A refused call ends the pass: no next step is asked for. An error asking for it is raised where
+                        // the loop would have asked, after this answer is counted.
+                        guard refusedCall == nil else { return (report, nil) }
+                        do { return (report, .success(try await nextStep())) } catch { return (report, .failure(error)) }
                     }
+                    prefetched = next
                     for fault in report.faults {
                         result.faults.append(HomeFault(home: home.id, fault: fault))
                         if fault.kind == .unauthorized { result.unauthorized = true }
                     }
                     if !report.store.isEmpty || report.changes.reorganized
                         || report.changes.authorityToSeq != report.changes.authorityFromSeq || !report.changes.namespaces.isEmpty {
-                        result.changed = true; progress = true
+                        result.changed = true; progress = true; unpublished = true
                     }
                     if let refusedCall { stopped = refusedCall; result.unauthorized = true; break homeLoop }
                 }
@@ -1849,6 +1986,7 @@ actor SessionWorker {
         }
         faults = result.faults
         issues = result.issues
+        result.owesRefresh = deferredHint
         return result
     }
 
