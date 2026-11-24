@@ -57,8 +57,20 @@ const json = (r) => (r.body.length ? JSON.parse(r.body.toString('utf8')) : null)
 const JSON_TYPE = { 'content-type': 'application/json' };
 const ask = (port, slot, { account = ACCOUNT, headers = BEARER } = {}) =>
   raw(port, '/v1/provision', { method: 'POST', headers: { ...JSON_TYPE, ...headers }, body: JSON.stringify({ slot, base: PREFIX + slot, account }) });
-const op = (port, slot, action, { headers = BEARER, method = action ? 'POST' : 'GET' } = {}) =>
-  raw(port, `/v1/operator/slots/${slot}${action ? `/${action}` : ''}`, { method, headers });
+const op = (port, slot, action, { headers = BEARER, method = action ? 'POST' : 'GET', query = action ? '?generation=x' : '' } = {}) =>
+  raw(port, `/v1/operator/slots/${slot}${action ? `/${action}` : ''}${query}`, { method, headers });
+/** The slot's state as the operator reads it, and its generation apart. */
+async function state(port, slot) {
+  const r = await op(port, slot);
+  const body = json(r);
+  if (r.status !== 200) return body;
+  const { generation, ...rest } = body;
+  assert.match(generation, /^[0-9a-f]{32}$/, 'an opaque generation');
+  return rest;
+}
+const generationOf = async (port, slot) => json(await op(port, slot)).generation;
+/** Suspend or resume with the slot's current generation, as the provisioner does. */
+const act = async (port, slot, action) => op(port, slot, action, { query: `?generation=${await generationOf(port, slot)}` });
 
 async function homeKey() {
   const pair = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
@@ -107,12 +119,15 @@ const read = (port, slot, [method, p]) => raw(port, `/v1/libraries/${slot}${p}`,
 const answer = (r) => ({ status: r.status, body: r.body.toString('utf8') });
 
 describe('the operator API settings', () => {
-  test('operatorPerMinute is a positive integer, and only with gate token', () => {
+  test('operatorPerMinute and operatorRefusedPerMinute are positive integers, and only with gate token', () => {
     const token = { enabled: true, prefix: PREFIX, gate: 'token', tokenSha256: sha(TOKEN) };
-    assert.equal(provisionConfig(token).operatorPerMinute, 60);
+    assert.equal(provisionConfig(token).operatorPerMinute, 600);
+    assert.equal(provisionConfig(token).operatorRefusedPerMinute, 10);
     assert.equal(provisionConfig({ ...token, operatorPerMinute: 5 }).operatorPerMinute, 5);
-    for (const bad of [{ ...token, operatorPerMinute: 0 }, { ...token, operatorPerMinute: 1.5 }, { enabled: true, prefix: PREFIX, operatorPerMinute: 5 }]) {
-      assert.throws(() => provisionConfig(bad), Error, JSON.stringify(bad));
+    for (const k of ['operatorPerMinute', 'operatorRefusedPerMinute']) {
+      for (const bad of [{ ...token, [k]: 0 }, { ...token, [k]: 1.5 }, { enabled: true, prefix: PREFIX, [k]: 5 }]) {
+        assert.throws(() => provisionConfig(bad), Error, JSON.stringify(bad));
+      }
     }
   });
 });
@@ -142,7 +157,7 @@ describe('the operator API', { skip: ready ? false : `build the module first (${
     for (const provision of [{ gate: 'open', tokenSha256: undefined }, { enabled: false, gate: 'open', tokenSha256: undefined }]) {
       const port = await fresh(provision);
       const unknown = await raw(port, '/v1/nothing');
-      for (const r of [await op(port, SLOT), await op(port, SLOT, 'suspend'), await op(port, SLOT, 'resume'), await op(port, SLOT, 'suspend', { headers: {} })]) {
+      for (const r of [await op(port, SLOT), await act(port, SLOT, 'suspend'), await act(port, SLOT, 'resume'), await op(port, SLOT, 'suspend', { headers: {} })]) {
         assert.equal(r.status, 404);
         assert.deepEqual(answer(r), answer(unknown));
       }
@@ -150,9 +165,9 @@ describe('the operator API', { skip: ready ? false : `build the module first (${
   });
 
   test('authentication: a missing, wrong or non-bearer token is 403 refused:noEntitlement, and changes nothing', async () => {
-    const port = await fresh();
+    const port = await fresh({ operatorRefusedPerMinute: 100 });
     assert.equal((await ask(port, SLOT)).status, 200);
-    for (const headers of [{}, { authorization: 'Bearer wrong-token-0123456789' }, { authorization: `Bearer ${TOKEN}x` },
+    for (const headers of [{},{ authorization: 'Bearer wrong-token-0123456789' }, { authorization: `Bearer ${TOKEN}x` },
       { authorization: `bearer ${TOKEN}` }, { authorization: `Bearer  ${TOKEN}` }, { authorization: `Colophon ${TOKEN}` }, { authorization: TOKEN }]) {
       for (const action of [undefined, 'suspend', 'resume']) {
         const r = await op(port, SLOT, action, { headers });
@@ -162,7 +177,7 @@ describe('the operator API', { skip: ready ? false : `build the module first (${
     }
     // Authentication comes before the slot is looked up: an unknown slot answers the same.
     assert.deepEqual(json(await op(port, 'tnothere000', 'suspend', { headers: {} })), { result: 'refused:noEntitlement' });
-    assert.equal(json(await op(port, SLOT)).suspended, false, 'nothing was suspended');
+    assert.equal((await state(port, SLOT)).suspended, false, 'nothing was suspended');
     assert.equal(existsSync(path.join(dir, SLOT, 'suspended.json')), false);
   });
 
@@ -176,8 +191,8 @@ describe('the operator API', { skip: ready ? false : `build the module first (${
       }
     }
     assert.equal((await ask(port, SLOT)).status, 200);
-    assert.deepEqual(json(await op(port, SLOT)), { slot: SLOT, provisioned: true, suspended: false });
-    assert.deepEqual(json(await op(port, 'configured0')), { slot: 'configured0', provisioned: false, suspended: false }, 'a configured home slot is held, not provisioned');
+    assert.deepEqual(await state(port, SLOT), { slot: SLOT, provisioned: true, suspended: false });
+    assert.deepEqual(await state(port, 'configured0'), { slot: 'configured0', provisioned: false, suspended: false }, 'a configured home slot is held, not provisioned');
     const wrong = [[SLOT, undefined, 'POST', 'GET'], [SLOT, 'suspend', 'GET', 'POST'], [SLOT, 'resume', 'PUT', 'POST']];
     for (const [name, action, method, allow] of wrong) {
       const r = await op(port, name, action, { method });
@@ -186,9 +201,13 @@ describe('the operator API', { skip: ready ? false : `build the module first (${
     }
     assert.equal((await raw(port, `/v1/operator/slots/${SLOT}/delete`, { method: 'POST', headers: BEARER })).status, 404);
     assert.equal((await raw(port, `/v1/operator/slots/${SLOT}?x=1`, { headers: BEARER })).status, 400);
+    // A change names the generation it is meant for: none, or anything else in the query, is 400.
+    for (const query of ['', '?generation=', '?x=1', `?generation=${await generationOf(port, SLOT)}&x=1`, '?generation=a&generation=b']) {
+      assert.equal((await op(port, SLOT, 'suspend', { query })).status, 400, query);
+    }
     // A page is not an operator's tool.
     assert.equal((await op(port, SLOT, 'suspend', { headers: { ...BEARER, origin: 'https://page.example' } })).status, 403);
-    assert.equal(json(await op(port, SLOT)).suspended, false);
+    assert.equal((await state(port, SLOT)).suspended, false);
   });
 
   test('suspended, every data write is 403 refused:subscriptionLapsed and stores nothing; reads and authority uploads answer as before', async () => {
@@ -200,13 +219,13 @@ describe('the operator API', { skip: ready ? false : `build the module first (${
       for (const r of [...READS, ...CALLED_WRITES, ...AUTHORITY]) readsBefore.push(answer(await (r.length > 2 ? write : read)(port, name, r)));
       for (const [i, a] of writesBefore.entries()) assert.notEqual(a.status, 403, `${name} ${WRITES[i][0]} ${WRITES[i][1]} before`);
 
-      const r = await op(port, name, 'suspend');
+      const r = await act(port, name, 'suspend');
       assert.equal(r.status, 204);
       assert.equal(r.body.length, 0);
-      assert.deepEqual(json(await op(port, name)), { slot: name, provisioned: name === SLOT, suspended: true });
+      assert.deepEqual(await state(port, name), { slot: name, provisioned: name === SLOT, suspended: true });
       const file = JSON.parse(await readFile(path.join(dir, name, 'suspended.json'), 'utf8'));
       assert.deepEqual(file, { suspended: true, at: T0 });
-      assert.equal((await op(port, name, 'suspend')).status, 204, 'suspending again is the same');
+      assert.equal((await act(port, name, 'suspend')).status, 204, 'suspending again is the same');
       const changes = json(await read(port, name, ['GET', '/changes'])) ?? null;
 
       for (const w of WRITES) {
@@ -219,10 +238,10 @@ describe('the operator API', { skip: ready ? false : `build the module first (${
       }
       assert.deepEqual(json(await read(port, name, ['GET', '/changes'])) ?? null, changes, 'nothing was stored');
 
-      assert.equal((await op(port, name, 'resume')).status, 204);
-      assert.deepEqual(json(await op(port, name)), { slot: name, provisioned: name === SLOT, suspended: false });
+      assert.equal((await act(port, name, 'resume')).status, 204);
+      assert.deepEqual(await state(port, name), { slot: name, provisioned: name === SLOT, suspended: false });
       assert.equal(existsSync(path.join(dir, name, 'suspended.json')), false, 'resume removes the suspension');
-      assert.equal((await op(port, name, 'resume')).status, 204, 'resuming again is the same');
+      assert.equal((await act(port, name, 'resume')).status, 204, 'resuming again is the same');
       for (const [i, w] of WRITES.entries()) assert.deepEqual(answer(await write(port, name, w)), writesBefore[i], `${name} ${w[0]} ${w[1]} after resume`);
     }
   });
@@ -240,7 +259,7 @@ describe('the operator API', { skip: ready ? false : `build the module first (${
     const upload = write(port, SLOT, WRITES[0]);
     await pausedAt;
     let suspended = false;
-    const suspension = op(port, SLOT, 'suspend').then((r) => { suspended = true; return r; });
+    const suspension = act(port, SLOT, 'suspend').then((r) => { suspended = true; return r; });
     await new Promise((r) => setTimeout(r, 50));
     assert.equal(suspended, false, 'the suspension waits for the write that holds the lock');
     resume();
@@ -252,9 +271,9 @@ describe('the operator API', { skip: ready ? false : `build the module first (${
   test('a suspension survives a restart, and a resume does too', async () => {
     let port = await fresh();
     assert.equal((await ask(port, SLOT)).status, 200);
-    assert.equal((await op(port, SLOT, 'suspend')).status, 204);
+    assert.equal((await act(port, SLOT, 'suspend')).status, 204);
     port = await restart();
-    assert.deepEqual(json(await op(port, SLOT)), { slot: SLOT, provisioned: true, suspended: true });
+    assert.deepEqual(await state(port, SLOT), { slot: SLOT, provisioned: true, suspended: true });
     assert.deepEqual(json(await write(port, SLOT, WRITES[0])), LAPSED);
     assert.equal((await read(port, SLOT, ['GET', ''])).status, 200);
     // With the token gate turned off, the API is gone, and the slot stays read-only.
@@ -262,9 +281,9 @@ describe('the operator API', { skip: ready ? false : `build the module first (${
     assert.equal((await op(port, SLOT)).status, 404);
     assert.deepEqual(json(await write(port, SLOT, WRITES[0])), LAPSED);
     port = await restart();
-    assert.equal((await op(port, SLOT, 'resume')).status, 204);
+    assert.equal((await act(port, SLOT, 'resume')).status, 204);
     port = await restart();
-    assert.deepEqual(json(await op(port, SLOT)), { slot: SLOT, provisioned: true, suspended: false });
+    assert.deepEqual(await state(port, SLOT), { slot: SLOT, provisioned: true, suspended: false });
     assert.notEqual((await write(port, SLOT, WRITES[0])).status, 403);
   });
 
@@ -272,7 +291,7 @@ describe('the operator API', { skip: ready ? false : `build the module first (${
     let port = await fresh({ unclaimedHours: 24 });
     assert.equal((await ask(port, SLOT)).status, 200);
     assert.equal((await ask(port, 'tslot00000b')).status, 200);
-    assert.equal((await op(port, SLOT, 'suspend')).status, 204);
+    assert.equal((await act(port, SLOT, 'suspend')).status, 204);
     now = T0 + 25 * HOUR;
     assert.equal((await ask(port, 'tslot00000c')).status, 200, 'a provision runs the release');
     const rows = async () => Object.keys(JSON.parse(await readFile(path.join(dir, 'provisioned.json'), 'utf8'))).sort();
@@ -282,27 +301,169 @@ describe('the operator API', { skip: ready ? false : `build the module first (${
     now = T0 + 50 * HOUR;
     port = await restart({ unclaimedHours: 24 });
     assert.deepEqual(await rows(), [SLOT]);
-    assert.deepEqual(json(await op(port, SLOT)), { slot: SLOT, provisioned: true, suspended: true });
+    assert.deepEqual(await state(port, SLOT), { slot: SLOT, provisioned: true, suspended: true });
     // Resumed, it is an unclaimed slot like any other.
-    assert.equal((await op(port, SLOT, 'resume')).status, 204);
+    assert.equal((await act(port, SLOT, 'resume')).status, 204);
     assert.equal((await ask(port, 'tslot00000d')).status, 200);
     assert.deepEqual(await rows(), ['tslot00000d']);
     assert.equal(existsSync(path.join(dir, SLOT)), false);
-    assert.deepEqual(json(await op(port, SLOT)), { result: 'refused:notProvisioned' });
+    assert.deepEqual(await state(port, SLOT), { result: 'refused:notProvisioned' });
   });
 
-  test('operator requests have their own per-address share, apart from the door\'s', async () => {
-    const port = await fresh({ operatorPerMinute: 3, perAddressPerHour: 2 });
+  test('authenticated operator requests have their own share: refused ones from any address never spend or crowd it out', async () => {
+    const port = await fresh({ operatorPerMinute: 3, operatorRefusedPerMinute: 2, perAddressPerHour: 2 });
     assert.equal((await ask(port, SLOT)).status, 200);
-    assert.equal((await op(port, SLOT, 'suspend', { headers: {} })).status, 403, 'a refused token counts');
+    // Unauthenticated traffic from the operator's own address: refused, then over its share.
+    assert.equal((await op(port, SLOT, 'suspend', { headers: {} })).status, 403);
+    assert.equal((await op(port, SLOT, 'suspend', { headers: {} })).status, 403);
+    const refused = await op(port, SLOT, 'suspend', { headers: {} });
+    assert.equal(refused.status, 429, 'refused requests over their share');
+    assert.deepEqual(json(refused), { result: 'refused:overQuota' });
+    // The operator, from the same address, is not affected.
     assert.equal((await op(port, SLOT)).status, 200);
-    assert.equal((await op(port, SLOT, 'resume')).status, 204);
+    assert.equal((await act(port, SLOT, 'suspend')).status, 204);
     const over = await op(port, SLOT);
-    assert.equal(over.status, 429, 'over the share even the right token is refused');
-    assert.deepEqual(json(over), { result: 'refused:overQuota' });
+    assert.equal(over.status, 429, 'the operator\'s own share, three a minute');
     assert.equal(over.headers['retry-after'], '60');
     assert.equal((await ask(port, 'tslot00000b')).status, 200, 'the door\'s share is its own');
     now = T0 + 60_000;
     assert.equal((await op(port, SLOT)).status, 200, 'a minute later the share is back');
+  });
+
+  test('a full table of refused addresses never refuses the operator', async () => {
+    const port = await fresh({ operatorRefusedPerMinute: 1 }, { clientAddress: { header: 'X-Client', trustedPeers: ['127.0.0.1'] } });
+    assert.equal((await ask(port, SLOT)).status, 200);
+    for (let i = 0; i < 10_001; i += 1) {
+      const ip = `10.${(i >> 16) & 255}.${(i >> 8) & 255}.${i & 255}`;
+      await op(port, SLOT, undefined, { headers: { 'x-client': ip } });
+    }
+    const fresh0 = await op(port, SLOT, undefined, { headers: { 'x-client': '192.0.2.1' } });
+    assert.equal(fresh0.status, 429, 'a new unauthenticated address is refused while the table is full');
+    assert.equal((await op(port, SLOT, undefined, { headers: { ...BEARER, 'x-client': '192.0.2.2' } })).status, 200, 'the operator from a new address is served');
+  });
+
+  test('a delayed command for a released name never reaches the slot that reuses it: 409 refused:staleGeneration', async () => {
+    let port = await fresh({ unclaimedHours: 24 });
+    assert.equal((await ask(port, SLOT)).status, 200);
+    const first = await generationOf(port, SLOT);
+    assert.equal(await generationOf(port, SLOT), first, 'stable');
+    port = await restart({ unclaimedHours: 24 });
+    assert.equal(await generationOf(port, SLOT), first, 'stable across a restart');
+    // Released unclaimed, then provisioned again for another account.
+    now = T0 + 25 * HOUR;
+    assert.equal((await ask(port, SLOT, { account: OTHER })).status, 200);
+    const second = await generationOf(port, SLOT);
+    assert.notEqual(second, first, 'a new generation');
+    const stale = await op(port, SLOT, 'suspend', { query: `?generation=${first}` });
+    assert.equal(stale.status, 409);
+    assert.deepEqual(json(stale), { result: 'refused:staleGeneration' });
+    assert.equal((await state(port, SLOT)).suspended, false, 'the new library is untouched');
+    assert.equal(existsSync(path.join(dir, SLOT, 'suspended.json')), false);
+    assert.equal((await op(port, SLOT, 'suspend', { query: `?generation=${second}` })).status, 204);
+    assert.equal((await op(port, SLOT, 'resume', { query: `?generation=${first}` })).status, 409);
+    assert.equal((await state(port, SLOT)).suspended, true);
+  });
+
+  test('an unauthenticated provision runs no cleanup: suspend and resume are not held up by a release that drains', async () => {
+    // A slow request on an unclaimed, expired slot: its release would wait for it to drain.
+    let resume; const gate = new Promise((r) => { resume = r; });
+    let paused; const pausedAt = new Promise((r) => { paused = r; });
+    let draining = 0;
+    let armed = false;
+    const hook = (point) => {
+      if (point === 'access predecessor' && armed) { armed = false; paused(); return gate; }
+      if (point.startsWith('release draining')) draining += 1;
+      return undefined;
+    };
+    const port = await fresh({ unclaimedHours: 24 }, { tracing: true, hook });
+    assert.equal((await ask(port, 'tslot00000b')).status, 200);
+    now = T0 + 2 * HOUR; // the operator's slot is younger: not released below
+    assert.equal((await ask(port, SLOT)).status, 200);
+    armed = true;
+    const slow = write(port, 'tslot00000b', WRITES[0]);
+    await pausedAt;
+    now = T0 + 25 * HOUR;
+    // Without the token, the door refuses before any cleanup.
+    for (const headers of [{}, { authorization: 'Bearer wrong-token-0123456789' }]) {
+      const r = await ask(port, 'tslot00000c', { headers });
+      assert.equal(r.status, 403);
+    }
+    assert.equal(draining, 0, 'no release started');
+    // With it, the release starts and drains outside the lock: the operator is served meanwhile.
+    const provision = ask(port, 'tslot00000c');
+    while (draining === 0) await new Promise((r) => setImmediate(r));
+    assert.equal((await act(port, SLOT, 'suspend')).status, 204, 'not held up by the draining release');
+    assert.equal((await state(port, SLOT)).suspended, true);
+    resume();
+    await slow;
+    assert.equal((await provision).status, 200);
+    assert.deepEqual(Object.keys(JSON.parse(await readFile(path.join(dir, 'provisioned.json'), 'utf8'))).sort(), [SLOT, 'tslot00000c']);
+  });
+
+  test('a failed directory sync keeps data writes refused until the state is reconciled; a retry is answered only once it is durable', async () => {
+    let fail = null;
+    const hook = (point) => { if (point === fail) { fail = null; throw new Error('simulated sync failure'); } return undefined; };
+    const port = await fresh({}, { tracing: true, hook });
+    assert.equal((await ask(port, SLOT)).status, 200);
+    const before = answer(await write(port, SLOT, WRITES[0]));
+    // Sent with the generation it already holds, as a retrying provisioner does (a read of the
+    // state would reconcile it first).
+    const g = await generationOf(port, SLOT);
+    const go = (action) => op(port, SLOT, action, { query: `?generation=${g}` });
+    // A suspend whose rename landed but whose sync failed: not acknowledged, and a retry redoes
+    // every step (memory still says writable), acknowledged only once synced.
+    fail = 'suspension renamed';
+    assert.equal((await go('suspend')).status, 500);
+    const s = await running.relay.slot(SLOT);
+    assert.equal(s.home.suspensionUncertain, true);
+    assert.equal(s.home.suspended, false, 'memory still says writable');
+    fail = 'suspension renamed';
+    assert.equal((await go('suspend')).status, 500, 'a retry that fails again is not acknowledged');
+    assert.equal(s.home.suspensionUncertain, true);
+    assert.equal((await go('suspend')).status, 204, 'acknowledged once synced');
+    assert.equal(s.home.suspensionUncertain, false);
+    assert.deepEqual(json(await write(port, SLOT, WRITES[0])), LAPSED);
+    // A failed suspend, then a data write: reconciled from the disk first (the marker is there),
+    // so the write is refused, never taken on the cached flag.
+    assert.equal((await go('resume')).status, 204);
+    fail = 'suspension renamed';
+    assert.equal((await go('suspend')).status, 500);
+    assert.deepEqual(json(await write(port, SLOT, WRITES[0])), LAPSED, 'reconciled from disk: suspended');
+    assert.equal(s.home.suspensionUncertain, false);
+    assert.equal((await state(port, SLOT)).suspended, true);
+    // A failed resume, then a data write: reconciled (the marker is gone), so it is taken.
+    fail = 'suspension removed';
+    assert.equal((await go('resume')).status, 500);
+    assert.equal(s.home.suspended, true, 'memory still says suspended');
+    assert.deepEqual(answer(await write(port, SLOT, WRITES[0])), before);
+    assert.equal((await state(port, SLOT)).suspended, false);
+    // An uncertain state whose reconciliation fails answers 503, never a write.
+    assert.equal((await go('suspend')).status, 204);
+    fail = 'suspension removed';
+    assert.equal((await go('resume')).status, 500);
+    s.home.reconcileSuspensionLocked = async () => { throw new Error('the disk is gone'); };
+    const r = await write(port, SLOT, WRITES[0]);
+    assert.equal(r.status, 503);
+    assert.deepEqual(json(r), { result: 'unavailable' });
+  });
+
+  test('with a private listener, provisioning and the operator API are served there only', async () => {
+    const port = await fresh({}, { privateListen: { host: '127.0.0.1', port: 0 } });
+    const priv = running.privatePort;
+    assert.ok(priv && priv !== port);
+    const unknown = answer(await raw(port, '/v1/nothing'));
+    // Public: 404 as any unknown path, before any check or body read.
+    assert.deepEqual(answer(await ask(port, SLOT)), unknown);
+    assert.deepEqual(answer(await op(port, SLOT)), unknown);
+    assert.deepEqual(answer(await op(port, SLOT, 'suspend')), unknown);
+    // Private: the door and the operator.
+    assert.equal((await ask(priv, SLOT)).status, 200);
+    assert.equal((await act(priv, SLOT, 'suspend')).status, 204);
+    assert.equal((await state(priv, SLOT)).suspended, true);
+    // The library itself is public only.
+    assert.equal((await raw(port, `/v1/libraries/${SLOT}`)).status, 200);
+    assert.deepEqual(json(await write(port, SLOT, WRITES[0])), LAPSED);
+    assert.equal((await raw(priv, `/v1/libraries/${SLOT}`)).status, 404);
+    assert.equal((await raw(priv, '/healthz')).status, 200);
   });
 });

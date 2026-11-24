@@ -4,9 +4,13 @@
 
 No format or reader-rule change. The spec stays Colophon 0.5, revision 18.
 
-- **Operator API and read-only slots** (reference home, `relay/`): with gate `token`, the provisioning token also authorizes `POST /v1/operator/slots/<slot>/suspend` and `/resume` (204) and `GET /v1/operator/slots/<slot>` (`{"slot","provisioned","suspended"}`). Without gate `token` the paths answer 404. Operator requests have their own per-address limit, `provision.operatorPerMinute` (default 60).
+- **Operator API and read-only slots** (reference home, `relay/`): with gate `token`, the provisioning token also authorizes `GET /v1/operator/slots/<slot>` (`{"slot","provisioned","suspended","generation"}`) and `POST /v1/operator/slots/<slot>/suspend` and `/resume` (204), which require `?generation=` (400 without it, 409 `refused:staleGeneration` when the name has since been released and provisioned again). Without gate `token` the paths answer 404.
   - A suspended slot serves every read (the head, history, pending objects, records, blob chunks, the change feed and its long poll) and refuses every data write with 403 `{"result":"refused:subscriptionLapsed"}`: record, live value, blob chunk and predecessor puts, and forwarded heads. History uploads and pending objects (transitions, vetoes, receipts) are still taken and receipted, so the account can appoint another home and revoke this one. It deletes nothing.
-  - The suspension is stored as `<slot>/suspended.json`, written atomically, and survives a restart. A suspended slot is never released as unclaimed.
+  - The suspension is stored as `<slot>/suspended.json`, written atomically, and survives a restart. If writing it fails part way, data writes stay refused until the state is reconciled from disk, and a retry is acknowledged only once the intended state is durable. A suspended slot is never released as unclaimed.
+  - The token is checked first. Authenticated operator requests share `provision.operatorPerMinute` (default 600) for the whole home; refused ones count per address against `provision.operatorRefusedPerMinute` (default 10), and never spend or crowd out the operator's share.
+- **Private listener** (`COLOPHON_PRIVATE_LISTEN=host:port`, or `privateListen` in the config): serves `/v1/provision` and `/v1/operator/*` only; the public listener then answers 404 for both.
+- **Hosted mode** (container): `COLOPHON_HOSTED=1`, or a private listener, requires `COLOPHON_PROVISION_TOKEN_SHA256` with gate `token`, and never makes or prints a token.
+- **The door and releases**: a token request is authenticated before any sweep of unclaimed slots, and a release drains the work in flight on its slot outside the door's lock, then checks the slot is still the one it started from before removing anything.
 - **`refused:subscriptionLapsed`** is listed with the reserved home refusals (spec §14). The Swift, Kotlin and JS sessions already show any `refused:` result as received; their documentation now names it.
 
 ## 0.5.4 — 2026-11-24

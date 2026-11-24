@@ -46,7 +46,9 @@ curl http://127.0.0.1:8080/healthz          # {"ok":true}
 | `COLOPHON_HOST` | `0.0.0.0` | Listen address. Use `::` where the platform's private network is IPv6. |
 | `COLOPHON_PROVISION` | `on` | `off` turns off the door at `POST /v1/provision`. |
 | `COLOPHON_PROVISION_GATE` | `token` | `token`, `open`, `grant`, or a list such as `grant,token` (relay README, "Provisioning"). |
-| `COLOPHON_PROVISION_TOKEN_SHA256` | made on first start | The SHA-256 of a token you made (`bun relay/server.js token`). Leave it unset to have a token made and printed once. |
+| `COLOPHON_PROVISION_TOKEN_SHA256` | made on first start | The SHA-256 of a token you made (`bun relay/server.js token`). Leave it unset to have a token made and printed once (not in hosted mode). |
+| `COLOPHON_PRIVATE_LISTEN` | none | `host:port` of a private listener that alone serves `/v1/provision` and `/v1/operator/*`; the public port then answers 404 for both. Bind it to your private network only. Setting it turns on hosted mode. |
+| `COLOPHON_HOSTED` | off | Hosted mode: with gate `token`, `COLOPHON_PROVISION_TOKEN_SHA256` is required, and no token is ever made or printed (a hash left on the volume is not used). |
 | `COLOPHON_PROVISION_OPERATOR_ACCOUNT`, `COLOPHON_PROVISION_OPERATOR_SLOT` | none | Required with gate `grant`. The audience is `<origin>/v1/provision`. |
 | `COLOPHON_MAX_SLOTS` | `200` | `provision.maxSlots` |
 | `COLOPHON_PROVISION_PER_ADDRESS_PER_HOUR` | `10` | `provision.perAddressPerHour` |
@@ -89,6 +91,15 @@ If you lose the volume, you lose the key, and those accounts must appoint a new 
 
 ## The provisioning token
 
+**Hosted deployments** (a home you run for other people) set `COLOPHON_PRIVATE_LISTEN` or
+`COLOPHON_HOSTED=1`, make the token themselves, keep it in their secret manager, and pass only
+its hash in `COLOPHON_PROVISION_TOKEN_SHA256`. The container then refuses to start without that
+hash and never prints a token. If a token was ever printed to a log that others can read (an
+earlier start without hosted mode), treat it as known: make a new one, set its hash, restart,
+and give the new token to your tools. The old one stops working at that restart.
+
+For a home of your own:
+
 On the first start with gate `token` and no `COLOPHON_PROVISION_TOKEN_SHA256`, the log shows:
 
 ```
@@ -106,11 +117,12 @@ docker run --rm -v colophon-home:/data --entrypoint /usr/local/bin/bun colophon-
   -e 'require("fs").unlinkSync("/data/secrets/provision-token.sha256")'
 ```
 
-The token lets someone create new slots, and, through the operator API
-(`/v1/operator/slots/<slot>`, relay README, "The operator API, and read-only slots"), make a slot's
-data read-only and writable again (the account's authority changes are always taken). It never reads or deletes what a slot holds. It is meant for one
-operator's own tools. Do not ship it in an app; see the relay README,
-"Self-hosting".
+The token lets someone create new slots and, through the operator API (`/v1/operator/slots/<slot>`,
+relay README, "The operator API, and read-only slots"), make a slot's data read-only and writable
+again; the account's authority changes are always taken. With `COLOPHON_PRIVATE_LISTEN` set, the
+door and the operator API are served only on the private listener. The token never reads or
+deletes what a slot holds. It is meant for one operator's own tools. Do not ship it in an app; see
+the relay README, "Self-hosting".
 
 ## Back up, restore, update
 

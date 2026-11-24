@@ -37,7 +37,8 @@ fn bearer() -> Vec<(String, String)> {
 }
 
 /// A relay with provisioning on behind gate "token" and no slot configured, on the test clock.
-fn start(keys: &HomeKeys, dir: &std::path::Path, clock_ms: i64) -> (Child, u16) {
+/// Returns the process, the public port and the private port.
+fn start(keys: &HomeKeys, dir: &std::path::Path, clock_ms: i64) -> (Child, u16, u16) {
     let (relay, wasm) = prerequisites().expect("prerequisites");
     std::fs::create_dir_all(dir).unwrap();
     write_clock(&dir.join("clock"), clock_ms);
@@ -68,6 +69,7 @@ fn start(keys: &HomeKeys, dir: &std::path::Path, clock_ms: i64) -> (Child, u16) 
         .env("COLOPHON_HOME_WASM", wasm)
         .env("COLOPHON_RELAY_CLOCK_FILE", dir.join("clock"))
         .env("COLOPHON_RELAY_TICK_MS", "0")
+        .env("COLOPHON_PRIVATE_LISTEN", "127.0.0.1:0")
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
@@ -77,7 +79,11 @@ fn start(keys: &HomeKeys, dir: &std::path::Path, clock_ms: i64) -> (Child, u16) 
         .read_line(&mut line)
         .unwrap();
     let v: Value = serde_json::from_str(&line).expect("the listening line");
-    (child, v["listening"]["port"].as_u64().unwrap() as u16)
+    (
+        child,
+        v["listening"]["port"].as_u64().unwrap() as u16,
+        v["listening"]["private"]["port"].as_u64().unwrap() as u16,
+    )
 }
 
 /// Appoint the home with exactly the member request bytes the door answered.
@@ -104,7 +110,7 @@ fn q(e: &colophon_core::v05::engine::Engine<MemSource>, name: &str, args: Value)
     }
 }
 
-/// The operator's state of the slot (`GET /v1/operator/slots/<slot>`).
+/// The operator's state of the slot (`GET /v1/operator/slots/<slot>`), on the private listener.
 fn operator_state(port: u16) -> Value {
     let (status, _, body) = http(
         port,
@@ -114,14 +120,33 @@ fn operator_state(port: u16) -> Value {
         b"",
     );
     assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
-    serde_json::from_slice(&body).unwrap()
+    let mut v: Value = serde_json::from_slice(&body).unwrap();
+    let generation = v
+        .as_object_mut()
+        .unwrap()
+        .remove("generation")
+        .expect("a generation");
+    assert!(generation.as_str().is_some_and(|g| g.len() == 32));
+    v
 }
 
+/// Suspend or resume with the slot's current generation, as the provisioner does.
 fn operate(port: u16, action: &str) {
+    let (_, _, body) = http(
+        port,
+        "GET",
+        &format!("/v1/operator/slots/{SLOT}"),
+        &bearer(),
+        b"",
+    );
+    let generation = serde_json::from_slice::<Value>(&body).unwrap()["generation"]
+        .as_str()
+        .unwrap()
+        .to_string();
     let (status, _, body) = http(
         port,
         "POST",
-        &format!("/v1/operator/slots/{SLOT}/{action}"),
+        &format!("/v1/operator/slots/{SLOT}/{action}?generation={generation}"),
         &bearer(),
         b"",
     );
@@ -137,14 +162,25 @@ fn a_suspended_slot_refuses_writes_with_subscription_lapsed_serves_every_read_an
     let scratch = Scratch::new("suspend-journey");
     let mut f = create_public(&[NS]);
     let account = f.account.id().as_str().to_string();
-    let (mut child, port) = start(&keys, scratch.path(), f.account.now_ms());
+    let (mut child, port, private) = start(&keys, scratch.path(), f.account.now_ms());
     let relay = Relay::attached(port, &base(), &account, scratch.path());
 
     // The door, with the provisioning token.
     let mut headers = bearer();
     headers.push(("Content-Type".into(), "application/json".into()));
     let body = json!({"slot": SLOT, "base": base(), "account": account}).to_string();
-    let (status, _, request) = http(port, "POST", "/v1/provision", &headers, body.as_bytes());
+    // Provisioning and the operator API are served on the private listener only.
+    let (status, _, _) = http(port, "POST", "/v1/provision", &headers, body.as_bytes());
+    assert_eq!(status, 404, "the public listener does not serve the door");
+    let (status, _, _) = http(
+        port,
+        "GET",
+        &format!("/v1/operator/slots/{SLOT}"),
+        &bearer(),
+        b"",
+    );
+    assert_eq!(status, 404, "nor the operator API");
+    let (status, _, request) = http(private, "POST", "/v1/provision", &headers, body.as_bytes());
     assert_eq!(status, 200, "{}", String::from_utf8_lossy(&request));
     appoint_with(&mut f, &request);
     let phone_id = f.host.identity(31);
@@ -162,7 +198,7 @@ fn a_suspended_slot_refuses_writes_with_subscription_lapsed_serves_every_read_an
     let now = f.account.now_ms() + 1_000;
     first_upload(&relay, &f, now);
     assert_eq!(
-        operator_state(port),
+        operator_state(private),
         json!({"slot": SLOT, "provisioned": true, "suspended": false})
     );
 
@@ -200,9 +236,9 @@ fn a_suspended_slot_refuses_writes_with_subscription_lapsed_serves_every_read_an
     assert!(faults.is_empty(), "{faults:?}");
 
     // Suspended: read-only.
-    operate(port, "suspend");
+    operate(private, "suspend");
     assert_eq!(
-        operator_state(port),
+        operator_state(private),
         json!({"slot": SLOT, "provisioned": true, "suspended": true})
     );
 
@@ -317,7 +353,7 @@ fn a_suspended_slot_refuses_writes_with_subscription_lapsed_serves_every_read_an
     );
 
     // Resumed: the phone's write goes through, and the laptop reads it.
-    operate(port, "resume");
+    operate(private, "resume");
     let faults = relay_pass(
         &mut phone,
         &phone_src,

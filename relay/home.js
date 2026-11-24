@@ -449,21 +449,59 @@ export class HomeSlot {
   // the home's own upkeep (recording due entries, signing heads, forwarding) go on. Nothing is
   // deleted.
 
-  refuseIfSuspended() {
-    if (this.suspended) throw new this.deps.HttpError(403, 'This library is read-only', {}, { result: LAPSED });
+  /** Under the slot's lock. While the suspension's state on disk is uncertain (a write of it
+   * failed part way), data writes stay refused: the state is reconciled first, and a write is
+   * answered 503 `unavailable` if that fails too. */
+  async refuseIfSuspended() {
+    const { HttpError } = this.deps;
+    if (this.suspensionUncertain) {
+      try { await this.reconcileSuspensionLocked(); } catch (error) {
+        this.note('suspension', `the suspension's state could not be read: ${error.message}`);
+        throw new HttpError(503, 'The library is unavailable', { 'retry-after': '1' }, { result: 'unavailable' });
+      }
+    }
+    if (this.suspended) throw new HttpError(403, 'This library is read-only', {}, { result: LAPSED });
   }
 
-  /** Suspend (`on`) or resume the slot, durably before it is answered, under the slot's lock. */
+  /** Read the marker's presence from disk and make the directory durable, so what is on disk now
+   * is what a restart reads; only then is the state certain again. Under the slot's lock. */
+  async reconcileSuspensionLocked() {
+    const st = await fsp.lstat(this.file(SUSPENSION_FILE)).catch((error) => { if (error.code === 'ENOENT') return null; throw error; });
+    if (st && !st.isFile()) throw new Error(`${this.file(SUSPENSION_FILE)} is not a regular file`);
+    await syncDir(this.slot.root);
+    this.suspended = Boolean(st);
+    this.suspensionUncertain = false;
+  }
+
+  /** The operator's read of the state: reconciled first when it is uncertain. */
+  async reconcileSuspension() {
+    if (!this.suspensionUncertain) return;
+    await this.lock(() => this.reconcileSuspensionLocked());
+  }
+
+  /**
+   * Suspend (`on`) or resume the slot, durably before it is answered, under the slot's lock. The
+   * marker is staged, fsynced and renamed into place (or removed), and the directory fsynced. If
+   * any step fails the state is uncertain: data writes stay refused until it is reconciled, and the
+   * request fails (a retry redoes every step, whatever the state in memory says, so a 204 always
+   * means the intended state is durable).
+   */
   async setSuspended(on) {
     await this.lock(async () => {
-      if (on === this.suspended) return;
+      if (on === this.suspended && !this.suspensionUncertain) return;
+      this.suspensionUncertain = true;
       if (on) {
-        await this.writeJson(SUSPENSION_FILE, { suspended: true, at: this.clock() });
+        const staged = path.join(this.slot.root, 'tmp', `${SUSPENSION_FILE}.${randomBytes(12).toString('hex')}`);
+        const handle = await fsp.open(staged, fsc.O_WRONLY | fsc.O_CREAT | fsc.O_EXCL | fsc.O_NOFOLLOW, 0o600);
+        try { await writeAll(handle, JSON.stringify({ suspended: true, at: this.clock() })); await handle.sync(); } finally { await handle.close(); }
+        try { await fsp.rename(staged, this.file(SUSPENSION_FILE)); } catch (error) { await fsp.rm(staged, { force: true }); throw error; }
       } else {
         await fsp.rm(this.file(SUSPENSION_FILE), { force: true });
-        await syncDir(this.slot.root);
       }
+      await this.deps.reach?.(on ? 'suspension renamed' : 'suspension removed'); // a test hook (traced builds only)
+      await syncDir(this.slot.root);
       this.suspended = on;
+      this.suspensionUncertain = false;
     });
   }
 
@@ -655,7 +693,7 @@ export class HomeSlot {
     await this.deps.reach?.(`access ${section ?? ''}`); // a test hook (traced builds only)
     // A write the relay's own code would serve (a delete) is refused here; the others are
     // refused under the lock where they commit.
-    if (method !== 'GET' && method !== 'HEAD' && section === 'records' && !writing) this.refuseIfSuspended();
+    if (method !== 'GET' && method !== 'HEAD' && section === 'records' && !writing) await this.lock(() => this.refuseIfSuspended());
     if (!section) return false;
     if (section === 'head') { await this.serveOwnHead(res); return true; }
     if (section === 'authority') {
@@ -752,11 +790,10 @@ export class HomeSlot {
       const allowed = await this.access(req, section, rest, effect, body);
       await this.deps.reach?.(`access ${section}`); // a test hook (traced builds only)
       const key = allowed.reserve?.key;
-      if (this.suspended) {
+      if (this.suspended || this.suspensionUncertain) {
         // Judged first, so the caller's own call is what is refused (a request with no call is
         // challenged, as always); the reservation ends with no effect, and the call is spent.
-        if (key) await this.complete(key, 'completed');
-        this.refuseIfSuspended();
+        try { await this.refuseIfSuspended(); } catch (error) { if (key) await this.complete(key, 'completed'); throw error; }
       }
       let ended = false;
       try {
@@ -789,7 +826,7 @@ export class HomeSlot {
     const { readBody } = this.deps;
     const body = await readBody(req, 8192);
     await this.lock(async () => {
-      this.refuseIfSuspended();
+      await this.refuseIfSuspended();
       const r = this.wasm.call({ op: 'admit_one', state: this.state, now: this.clock(), bytes: b64(body), path: recordPath });
       await this.commit(r.state);
       await this.materialize(r.store);
