@@ -90,7 +90,12 @@ test('shutdown wakes every filtered long poll', () => fixture(async (r, base) =>
   const polls = ['notes', 'other', ''].map((ns) => fetch(`${base}/changes?namespace=${ns}&wait=30`));
   await until(() => slot.waiters.size === 3);
   await r.relay.close();
-  for (const poll of polls) expect((await poll).status).toBe(404);
+  // Retryable: the relay is going away, not the slot.
+  for (const poll of polls) {
+    const res = await poll;
+    expect(res.status).toBe(503);
+    expect(res.headers.get('retry-after')).toBe('1');
+  }
   expect(slot.waiters.size).toBe(0);
 }));
 

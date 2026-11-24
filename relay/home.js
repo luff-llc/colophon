@@ -167,6 +167,8 @@ export class HomeSlot {
     this.commits = 0; // committed state changes, for long polls judged before one
     this.lastHead = null;
     this.stream = new HomeStream(this, o.stream ?? {});
+    // Aborted at shutdown: a forwarding pass's waits on other homes end at once.
+    this.stopping = new AbortController();
   }
 
   file(name) { return path.join(this.slot.root, name); }
@@ -1040,12 +1042,13 @@ export class HomeSlot {
     // Calls to other homes happen outside the lock (two homes forwarding to each other would
     // otherwise wait on one another), and each peer has its own pass: the tick starts them and
     // does not wait, so one slow or silent peer delays neither this home's settling nor its
-    // forwarding to any other peer.
-    this.forwardAll();
+    // forwarding to any other peer. (Shutdown waits for the start: quiesce.)
+    this.forwarding = this.forwardAll();
   }
 
   /** Start a forwarding pass to every peer that has none running (§13.1). */
   async forwardAll() {
+    if (this.stopping?.signal.aborted) return; // shutting down: no new pass
     // One start at a time: a tick that comes while the last start still waits for the lock adds
     // nothing to the lock's queue (a queue growing every tick would delay every request).
     if (this.startingPasses) return;
@@ -1056,6 +1059,7 @@ export class HomeSlot {
       this.note('forward', `forwarding could not start: ${error.message}`);
       return;
     } finally { this.startingPasses = false; }
+    if (this.stopping?.signal.aborted) return;
     const resolve = typeof this.resolve === 'function' ? this.resolve() : this.resolve;
     this.passes ??= new Map();
     for (const peer of st.peers ?? []) {
@@ -1076,6 +1080,34 @@ export class HomeSlot {
     }
   }
 
+  /** A request to another home: its own time limit, or shutdown, whichever comes first. */
+  peerSignal(timeout) {
+    const limit = AbortSignal.timeout(timeout);
+    return this.stopping ? AbortSignal.any([limit, this.stopping.signal]) : limit;
+  }
+
+  /** At shutdown: no new forwarding pass, and the running ones stop waiting on other homes. */
+  stop() {
+    this.stopping ??= new AbortController();
+    if (!this.stopping.signal.aborted) this.stopping.abort(new Error('the relay is closing'));
+  }
+
+  /**
+   * At shutdown, after the requests in flight on the slot have ended: no new forwarding pass;
+   * the passes running stop waiting on other homes (each request is aborted) and are waited
+   * for, with the forwarding state they save; then whatever is queued on the slot's locks.
+   * What a pass commits under the lock finishes, as always: state is never left torn.
+   */
+  async quiesce() {
+    this.stop();
+    await this.forwarding;
+    await Promise.allSettled([...(this.passes?.values() ?? [])]);
+    await this.saving;
+    await this.lock(async () => {});
+    await this.replayLock?.(async () => {});
+    await this.saving;
+  }
+
   /** Persist the forwarding rows, one write at a time (passes to several peers run at once). */
   saveForward() {
     // A snapshot taken under the lock when the save is asked for, not the live rows at write time.
@@ -1092,7 +1124,7 @@ export class HomeSlot {
   async offer(base, objects, peerId, deadline) {
     const timeout = Math.min(PEER_TIMEOUT_MS, deadline - Date.now());
     if (timeout <= 0) return false;
-    const r = await fetch(`${base}/pending`, { signal: AbortSignal.timeout(timeout), method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ objects }) });
+    const r = await fetch(`${base}/pending`, { signal: this.peerSignal(timeout), method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ objects }) });
     const body = Buffer.from(await r.arrayBuffer());
     const a = this.wasm.call({ op: 'peer_answer', status: r.status, body: b64(body) });
     if (a.receipts?.length) {
@@ -1200,7 +1232,7 @@ export class HomeSlot {
       const body = JSON.stringify({ from: fwd.from, entries: fwd.entries.map((e) => JSON.parse(unb64(e))), receipts: [] });
       const timeout = Math.min(PEER_TIMEOUT_MS, deadline - Date.now());
       if (timeout <= 0) return 0;
-      const r = await fetch(`${base}/authority`, { signal: AbortSignal.timeout(timeout), method: 'POST', headers: { 'content-type': 'application/json' }, body });
+      const r = await fetch(`${base}/authority`, { signal: this.peerSignal(timeout), method: 'POST', headers: { 'content-type': 'application/json' }, body });
       this.note(`entries ${peerId}`, r.status === 200 ? '' : `home ${peerId} did not take this home's entries from ${fwd.from}: ${r.status} ${(await r.text()).slice(0, 200)}`);
       return r.status;
     };
@@ -1212,7 +1244,7 @@ export class HomeSlot {
       if (sha(text) === row.head) return;
       const timeout = Math.min(PEER_TIMEOUT_MS, deadline - Date.now());
       if (timeout <= 0) return;
-      const r = await fetch(`${base}/records/heads/${this.key.memberId}.json`, { signal: AbortSignal.timeout(timeout), method: 'PUT', headers: { 'content-type': 'application/json' }, body: text });
+      const r = await fetch(`${base}/records/heads/${this.key.memberId}.json`, { signal: this.peerSignal(timeout), method: 'PUT', headers: { 'content-type': 'application/json' }, body: text });
       if (r.status === 200) { row.head = sha(text); await this.saveForward(); this.note(`head ${peerId}`, ''); }
       else this.note(`head ${peerId}`, `home ${peerId} refused this home's head: ${r.status} ${(await r.text()).slice(0, 200)}`);
     };

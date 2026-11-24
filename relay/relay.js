@@ -498,7 +498,7 @@ async function serveBatch(res, slot, decisions) {
  * Creates the relay. `libraries` maps slot names to `{ tokenSha256 }`, `{ token }` or
  * `{ open: true }` (no bearer token; local testing only).
  */
-export async function createRelay({ dataDir, libraries, limits = {}, home, clock = Date.now, resolve, tickMs = 0, tracing = false, cors, provision, clientAddress: addressConfig, crashAt, hook, stream: streamOptionsIn = {} }) {
+export async function createRelay({ dataDir, libraries, limits = {}, home, clock = Date.now, resolve, tickMs = 0, tracing = false, cors, provision, clientAddress: addressConfig, crashAt, hook, stream: streamOptionsIn = {}, drainMs = DRAIN_MS }) {
   if (!dataDir) throw new Error('dataDir is required');
   if (cors !== undefined && cors !== null && (typeof cors !== 'object' || Array.isArray(cors))) throw new Error('cors must be an object with origins, an array of origins');
   const origins = corsOrigins(cors?.origins);
@@ -600,6 +600,8 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
   const slots = new Map();
   const opening = new Map();
   const notProvisioned = () => new HttpError(404, 'Not provisioned', {}, { result: 'refused:notProvisioned' });
+  // Shutdown, unlike a release, says nothing about the slot: the request may be retried.
+  const relayClosing = () => new HttpError(503, 'Relay is closing', { 'retry-after': '1' });
   async function slot(name) {
     if (closing) throw new HttpError(503, 'Relay is closing');
     if (slots.has(name)) return slots.get(name);
@@ -842,7 +844,8 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
     }
     const s = await slot(name);
     // Counted from here until the response has ended and this handler has settled.
-    if (closing || s.closing || s.releasing || s.released) throw notProvisioned();
+    if (s.releasing || s.released) throw notProvisioned();
+    if (closing || s.closing) throw relayClosing();
     enter(s); work.slot = s;
     // A home's commits so far: a long poll judged by the home ends once the authority changes.
     const commits = s.home?.commits;
@@ -882,7 +885,8 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
         await reach('changes waiting'); // a test hook (traced builds only)
         await waiting;
         if (res.destroyed) return undefined;
-        if (s.closing || s.releasing) throw notProvisioned(); // woken by a release
+        if (s.releasing) throw notProvisioned(); // woken by a release
+        if (s.closing) throw relayClosing(); // woken by shutdown: retry elsewhere or later
         if (changed()) break;
         page = s.changes(page.cursor, limit, namespaces);
       }
@@ -997,24 +1001,31 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
     for (const s of slots.values()) {
       s.closing = true;
       s.home?.stream.closeAll('restart');
+      s.home?.stop();
       for (const waiter of [...s.waiters]) waiter.wake();
     }
     const drain = async () => {
       await Promise.allSettled([...requests, ...opening.values(), provisionTail]);
-      await Promise.all([...slots.values()].map(async (s) => { await drained(s); await s.chain; }));
+      // Then each home's own work no request carries (forwarding, its saves, queued lock work).
+      await Promise.all([...slots.values()].map(async (s) => { await drained(s); await s.home?.quiesce(); await s.chain; }));
       await unlock();
     };
-    closePromise = boundedDrain(drain());
+    closePromise = boundedDrain(drain(), drainMs);
     return closePromise;
   } };
   } catch (error) { await unlock(true); throw error; }
 }
 
+/** How long shutdown waits for work in flight: under the 10 s Docker gives a container to stop
+ * by default (docker-compose.yml gives 15 s), with time left to exit. A forwarding pass's waits
+ * on other homes are cut at once; what remains is local commits and requests in flight. */
+export const DRAIN_MS = 8_000;
+
 // The lock stays held until writes settle, even after the shutdown deadline expires.
-function boundedDrain(work) {
+function boundedDrain(work, ms = DRAIN_MS) {
   let timer;
   return Promise.race([work, new Promise((_, reject) => {
-    timer = setTimeout(() => reject(new Error('Relay shutdown timed out draining writes')), 5000);
+    timer = setTimeout(() => reject(new Error('Relay shutdown timed out draining writes')), ms);
   })]).finally(() => clearTimeout(timer));
 }
 
