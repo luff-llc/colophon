@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.5.5 (unreleased)
+
+No format or reader-rule change. The spec stays Colophon 0.5, revision 18.
+
+- **Operator API and read-only slots** (reference home, `relay/`): with gate `token`, the provisioning token also authorizes `GET /v1/operator/slots/<slot>` (`{"slot","provisioned","suspended","generation"}`) and `POST /v1/operator/slots/<slot>/suspend` and `/resume` (204), which require `?generation=` (400 without it, 409 `refused:staleGeneration` when the name has since been released and provisioned again). Without gate `token` the paths answer 404.
+  - A suspended slot serves every read (the head, history, pending objects, records, blob chunks, the change feed and its long poll) and refuses every data write with 403 `{"result":"refused:subscriptionLapsed"}`: record, live value, blob chunk and predecessor puts, and forwarded heads. History uploads and pending objects (transitions, vetoes, receipts) are still taken and receipted, so the account can appoint another home and revoke this one. It deletes nothing.
+  - The suspension is stored as `<slot>/suspended.json`, written atomically, and survives a restart. If writing it fails part way, data writes stay refused until the state is reconciled from disk, and a retry is acknowledged only once the intended state is durable. A suspended slot is never released as unclaimed.
+  - The token is checked first. Authenticated operator requests share `provision.operatorPerMinute` (default 600) for the whole home; refused ones count per address against `provision.operatorRefusedPerMinute` (default 10), and never spend or crowd out the operator's share.
+- **`GET /v1/operator/slots`** lists every home slot (`{slot, provisioned, suspended, generation}`), paginated by `after` and `limit`, behind the same token and share as the other operator routes.
+- **Slot quota at a home slot**: `limits.slotBytes` counts data only (records, live values, blob chunks) and refuses a data write over it with 507 `{"result":"refused:overQuota"}`; the account's history and reads are never refused.
+- **History quota at a home slot**: `limits.historyBytes` (default 64 MiB, `COLOPHON_SLOT_HISTORY_BYTES`) bounds a slot's history; an upload, pending objects, a forwarded head or a predecessor entry past it answers 507 `{"result":"refused:historyQuota"}` before anything commits. Reads are never refused.
+- **Forwarding is bounded and fair**: a peer's answer is streamed and cancelled past `limits.peerAnswerBytes` (1 MiB); passes run at most `limits.forwardPeersPerSlot` (8) per slot and `limits.forwardPasses` (64) per home; peers take turns within a slot, and each scheduler pass starts from the next slot.
+- **Door shares**: provisioning the same slot again for the same account spends no new-slot share and is never refused by one. A grant call sweeps unclaimed slots only once it passes the module's judgement over the operator slot's current state.
+- **Private listener** (`COLOPHON_PRIVATE_LISTEN=unix:/path` or `host:port`, or `privateListen` in the config): serves `/v1/provision` and `/v1/operator/*` only; the public listener then answers 404 for both. A Unix socket is made mode 0600; a host must be loopback or private unless `COLOPHON_PRIVATE_LISTEN_ALLOW_PUBLIC=1`.
+- **The door's 200 carries `Colophon-Slot-Generation`**, the slot's generation from the same decision; the body (the member request) is unchanged.
+- **Hosted mode** (container): `COLOPHON_HOSTED=1`, or a private listener, requires `COLOPHON_PROVISION_TOKEN_SHA256` with gate `token`, and never makes or prints a token.
+- **The door and releases**: a token request is authenticated, and a grant call judged without state, before any sweep of unclaimed slots. A release drains the work in flight on its slot outside the door's lock, checks the slot is still the one it started from, never releases a slot whose suspension marker is on disk or whose state is uncertain, and renames the directory aside under the lock and removes it after. A full home waits for releases under way before answering 507.
+- **`refused:subscriptionLapsed`** is listed with the reserved home refusals (spec §14). The Swift, Kotlin and JS sessions already show any `refused:` result as received; their documentation now names it.
+
 ## 0.5.4 — 2026-11-24
 
 No format or reader-rule change. The spec stays Colophon 0.5, revision 18; 0.5.x homes and apps

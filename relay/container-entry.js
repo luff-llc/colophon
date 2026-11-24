@@ -25,6 +25,7 @@ import { closeSync, constants as fsc, fsyncSync, lchownSync, linkSync, lstatSync
 import { hostname } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { checkPrivateListen, parsePrivateListen } from './provision.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const SERVER = path.join(here, 'server.js');
@@ -73,6 +74,22 @@ export function readSettings(env) {
     if (!account || !slot) throw new SettingError('gate grant needs COLOPHON_PROVISION_OPERATOR_ACCOUNT and COLOPHON_PROVISION_OPERATOR_SLOT');
     operator = { account, slot };
   }
+  // The private listener (provisioning and the operator API), and hosted mode: with either, the
+  // token gate needs a hash supplied by the operator's secret management; no token is made or
+  // printed, and no hash left on the volume by an earlier start is trusted.
+  let privateListen;
+  const privateText = env.COLOPHON_PRIVATE_LISTEN?.trim();
+  const privateListenAllowPublic = env.COLOPHON_PRIVATE_LISTEN_ALLOW_PUBLIC?.trim() === '1';
+  if (privateText) {
+    try { privateListen = checkPrivateListen(parsePrivateListen(privateText, 'COLOPHON_PRIVATE_LISTEN'), privateListenAllowPublic); }
+    catch (error) { throw new SettingError(error.message.startsWith('COLOPHON_') ? error.message : `COLOPHON_PRIVATE_LISTEN: ${error.message}`); }
+  }
+  const hostedText = (env.COLOPHON_HOSTED ?? '').trim().toLowerCase();
+  if (!['', 'on', 'off', 'true', 'false', '1', '0'].includes(hostedText)) throw new SettingError('COLOPHON_HOSTED must be on or off');
+  const hosted = ['on', 'true', '1'].includes(hostedText) || privateListen !== undefined;
+  if (hosted && provisioning && gates.includes('token') && tokenSha256 === undefined) {
+    throw new SettingError('A hosted home (COLOPHON_HOSTED, or COLOPHON_PRIVATE_LISTEN set) with gate token needs COLOPHON_PROVISION_TOKEN_SHA256 from your secret manager: it never makes or prints a token');
+  }
   const header = env.COLOPHON_CLIENT_IP_HEADER?.trim() || undefined;
   const proxies = list(env.COLOPHON_TRUSTED_PROXIES);
   if (Boolean(header) !== (proxies.length > 0)) throw new SettingError('COLOPHON_CLIENT_IP_HEADER and COLOPHON_TRUSTED_PROXIES go together: the header is read only from those peers');
@@ -85,10 +102,14 @@ export function readSettings(env) {
     gates,
     tokenSha256,
     operator,
+    hosted,
+    privateListen,
+    privateListenAllowPublic,
     maxSlots: int(env, 'COLOPHON_MAX_SLOTS', { min: 1 }),
     perAddressPerHour: int(env, 'COLOPHON_PROVISION_PER_ADDRESS_PER_HOUR', { min: 1 }),
     unclaimedHours: int(env, 'COLOPHON_PROVISION_UNCLAIMED_HOURS', { min: 1 }),
     slotBytes: int(env, 'COLOPHON_SLOT_BYTES', { min: 0 }),
+    historyBytes: int(env, 'COLOPHON_SLOT_HISTORY_BYTES', { min: 0 }),
     corsOrigins: list(env.COLOPHON_CORS_ORIGINS),
     clientAddress: header ? { header, trustedPeers: proxies } : undefined,
     wasm: env.COLOPHON_HOME_WASM || DEFAULT_WASM,
@@ -104,8 +125,12 @@ export function relayConfig(s, { dataDir, keyFile, tokenSha256 }) {
     home: { keyFile, wasm: s.wasm },
     cors: { origins: s.corsOrigins },
   };
-  if (s.slotBytes !== undefined) config.limits = { slotBytes: s.slotBytes };
+  if (s.slotBytes !== undefined || s.historyBytes !== undefined) {
+    config.limits = { ...(s.slotBytes !== undefined ? { slotBytes: s.slotBytes } : {}), ...(s.historyBytes !== undefined ? { historyBytes: s.historyBytes } : {}) };
+  }
   if (s.clientAddress) config.clientAddress = s.clientAddress;
+  if (s.privateListen) config.privateListen = s.privateListen;
+  if (s.privateListen && s.privateListenAllowPublic) config.privateListenAllowPublic = true;
   // The prefix stays set when provisioning is off: a table written while it was on is checked
   // against it at start-up.
   const provision = { enabled: s.provisioning, prefix: s.prefix };
@@ -222,6 +247,7 @@ export function prepare(dataRoot, env) {
   if (s.provisioning && s.gates.includes('token')) {
     const hashFile = path.join(secrets, 'provision-token.sha256');
     if (s.tokenSha256) tokenSha256 = s.tokenSha256;
+    else if (s.hosted) throw new SettingError('A hosted home needs COLOPHON_PROVISION_TOKEN_SHA256: it never makes or prints a token');
     else if (existsSync(hashFile)) {
       tokenSha256 = readFileSync(hashFile, 'utf8').trim();
       if (!HEX64.test(tokenSha256)) throw new Error(`${hashFile} does not hold a SHA-256; remove it to make a new token`);

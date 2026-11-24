@@ -70,6 +70,33 @@ describe('settings from the environment', () => {
     const off = relayConfig(readSettings({ COLOPHON_PUBLIC_URL: URL_, COLOPHON_PROVISION: 'off' }), { dataDir: 'd', keyFile: 'k' });
     assert.deepEqual(off.provision, { enabled: false, prefix: `${URL_}/v1/libraries/` }, 'the prefix stays for a table made while it was on');
   });
+  test('hosted: a private listener or COLOPHON_HOSTED needs a supplied token hash, and is written to the config', () => {
+    for (const extra of [{ COLOPHON_HOSTED: '1' }, { COLOPHON_PRIVATE_LISTEN: '10.0.0.2:8788' }, { COLOPHON_HOSTED: 'on', COLOPHON_PROVISION_GATE: 'grant,token',
+      COLOPHON_PROVISION_OPERATOR_ACCOUNT: 'cd'.repeat(32), COLOPHON_PROVISION_OPERATOR_SLOT: 'operator-home' }]) {
+      assert.throws(() => readSettings({ COLOPHON_PUBLIC_URL: URL_, ...extra }), (e) => e instanceof SettingError && /COLOPHON_PROVISION_TOKEN_SHA256/.test(e.message), JSON.stringify(extra));
+    }
+    const s = readSettings({ COLOPHON_PUBLIC_URL: URL_, COLOPHON_PRIVATE_LISTEN: '[fd00::2]:8788', COLOPHON_PROVISION_TOKEN_SHA256: 'ab'.repeat(32) });
+    assert.equal(s.hosted, true);
+    assert.deepEqual(s.privateListen, { host: 'fd00::2', port: 8788 });
+    assert.deepEqual(relayConfig(s, { dataDir: 'd', keyFile: 'k', tokenSha256: s.tokenSha256 }).privateListen, { host: 'fd00::2', port: 8788 });
+    assert.equal(readSettings({ COLOPHON_PUBLIC_URL: URL_, COLOPHON_HOSTED: '1', COLOPHON_PROVISION_GATE: 'open' }).hosted, true, 'no token gate: nothing to supply');
+    const sock = readSettings({ COLOPHON_PUBLIC_URL: URL_, COLOPHON_PRIVATE_LISTEN: 'unix:/run/colophon/private.sock', COLOPHON_PROVISION_TOKEN_SHA256: 'ab'.repeat(32) });
+    assert.deepEqual(relayConfig(sock, { dataDir: 'd', keyFile: 'k', tokenSha256: sock.tokenSha256 }).privateListen, { path: '/run/colophon/private.sock' });
+    for (const pub of ['0.0.0.0:8788', '[::]:8788', '203.0.113.7:8788']) {
+      assert.throws(() => readSettings({ COLOPHON_PUBLIC_URL: URL_, COLOPHON_PRIVATE_LISTEN: pub, COLOPHON_PROVISION_TOKEN_SHA256: 'ab'.repeat(32) }), (e) => e instanceof SettingError && /not a loopback or private address/.test(e.message), pub);
+    }
+    const allowed = readSettings({ COLOPHON_PUBLIC_URL: URL_, COLOPHON_PRIVATE_LISTEN: '0.0.0.0:8788', COLOPHON_PRIVATE_LISTEN_ALLOW_PUBLIC: '1', COLOPHON_PROVISION_TOKEN_SHA256: 'ab'.repeat(32) });
+    assert.equal(relayConfig(allowed, { dataDir: 'd', keyFile: 'k', tokenSha256: allowed.tokenSha256 }).privateListenAllowPublic, true);
+    for (const bad of ['8788', 'host:', 'host:70000', 'a b:1', 'unix:relative.sock']) {
+      assert.throws(() => readSettings({ COLOPHON_PUBLIC_URL: URL_, COLOPHON_PRIVATE_LISTEN: bad, COLOPHON_PROVISION_TOKEN_SHA256: 'ab'.repeat(32) }), (e) => e instanceof SettingError && /COLOPHON_PRIVATE_LISTEN/.test(e.message), bad);
+    }
+    assert.throws(() => readSettings({ COLOPHON_PUBLIC_URL: URL_, COLOPHON_HOSTED: 'yes' }), (e) => e instanceof SettingError && /COLOPHON_HOSTED/.test(e.message));
+  });
+  test('COLOPHON_SLOT_HISTORY_BYTES lands in limits.historyBytes', () => {
+    const c = relayConfig(readSettings({ COLOPHON_PUBLIC_URL: URL_, COLOPHON_SLOT_HISTORY_BYTES: '1048576' }), { dataDir: 'd', keyFile: 'k', tokenSha256: 'ab'.repeat(32) });
+    assert.deepEqual(c.limits, { historyBytes: 1048576 });
+    assert.throws(() => readSettings({ COLOPHON_PUBLIC_URL: URL_, COLOPHON_SLOT_HISTORY_BYTES: 'lots' }), (e) => e instanceof SettingError && /COLOPHON_SLOT_HISTORY_BYTES/.test(e.message));
+  });
   test('a wrong setting names its variable', () => {
     const bad = [
       [{}, /COLOPHON_PUBLIC_URL is required/],
@@ -126,6 +153,15 @@ describe('the volume', { skip: ready ? false : `build the module first (${wasm})
     assert.equal(again.provision.maxSlots, 7, 'the config follows the environment at every start');
     assert.ok(!existsSync(path.join(data, 'config.json')), 'the generated config is not the escape hatch');
     assert.ok(two.unset.includes('COLOPHON_RELAY_DATA') && two.unset.includes('COLOPHON_HOME_KEY'));
+  });
+  test('hosted: no token is made or printed, and a hash left on the volume is not trusted', () => {
+    const data = path.join(root, 'hosted');
+    const first = prepare(data, env());
+    assert.ok(first.token, 'a self-hosted start makes one');
+    assert.throws(() => prepare(data, env({ COLOPHON_HOSTED: '1' })), (e) => e instanceof SettingError && /COLOPHON_PROVISION_TOKEN_SHA256/.test(e.message));
+    const hosted = prepare(data, env({ COLOPHON_HOSTED: '1', COLOPHON_PROVISION_TOKEN_SHA256: 'cd'.repeat(32) }));
+    assert.equal(hosted.token, undefined, 'nothing to print');
+    assert.equal(JSON.parse(readFileSync(hosted.configFile, 'utf8')).provision.tokenSha256, 'cd'.repeat(32), 'the supplied hash, not the stored one');
   });
   test('a supplied token hash is used and nothing is made; gate open makes no token', () => {
     const a = prepare(path.join(root, 'hash'), env({ COLOPHON_PROVISION_TOKEN_SHA256: 'ab'.repeat(32) }));
