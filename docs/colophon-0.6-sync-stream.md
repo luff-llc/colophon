@@ -283,7 +283,11 @@ batch. The points below are places where the two drafts are ambiguous or silent.
    (§12.3 step 4), and a device cannot mint before it has read the home's head. §1.1 should say
    so. The host contract above handles it.
 
-## 5. What the bindings need next (not done here)
+## 5. What the bindings need next
+
+The stream object and `stream_begin_call` / `stream_client` are now exported in both binding crates
+([bindings-05.md](bindings-05.md) §10); the per-platform WebSocket transports below are still to do.
+
 
 - **Batch:** nothing new. `CallNeed` and `exchange_begin_call` already cover it.
   `exchange_batch_support(home)` is a read-only diagnostic and can be exposed.

@@ -39,6 +39,8 @@ const DEFAULT_BATCH: u64 = 16_384;
 pub struct AccountEngine {
     eng: Cell<Engine<Source>>,
     pub(crate) owner: u64,
+    /// What 0.6 session endpoints read instead of taking the engine's lock (`sessions.rs`).
+    pub(crate) gate: super::sessions::SessionGate,
     versions: Versions,
     fault: HostFault,
 }
@@ -293,7 +295,11 @@ impl AccountEngine {
                     poisoned.detail()
                 )));
             }
-            match f(&mut g) {
+            let r = f(&mut g);
+            // A new authority head or key set becomes visible to session endpoints here, while
+            // this call still holds the engine: the call returns only once it is installed.
+            self.gate.publish(g.account(), g.is_locked());
+            match r {
                 Ok(v) => Ok(v),
                 Err(e) => {
                     // The core says a locked engine refuses by a plain refusal: say it typed.
@@ -399,9 +405,11 @@ impl AccountEngine {
                     return Err(e);
                 }
             };
+            let gate = super::sessions::SessionGate::new(e.account(), e.is_locked());
             Ok(Self {
                 eng: Cell::watched(e, busy),
                 owner: next_owner(),
+                gate,
                 versions,
                 fault,
             })

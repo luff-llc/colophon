@@ -1801,6 +1801,37 @@ impl Account {
     pub(crate) fn epoch_keys(&self) -> &crate::v05::records::EpochKeys {
         &self.d.keys
     }
+    /// The 0.6 session view of the verified history at `at_ms` (§S1, §S2): every member current
+    /// at `at_ms` with its session number and `records` entries
+    /// ([`SessionAccount::from_history_state`](crate::v06::session::keys::SessionAccount::from_history_state)).
+    /// An account whose genesis did not verify has an empty view: nobody is entitled.
+    pub fn session_account(&self, at_ms: i64) -> crate::v06::session::keys::SessionAccount {
+        match &self.d.verdict.state {
+            Some(state) => crate::v06::session::keys::SessionAccount::from_history_state(
+                self.id(),
+                state,
+                at_ms,
+            ),
+            None => crate::v06::session::keys::SessionAccount::new(self.id().as_str()),
+        }
+    }
+    /// The epoch keys this session holds for `namespace`, as an opaque capability for a 0.6
+    /// session endpoint ([`SessionEpochs`](crate::v06::session::codec::SessionEpochs)): a
+    /// wiped-on-drop copy from which nothing outside the crate can read a key. Take a new one
+    /// after an unlock or a rekey.
+    pub fn session_epochs(&self, namespace: &str) -> crate::v06::session::codec::SessionEpochs {
+        let account = self.id();
+        let mut out = crate::v06::session::codec::SessionEpochs::new(namespace);
+        for k in self
+            .d
+            .keys
+            .of_namespace(namespace)
+            .filter(|k| k.account() == account)
+        {
+            out.insert(k.epoch(), k.expose());
+        }
+        out
+    }
     /// Restrict which namespaces this session folds and unlocks (as 0.4's read scope).
     pub fn set_read_scope(&mut self, namespaces: Vec<String>) -> Result<Changes> {
         for n in &namespaces {

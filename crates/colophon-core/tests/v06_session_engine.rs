@@ -1,0 +1,136 @@
+//! The account view and epoch keys an engine gives a 0.6 session endpoint
+//! (`Account::session_account`, `Account::session_epochs`): two members of one account, each on
+//! its own engine, seal and open each other's frames with only what their engines verified and
+//! unlocked; a table without the epoch opens nothing. The epoch capability is opaque: it is not
+//! `Debug`, `Clone` or serializable, and a key read through it is an `EpochSecret` with no
+//! public way to its bytes (checked at compile time below).
+#![allow(clippy::unwrap_used)]
+#[path = "v05_engine_support/mod.rs"]
+mod support;
+use colophon_core::v05::terms::Access;
+use colophon_core::v06::session::codec::{CellId, EpochKeys, EpochSecret, EpochTable, SessionEpochs};
+use colophon_core::v06::session::endpoint::{Clock, Endpoint, EndpointError};
+use colophon_core::v06::session::{Command, Policy};
+use support::*;
+
+const NOW: i64 = T0 + 3 * HOUR;
+const NS: &str = "notes";
+
+#[test]
+fn member_engines_give_endpoints_that_open_each_others_frames() {
+    let (mut s, ids) = setup(NS, &[("A", 31, "write"), ("B", 32, "read")]);
+    let host = std::mem::replace(&mut s.f.host, Host::new());
+    let (a_src, b_src) = (device_source(&s), device_source(&s));
+    let a = member_engine(&s.f, &host, &a_src, &ids[0], NOW);
+    let b = member_engine(&s.f, &host, &b_src, &ids[1], NOW);
+
+    let view = a.account().session_account(NOW);
+    assert_eq!(
+        view,
+        b.account().session_account(NOW),
+        "one history, one view"
+    );
+    assert_eq!(view.account(), a.account().id().as_str());
+    assert_eq!(view.writers(NS, NOW), vec![ids[0].clone()]);
+    assert_eq!(view.access(&ids[1], NS, NOW), Some(Access::Read));
+    assert_eq!(view.member(&ids[0]).unwrap().session, 0);
+
+    let (ka, kb) = (
+        a.account().session_epochs(NS),
+        b.account().session_epochs(NS),
+    );
+    let epoch = ka.current_epoch(NS).unwrap();
+    assert_eq!(kb.current_epoch(NS), Some(epoch));
+    assert_eq!(ka.namespace(), NS);
+    // A key read through the capability is opaque: this compiles only because nothing is read.
+    let _opaque: EpochSecret = ka.epoch_key(NS, epoch).unwrap();
+    assert!(ka.epoch_key("other", epoch).is_none(), "one namespace only");
+    assert!(a
+        .account()
+        .session_epochs("other")
+        .current_epoch("other")
+        .is_none());
+
+    let cell = CellId::new(a.account().id().as_str(), NS, "now-playing");
+    let clock = Clock {
+        mono_ms: 1_000,
+        wall_ms: NOW,
+    };
+    let make = |me: &str, r: u8| {
+        Endpoint::new(
+            cell.clone(),
+            me,
+            Policy::default(),
+            None,
+            view.clone(),
+            &mut [r; 32],
+            [r; 16],
+            clock,
+        )
+        .unwrap()
+    };
+    // A view of one account cannot back an endpoint of another.
+    let other = CellId::new(&"c".repeat(64), NS, "now-playing");
+    let wrong = Endpoint::new(
+        other,
+        &ids[0],
+        Policy::default(),
+        None,
+        view.clone(),
+        &mut [9; 32],
+        [9; 16],
+        clock,
+    );
+    assert!(matches!(wrong, Err(EndpointError::WrongAccount)));
+    let (mut pa, mut pb) = (make(&ids[0], 7), make(&ids[1], 8));
+    // A view of another account given later changes nothing.
+    let foreign = colophon_core::v06::session::keys::SessionAccount::new(&"c".repeat(64));
+    let before = pa.machine().digest();
+    let step = pa.set_account(foreign, clock, &ka);
+    assert!(step.effects.is_empty());
+    assert_eq!(pa.machine().digest(), before);
+    assert!(pa.entitled(), "the foreign view did not revoke anything");
+    for (p, id) in [(&mut pa, &ids[0]), (&mut pb, &ids[1])] {
+        let body = p.begin_delegation(NOW - 1_000, NOW + HOUR).unwrap();
+        let sig = host.ids[id].sign(&body).to_vec();
+        p.finish_delegation(&body, &sig, clock).unwrap();
+    }
+    let joined = pa.command(Command::Join { state: None }, clock, &ka);
+    let hello = joined.frames().next().unwrap().to_vec();
+    pb.command(Command::Join { state: None }, clock, &kb);
+    assert_eq!(
+        pb.receive(&hello, clock, &EpochTable::new())
+            .dropped
+            .map(|d| d.reason.code()),
+        Some("noEpoch")
+    );
+    let got = pb.receive(&hello, clock, &kb);
+    assert!(got.dropped.is_none(), "{:?}", got.dropped);
+}
+
+/// Compile-time proof that a type does not implement a trait: with the trait implemented, the
+/// `_` below has two candidates and the call is ambiguous, so this file would not compile.
+macro_rules! lacks {
+    ($t:ty, $tr:path) => {{
+        trait Ambiguous<A> {
+            fn check() {}
+        }
+        impl<T: ?Sized> Ambiguous<()> for T {}
+        #[allow(dead_code)]
+        struct Implemented;
+        impl<T: ?Sized + $tr> Ambiguous<Implemented> for T {}
+        <$t as Ambiguous<_>>::check()
+    }};
+}
+
+#[test]
+fn the_epoch_capability_and_its_keys_are_opaque() {
+    lacks!(SessionEpochs, std::fmt::Debug);
+    lacks!(SessionEpochs, Clone);
+    lacks!(SessionEpochs, serde::Serialize);
+    lacks!(EpochSecret, std::fmt::Debug);
+    lacks!(EpochSecret, Clone);
+    lacks!(EpochSecret, serde::Serialize);
+    lacks!(EpochTable, std::fmt::Debug);
+    lacks!(EpochTable, Clone);
+}

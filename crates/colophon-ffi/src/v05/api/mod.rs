@@ -10,6 +10,10 @@
 //!
 //! What never crosses in either direction: seed bytes, epoch key bytes, a PRF output or a raw
 //! ECDH result read back, a prepared action's state, a verified state supplied by the host.
+//!
+//! The 0.6 home stream (`stream.rs`) and sessions (`sessions.rs`) are part of this surface. The
+//! conformance surface lives in a separate, unpublished crate (`colophon-conformance`) that no
+//! shipped artifact depends on.
 #![allow(missing_docs, clippy::too_many_arguments)]
 
 #[cfg(all(feature = "native05", feature = "web05"))]
@@ -19,6 +23,8 @@ compile_error!(
      supported; use `--features native05` for colophon-ffi and the default for colophon-wasm)"
 );
 
+#[macro_use]
+mod types;
 mod action;
 mod convert;
 mod create;
@@ -28,8 +34,10 @@ mod join;
 mod moving;
 mod pairing;
 mod session;
+#[macro_use]
+mod sessions;
+mod stream;
 mod successor;
-mod types;
 mod verify;
 
 pub use action::AccountAction;
@@ -43,6 +51,11 @@ pub use session::{
     AccountCopyWrite, SwiftCopyDestination, SwiftCopyPlan, SwiftCopyResult, SwiftSource,
     SwiftTranslator,
 };
+pub use sessions::{
+    session_clock_sample, session_default_policy, session_validate_policy, SessionAccountView,
+    SessionEndpoint,
+};
+pub use stream::{stream_default_config, stream_redact_url, HomeStream};
 pub use successor::SwiftSuccessorCreation;
 pub use types::*;
 pub use verify::*;

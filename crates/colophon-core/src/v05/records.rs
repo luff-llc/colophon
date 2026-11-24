@@ -598,6 +598,16 @@ impl EpochKeys {
     pub fn is_empty(&self) -> bool {
         self.keys.is_empty()
     }
+    /// The keys held for `namespace`, oldest epoch first. Crate-private, like the bytes.
+    pub(crate) fn of_namespace<'a>(
+        &'a self,
+        namespace: &'a str,
+    ) -> impl Iterator<Item = &'a EpochKey> {
+        self.keys
+            .iter()
+            .filter(move |((n, _), _)| n == namespace)
+            .map(|(_, k)| k)
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
