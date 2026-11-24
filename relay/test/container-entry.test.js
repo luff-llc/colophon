@@ -92,6 +92,11 @@ describe('settings from the environment', () => {
     }
     assert.throws(() => readSettings({ COLOPHON_PUBLIC_URL: URL_, COLOPHON_HOSTED: 'yes' }), (e) => e instanceof SettingError && /COLOPHON_HOSTED/.test(e.message));
   });
+  test('COLOPHON_SLOT_HISTORY_BYTES lands in limits.historyBytes', () => {
+    const c = relayConfig(readSettings({ COLOPHON_PUBLIC_URL: URL_, COLOPHON_SLOT_HISTORY_BYTES: '1048576' }), { dataDir: 'd', keyFile: 'k', tokenSha256: 'ab'.repeat(32) });
+    assert.deepEqual(c.limits, { historyBytes: 1048576 });
+    assert.throws(() => readSettings({ COLOPHON_PUBLIC_URL: URL_, COLOPHON_SLOT_HISTORY_BYTES: 'lots' }), (e) => e instanceof SettingError && /COLOPHON_SLOT_HISTORY_BYTES/.test(e.message));
+  });
   test('a wrong setting names its variable', () => {
     const bad = [
       [{}, /COLOPHON_PUBLIC_URL is required/],

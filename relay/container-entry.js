@@ -109,6 +109,7 @@ export function readSettings(env) {
     perAddressPerHour: int(env, 'COLOPHON_PROVISION_PER_ADDRESS_PER_HOUR', { min: 1 }),
     unclaimedHours: int(env, 'COLOPHON_PROVISION_UNCLAIMED_HOURS', { min: 1 }),
     slotBytes: int(env, 'COLOPHON_SLOT_BYTES', { min: 0 }),
+    historyBytes: int(env, 'COLOPHON_SLOT_HISTORY_BYTES', { min: 0 }),
     corsOrigins: list(env.COLOPHON_CORS_ORIGINS),
     clientAddress: header ? { header, trustedPeers: proxies } : undefined,
     wasm: env.COLOPHON_HOME_WASM || DEFAULT_WASM,
@@ -124,7 +125,9 @@ export function relayConfig(s, { dataDir, keyFile, tokenSha256 }) {
     home: { keyFile, wasm: s.wasm },
     cors: { origins: s.corsOrigins },
   };
-  if (s.slotBytes !== undefined) config.limits = { slotBytes: s.slotBytes };
+  if (s.slotBytes !== undefined || s.historyBytes !== undefined) {
+    config.limits = { ...(s.slotBytes !== undefined ? { slotBytes: s.slotBytes } : {}), ...(s.historyBytes !== undefined ? { historyBytes: s.historyBytes } : {}) };
+  }
   if (s.clientAddress) config.clientAddress = s.clientAddress;
   if (s.privateListen) config.privateListen = s.privateListen;
   if (s.privateListen && s.privateListenAllowPublic) config.privateListenAllowPublic = true;

@@ -97,7 +97,8 @@ home holds no account secret: no controller or member key, no PRF output, no see
 | Other homes | config `resolve`: `{"https://other.example/v1/libraries/acct": "http://10.0.0.7:8787/v1/libraries/acct"}` (the endpoint an account names, to the URL to reach it) | the endpoint itself |
 | Request rate | `limits.requestsPerMinute` (per address) | `1200` |
 | Slot quota | `limits.slotBytes` (`COLOPHON_SLOT_BYTES` in the container): the most bytes of data one slot may hold. At a home slot only data counts (records under `ops/` and `history/`, live values under `state/`, blob chunks), and a data write over it answers 507 `{"result":"refused:overQuota"}`; the account's history, and everything the module stores, is never refused, and reads never are. A hosted home should set it | `0`: none |
-| Forwarding bounds | `limits.peerAnswerBytes` (the most decoded bytes read of one peer's answer; a longer answer is cancelled and the object offered again later), `limits.forwardPeersPerSlot` and `limits.forwardPasses` (forwarding passes running at once for one slot, and for the whole home; a peer left out gets its pass at a later tick) | `1048576`, `8`, `64` |
+| History quota | `limits.historyBytes` (`COLOPHON_SLOT_HISTORY_BYTES`): the most bytes of a home slot's history and the module's other files (authority entries, transitions, vetoes, receipts, heads, predecessor entries). A history upload, pending objects, a forwarded head or a predecessor entry that would pass it answers 507 `{"result":"refused:historyQuota"}`, checked before anything commits; what the home appends itself, and every read, is never refused. Real account histories are far smaller: the default is a ceiling against abuse, not a plan limit | `67108864` (64 MiB); `0`: none |
+| Forwarding bounds | `limits.peerAnswerBytes` (the most decoded bytes read of one peer's answer; a longer answer is cancelled and the object offered again later), `limits.forwardPeersPerSlot` and `limits.forwardPasses` (forwarding passes running at once for one slot, and for the whole home; a peer left out gets its pass at a later tick, peers take turns within a slot and each pass of the scheduler starts from the next slot, so early ones cannot take every pass) | `1048576`, `8`, `64` |
 | TLS | `COLOPHON_RELAY_TLS_CERT`, `COLOPHON_RELAY_TLS_KEY`, or `"tls":{…}` | off |
 | CORS origins | `COLOPHON_RELAY_CORS_ORIGINS="https://app.example,…"` or `cors.origins`: each exactly `scheme://host[:port]`, lower case, compared whole; `*`, `null`, a path or a default port refuse start-up | none: no CORS header |
 | Provisioning | config `provision` (below) | off |
@@ -215,7 +216,9 @@ names are not secrets, and access is by call (or, at a 0.3 slot, by token), neve
 **The private listener.** `COLOPHON_PRIVATE_LISTEN` (or `privateListen` in the config file)
 starts a second, plain HTTP listener that serves the door (`/v1/provision`) and the operator API
 (`/v1/operator/*`), and `/healthz`, and nothing else. The public listener then answers 404 for both,
-as for any unknown path, before any check or body read. A hosted home should always use it. The
+as for any unknown path, before any check or body read. A hosted home runs gate `"token"` with
+the private listener (and, in the container, `COLOPHON_HOSTED=1`): the door and the operator API
+are then reached only from the operator's own side. The
 token crosses it in plain text, so:
 
 - Prefer a Unix domain socket: `unix:/run/colophon/private.sock` (`{"path": …}`). It is made mode

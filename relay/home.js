@@ -486,6 +486,18 @@ export class HomeSlot {
   // the home's own upkeep (recording due entries, signing heads, forwarding) go on. Nothing is
   // deleted.
 
+  /** A history write (an upload, pending objects, a forwarded head, a predecessor entry) of
+   * `added` bytes, refused before the module is asked when the slot's history would pass
+   * `historyBytes`: 507 `refused:historyQuota`. Checked before anything commits, so the state and
+   * its files never part; what the home itself appends (entries, receipts, heads) is never
+   * refused. Real histories are far below the default. */
+  refuseIfHistoryFull(added) {
+    const max = this.limits?.historyBytes ?? 0;
+    if (!(max > 0)) return;
+    const used = this.slot.bytes - (this.slot.dataBytes ?? 0);
+    if (used + added > max) throw new this.deps.HttpError(507, 'Library history quota exceeded', {}, { result: 'refused:historyQuota' });
+  }
+
   /** Under the slot's lock. While the suspension's state on disk is uncertain (a write of it
    * failed part way), data writes stay refused: the state is reconciled first, and a write is
    * answered 503 `unavailable` if that fails too. */
@@ -841,6 +853,7 @@ export class HomeSlot {
       let ended = false;
       try {
         if (section === 'predecessor') {
+          this.refuseIfHistoryFull(body.length);
           const r = this.wasm.call({ op: 'put_predecessor', state: this.state, now: this.clock(), path: rest, bytes: b64(body) });
           await this.commit(r.state);
           await this.materialize(r.store);
@@ -870,6 +883,7 @@ export class HomeSlot {
     const body = await readBody(req, 8192);
     await this.lock(async () => {
       await this.refuseIfSuspended();
+      this.refuseIfHistoryFull(body.length);
       const r = this.wasm.call({ op: 'admit_one', state: this.state, now: this.clock(), bytes: b64(body), path: recordPath });
       await this.commit(r.state);
       await this.materialize(r.store);
@@ -906,6 +920,7 @@ export class HomeSlot {
 
   async postAuthority(res, body) {
     const { send } = this.deps;
+    this.refuseIfHistoryFull(body.length);
     const r = this.wasm.call({ op: 'post_authority', state: this.state, now: this.clock(), body: b64(body) });
     await this.commit(r.state); // even a refusal changes state (§13.1)
     await this.deps.reach?.('authority committed'); // a test hook (traced builds only)
@@ -919,6 +934,7 @@ export class HomeSlot {
 
   async postPending(res, body) {
     const { send } = this.deps;
+    this.refuseIfHistoryFull(body.length);
     const r = this.wasm.call({ op: 'post_pending', state: this.state, now: this.clock(), body: b64(body) });
     await this.commit(r.state);
     await this.materialize(r.store);
@@ -974,7 +990,14 @@ export class HomeSlot {
     // later tick, when one has ended.
     const budget = this.deps?.forwarding ?? (this.ownForwarding ??= { running: 0, max: Infinity });
     const perSlot = this.limits?.forwardPeersPerSlot ?? Infinity;
-    for (const peer of st.peers ?? []) {
+    // Round robin: each start begins after the last peer the previous one started, so peers early
+    // in the list cannot take every pass while the bounds are full.
+    const peers = st.peers ?? [];
+    const first = peers.length ? (this.forwardCursor ?? 0) % peers.length : 0;
+    let lastStarted = -1;
+    for (let i = 0; i < peers.length; i += 1) {
+      const at = (first + i) % peers.length;
+      const peer = peers[at];
       const endpoint = (peer.endpoints ?? [])[0];
       if (!endpoint || this.passes.has(peer.id)) continue; // its last pass is still running
       if (this.passes.size >= perSlot || budget.running >= budget.max) {
@@ -992,12 +1015,14 @@ export class HomeSlot {
       const row = (this.forward.peers[peer.id] ??= { after: 0, retry: [], head: '' });
       row.retry ??= [];
       budget.running += 1;
+      lastStarted = at;
       const pass = this.forwardTo(base, row, peer.id)
         .then(() => this.note(`forward ${peer.id}`, ''))
         .catch((error) => this.note(`forward ${peer.id}`, `forwarding to home ${peer.id} failed (it will be retried): ${error.message}`))
         .finally(() => { this.passes.delete(peer.id); budget.running -= 1; });
       this.passes.set(peer.id, pass);
     }
+    if (lastStarted >= 0) this.forwardCursor = lastStarted + 1;
   }
 
   /** A request to another home: its own time limit, or shutdown, whichever comes first. */

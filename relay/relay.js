@@ -19,7 +19,8 @@ export const DEFAULT_LIMITS = Object.freeze({
   pageEntries: 1000,
   waitSeconds: 30,
   maxWaiters: 256, // concurrent long polls per slot
-  slotBytes: 0, // 0 = no per-slot quota
+  slotBytes: 0, // 0 = no per-slot quota (at a home slot: its data only)
+  historyBytes: 64 * 1024 * 1024, // a home slot's history and the module's files; 0 = none
   // Home slots only (not published at GET {base}):
   authorityBodyBytes: 16 * 1024 * 1024,
   pendingBodyBytes: 12 * 1024 * 1024,
@@ -31,7 +32,7 @@ export const DEFAULT_LIMITS = Object.freeze({
   forwardPasses: 64, // passes running at once for the whole home
 });
 /** Limits that are the home's own business, not published at `GET {base}`. */
-const UNPUBLISHED = ['slotBytes', 'authorityBodyBytes', 'pendingBodyBytes', 'replayRows', 'requestsPerMinute', 'peerAnswerBytes', 'forwardPeersPerSlot', 'forwardPasses'];
+const UNPUBLISHED = ['slotBytes', 'historyBytes', 'authorityBodyBytes', 'pendingBodyBytes', 'replayRows', 'requestsPerMinute', 'peerAnswerBytes', 'forwardPeersPerSlot', 'forwardPasses'];
 
 const SLOT = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 /** A released slot's directory, renamed aside before it is removed (never a slot name: slots
@@ -505,6 +506,7 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
   for (const k of ['peerAnswerBytes', 'forwardPeersPerSlot', 'forwardPasses']) {
     if (!Number.isSafeInteger(effective[k]) || effective[k] < 1) throw new Error(`limits.${k} must be a positive integer`);
   }
+  if (!Number.isSafeInteger(effective.historyBytes) || effective.historyBytes < 0) throw new Error('limits.historyBytes must be a whole number of bytes (0: none)');
   // Forwarding passes running now, across every home slot (bounded by `forwardPasses`).
   const forwarding = { running: 0, max: effective.forwardPasses };
   await fsp.mkdir(dataDir, { recursive: true, mode: 0o700 });
@@ -1217,8 +1219,14 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
 
   // The scheduler: recording entries, heads and forwarding for every home slot, on the relay's clock.
   // Slots tick concurrently (each runs one pass at a time), so one slot never waits on another.
+  // Each pass starts from the next slot in turn, so the same slots do not always ask first for
+  // the home-wide forwarding budget (`forwardPasses`).
+  let tickRound = 0;
   const tickAll = async () => {
-    await Promise.all([...homeSlots.keys()].map(async (name) => {
+    const names = [...homeSlots.keys()];
+    const start = names.length ? tickRound++ % names.length : 0;
+    const order = [...names.slice(start), ...names.slice(0, start)];
+    await Promise.all(order.map(async (name) => {
       let s;
       try { s = await slot(name); } catch { return; }
       if (s.closing || s.releasing || s.released) return;

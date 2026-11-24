@@ -640,6 +640,33 @@ describe('the operator API', { skip: ready ? false : `build the module first (${
     assert.doesNotThrow(() => s.checkQuota(1000, 'authority/00000001.json'));
     assert.throws(() => s.checkQuota(2, 'ops/a/b/c.json'), (e) => e.status === 507 && e.body?.result === 'refused:overQuota');
   });
+
+  test('historyBytes bounds a home slot\'s history: 507 refused:historyQuota before anything commits; reads go on', async () => {
+    const port = await fresh({}, { limits: { requestsPerMinute: 0, historyBytes: 64 } });
+    assert.equal((await ask(port, SLOT)).status, 200);
+    const big = JSON.stringify({ from: 1, entries: [{ pad: 'x'.repeat(100) }], receipts: [] });
+    for (const [method, p, body] of [['POST', '/authority', big], ['POST', '/pending', JSON.stringify({ objects: [{ pad: 'x'.repeat(100) }] })],
+      ['PUT', '/predecessor/authority/00000001.json', 'x'.repeat(100)], ['PUT', '/records/heads/' + '1'.repeat(32) + '.json', 'x'.repeat(100)]]) {
+      const r = await raw(port, `/v1/libraries/${SLOT}${p}`, { method, headers: JSON_TYPE, body });
+      assert.equal(r.status, 507, `${method} ${p}`);
+      assert.deepEqual(json(r), { result: 'refused:historyQuota' }, `${method} ${p}`);
+    }
+    // A small one is judged as always; reads are never refused.
+    assert.equal((await write(port, SLOT, AUTHORITY[0])).status, 422);
+    assert.equal((await raw(port, `/v1/libraries/${SLOT}`)).status, 200);
+    assert.equal(json(await raw(port, `/v1/libraries/${SLOT}`)).limits.historyBytes, undefined, 'not published');
+    await assert.rejects(start({}, { limits: { historyBytes: -1 } }), /historyBytes/);
+  });
+
+  test('each scheduler pass starts from the next slot in turn', async () => {
+    const libraries = Object.fromEntries(['slota0000', 'slotb0000', 'slotc0000'].map((n) => [n, { home: true, base: `${PREFIX}${n}`, account: OTHER }]));
+    await fresh({}, { libraries });
+    const order = [];
+    for (const n of Object.keys(libraries)) (await running.relay.slot(n)).home.tick = async () => { order.push(n); };
+    const rounds = [];
+    for (let i = 0; i < 3; i += 1) { order.length = 0; await running.relay.tickAll(); rounds.push(order[0]); }
+    assert.deepEqual(rounds.sort(), ['slota0000', 'slotb0000', 'slotc0000'], 'every slot goes first once in three passes');
+  });
 });
 
 describe('forwarding is bounded', () => {
@@ -678,5 +705,26 @@ describe('forwarding is bounded', () => {
     assert.equal(forwarding.running, 5);
     await a.forwardAll();
     assert.equal(a.passes.size, 3, 'nothing more starts while they run');
+  });
+
+  test('peers take their turn: a start begins after the last peer the previous one started', async () => {
+    const h = Object.create(HomeSlot.prototype);
+    const started = [];
+    Object.assign(h, {
+      deps: { forwarding: { running: 0, max: 100 } }, limits: { forwardPeersPerSlot: 2 }, forward: { peers: {} }, said: new Map(),
+      key: { memberId: 'f'.repeat(32) }, clock: () => 0, stopping: new AbortController(),
+      lock: async (fn) => fn(), isQuiet: () => false,
+      status: () => ({ peers: Array.from({ length: 5 }, (_, i) => ({ id: `peer${i}`, endpoints: [`https://peer${i}.example/`] })) }),
+      forwardTo: async (_base, _row, id) => { started.push(id); },
+      note: () => {},
+    });
+    const rounds = [];
+    for (let i = 0; i < 3; i += 1) {
+      started.length = 0;
+      await h.forwardAll();
+      await Promise.allSettled([...h.passes.values()]);
+      rounds.push([...started]);
+    }
+    assert.deepEqual(rounds, [['peer0', 'peer1'], ['peer2', 'peer3'], ['peer4', 'peer0']]);
   });
 });
