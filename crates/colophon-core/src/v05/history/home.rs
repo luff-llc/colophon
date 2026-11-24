@@ -5,7 +5,7 @@
 //! verifies the host's signature before publishing it. No private keys or IO live here.
 use super::envelope::{embedded_bytes, AuthEnvelope};
 use super::state::{self, HeadSet};
-use super::{parse_entry, verify_history, Objects, Persisted, State, Stop, Verdict};
+use super::{parse_entry, verify_history, Objects, Persisted, State, Stop, Verdict, FOLD_RULES};
 use crate::v05::descriptor::Role;
 use crate::v05::encoding::{bounds, canonical, date, Obj};
 use crate::v05::signature::RawEnvelope;
@@ -156,8 +156,9 @@ pub struct HomeState {
     #[serde(default)]
     candidate_slots: BTreeMap<u64, BTreeMap<String, String>>,
     /// `Persisted::from_bytes(checkpoint_bytes)`, decoded when the state was read
-    /// ([`HomeState::from_bytes`]) and dropped whenever the checkpoint is replaced: a memo of the
-    /// bytes, never stored.
+    /// ([`HomeState::from_bytes`]) and again whenever the checkpoint is replaced: a memo of the
+    /// bytes, never stored, which also says whether this build folded them
+    /// ([`HomeState::fold_vouched`]).
     #[serde(skip)]
     parsed: Option<Persisted>,
 }
@@ -260,7 +261,7 @@ impl HomeState {
         let mut state = Self {
             version: STATE_VERSION,
             home,
-            checkpoint_bytes: Persisted::checkpoint(objects, &Persisted::default(), now_ms).to_bytes()?,
+            checkpoint_bytes: Vec::new(),
             pending: Vec::new(),
             next_cursor: 1,
             facts: BTreeMap::new(),
@@ -271,6 +272,7 @@ impl HomeState {
             candidate_slots: BTreeMap::new(),
             parsed: None,
         };
+        state.set_checkpoint(Persisted::checkpoint(objects, &Persisted::default(), now_ms))?;
         refresh_checkpoint(&mut state, None, now_ms)?;
         Ok(state)
     }
@@ -322,11 +324,54 @@ impl HomeState {
             None => Persisted::from_bytes(&self.checkpoint_bytes),
         }
     }
-    /// Replace the checkpoint (the only way it is written), dropping the decoded copy of the
-    /// previous one.
-    fn set_checkpoint(&mut self, bytes: Vec<u8>) {
+    /// Replace the checkpoint (the only way it is written). The decoded copy is the new bytes read
+    /// back, as any later reader decodes them, keeping only whether this build folded it
+    /// ([`Persisted::folded_here`]), which bytes never carry.
+    fn set_checkpoint(&mut self, p: Persisted) -> Result<()> {
+        let bytes = p.to_bytes()?;
+        let mut parsed = Persisted::from_bytes(&bytes)?;
+        if p.folded_here() {
+            parsed.assume_folded_here();
+        }
         self.checkpoint_bytes = bytes;
-        self.parsed = None;
+        self.parsed = Some(parsed);
+        Ok(())
+    }
+    /// Whether this build's verifier folded the checkpoint this state holds from genesis
+    /// ([`Persisted::folded_here`]): it was made here, or proved by [`HomeState::vouch_fold`] or
+    /// [`HomeState::verify_fold`]. A host stores [`FOLD_RULES`] and [`HomeState::checkpoint_digest`]
+    /// beside the state when it is, and hands them to `vouch_fold` when it reads the state again.
+    pub fn fold_vouched(&self) -> bool {
+        self.parsed.as_ref().is_some_and(Persisted::folded_here)
+    }
+    /// The SHA-256 of the checkpoint's bytes, which a host's proof of the fold names.
+    pub fn checkpoint_digest(&self) -> String {
+        crate::v05::encoding::digest(&self.checkpoint_bytes)
+    }
+    /// Take the checkpoint as this build's fold on the host's word: `rules` is this build's
+    /// [`FOLD_RULES`] and `checkpoint` the digest of exactly the checkpoint held, as the host
+    /// stored them when [`HomeState::fold_vouched`] said so. Anything else changes nothing.
+    /// Returns whether the fold is now taken as this build's.
+    pub fn vouch_fold(&mut self, rules: &str, checkpoint: &str) -> bool {
+        if rules == FOLD_RULES && checkpoint == self.checkpoint_digest() {
+            if let Some(p) = &mut self.parsed {
+                p.assume_folded_here();
+            }
+        }
+        self.fold_vouched()
+    }
+    /// Verify the checkpoint again from genesis ([`Persisted::verified_again`]) and, when the
+    /// replay gives exactly it, take it as this build's fold. The checkpoint is left as it is.
+    /// Returns whether the fold is now taken as this build's.
+    pub fn verify_fold(&mut self) -> Result<bool> {
+        if self.fold_vouched() {
+            return Ok(true);
+        }
+        let again = self.persisted()?.verified_again();
+        if let (Some(_), Some(p)) = (again, &mut self.parsed) {
+            p.assume_folded_here();
+        }
+        Ok(self.fold_vouched())
     }
     /// A permanent format stop, derived from the stored history and stop floor on open (§13.6).
     pub fn is_stopped(&self, now_ms: i64) -> Result<bool> {
@@ -1446,7 +1491,7 @@ fn refresh_checkpoint(next: &mut HomeState, new_head: Option<&[u8]>, now_ms: i64
     let heads = kept_heads(&heads, settled, &branch);
     let pending: Vec<Vec<u8>> = next.pending.iter().map(|o| o.envelope.clone()).collect();
     if heads == before.heads && pending == before.pending {
-        next.set_checkpoint(p.to_bytes()?);
+        next.set_checkpoint(p)?;
         return Ok(());
     }
     let objects = Objects {
@@ -1464,7 +1509,7 @@ fn refresh_checkpoint(next: &mut HomeState, new_head: Option<&[u8]>, now_ms: i64
     if lower {
         rebuilt.high_water = p.high_water.clone();
     }
-    next.set_checkpoint(rebuilt.to_bytes()?);
+    next.set_checkpoint(rebuilt)?;
     Ok(())
 }
 
@@ -1555,7 +1600,7 @@ fn admit_entry(
         if verdict.stopped == Some(entry.seq)
             && verdict.state.as_ref().is_some_and(|s| s.history() == st.history())
         {
-            next.set_checkpoint(persisted.clone().with_stop_floor(entry.seq, None).to_bytes()?);
+            next.set_checkpoint(persisted.clone().with_stop_floor(entry.seq, None))?;
         }
         // The entry making a layout raise final is verified and retained. The next entry
         // will be refused by the stopped-home gate, including in the same upload.
@@ -1585,7 +1630,7 @@ fn admit_entry(
         }
     }
     objects.pending = next.pending.iter().map(|p| p.envelope.clone()).collect();
-    next.set_checkpoint(Persisted::checkpoint(&objects, persisted, now_ms).to_bytes()?);
+    next.set_checkpoint(Persisted::checkpoint(&objects, persisted, now_ms))?;
     Ok(suspend_notice(&entry, st).into_iter().collect())
 }
 
@@ -1869,7 +1914,7 @@ fn admit_candidate(
                 }
             }
         }
-        next.set_checkpoint(p.to_bytes()?);
+        next.set_checkpoint(p)?;
         return Ok(notices);
     }
     // Non-standing evidence consumes one durable slot of a current covering home; the
@@ -1884,7 +1929,7 @@ fn admit_candidate(
         }
     }
     if stored_as_evidence {
-        next.set_checkpoint(Persisted::checkpoint(&objects, persisted, now_ms).to_bytes()?);
+        next.set_checkpoint(Persisted::checkpoint(&objects, persisted, now_ms))?;
     }
     if fork.is_some() || (stored_as_evidence && forks) {
         return Err(Failure::Refused(crate::v05::Reason::Fork).into());
@@ -2034,7 +2079,7 @@ pub fn admit_predecessor(
         return Err(stop_failure(stop).into());
     }
     let mut next = home.clone();
-    next.set_checkpoint(Persisted::checkpoint(&objects, &persisted, now_ms).to_bytes()?);
+    next.set_checkpoint(Persisted::checkpoint(&objects, &persisted, now_ms))?;
     Ok(next)
 }
 

@@ -693,6 +693,24 @@ impl RecordAuthority {
         }
         Self::from_verdict(objects, verdict)
     }
+    /// [`RecordAuthority::from_objects`] over a checkpoint's own objects, answered from the
+    /// checkpoint's fold without replaying them, where that is the replay's answer: the
+    /// checkpoint is this build's fold ([`Persisted::folded_here`]) and [`verify_history`] answers
+    /// from it alone at `now_ms` ([`super::history::resumes_unchanged`]), so its verdict is a
+    /// replay's from genesis of those objects at `now_ms`. `None` everywhere else (a fork, a held
+    /// or failed entry, a stop, a `/4` prefix, a successor, a clock behind the checkpoint, a fold
+    /// read from bytes): the caller replays.
+    pub fn from_vouched(persisted: &Persisted, now_ms: i64) -> Option<Result<Self>> {
+        let none = Objects::default();
+        if !persisted.folded_here() || !super::history::resumes_unchanged(&none, persisted, now_ms) {
+            return None;
+        }
+        let verdict = verify_history(&none, persisted, now_ms);
+        if let Some(Stop::Failed { failure, .. }) = &verdict.stop {
+            return Some(Err(failure.clone()));
+        }
+        Some(Self::from_verdict(persisted.objects()?, verdict))
+    }
     /// The record-layer view of a verdict the caller already holds, over the same `objects`
     /// the verdict was made from (the account layer's, which resumes from persisted state).
     /// A verdict that holds no genesis is refused. One that stopped with a failure after its

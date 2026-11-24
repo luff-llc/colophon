@@ -305,7 +305,7 @@ fn waiting_work_is_bounded_by_what_is_unsettled_not_by_everything_held() {
     // The note alone, over the same held state and clock.
     work::reset();
     let again = waiting(&h, &objects, now);
-    let work::Work { verifications, prepares } = work::get();
+    let work::Work { verifications, prepares, .. } = work::get();
     assert_eq!(again, r["note"]);
     eprintln!(
         "waiting over {held_objects} held transitions and vetoes, 2 unsettled: \

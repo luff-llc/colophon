@@ -928,3 +928,210 @@ fn a_checkpoint_read_from_bytes_is_never_answered_from_alone() {
     let rebuilt = Persisted::rebuild(&prefix, &p.to_bytes().unwrap(), now);
     assert!(resumes_unchanged(&none, &rebuilt, now));
 }
+
+/// The digest [`FOLD_RULES`] ends with: SHA-256 over every file of the history verifier's
+/// conformance vectors (`rules`, `upgrade`, `succession`), each as its path, its length and its
+/// bytes, in path order; the first 16 hex digits.
+fn vectors_digest() -> String {
+    use sha2::{Digest, Sha256};
+    fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) {
+        for e in fs::read_dir(dir).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                walk(root, &p, out);
+            } else {
+                let rel = p.strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/");
+                out.push((rel, p));
+            }
+        }
+    }
+    let mut files = Vec::new();
+    for top in ["rules", "upgrade", "succession"] {
+        walk(&cand(), &cand().join(top), &mut files);
+    }
+    files.sort();
+    let mut h = Sha256::new();
+    for (rel, p) in &files {
+        let bytes = fs::read(p).unwrap();
+        h.update(rel.as_bytes());
+        h.update([0]);
+        h.update((bytes.len() as u64).to_le_bytes());
+        h.update(&bytes);
+    }
+    assert!(files.len() > 500, "{} files", files.len());
+    colophon_core::v05::encoding::hex(&h.finalize())[..16].to_string()
+}
+
+/// A rule change cannot ship under a stale [`FOLD_RULES`]: a host takes a checkpoint stored with
+/// this value as this build's fold, so the value must change whenever a verdict can. It names the
+/// digest of the conformance vectors, so a changed vector (an `expected` verdict above all)
+/// fails here until the value is updated; a rule changed in code alone raises its revision.
+#[test]
+fn the_fold_rules_name_the_conformance_vectors() {
+    use colophon_core::v05::history::FOLD_RULES;
+    let digest = vectors_digest();
+    let (name, named) = FOLD_RULES.rsplit_once('/').unwrap();
+    assert!(name.starts_with("colophon-0.5-fold/r"), "{FOLD_RULES}");
+    assert_eq!(
+        named, digest,
+        "the history vectors changed: if a verdict can change, so did the rules. Raise the \
+         revision in FOLD_RULES if the rules changed in code too, and set its digest to {digest}"
+    );
+}
+
+/// The record layer's view from a vouched checkpoint (`RecordAuthority::from_vouched`) is the
+/// replay's (`RecordAuthority::from_objects` over the checkpoint's objects), whenever it is given:
+/// over every history vector (ordinary, held, forked, failed, stopped, upgraded from `/4`,
+/// successors, suspended keys), each checkpointed at several clock readings, resumed, and with a
+/// high-water mark ahead, at clock readings before, at and long after the checkpoint's. It is
+/// never given for a checkpoint read back from bytes, and it is given for many ordinary ones.
+#[test]
+fn a_vouched_record_view_is_the_replays() {
+    use colophon_core::v05::history::succession_status;
+    use colophon_core::v05::records::RecordAuthority;
+    const DAY: i64 = 86_400_000;
+    let mut all: Vec<(PathBuf, Objects, i64)> =
+        cases().into_iter().map(|(d, now)| (d.clone(), objects_of(&d), now)).collect();
+    all.extend(other_cases());
+    let (mut compared, mut given, mut not_again) = (0usize, 0usize, 0usize);
+    let mut kinds = std::collections::BTreeMap::<&str, (usize, usize)>::new();
+    for (dir, objects, now) in &all {
+        let cold = verify_history(objects, &Persisted::default(), *now);
+        let kind = match &cold.stop {
+            _ if cold.state.as_ref().is_some_and(|s| succession_status(s).is_some()) => "successor",
+            _ if cold.state.as_ref().is_some_and(|s| s.upgrade_seq.is_some()) => "upgraded",
+            _ if dir.ends_with("f2-suspended-key-suspends") => "suspended-key",
+            None => "ok",
+            Some(colophon_core::v05::history::Stop::Held { .. }) => "held",
+            Some(colophon_core::v05::history::Stop::Fork { .. }) => "fork",
+            Some(_) if cold.stopped.is_some() => "stopped",
+            Some(_) => "failed",
+        };
+        // Each checkpoint, and whether it was folded from genesis in one replay.
+        let mut checkpoints = Vec::new();
+        for at in [*now - 60_000, *now, *now + 7 * DAY] {
+            let p = Persisted::checkpoint(objects, &Persisted::default(), at);
+            checkpoints.push((at, Persisted::checkpoint(objects, &p, at + 1_000), false));
+            if let Some(d) = cold.branch.last() {
+                let ahead = Persisted::high_water(cold.branch.len() as u64 + 1, d.clone());
+                checkpoints.push((at, Persisted::checkpoint(objects, &ahead, at), true));
+            }
+            checkpoints.push((at, p, true));
+        }
+        for (at, p, genesis) in &checkpoints {
+            assert!(p.folded_here());
+            let held = p.objects().unwrap();
+            for t in [at - 1, *at, at + 30 * DAY] {
+                compared += 1;
+                let entry = kinds.entry(kind).or_default();
+                entry.0 += 1;
+                let Some(got) = RecordAuthority::from_vouched(p, t) else { continue };
+                given += 1;
+                entry.1 += 1;
+                let want = RecordAuthority::from_objects(held, t);
+                assert_eq!(
+                    format!("{got:?}"),
+                    format!("{want:?}"),
+                    "{} checkpointed at {at}, at {t}",
+                    dir.display()
+                );
+            }
+            let restored = Persisted::from_bytes(&p.to_bytes().unwrap()).unwrap();
+            assert!(!restored.folded_here());
+            assert!(RecordAuthority::from_vouched(&restored, *at).is_none());
+            // Verified again from genesis, a checkpoint folded in one replay is this build's fold
+            // once more, with the same bytes. (One resumed from an earlier checkpoint may hold what
+            // only the later fold found, its held time say, and then is not verified again.)
+            match restored.verified_again() {
+                Some(again) => {
+                    assert!(again.folded_here());
+                    assert_eq!(again.to_bytes().unwrap(), p.to_bytes().unwrap());
+                }
+                None => {
+                    assert!(!genesis, "{} checkpointed at {at} is not verified again", dir.display());
+                    not_again += 1;
+                }
+            }
+        }
+    }
+    eprintln!("{compared} clock readings, {given} answered from the fold, {not_again} resumed checkpoints not verified again; by history: {kinds:?}");
+    for k in ["ok", "held", "fork", "failed", "stopped", "upgraded", "successor", "suspended-key"] {
+        assert!(kinds.contains_key(k), "no {k} history: {kinds:?}");
+    }
+    let ok = kinds["ok"];
+    assert!(ok.1 * 3 > ok.0, "ordinary histories answered from the fold {} of {}", ok.1, ok.0);
+}
+
+/// A fold another build made under other rules is not this build's fold: verified again, the
+/// replay differs, so it is never taken as one. Here the fold of
+/// `f2-suspended-key-suspends` accepts the suspend a suspended key signed (seq 3), which these
+/// rules refuse (`badSignature`), as an older verifier with the same checkpoint format might.
+#[test]
+fn a_fold_made_under_other_rules_is_not_verified_again() {
+    use colophon_core::v05::records::RecordAuthority;
+    let (objects, now) = vector("f2-suspended-key-suspends");
+    let p = older_rules_fold(&objects, now);
+    let restored = Persisted::from_bytes(&p).unwrap();
+    assert_eq!(verify_history(&Objects::default(), &restored, now).branch.len(), 3, "the older fold took seq 3");
+    assert!(restored.verified_again().is_none());
+    assert!(RecordAuthority::from_vouched(&restored, now).is_none());
+    let replay = RecordAuthority::from_objects(restored.objects().unwrap(), now);
+    assert_eq!(replay.unwrap_err().code(), "badSignature");
+}
+
+/// The checkpoint an older verifier would write for `objects` if it accepted every entry: this
+/// build's fold through seq 2, with seq 3 appended to the state as accepted (its digest, `issued`,
+/// and per-seq memory carried over unchanged). Bytes, as a host stores them.
+pub fn older_rules_fold(objects: &Objects, now: i64) -> Vec<u8> {
+    let two = Objects { entries: objects.entries[..2].to_vec(), ..objects.clone() };
+    let p = Persisted::checkpoint(&two, &Persisted::default(), now);
+    assert_eq!(verify_history(&Objects::default(), &p, now).branch.len(), 2);
+    let mut cp: Value = serde_json::from_slice(&p.to_bytes().unwrap()).unwrap();
+    let third = &objects.entries[2];
+    let env: Value = serde_json::from_slice(third).unwrap();
+    let body = STANDARD.decode(env["body"].as_str().unwrap()).unwrap();
+    let issued = parse_date(serde_json::from_slice::<Value>(&body).unwrap()["issued"].as_str().unwrap()).unwrap();
+    let st = &mut cp["state"];
+    st["digests"].as_array_mut().unwrap().push(Value::String(body_digest(third)));
+    st["issued"].as_array_mut().unwrap().push(issued.into());
+    for k in ["keyring_at", "delay_at", "rule_at"] {
+        let a = st[k].as_array_mut().unwrap();
+        let last = a.last().unwrap().clone();
+        a.push(last);
+    }
+    cp["objects"]["entries"].as_array_mut().unwrap().push(serde_json::to_value(third).unwrap());
+    cp["high_water"] = serde_json::json!([3, body_digest(third)]);
+    serde_json::to_vec(&cp).unwrap()
+}
+
+/// A successor's checkpoint does not carry what its genesis was judged by: the predecessor's
+/// history and its release conditions, which the replay judges again at its own clock. So a fold
+/// can hold a state, or another state, where the replay from genesis at a later clock holds or
+/// refuses the genesis. Among the succession vectors such clock readings exist, and at every one
+/// the vouched record view is not given (`None`): the caller replays.
+#[test]
+fn a_successors_fold_is_never_the_record_view() {
+    use colophon_core::v05::records::RecordAuthority;
+    const DAY: i64 = 86_400_000;
+    let mut differs = Vec::new();
+    for (dir, objects, now) in other_cases() {
+        if !dir.to_string_lossy().contains("succession") {
+            continue;
+        }
+        for at in [now - 30 * DAY, now - DAY, now, now + 7 * DAY] {
+            let p = Persisted::checkpoint(&objects, &Persisted::default(), at);
+            for t in [at, at + DAY, at + 30 * DAY, at + 400 * DAY] {
+                let fold = verify_history(&Objects::default(), &p, t);
+                let Some(state) = fold.state.as_ref() else { continue };
+                let replay = RecordAuthority::from_objects(&objects, t);
+                let same = replay.as_ref().is_ok_and(|ra| format!("{:?}", ra.state()) == format!("{state:?}"));
+                assert!(RecordAuthority::from_vouched(&p, t).is_none(), "{} at {at}, {t}", dir.display());
+                if !same {
+                    differs.push(format!("{} checkpointed at {at}, at {t}", dir.display()));
+                }
+            }
+        }
+    }
+    eprintln!("{} successor readings where the fold is not the replay, first {:?}", differs.len(), differs.first());
+    assert!(!differs.is_empty(), "no successor fold differs from its replay at a later clock");
+}
