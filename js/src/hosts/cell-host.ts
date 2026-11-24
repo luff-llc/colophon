@@ -104,6 +104,8 @@ export interface CellHostOptions {
   persistAttempts?: number;
   /** How long one write may take before it counts as failed (default 10,000 ms); a late success is not acknowledged. */
   persistTimeoutMs?: number;
+  /** Consecutive failed or overdue fence checks (one a beat) after which the cell fails closed (default 3). */
+  fenceCheckMisses?: number;
   /** The most commands held at once (default 64); one more is refused with `commandQueueFull`. */
   maxCommands?: number;
   /** Host randomness (default `crypto.getRandomValues`). The session key and the `fresh` seed are new on every start. */
@@ -154,8 +156,9 @@ export class SessionCellHost implements StreamCell {
   private seq = 0;
   /** The fence this instance last saw held: what every save it makes expects (compare-and-set). */
   private heldFence: Fence | undefined;
-  /** How often it checks that the held fence is still its own (the policy's `beatMs`). */
+  /** How often it checks that the held fence is still its own (the policy's `beatMs`), and how many misses it bears. */
   private readonly watchMs: number;
+  private readonly watchMisses: number;
   /** Cancels every retry and deadline timer that is waiting (on close and on failure). */
   private readonly waits = new Set<() => void>();
   /** Commands admitted and not yet settled (bounded by `maxCommands`). */
@@ -191,6 +194,7 @@ export class SessionCellHost implements StreamCell {
     let beat = 5_000;
     try { const b = (JSON.parse(this.policy) as { beatMs?: unknown }).beatMs; if (typeof b === 'number' && b > 0) beat = b; } catch { /* the endpoint refuses a bad policy */ }
     this.watchMs = beat;
+    this.watchMisses = Math.max(1, options.fenceCheckMisses ?? 3);
     this.random = options.random ?? (n => crypto.getRandomValues(new Uint8Array(n)));
     this.tickTimer = new Deadline(this.clock, () => this.enqueue(() => this.whenOpen(() => this.run('tick', (e, engine, clock) => e.tick(engine, clock), 'tick'))));
     this.renewTimer = new Deadline(this.clock, () => this.enqueue(() => this.whenOpen(() => this.renew())));
@@ -523,22 +527,42 @@ export class SessionCellHost implements StreamCell {
     return f === undefined ? this.heldFence === undefined : f.generation === this.heldFence?.generation && f.seq === this.heldFence.seq;
   }
   /**
-   * Checks, every beat, that the store still holds this instance's fence. Another instance that reserved the cell
-   * makes this one fail with `superseded` within one beat, whether or not it saves again.
+   * Checks, every beat, that the store still holds this instance's fence, by reading the fence alone. It is never
+   * skipped: while a write is in flight the held fence may be that write's (one of this instance's own fences, which
+   * counts as its own). Another instance's fence fails the cell as `superseded` within one beat. Each read has a
+   * deadline of one beat; after `watchMisses` consecutive reads that failed or were overdue the cell fails closed
+   * (`store`): a host that cannot tell whether it still holds the cell stops acting.
    */
   private watch(): void {
     void (async () => {
+      let misses = 0;
       while (!this.over) {
         if (await this.timer(this.watchMs).done === 'cancelled') return;
-        if (this.phase !== 'open' || this.writing) continue;
-        let now: StoredClaim | undefined;
-        try { now = await this.store.load(); } catch { continue; }
-        if (this.over || this.writing) continue;
-        const f = now?.fence;
-        const mine = f !== undefined && this.heldFence !== undefined && f.generation === this.heldFence.generation && f.seq === this.heldFence.seq;
-        if (!mine) { this.enqueue(() => { if (!this.writing) this.fail('superseded'); }); return; }
+        const deadline = this.timer(this.watchMs);
+        const read = Promise.resolve().then(() => this.store.fence()).then(f => ({ f }), (error: unknown) => ({ error }));
+        const r = await Promise.race([read, deadline.done]);
+        deadline.cancel();
+        if (r === 'cancelled' || this.over) return;
+        if (r === 'fired' || 'error' in r) {
+          misses++;
+          if (misses >= this.watchMisses) {
+            const error = r === 'fired' ? new CellHostError('timeout', 'the store did not answer a fence check in time') : r.error;
+            this.enqueue(() => this.fail('store', error));
+            return;
+          }
+          continue;
+        }
+        misses = 0;
+        if (!this.mine(r.f)) { this.enqueue(() => this.fail('superseded')); return; }
       }
     })();
+  }
+  /** Whether `f` is a fence this instance saved (the one it last saw held, or one of its current generation's). */
+  private mine(f: Fence | undefined): boolean {
+    if (!f) return false;
+    const h = this.heldFence;
+    if (h && f.generation === h.generation && f.seq === h.seq) return true;
+    return f.generation === this.generation && f.seq <= this.seq;
   }
   /** A timer that close and failure cancel. */
   private timer(ms: number): { done: Promise<'fired' | 'cancelled'>; cancel(): void } {
