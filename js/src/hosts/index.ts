@@ -9,7 +9,7 @@ export { frameBytes, frameCell, frameText, sessionFrameText } from './frames.js'
 export { webSocketFactory, type HostSocket, type SocketFactory, type SocketHandlers } from './socket.js';
 export { HomeStreamHost, type StreamCell, type StreamEventValue, type StreamHostEvent, type StreamHostOptions, type StreamStatusValue, type StreamStepValue } from './stream-host.js';
 export {
-  base64, base64url, SessionCellHost, unbase64,
-  type CellCarrier, type CellHostEvent, type CellHostOptions, type ClaimStore, type RebuildReason, type SessionEffectValue, type SessionStepValue,
+  base64, base64url, CellHostError, SessionCellHost, unbase64,
+  type CellCarrier, type CellHostEvent, type CellHostOptions, type ClaimStore, type FailReason, type RebuildReason, type SessionEffectValue, type SessionStepValue,
 } from './cell-host.js';
 export { CellSession, cellEvent, type CellEvent, type CellState, type Claim } from './cell.js';

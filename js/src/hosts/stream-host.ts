@@ -16,7 +16,7 @@ import { frameCell, sessionFrameText } from './frames.js';
 import { webSocketFactory, type HostSocket, type SocketFactory } from './socket.js';
 
 /** `StreamStep` as plain values. */
-export interface StreamStepValue { kind: glue.StreamStepKind; url?: string; logUrl?: string; text?: string; code?: number; until?: bigint }
+export interface StreamStepValue { kind: glue.StreamStepKind; url?: string; logUrl?: string; text?: string; code?: number; until?: bigint; wakeAt?: bigint }
 /** `StreamEvent` as plain values. */
 export interface StreamEventValue {
   kind: glue.StreamEventKind; principal?: string; expiresAt?: bigint; cursor?: string; json?: string; text?: string; code?: string;
@@ -74,6 +74,8 @@ export interface StreamHostOptions {
 const key = (namespace: string, cell: string): string => `${namespace}\n${cell}`;
 const toAnswer = (a: HomeAnswer): glue.HttpAnswer => new glue.HttpAnswer(a.status, a.headers.slice(0, 256).map(h => new glue.Header(h.name, h.value)), a.body);
 const methodName = (m: glue.HttpMethod): 'GET' | 'POST' | 'PUT' => m === glue.HttpMethod.Get ? 'GET' : m === glue.HttpMethod.Post ? 'POST' : 'PUT';
+const earliest = (a: bigint | undefined, b: bigint | undefined): number | undefined =>
+  a === undefined ? (b === undefined ? undefined : Number(b)) : b === undefined ? Number(a) : Number(a < b ? a : b);
 const codeOf = (error: unknown): string => isAccountFault(error) ? error.code : error instanceof Error ? error.name : 'unknown';
 
 export class HomeStreamHost {
@@ -98,8 +100,6 @@ export class HomeStreamHost {
   private pumpAgain = false;
   private passing = false;
   private passAgain = false;
-  /** A ticket call is being signed: the core asks for it (`NeedTicketCall`) until the host answers. */
-  private minting = false;
   private lastStatus: glue.StreamStatusKind | undefined;
   private readonly life = new AbortController();
 
@@ -218,17 +218,13 @@ export class HomeStreamHost {
       const step = plain<StreamStepValue>(this.client.next(this.now()));
       switch (step.kind) {
         case glue.StreamStepKind.Wake: this.runPass(); break;
-        case glue.StreamStepKind.NeedTicketCall:
-          // Level-triggered: the core repeats it until `ticket_request` or `ticket_call_failed`. While the call is
-          // being signed (which may wait on a person) the host waits, as it does for `Waiting`.
-          if (this.minting) { this.timer.clear(); return; }
-          this.mint();
-          break;
+        case glue.StreamStepKind.NeedTicketCall: this.mint(); break;
         case glue.StreamStepKind.Connect: this.connect(step.url ?? '', step.logUrl ?? ''); break;
         case glue.StreamStepKind.Send: if (step.text !== undefined) this.sendClient(() => step.text as string); break;
         case glue.StreamStepKind.Close: this.close(step.code ?? 1000); break;
-        case glue.StreamStepKind.Waiting: this.timer.clear(); return;
-        case glue.StreamStepKind.Sleep: this.timer.at(step.until === undefined ? undefined : Number(step.until)); return;
+        // Both carry `wake_at`, when to ask again at the latest (a coalesced wake while a call is signed, say).
+        case glue.StreamStepKind.Waiting: this.timer.at(step.wakeAt === undefined ? undefined : Number(step.wakeAt)); return;
+        case glue.StreamStepKind.Sleep: this.timer.at(earliest(step.until, step.wakeAt)); return;
       }
       this.checkStatus();
     }
@@ -237,20 +233,17 @@ export class HomeStreamHost {
   /** `NeedTicketCall`: sign the call, send the ticket request, hand the core the answer. */
   private mint(): void {
     const signal = this.life.signal;
-    this.minting = true;
     void (async () => {
       let call: Uint8Array;
       try {
         call = await this.account.streamCall(this.home, signal);
       } catch (error) {
-        this.minting = false;
         if (this.stopped) return;
         this.handle(this.client.ticket_call_failed(this.now()));
         this.emit({ type: 'ticketCallFailed', code: codeOf(error) });
         this.pump();
         return;
       }
-      this.minting = false;
       if (this.stopped) return;
       let answer: HomeAnswer | undefined;
       try {
@@ -278,10 +271,10 @@ export class HomeStreamHost {
   private connect(url: string, logUrl: string): void {
     const generation = ++this.generation;
     const current = (): boolean => generation === this.generation && !this.stopped;
-    this.emit({ type: 'connect', url: logUrl });
     const ended = (): void => { this.socket = undefined; this.generation++; this.allDown(); };
+    let socket: HostSocket;
     try {
-      this.socket = this.openSocket(url, {
+      socket = this.openSocket(url, {
         open: () => { if (!current()) return; this.client.on_open(this.now()); this.pump(); },
         message: text => { if (!current()) return; this.handle(this.client.on_frame(text, this.now())); this.pump(); },
         refused: answer => { if (!current()) return; ended(); this.handle(this.client.on_refused(toAnswer(answer), this.now())); this.pump(); },
@@ -290,7 +283,12 @@ export class HomeStreamHost {
     } catch {
       // A socket that cannot even be made is a transport failure, reported after this step as any other.
       queueMicrotask(() => { if (!current()) return; ended(); this.handle(this.client.on_closed(undefined, this.now())); this.pump(); });
+      return;
     }
+    // The socket carries the ticket: it is owned (kept, or closed at once) before any listener runs.
+    if (!current()) { try { socket.close(1000); } catch { /* already closed */ } return; }
+    this.socket = socket;
+    this.emit({ type: 'connect', url: logUrl });
   }
 
   /** `Close`: close the socket, then tell the core. */
@@ -321,6 +319,8 @@ export class HomeStreamHost {
   /** The core's events, in order. */
   private handle(events: glue.StreamEvent[]): void {
     for (const event of plain<StreamEventValue[]>(events)) {
+      // A listener may have stopped the host (and freed the client) while an earlier event was reported.
+      if (this.stopped) return;
       switch (event.kind) {
         case glue.StreamEventKind.Connected:
           // The hello arrived: the stream is live. Subscribe every attached cell.

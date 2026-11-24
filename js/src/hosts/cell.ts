@@ -59,7 +59,7 @@ export function cellEvent(json: { event: string; [field: string]: unknown }): Ce
   return out as unknown as CellEvent;
 }
 
-interface ViewJson { accepted: Claim | null; holder: string | null; holding: boolean; gated: boolean; seq: number; state: string | null }
+interface ViewJson { accepted: Claim | null; holder: string | null; holding: boolean; seq: number; state: string | null }
 
 export class CellSession {
   private current: CellState;
@@ -130,7 +130,7 @@ export class CellSession {
     let view: ViewJson;
     try { view = JSON.parse(e.view_json()) as ViewJson; } catch { return; }
     const next: CellState = Object.freeze({
-      joined: e.joined(), isHolder: e.is_holder(), gated: view.gated, seq: view.seq, entitled: e.entitled(), canWrite: e.can_write(),
+      joined: e.joined(), isHolder: e.is_holder(), gated: e.gated(), seq: view.seq, entitled: e.entitled(), canWrite: e.can_write(),
       ...(view.holder !== null ? { holder: view.holder } : {}),
       ...(view.accepted !== null ? { claim: view.accepted } : {}),
       ...(view.state !== null ? { state: unbase64(view.state) } : {}),

@@ -9,30 +9,41 @@
  */
 
 const WS = new Set([' ', '\t', '\n', '\r']);
+/** Deeper than any stream message may nest (a frame's 64 levels and the message's one, stream §5.2). */
+const MAX_DEPTH = 66;
+const NUMBER = /^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?/;
+const HEX4 = /^[0-9a-fA-F]{4}$/;
 
+/** A strict JSON scanner (RFC 8259) that reports where values are instead of building them. */
 class Scan {
   i = 0;
   constructor(readonly s: string) {}
-  fail(): never { throw new SyntaxError('not a JSON object message'); }
+  fail(): never { throw new SyntaxError('not a JSON message'); }
   ws(): void { while (this.i < this.s.length && WS.has(this.s[this.i] as string)) this.i++; }
   expect(c: string): void { this.ws(); if (this.s[this.i] !== c) this.fail(); this.i++; }
-  /** A string starting at `i` (at its quote); returns its decoded value. */
+  /** A string at `i` (at its quote), every escape checked; returns its decoded value. */
   string(): string {
     if (this.s[this.i] !== '"') this.fail();
-    const start = this.i;
-    this.i++;
+    const start = this.i++;
     for (;;) {
       const c = this.s[this.i];
       if (c === undefined) this.fail();
       if (c === '"') { this.i++; break; }
-      if (c === '\\') { this.i += 2; continue; }
       if (c < ' ') this.fail();
+      if (c === '\\') {
+        const e = this.s[this.i + 1];
+        if (e === 'u') { if (!HEX4.test(this.s.slice(this.i + 2, this.i + 6))) this.fail(); this.i += 6; continue; }
+        if (e === undefined || !'"\\/bfnrt'.includes(e)) this.fail();
+        this.i += 2;
+        continue;
+      }
       this.i++;
     }
     return JSON.parse(this.s.slice(start, this.i)) as string;
   }
-  /** Skips one value; returns its [start, end) span. */
-  value(): [number, number] {
+  /** One value, validated; returns its [start, end) span. */
+  value(depth: number): [number, number] {
+    if (depth > MAX_DEPTH) this.fail();
     this.ws();
     const start = this.i;
     const c = this.s[this.i];
@@ -44,7 +55,7 @@ class Scan {
       if (this.s[this.i] === close) { this.i++; return [start, this.i]; }
       for (;;) {
         if (c === '{') { this.ws(); this.string(); this.expect(':'); }
-        this.value();
+        this.value(depth + 1);
         this.ws();
         const d = this.s[this.i];
         if (d === ',') { this.i++; continue; }
@@ -52,17 +63,22 @@ class Scan {
         this.fail();
       }
     }
-    // A number or a literal: up to the next delimiter.
-    while (this.i < this.s.length && !WS.has(this.s[this.i] as string) && !',}]'.includes(this.s[this.i] as string)) this.i++;
-    if (this.i === start) this.fail();
+    for (const literal of ['true', 'false', 'null']) {
+      if (this.s.startsWith(literal, this.i)) { this.i += literal.length; return [start, this.i]; }
+    }
+    const number = NUMBER.exec(this.s.slice(this.i, this.i + 400));
+    if (!number) this.fail();
+    this.i += number[0].length;
     return [start, this.i];
   }
 }
 
 /**
- * The exact text of the top-level `frame` value of a stream `session` message, or undefined when the message has no
- * `frame` member (or is not one JSON object). A message naming `frame` twice is refused: which one a JSON parser keeps
- * is not defined, so the host cannot know which bytes the home meant.
+ * The exact text of the top-level `frame` value of a stream `session` message, or undefined. The whole message must be
+ * one strict JSON object (every string, escape, number, literal and nesting level checked, nothing after it); a
+ * member named `frame` at another level, or inside a string, is not it. A message naming `frame` twice (in any
+ * spelling that decodes to `frame`) is refused: which one a JSON parser keeps is not defined, so the host cannot know
+ * which bytes the home meant.
  */
 export function sessionFrameText(message: string): string | undefined {
   const scan = new Scan(message);
@@ -70,21 +86,22 @@ export function sessionFrameText(message: string): string | undefined {
     scan.expect('{');
     scan.ws();
     let found: [number, number] | undefined;
-    if (message[scan.i] === '}') return undefined;
-    for (;;) {
-      scan.ws();
-      const name = scan.string();
-      scan.expect(':');
-      const span = scan.value();
-      if (name === 'frame') {
-        if (found) return undefined;
-        found = span;
+    if (message[scan.i] === '}') { scan.i++; } else {
+      for (;;) {
+        scan.ws();
+        const name = scan.string();
+        scan.expect(':');
+        const span = scan.value(1);
+        if (name === 'frame') {
+          if (found) return undefined;
+          found = span;
+        }
+        scan.ws();
+        const d = message[scan.i];
+        if (d === ',') { scan.i++; continue; }
+        if (d === '}') { scan.i++; break; }
+        scan.fail();
       }
-      scan.ws();
-      const d = message[scan.i];
-      if (d === ',') { scan.i++; continue; }
-      if (d === '}') { scan.i++; break; }
-      scan.fail();
     }
     scan.ws();
     if (scan.i !== message.length) return undefined;
