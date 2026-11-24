@@ -4,7 +4,7 @@ import ColophonKeys
 import ColophonSavedKit
 import ColophonSession
 
-/// `perform(_:observed:)` with many commands: one reconcile, one all-or-none write to the store, one snapshot.
+/// `perform(_:observed:)` with many commands: one reconcile, each command stored as it is signed, one snapshot.
 @MainActor struct BatchWriteTests {
     private func link(_ id: String) throws -> DomainCommand {
         try .saveLink(id: id, url: URL(string: "https://example.org/\(id)")!, title: id.uppercased())
@@ -25,7 +25,7 @@ import ColophonSession
             }
     }
 
-    @Test func aBatchWritesEveryCommandInOrderInOneStoreWrite() async throws {
+    @Test func aBatchWritesEveryCommandInOrderEachInItsOwnStoreWrite() async throws {
         let device = Device()
         await device.session.create()
         let single = try await device.session.perform(try link("first"), observed: device.session.observedRevision)
@@ -43,9 +43,9 @@ import ColophonSession
         guard case .saved(let first) = single else { Issue.record("not saved"); return }
         let order: [String] = stored.map { $0.id }
         #expect(order == [first] + written)
-        // One write to the store: every operation of the batch carries the version of the same write.
+        // Each command is stored in its own write, before the next is signed.
         let versions = Set(stored.dropFirst().map { $0.version })
-        #expect(versions.count == 1, "\(stored)")
+        #expect(versions.count == 4, "\(stored)")
 
         // The revision the batch published is current: the next write is not stale.
         try await device.session.perform(try link("after"), observed: device.session.observedRevision)
@@ -111,12 +111,17 @@ import ColophonSession
         #expect(try await ids(device.session) == only)
     }
 
-    @Test func aStoreThatRefusesTheBatchKeepsNoneOfIt() async throws {
+    @Test func aStoreThatRefusesTheFirstCommandKeepsNoneOfIt() async throws {
         let device = Device()
         await device.session.create()
-        device.medium.setFault(.failWrite(after: 1))
-        await #expect(throws: StorageError.self) {
+        device.medium.setFault(.failWrite(after: 0))
+        do {
             _ = try await device.session.perform([try link("a"), try link("b")], observed: device.session.observedRevision)
+            Issue.record("the batch must stop")
+        } catch let stop as BatchInterruption {
+            #expect(stop.index == 0)
+            #expect(stop.receipts.isEmpty)
+            #expect(stop.error is StorageError, "\(stop.error)")
         }
         device.medium.setFault(.none)
         await device.session.refresh()
