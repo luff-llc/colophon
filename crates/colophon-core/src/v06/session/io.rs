@@ -49,6 +49,17 @@ pub enum Input {
     LinkUp,
     /// No carrier works.
     LinkDown,
+    /// A link outage reported after the fact, at the processing clock: no carrier worked for
+    /// the last `down_ms`, and (when `ended`) one works again now. For gating and lapse it is
+    /// exactly `LinkDown` at `now - down_ms` followed, when `ended`, by `LinkUp` at `now`,
+    /// without a past clock reaching the machine (a host that held inputs while a `Persist`
+    /// was stored reports the outage this way).
+    Outage {
+        /// How long no carrier worked, ending now.
+        down_ms: u64,
+        /// A carrier works again now.
+        ended: bool,
+    },
     /// An application command.
     App {
         /// The command.

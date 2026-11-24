@@ -465,6 +465,10 @@ impl Session {
     pub fn link_is_up(&self) -> bool {
         self.link_up
     }
+    /// When the current outage began (monotonic ms), while the link is down.
+    pub fn link_down_since(&self) -> Option<u64> {
+        self.link_down_since
+    }
     /// Whether it has joined.
     pub fn joined(&self) -> bool {
         self.joined
@@ -709,6 +713,17 @@ impl Session {
                 if self.link_up {
                     self.link_up = false;
                     self.link_down_since = Some(now);
+                }
+            }
+            Input::Outage { down_ms, ended } => {
+                // What `LinkDown` at `now - down_ms` does (only when the link was up: an outage
+                // already under way keeps its own start), then `LinkUp` at `now`.
+                if self.link_up {
+                    self.link_up = false;
+                    self.link_down_since = Some(now.saturating_sub(down_ms));
+                }
+                if ended {
+                    self.on_link_up(now, &mut out);
                 }
             }
             Input::App { command } => self.on_command(command, now, &mut out),

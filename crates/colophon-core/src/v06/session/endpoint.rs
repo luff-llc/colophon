@@ -403,6 +403,16 @@ impl Endpoint {
         }
     }
 
+    /// A link outage reported after the fact ([`Input::Outage`]): no carrier worked for the
+    /// last `down_ms`, and, when `ended`, one works again now.
+    pub fn outage(&mut self, down_ms: u64, ended: bool, clock: Clock, epochs: &dyn EpochKeys) -> Step {
+        let outs = self.machine.handle(Input::Outage { down_ms, ended }, clock.mono_ms);
+        Step {
+            effects: self.run(outs, clock, epochs),
+            dropped: None,
+        }
+    }
+
     /// Bytes received from a carrier. A frame that fails any §S3 check is dropped silently
     /// and changes no state; a frame from a key this member has not accepted, sent by a
     /// member entitled to the namespace, makes the machine send that member a `hello` (rate
