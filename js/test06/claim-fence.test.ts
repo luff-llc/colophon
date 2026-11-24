@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { accountOf, compareAndSet, MemoryClaimStore, privateClaimStore, SessionCellHost, type CellCarrier, type CellHostEvent, type ClaimStore, type StreamCell } from '../src/hosts/index.js';
 import { init, MemoryPrivateStore, type AtomicPrivateStore } from '../src/session/index.js';
-import { FilePrivateStore } from '../src/session/node.js';
+import { FileClaimStore } from '../src/hosts/node.js';
 import { Device } from '../test05/support.ts';
 import { ManualClock, settle } from './fakes.ts';
 
@@ -118,11 +118,11 @@ describe('the claim fence across independent clients', () => {
     });
   }
 
-  test('the real file store, two handles on one folder: two opens at once leave one holder', async () => {
+  test('the real file claim store, two handles on one folder: two opens at once leave one holder', async () => {
     const folder = mkdtempSync(join(tmpdir(), 'colophon-js-claims-'));
     const clock = new ManualClock();
-    const one = privateClaimStore(new FilePrivateStore(folder), 'cell');
-    const two = privateClaimStore(new FilePrivateStore(folder), 'cell');
+    const one = new FileClaimStore(folder);
+    const two = new FileClaimStore(folder);
     // The compare-and-set itself: two saves from the same observed fence, one stored.
     const results = await Promise.all([one.save({ claim: null, fence: { generation: 1, seq: 0 } }, undefined), two.save({ claim: null, fence: { generation: 1, seq: 0 } }, undefined)]);
     expect(results.sort()).toEqual(['stale', 'stored']);

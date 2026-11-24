@@ -473,4 +473,37 @@ describe('the cell host', () => {
       host.close();
     }
   });
+
+  test('the fence check runs every beat, even while a write is in flight, and a write of its own is not taken for another instance', async () => {
+    const clock = new ManualClock();
+    const r = await pair(clock);
+    r.stores.a.hold = true;
+    await r.a.command('take', { command: 'take', state: null });
+    const reads = r.stores.a.fenceReads;
+    await clock.advance(5_000 * 3);
+    expect(r.stores.a.fenceReads - reads).toBe(3);
+    expect(r.a.state).toBe('open');
+    r.stores.a.release();
+    await settle();
+    await clock.advance(5_000);
+    expect(r.a.state).toBe('open');
+    r.close();
+  });
+
+  test('fence checks that keep failing, or never answer, fail the cell closed; one miss alone does not', async () => {
+    for (const mode of ['reject', 'hang', 'once'] as const) {
+      const clock = new ManualClock();
+      const r = await pair(clock);
+      if (mode === 'reject') r.stores.a.fenceFailures = 3;
+      if (mode === 'once') r.stores.a.fenceFailures = 1;
+      if (mode === 'hang') r.stores.a.fenceHang = true;
+      // Each check waits a beat, and a read has a beat to answer.
+      for (let k = 0; k < 6; k++) await clock.advance(5_000);
+      const failed = r.logs.a.find(e => e.type === 'failed');
+      if (mode === 'once') expect(failed).toBeUndefined();
+      else expect({ mode, reason: (failed as { reason?: string } | undefined)?.reason }).toEqual({ mode, reason: 'store' });
+      r.close();
+    }
+  });
 });
+

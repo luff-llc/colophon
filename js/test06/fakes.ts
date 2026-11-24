@@ -81,7 +81,11 @@ export const answer = (status: number, body: unknown = {}, headers: { name: stri
 export class TestStore implements ClaimStore {
   /** The claim last stored (none: nothing, or only a reservation). */
   value: string | undefined;
-  fence: Fence | undefined;
+  heldFence: Fence | undefined;
+  /** Fence checks: the next `fenceFailures` reject, and while `fenceHang` is set they never settle. */
+  fenceFailures = 0;
+  fenceHang = false;
+  fenceReads = 0;
   readonly writes: string[] = [];
   readonly fences: Fence[] = [];
   hold = false;
@@ -95,9 +99,15 @@ export class TestStore implements ClaimStore {
   private waiting: (() => void)[] = [];
   readonly hung: (() => void)[] = [];
   constructor(initial?: StoredClaim, private readonly timer: (run: () => void, ms: number) => void = (run, ms) => { setTimeout(run, ms); }) {
-    this.value = initial?.claim ?? undefined; this.fence = initial?.fence;
+    this.value = initial?.claim ?? undefined; this.heldFence = initial?.fence;
   }
-  async load(): Promise<StoredClaim | undefined> { return this.fence ? { claim: this.value ?? null, fence: { ...this.fence } } : undefined; }
+  async load(): Promise<StoredClaim | undefined> { return this.heldFence ? { claim: this.value ?? null, fence: { ...this.heldFence } } : undefined; }
+  async fence(): Promise<Fence | undefined> {
+    this.fenceReads++;
+    if (this.fenceFailures > 0) { this.fenceFailures--; throw new Error('the disk is busy'); }
+    if (this.fenceHang) await new Promise<void>(() => {});
+    return this.heldFence && { ...this.heldFence };
+  }
   async save(record: StoredClaim, expected: Fence | undefined): Promise<'stored' | 'stale'> {
     this.inflight++; this.maxInflight = Math.max(this.maxInflight, this.inflight);
     try {
@@ -110,7 +120,7 @@ export class TestStore implements ClaimStore {
       // The compare-and-set, applied when the write lands.
       const next = compareAndSet(await this.load(), record, expected);
       if (!next) { this.refused++; return 'stale'; }
-      this.value = next.claim ?? undefined; this.fence = next.fence;
+      this.value = next.claim ?? undefined; this.heldFence = next.fence;
       return 'stored';
     } finally {
       this.inflight--;
