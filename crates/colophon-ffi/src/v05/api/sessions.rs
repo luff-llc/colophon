@@ -325,48 +325,50 @@ enum Input0 {
     Receive(Vec<u8>),
     Link(bool),
     Command(Command),
-    /// Only run from the outage summary, never taken from the host.
+    /// Only run from the kept link changes, never taken from the host.
     Outage {
         down_ms: u64,
         ended: bool,
     },
 }
 
-/// The link changes seen while a `Persist` waits, as a constant-size summary: the link's state
-/// now, when the current outage began (if it began while waiting), and the longest outage that
-/// began and ended while waiting. The machine learns it at the processing clock, through
-/// `Input::Outage`, never at a past clock.
-#[derive(Default)]
-struct OutageSummary {
-    /// The link's state after the changes seen; none when no change was seen.
-    up: Option<bool>,
-    /// When the current outage began, if it began while waiting.
-    down_since: Option<u64>,
-    /// An outage ended while waiting (one that began before is counted too, as 0 ms: the
-    /// machine keeps its own start for it).
-    ended: bool,
-    /// The longest outage that began and ended while waiting.
-    longest: u64,
+/// The link changes between two kept frames (or before the first, or after the last), as a
+/// constant-size summary: an up that ended an outage begun before the interval, the longest
+/// outage that began and ended inside it, and a down still open at its end. The machine
+/// learns it at the processing clock, through `Input::Outage`, never at a past clock.
+#[derive(Default, Clone, Copy)]
+struct Interval {
+    /// When an outage begun before this interval ended in it.
+    closes: Option<u64>,
+    /// The longest outage that began and ended in this interval.
+    longest: Option<u64>,
+    /// When the outage still under way at the interval's end began, if it began in it.
+    opens: Option<u64>,
 }
-impl OutageSummary {
+impl Interval {
     fn seen(&self) -> bool {
-        self.up.is_some()
+        self.closes.is_some() || self.longest.is_some() || self.opens.is_some()
     }
-    fn change(&mut self, up: bool, at: u64, machine_up: bool) {
-        let was = self.up.unwrap_or(machine_up);
-        if was == up {
-            return;
-        }
-        self.up = Some(up);
+    /// A real transition (the link changed state) at `at`.
+    fn change(&mut self, up: bool, at: u64) {
         if up {
-            self.ended = true;
-            if let Some(d) = self.down_since.take() {
-                self.longest = self.longest.max(at.saturating_sub(d));
+            match self.opens.take() {
+                Some(d) => {
+                    let len = at.saturating_sub(d);
+                    self.longest = Some(self.longest.map_or(len, |l| l.max(len)));
+                }
+                None => self.closes = Some(at),
             }
         } else {
-            self.down_since = Some(at);
+            self.opens = Some(at);
         }
     }
+}
+
+/// A kept frame and the link changes that came before it.
+struct Segment {
+    before: Interval,
+    frame: Vec<u8>,
 }
 
 /// What one call hands back, accumulated across the inputs it ran.
@@ -407,12 +409,14 @@ struct EndpointState {
     /// The body `begin_delegation` returned and `finish_delegation` has not installed yet.
     delegation: Option<Vec<u8>>,
     pending: Option<Pending>,
-    /// Inputs that arrived while a `Persist` waited: the frames in arrival order, the link
-    /// changes as a summary, and whether a tick fell due. All run at the clock of the call
-    /// that drains them.
-    frames: std::collections::VecDeque<Vec<u8>>,
+    /// Inputs that arrived while a `Persist` waited, in their true order: each kept frame with
+    /// the link changes before it, the link changes after the last one, and whether a tick fell
+    /// due. All run at the clock of the call that drains them.
+    frames: std::collections::VecDeque<Segment>,
     frame_bytes: usize,
-    outage: OutageSummary,
+    trailing: Interval,
+    /// The link's state after the changes kept (none: as the machine has it).
+    link_now: Option<bool>,
     tick: bool,
     next_ack: u64,
     /// The last monotonic clock given to the machine: a call with an earlier one is refused.
@@ -463,46 +467,64 @@ impl EndpointState {
         }
         self.absorb(step.effects, out)
     }
-    /// Run what waited, all at this call's clock, until a `Persist`: first the link changes
-    /// (an outage that ended, then one still under way, as `Input::Outage`, so a holder that
-    /// lapsed is gated before it acts on anything), then the frames in arrival order, then one
-    /// tick. Running the outage before frames that arrived earlier is a deliberate, cautious
-    /// reordering.
+    /// Run what waited, in its true order and all at this call's clock, until a `Persist`:
+    /// for each kept frame the link changes before it (as `Input::Outage`) and then the frame;
+    /// then the link changes after the last frame; then one tick. An outage that spans kept
+    /// frames is one continuous outage of its true length: its down is given with that length,
+    /// and the machine keeps that start when the up comes (an outage the drain does not see
+    /// begin, one that began before the `Persist` or before an earlier drain stopped, keeps the
+    /// machine's own, earlier, start).
     fn drain(&mut self, clock: Clock, epochs: &SessionEpochs, out: &mut Out) -> R<()> {
-        let o = std::mem::take(&mut self.outage);
-        if o.ended
-            && self.run(
-                Input0::Outage {
-                    down_ms: o.longest,
-                    ended: true,
-                },
-                clock,
-                epochs,
-                out,
-            )?
-        {
-            return Ok(());
-        }
-        if let (Some(false), Some(since)) = (o.up, o.down_since) {
-            let down_ms = clock.mono_ms.saturating_sub(since);
-            if self.run(
-                Input0::Outage {
-                    down_ms,
-                    ended: false,
-                },
-                clock,
-                epochs,
-                out,
-            )? {
+        let now = clock.mono_ms;
+        // The close of each open outage, to give its down its true length.
+        let intervals: Vec<Interval> = self
+            .frames
+            .iter()
+            .map(|s| s.before)
+            .chain(std::iter::once(self.trailing))
+            .collect();
+        let length = |k: usize, d: u64| -> u64 {
+            intervals[k + 1..]
+                .iter()
+                .find_map(|i| i.closes)
+                .map_or(now.saturating_sub(d), |u| u.saturating_sub(d))
+        };
+        let lengths: Vec<Option<u64>> = intervals
+            .iter()
+            .enumerate()
+            .map(|(k, i)| i.opens.map(|d| length(k, d)))
+            .collect();
+        let mut k = 0;
+        loop {
+            let interval = if self.frames.is_empty() {
+                std::mem::take(&mut self.trailing)
+            } else {
+                self.frames[0].before
+            };
+            let outages = [
+                interval.closes.map(|_| (0, true)),
+                interval.longest.map(|l| (l, true)),
+                lengths[k].map(|l| (l, false)),
+            ];
+            if let Some(seg) = self.frames.front_mut() {
+                seg.before = Interval::default();
+            }
+            // An outage never persists (only claims do), so these run to the end.
+            for (down_ms, ended) in outages.into_iter().flatten() {
+                if self.run(Input0::Outage { down_ms, ended }, clock, epochs, out)? {
+                    return Ok(());
+                }
+            }
+            let Some(seg) = self.frames.pop_front() else {
+                break;
+            };
+            self.frame_bytes = self.frame_bytes.saturating_sub(seg.frame.len());
+            if self.run(Input0::Receive(seg.frame), clock, epochs, out)? {
                 return Ok(());
             }
+            k += 1;
         }
-        while let Some(b) = self.frames.pop_front() {
-            self.frame_bytes = self.frame_bytes.saturating_sub(b.len());
-            if self.run(Input0::Receive(b), clock, epochs, out)? {
-                return Ok(());
-            }
-        }
+        self.link_now = None;
         if std::mem::take(&mut self.tick) {
             self.run(Input0::Tick, clock, epochs, out)?;
         }
@@ -519,8 +541,11 @@ impl EndpointState {
                 Ok(())
             }
             Input0::Link(up) => {
-                let machine_up = self.e.machine().link_is_up();
-                self.outage.change(up, clock.mono_ms, machine_up);
+                let was = self.link_now.unwrap_or(self.e.machine().link_is_up());
+                if was != up {
+                    self.link_now = Some(up);
+                    self.trailing.change(up, clock.mono_ms);
+                }
                 out.queued = true;
                 Ok(())
             }
@@ -534,8 +559,11 @@ impl EndpointState {
                         hello_to: None,
                     });
                 } else {
+                    // A frame that cannot be kept leaves the link changes before it in the
+                    // trailing interval, merged with what follows.
                     self.frame_bytes += b.len();
-                    self.frames.push_back(b);
+                    let before = std::mem::take(&mut self.trailing);
+                    self.frames.push_back(Segment { before, frame: b });
                     out.queued = true;
                 }
                 Ok(())
@@ -543,7 +571,8 @@ impl EndpointState {
         }
     }
     /// Refuse a monotonic clock earlier than the last one given, changing nothing; else record it.
-    fn advance(&mut self, clock: &Clock) -> R<()> {
+    /// Refuse a monotonic clock earlier than the last one given, changing nothing.
+    fn check(&self, clock: &Clock) -> R<()> {
         if clock.mono_ms < self.last_mono {
             return Err(AccountError::Malformed {
                 code: "session:clockBackwards".into(),
@@ -553,11 +582,16 @@ impl EndpointState {
                 ),
             });
         }
-        self.last_mono = clock.mono_ms;
         Ok(())
     }
+    /// Record the clock of a call that was not refused.
+    fn advance(&mut self, clock: &Clock) {
+        self.last_mono = self.last_mono.max(clock.mono_ms);
+    }
     fn queued(&self) -> usize {
-        self.frames.len() + usize::from(self.tick) + usize::from(self.outage.seen())
+        self.frames.len()
+            + usize::from(self.tick)
+            + usize::from(self.trailing.seen() || self.frames.iter().any(|s| s.before.seen()))
     }
 }
 
@@ -646,7 +680,8 @@ impl SessionEndpoint {
                         pending: None,
                         frames: Default::default(),
                         frame_bytes: 0,
-                        outage: OutageSummary::default(),
+                        trailing: Interval::default(),
+                        link_now: None,
                         tick: false,
                         next_ack: 0,
                         last_mono: clock.mono_ms,
@@ -706,14 +741,16 @@ impl SessionEndpoint {
         self.gated(engine, |s, p, epochs| {
             let current = s.installed.seq == p.seq && s.installed.digest == p.digest;
             let mut out = Out::new();
-            s.advance(&clock)?;
+            s.check(&clock)?;
             if s.pending.is_some() {
                 s.hold(input, clock, &mut out)?;
+                s.advance(&clock);
                 return Ok(out.step(s.pending.is_some()));
             }
             if !current {
                 return Err(stale());
             }
+            s.advance(&clock);
             s.drain(clock, epochs, &mut out)?;
             if s.pending.is_some() {
                 s.hold(input, clock, &mut out)?;
@@ -807,7 +844,8 @@ impl SessionEndpoint {
             if stamp.seq != p.seq || stamp.digest != p.digest {
                 return Err(stale());
             }
-            s.advance(&clock)?;
+            s.check(&clock)?;
+            s.advance(&clock);
             let mut out = Out::new();
             let step = s.e.set_account(view.v.clone(), clock, epochs);
             s.installed = stamp.clone();
@@ -891,7 +929,8 @@ impl SessionEndpoint {
                 Some(p) if p.ack == ack => {}
                 _ => return Err(wrong_ack()),
             }
-            s.advance(&clock)?;
+            s.check(&clock)?;
+            s.advance(&clock);
             let mut out = Out::new();
             let rest = s.pending.take().map(|p| p.rest).unwrap_or_default();
             if !current {

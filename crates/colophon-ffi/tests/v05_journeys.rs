@@ -539,6 +539,70 @@ fn v06_through_the_engine(
     assert_eq!(e.code(), "session:clockBackwards");
     assert_eq!(ep.digest().unwrap(), before);
     assert!(ep.tick(ea, clock(30_000)).is_ok(), "the same clock again is fine");
+    // A refused call does not move the endpoint's clock.
+    assert_eq!(ep.tick(ea, clock(1)).err().unwrap().code(), "session:clockBackwards");
+    assert!(ep.tick(ea, clock(30_000)).is_ok(), "the refused call left the clock at 30 s");
+
+    // An outage that spans a kept frame is one outage of its true length: 20 s gates, 10 s
+    // does not (measured from the processing clock it would have been 28 s and 38 s).
+    for (up_at, gates) in [(32_000, true), (22_000, false)] {
+        let (ep, ack) = pending_holder(8);
+        ep.link_down(ea, clock(12_000)).unwrap();
+        assert!(ep.receive(b"x".to_vec(), ea, clock(15_000)).unwrap().queued);
+        ep.link_up(ea, clock(up_at)).unwrap();
+        ack_all(&ep, ack, 50_000);
+        assert_eq!(gated(&ep), gates, "an outage from 12 s to {up_at} ms");
+    }
+
+    // A frame lost to the bound leaves the link changes before it in place: the outage around
+    // it still gates.
+    let (ep, ack) = pending_holder(9);
+    for _ in 0..64 {
+        assert!(ep.receive(b"y".to_vec(), ea, clock(11_000)).unwrap().queued);
+    }
+    ep.link_down(ea, clock(12_000)).unwrap();
+    let lost = ep.receive(b"z".to_vec(), ea, clock(13_000)).unwrap();
+    assert_eq!(lost.drops[0].reason, "queueFull");
+    ep.link_up(ea, clock(32_000)).unwrap();
+    ack_all(&ep, ack, 40_000);
+    assert!(gated(&ep), "the outage around the lost frame is kept");
+
+    // A host clock that resets makes every call fail; the recovery is a new endpoint from the
+    // last persisted claim, which a holder restarts from under the §S6 rules: it does not act
+    // as holder until it has waited out askTimeoutMs.
+    let (ep, ack) = pending_holder(10);
+    let persisted = ep.claim_json().unwrap().map(|c| format!(r#"{{"claim":{c},"released":false}}"#));
+    ack_all(&ep, ack, 10_200);
+    assert!(ep.is_holder().unwrap());
+    assert_eq!(ep.tick(ea, clock(5)).err().unwrap().code(), "session:clockBackwards");
+    let again = SessionEndpoint::new(
+        account.into(),
+        "notes".into(),
+        "outage".into(),
+        m1.into(),
+        session_default_policy().unwrap(),
+        persisted,
+        after.clone(),
+        vec![11; 32],
+        vec![11; 16],
+        clock(5),
+    )
+    .unwrap();
+    let body = again.begin_delegation(NOW - 1_000, NOW + HOUR).unwrap();
+    let sig = host.sign_one(&body, m1, false).signature;
+    again.finish_delegation(body, sig, clock(5)).unwrap();
+    let joined = again
+        .command(r#"{"command":"join","state":null}"#.into(), ea, clock(10))
+        .unwrap();
+    let v: Value = serde_json::from_str(&again.view_json().unwrap()).unwrap();
+    assert!(v["gated"] == true || v["holding"] == false, "{v}");
+    assert!(
+        !joined
+            .effects
+            .iter()
+            .any(|e| matches!(e.frame_kind.as_deref(), Some("state" | "beat" | "msg"))),
+        "no holder traffic before the restart gate"
+    );
 
     // A long engine call (every record read slow, the engine's lock held throughout) does not
     // hold up a tick: endpoint calls read the gate, never the engine's lock.
@@ -572,6 +636,182 @@ fn v06_through_the_engine(
     *sa.mode.lock().unwrap() = 0;
     sa.files.lock().unwrap().remove(&probe_path);
     ea.refresh(sa.listing()).unwrap();
+
+    two_members_pass_and_outage(ea, sa, ctl, auth, sim, d, host, m1, home, account);
+}
+
+/// A second writer, and the order of a pass and an outage while a Persist waits: a pass that
+/// makes the member holder, then an outage past holderTimeoutMs, gates it after the
+/// acknowledgement, exactly as the same inputs run at once; the outage first, then the pass,
+/// leaves it holder and not gated, as that order does at once. The drain stops at the Persist
+/// the pass makes and resumes with the outage that followed.
+#[allow(clippy::too_many_arguments)]
+fn two_members_pass_and_outage(
+    ea: &Arc<AccountEngine>,
+    sa: &MemSource,
+    ctl: &Arc<AccountEngine>,
+    auth: &MemSource,
+    sim: &mut SimHome,
+    d: &str,
+    host: &mut Host,
+    m1: &str,
+    home: &str,
+    account: &str,
+) {
+    assert!(sync_pass(ctl, auth, home, sim, host, NOW).is_empty());
+    let m2 = host.identity(32);
+    let terms = json!({"records": [{"namespace": "notes", "access": "write"}]});
+    let r2 = request(host, account, &m2, "Tablet", AccountMemberKind::Device, terms.clone(), vec![]);
+    let approve = ctl
+        .begin_approve(r2.raw.clone(), terms.to_string(), vec![d.to_string()], scanned(ctl, &r2.raw, NOW), host.fresh(32))
+        .unwrap();
+    auth.store(&finish(ctl, host, approve).stores);
+    assert!(sync_pass(ctl, auth, home, sim, host, NOW).is_empty());
+    assert!(sync_pass(ea, sa, home, sim, host, NOW).is_empty());
+    let s2 = auth.copy_of();
+    let e2 = open_engine(&s2, &format!("member:{m2}"), account);
+    unlock_member(&e2, host, &m2);
+    let host: &Host = host;
+    let clock = |t: u64| SessionClock { mono_ms: t, wall_ms: NOW };
+    let make = |who: &str, eng: &Arc<AccountEngine>, seed: u8| {
+        let view = eng.session_account("notes".into(), NOW).unwrap();
+        assert!(view.writers("notes".into(), NOW).contains(&who.to_string()));
+        let ep = SessionEndpoint::new(
+            account.into(), "notes".into(), "handover".into(), who.into(),
+            session_default_policy().unwrap(), None, view, vec![seed; 32], vec![seed; 16], clock(1_000),
+        )
+        .unwrap();
+        let body = ep.begin_delegation(NOW - 1_000, NOW + HOUR).unwrap();
+        ep.finish_delegation(body.clone(), host.sign_one(&body, who, false).signature, clock(1_000)).unwrap();
+        ep
+    };
+    // Perform a step as a host does when its writes complete at once; the frames it sends.
+    let settle = |ep: &SessionEndpoint, eng: &AccountEngine, step: SessionStep, t: u64| -> Vec<SessionEffect> {
+        let mut effects = step.effects;
+        let mut next = step.awaiting_persist;
+        while let Some(id) = next {
+            let r = ep.persisted(id, eng, clock(t)).unwrap();
+            next = r.awaiting_persist;
+            effects.extend(r.effects);
+        }
+        effects
+    };
+    let sends = |effects: &[SessionEffect]| -> Vec<Vec<u8>> {
+        effects.iter().filter(|e| e.kind == SessionEffectKind::Send).map(|e| e.bytes.clone()).collect()
+    };
+    // Carry frames both ways until neither side sends.
+    let pump = |a: &SessionEndpoint, b: &SessionEndpoint, mut to_a: Vec<Vec<u8>>, mut to_b: Vec<Vec<u8>>, t: u64| {
+        for _ in 0..20 {
+            if to_a.is_empty() && to_b.is_empty() {
+                return;
+            }
+            let mut next_b = Vec::new();
+            for f in to_a.drain(..) {
+                let r = a.receive(f, ea, clock(t)).unwrap();
+                next_b.extend(sends(&settle(a, ea, r, t)));
+            }
+            let mut next_a = Vec::new();
+            for f in to_b.drain(..) {
+                let r = b.receive(f, &e2, clock(t)).unwrap();
+                next_a.extend(sends(&settle(b, &e2, r, t)));
+            }
+            to_a = next_a;
+            to_b = next_b;
+        }
+        panic!("the two endpoints never went quiet");
+    };
+    let cmd = |ep: &SessionEndpoint, eng: &AccountEngine, c: &str, t: u64| -> Vec<SessionEffect> {
+        let r = ep.command(c.into(), eng, clock(t)).unwrap();
+        settle(ep, eng, r, t)
+    };
+    let join = r#"{"command":"join","state":null}"#;
+    let take = r#"{"command":"take","state":null}"#;
+    // One run: `queued` keeps A's inputs behind a Persist; `outage_first` reverses the order of
+    // the pass and the outage. A's view at the end and the kinds of the frames it sent from the
+    // pass on.
+    let run = |queued: bool, outage_first: bool| -> (Value, Vec<String>) {
+        let a = make(m1, ea, if outage_first { 21 } else { 22 });
+        let b = make(&m2, &e2, if outage_first { 23 } else { 24 });
+        let fa = sends(&cmd(&a, ea, join, 2_000));
+        let fb = sends(&cmd(&b, &e2, join, 2_000));
+        pump(&a, &b, fb, fa, 2_100);
+        let fb = sends(&cmd(&b, &e2, take, 3_000));
+        pump(&a, &b, fb, vec![], 3_100);
+        // B releases and takes again; A does not hear of it yet.
+        let mut withheld = sends(&cmd(&b, &e2, r#"{"command":"release"}"#, 4_000));
+        withheld.extend(sends(&cmd(&b, &e2, take, 4_100)));
+        // A asks under the claim it knows; B, holding a greater one, takes the ask and passes.
+        let fa = sends(&cmd(&a, ea, r#"{"command":"ask"}"#, 5_000));
+        for f in fa {
+            let r = b.receive(f, &e2, clock(5_100)).unwrap();
+            withheld.extend(sends(&settle(&b, &e2, r, 5_100)));
+        }
+        let passed = cmd(&b, &e2, &format!(r#"{{"command":"pass","to":"{m1}","snapshot":"AA=="}}"#), 5_200);
+        let pass: Vec<Vec<u8>> = passed
+            .iter()
+            .filter(|e| e.kind == SessionEffectKind::Send && e.frame_kind.as_deref() == Some("pass"))
+            .map(|e| e.bytes.clone())
+            .collect();
+        assert_eq!(pass.len(), 1, "B passes to A");
+        // A hears B's greater claim and persists it; with `queued` the write is slow. From here
+        // on, the kinds of the frames A sends, in order.
+        let mut kinds = Vec::new();
+        let mut keep = |effects: Vec<SessionEffect>| {
+            kinds.extend(effects.into_iter().filter_map(|e| e.frame_kind));
+        };
+        let mut pending = None;
+        for f in withheld {
+            let r = a.receive(f, ea, clock(6_000)).unwrap();
+            if queued {
+                if pending.is_none() {
+                    pending = r.awaiting_persist;
+                }
+                keep(r.effects);
+            } else {
+                keep(settle(&a, ea, r, 6_000));
+            }
+        }
+        if queued {
+            assert!(pending.is_some(), "A persists B's new claim");
+        }
+        let outage = |keep: &mut dyn FnMut(Vec<SessionEffect>)| {
+            let r = a.link_down(ea, clock(7_000)).unwrap();
+            assert_eq!(r.queued, queued);
+            keep(settle(&a, ea, r, 7_000));
+            let r = a.link_up(ea, clock(27_000)).unwrap();
+            keep(settle(&a, ea, r, 27_000));
+        };
+        if outage_first {
+            outage(&mut keep);
+        }
+        let at = if outage_first { 28_000 } else { 6_500 };
+        let r = a.receive(pass[0].clone(), ea, clock(at)).unwrap();
+        assert_eq!(r.queued, queued);
+        keep(settle(&a, ea, r, at));
+        if !outage_first {
+            outage(&mut keep);
+        }
+        if let Some(id) = pending {
+            let r = a.persisted(id, ea, clock(40_000)).unwrap();
+            // The pass made A holder: the drain stopped at its Persist and resumes after it.
+            keep(settle(&a, ea, r, 40_000));
+        }
+        assert_eq!(a.queued().unwrap(), 0);
+        let v: Value = serde_json::from_str(&a.view_json().unwrap()).unwrap();
+        (v, kinds)
+    };
+    let (kept, kept_kinds) = run(true, false);
+    let (direct, direct_kinds) = run(false, false);
+    assert_eq!(kept["holding"], true, "{kept}");
+    assert_eq!(kept["gated"], true, "the pass made A holder before the outage: gated");
+    assert_eq!(kept, direct, "the same state as the inputs run at once");
+    assert_eq!(kept_kinds, direct_kinds, "the same frames, in the same order");
+    let (kept, kept_kinds) = run(true, true);
+    let (direct, direct_kinds) = run(false, true);
+    assert_eq!(kept["holding"], true, "{kept}");
+    assert_eq!(kept["gated"], false, "the outage came before A held: not gated");
+    assert_eq!(kept, direct);
+    assert_eq!(kept_kinds, direct_kinds);
 }
 /// A step carries an acknowledgement ID exactly when its last effect is the Persist it names.
 fn assert_ack_only_with_persist(step: &SessionStep) {

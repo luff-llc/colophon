@@ -918,20 +918,29 @@ After every exchange pass that moved the head, call `set_account` before deliver
   changes nothing (retry it after `persisted`). A `tick` is kept as one pending tick however many
   arrive. Received frames are kept in arrival order, up to 64 frames and 1 MiB together (a durable
   write takes milliseconds to a few hundred, and this covers several seconds of a busy cell); past
-  either bound the newest frame is lost (a `queueFull` drop). Link changes are not kept as events
-  but as a constant-size summary: the link's state now, when the current outage began, and the
-  longest outage that began and ended while waiting, so no number of flaps fills anything. When
-  the `Persist` is acknowledged (or at `set_account` when the head had moved) what waited runs,
-  **all at that call's clock**, in this order: the outage summary (an ended outage, then one still
-  under way, as the core's `Outage` input), so a holder that lapsed is gated before it acts on
-  anything; then the frames in arrival order; then the tick. Running the outage before frames
-  that arrived earlier is a deliberate, cautious reordering, and a frame judged after the write
-  gives a later receive time than its arrival (a worse clock-offset sample, which the best-of-8
-  filter absorbs; a holder heard later is lapsed later, a liveness delay bounded by the write).
-  `next_deadline` stays the machine's deadline throughout.
+  either bound the newest frame is lost (a `queueFull` drop). Link changes are kept in their true
+  place among the frames, as constant-size summaries: one before each kept frame and one after
+  the last, each holding an up that ended an earlier outage, the longest outage that began and
+  ended in it, and a down still open at its end; no number of flaps fills anything, and a lost
+  frame leaves its summary to merge with the next. When the `Persist` is acknowledged (or at
+  `set_account` when the head had moved) what waited runs **in its true order and all at that
+  call's clock**: for each kept frame, the link changes before it (as the core's `Outage` input)
+  and then the frame; then the changes after the last frame; then the tick; stopping at the next
+  `Persist`, with the rest kept for its acknowledgement. An outage that spans kept frames reaches
+  the machine as one outage of its true length. Two cases come out longer than true, so a holder
+  can only lapse sooner: an outage that began before the `Persist`, and one whose drain stopped at
+  a `Persist` between its down and its up (each keeps the machine's earlier start). A frame judged
+  after the write gives a later receive time than its arrival (a worse clock-offset sample, which
+  the best-of-8 filter absorbs; a holder heard later is lapsed later, a liveness delay bounded by
+  the write). `next_deadline` stays the machine's deadline throughout.
 * *Time.* Every clock the endpoint gives the machine is the clock of the call it runs in, and
   never earlier than the last: a call whose monotonic clock is earlier than the endpoint's last is
-  refused with `session:clockBackwards` and changes nothing. Nothing is replayed at a past clock.
+  refused with `session:clockBackwards` and changes nothing, the endpoint's clock included.
+  Nothing is replayed at a past clock. A monotonic clock that resets (a reboot, a new process)
+  makes every later call fail this way; the recovery is to discard the endpoint and make a new
+  one from the last `persisted_json` the host stored, which applies the restart rules of §S6: a
+  member that held the role does not act as holder until it has waited out `askTimeoutMs` and
+  retaken, so the reset fails closed.
 
 **Host loops.** Stream: §2 of the sync-stream document, with these names; after every exchange pass call
 `on_history(head_seq())`; while `polling()` is true keep the existing poll timer. Session: the reference
