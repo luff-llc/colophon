@@ -920,14 +920,14 @@ fn check_record_by_replay(state: &str, now: i64, path: &str, bytes: &[u8]) -> Va
     }
 }
 
-/// `check_record` reads who may write from the home's verified view (its checkpoint) and no
-/// longer replays the history from genesis on every record. Over a home with current members, a
-/// member revoked after writing, a member the home has not seen admitted, and a stopped home, at
-/// several clock readings, every record (good ones, a swapped signature, a record at another's
-/// path, a stranger's, blobs good and bad, paths outside the store) gets exactly the answer the
-/// replay gave, and the check runs one verification of the history, not a replay besides it.
+/// `check_record` reads the home's checkpoint once (for the stop and the held entries) and decides
+/// who may write by a replay from genesis. Over a home with current members, a member revoked
+/// after writing, a member the home has not seen admitted, and a stopped home, at several clock
+/// readings, every record (good ones, a swapped signature, a record at another's path, a
+/// stranger's, blobs good and bad, paths outside the store) gets exactly the answer the replay
+/// gave, with at most the replay besides the checkpoint's verification.
 #[test]
-fn a_record_check_reads_the_home_view_and_answers_as_the_replay_from_genesis_did() {
+fn a_record_check_answers_as_the_replay_from_genesis_did() {
     use colophon_core::v05::history::work;
     let mut f = create_with(&[NS], "members", 1);
     let writer = f.host.identity(41);
@@ -987,7 +987,7 @@ fn a_record_check_reads_the_home_view_and_answers_as_the_replay_from_genesis_did
                 let got: Value = serde_json::from_slice(&out).unwrap();
                 let want = check_record_by_replay(&home.state, now, path, bytes);
                 assert_eq!(got, want, "{when}: {path}");
-                assert!(verifications <= 1, "{when}: {path}: {verifications} verifications");
+                assert!(verifications <= 2, "{when}: {path}: {verifications} verifications");
                 got
             })
             .collect()
@@ -1177,13 +1177,19 @@ fn an_authenticated_read_verifies_the_history_once_and_keeps_its_refusal_order()
     forged["call"] = json!(null);
     assert_eq!(call_op(forged)["status"], 401);
 
-    // Open routes: allowed whatever the state holds, and nothing of it is decoded.
+    // Open routes are open over a slot state that loads; a state that does not is an error, as
+    // for every other request.
     for (method, section, rest) in [("GET", "", Value::Null), ("POST", "authority", Value::Null),
                                     ("POST", "pending", Value::Null),
                                     ("PUT", "records", json!(format!("heads/{}.json", "b".repeat(32))))] {
-        let r = call(json!({"op": "access", "state": "not a state", "now": NOW, "method": method,
+        let r = call(json!({"op": "access", "state": home.state, "now": NOW, "method": method,
                             "section": section, "rest": rest}));
         assert_eq!((r["allowed"].clone(), r["via"].clone()), (json!(true), json!("open")), "{method} {section}");
+        for state in [json!("not a state"), Value::Null] {
+            let r = call_op(json!({"op": "access", "state": state, "now": NOW, "method": method,
+                                   "section": section, "rest": rest}));
+            assert_eq!(r["ok"], false, "{method} {section}: {r}");
+        }
     }
 }
 
@@ -1256,4 +1262,55 @@ fn write_request_bench_input() {
     assert_eq!(call(check.clone())["allowed"], true);
     let entries = call(json!({"op": "status", "state": home.state, "now": now}))["seq"].clone();
     std::fs::write(&out, json!({"entries": entries, "stateBytes": home.state.len(), "get": get, "put": put, "check": check}).to_string()).unwrap();
+}
+
+/// `check_record` decides who may write by a replay of the held entries from genesis, never from
+/// the folded state a checkpoint carries: a checkpoint is local memory, and one written under
+/// other rules (or by an older verifier with the same format number) may fold an entry that
+/// these rules refuse. Here the checkpoint's fold names a member whose approval it no longer
+/// holds among its entries: the replay does not know the member, so the record is refused.
+#[test]
+fn a_record_check_does_not_trust_the_fold_a_checkpoint_carries() {
+    use colophon_core::v05::history::home::HomeState;
+    let mut f = create_with(&[NS], "members", 1);
+    let writer = f.host.identity(31);
+    admit(&mut f, &writer, "Writer", "device", terms_for(&[(NS, "write")]), terms_for(&[(NS, "write")]));
+    let keys = HomeKeys::new(0x77);
+    appoint_homes(&mut f, &[(&keys, BASE_A)]);
+    let mut home = Home::new(keys, f.account.id().as_str());
+    let entries: Vec<(u64, Value)> = entries_json(&f);
+    let values: Vec<Value> = entries.iter().map(|(_, e)| e.clone()).collect();
+    assert_eq!(home.authority(1, &values, NOW)["appointed"], true);
+    let src = MemSource::new();
+    src.store_account(&f.account);
+    let mut host = std::mem::replace(&mut f.host, Host::new());
+    let mut e = member_engine(&f, &host, &src, &writer, NOW);
+    let w = engine_write(&mut e, &mut host, &src, NS, "follow", json!({"id": "show", "url": "https://example.org/feed", "title": "Show"}));
+    f.host = host;
+    let (path, bytes) = w.stores.into_iter().find(|(p, _)| p.starts_with("ops/")).unwrap();
+    let check = |state: &str| call(json!({"op": "check_record", "state": state, "now": NOW + 1_000, "path": path, "bytes": b(&bytes)}));
+    assert_eq!(check(&home.state)["allowed"], true);
+    // The writer's approval (the entry that names it) is dropped from the checkpoint's held
+    // entries; the fold, which has the writer, is left as it is.
+    let approval = entries
+        .iter()
+        .find(|(_, e)| String::from_utf8(STANDARD.decode(e["body"].as_str().unwrap()).unwrap()).unwrap().contains(&writer))
+        .map(|(_, e)| serde_json::to_vec(e).unwrap())
+        .unwrap();
+    let mut slot: Value = serde_json::from_slice(&STANDARD.decode(&home.state).unwrap()).unwrap();
+    let mut hs: Value = serde_json::from_slice(&STANDARD.decode(slot["home_state"].as_str().unwrap()).unwrap()).unwrap();
+    let mut cp: Value = serde_json::from_slice(&STANDARD.decode(hs["checkpoint"].as_str().unwrap()).unwrap()).unwrap();
+    let held = cp["objects"]["entries"].as_array_mut().unwrap();
+    let before = held.len();
+    held.retain(|e| serde_json::from_value::<Vec<u8>>(e.clone()).unwrap() != approval);
+    assert_eq!(held.len(), before - 1, "the approval was held");
+    hs["checkpoint"] = json!(b(&serde_json::to_vec(&cp).unwrap()));
+    slot["home_state"] = json!(b(&serde_json::to_vec(&hs).unwrap()));
+    let doctored = b(&serde_json::to_vec(&slot).unwrap());
+    let h = HomeState::from_bytes(&STANDARD.decode(slot["home_state"].as_str().unwrap()).unwrap()).unwrap();
+    let fold = h.verified_history(NOW + 1_000).unwrap().1;
+    assert!(fold.state.unwrap().members().iter().any(|m| m.request.member_id() == writer), "the fold still names the writer");
+    let r = call_op(json!({"op": "check_record", "state": doctored, "now": NOW + 1_000, "path": path, "bytes": b(&bytes)}));
+    assert_eq!(r, check_record_by_replay(&doctored, NOW + 1_000, &path, &bytes), "the replay's answer");
+    assert_ne!(r["allowed"], true, "{r}");
 }

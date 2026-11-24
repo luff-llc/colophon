@@ -10,8 +10,9 @@
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use colophon_core::v05::account::{Account, Identity};
 use colophon_core::v05::calls::{
-    home_purposes, home_record_writes, verify_call, verify_home_batch_parsed,
+    home_purposes, home_record_writes, verify_call_parsed, verify_home_batch_parsed,
     verify_home_request_parsed, AccountView, Call, CallConfig, CallSigner, HomeRequest, HomeWrite,
+    ParsedCall,
 };
 use colophon_core::v05::descriptor::{HistoryAccess, Role};
 use colophon_core::v05::encoding::{bounds, canonical, digest, parse_date, strict_parse};
@@ -29,8 +30,7 @@ use colophon_core::v05::home_stream::{
     RouteVerdict,
 };
 use colophon_core::v05::ids::{key_id, AccountId};
-use colophon_core::v05::records::OperationHeader;
-use colophon_core::v05::Failure;
+use colophon_core::v05::records::{OperationHeader, RecordAuthority};
 use colophon_core::v05::replay::{
     retained, ReplayKey, ReplayState, ReplayStore, Reservation, RETENTION_MS,
 };
@@ -258,6 +258,8 @@ fn limits() -> Value {
         "retentionMs": RETENTION_MS,
         "firstUploadEntries": MAX_FIRST_UPLOAD,
         "replayRows": DEFAULT_REPLAY_ROWS,
+        // `access` takes a principal's replay rows as `signerLive` and `signerOldest` too.
+        "replayCounts": true,
         "authorityPage": 64, "pendingPage": 64, "pendingBatch": 16,
         "authorityBody": bounds::AUTHORITY_BODY,
         "transitionEnvelope": bounds::TRANSITION_ENVELOPE,
@@ -580,11 +582,10 @@ fn access(req: &Value) -> R<Value> {
         }
         _ => return answer(404),
     };
-    // Open to anyone whatever the slot holds: nothing of the state is read.
+    let l = load(req)?;
     if matches!(class, Class::Identity | Class::Admit) {
         return Ok(json!({"allowed": true, "via": "open"}));
     }
-    let l = load(req)?;
     // Before the first upload nobody can make a call this home could verify, and a successor's
     // genesis needs its predecessor first: the `PUT` is taken, held, and judged with the upload.
     if matches!(class, Class::PredecessorPut) && l.home.is_none() {
@@ -628,8 +629,8 @@ fn access(req: &Value) -> R<Value> {
     // method and path (the core's rule, checked again in `verify_home_request`: only a path that
     // serves the history takes `colophon.history.read`), is refused at once.
     let path = str_of(req, "path")?;
-    let call = match Call::parse(&call) {
-        Ok(c) if home_purposes(method, path).contains(&c.purpose.as_str()) => c,
+    let call = match ParsedCall::parse(&call) {
+        Ok(c) if home_purposes(method, path).contains(&c.call().purpose.as_str()) => c,
         Ok(_) => return refuse("refused:outOfScope".into()),
         Err(f) => return refuse(f.code()),
     };
@@ -2334,8 +2335,7 @@ fn check_record(req: &Value) -> R<Value> {
     let path = str_of(req, "path")?;
     let bytes = bytes_of(req, "bytes")?;
     let refuse = |code: &str| Ok(json!({"allowed": false, "code": code}));
-    // The home's verified history, once: from its checkpoint, as every other decision about this
-    // slot reads it (a stopped home takes nothing).
+    // A stopped home takes nothing (the checkpoint is read once, for this and for the held entries).
     let verified = l
         .home
         .as_ref()
@@ -2356,25 +2356,20 @@ fn check_record(req: &Value) -> R<Value> {
             Ok(json!({"allowed": true}))
         }
         Kind::Op { .. } | Kind::Live { .. } | Kind::History => {
-            let (_, verdict) = verified.as_ref().ok_or("no home state")?;
-            // As the record layer takes a verdict (`RecordAuthority::from_objects`): a history that failed
-            // outright is an error; a held entry or an unresolved fork leaves the verified prefix.
-            if let Some(Stop::Failed { failure, .. }) = &verdict.stop {
-                return Err(failure.to_string());
-            }
-            let state = verdict
-                .state
-                .as_ref()
-                .ok_or_else(|| Failure::Malformed("the held objects hold no genesis".into()).to_string())?;
+            let (persisted, _) = verified.as_ref().ok_or("no home state")?;
+            // Who may write is decided by a replay of the held entries from genesis, not by the
+            // fold the checkpoint carries: that fold is local memory, which a verifier under other
+            // rules (or one that kept an inconsistent copy) may have written.
+            let objects = persisted.objects().cloned().unwrap_or_default();
+            let ra = RecordAuthority::from_objects(&objects, now_ms).map_err(|e| e.to_string())?;
             let Ok((header, env)) = OperationHeader::parse(&bytes) else {
                 return refuse("malformed");
             };
-            // A member of the verified history (revoked ones included) signed it, and the path
-            // says what the header says.
-            let Some(m) = state.members().iter().find(|m| m.request.member_id() == header.author) else {
+            // A member of the verified history signed it, and the path says what the header says.
+            let Some(m) = ra.member(&header.author) else {
                 return refuse("notGranted");
             };
-            if &header.account != state.account() {
+            if &header.account != ra.account() {
                 return refuse("malformed");
             }
             let path_ok = match &kind {
@@ -2528,10 +2523,11 @@ fn provision_access(req: &Value) -> R<Value> {
     let refuse = |code: String| Ok(json!({"allowed": false, "status": 403, "result": code}));
     let unavailable = || Ok(json!({"allowed": false, "status": 503, "result": "unavailable"}));
     let call_bytes = bytes_of(req, "call")?;
-    let call = match Call::parse(&call_bytes) {
+    let parsed = match ParsedCall::parse(&call_bytes) {
         Ok(c) => c,
         Err(f) => return refuse(f.code()),
     };
+    let call = parsed.call();
     if let Err(f) = call.verify_possession() {
         return refuse(f.code());
     }
@@ -2626,7 +2622,7 @@ fn provision_access(req: &Value) -> R<Value> {
         controller_purposes: &[],
         home_endpoints: &[],
     };
-    let vc = match verify_call(&call_bytes, &account_view, &cfg, &mut store) {
+    let vc = match verify_call_parsed(parsed, &account_view, &cfg, &mut store) {
         Ok(vc) => vc,
         Err(f) if f.code() == "unavailable" => return unavailable(),
         Err(f) => return refuse(f.code()),

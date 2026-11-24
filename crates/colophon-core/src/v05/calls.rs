@@ -1321,17 +1321,44 @@ pub fn verify_home_request(
     home_request(envelope, view, cfg, store, req, false)
 }
 
-/// [`verify_home_request`] for a call the home has already parsed with [`Call::parse`] from the
+/// A call parsed from the envelope it came in ([`ParsedCall::parse`]), for a verifier that looks
+/// at it before verifying it (its purpose, say) and verifies it without parsing it again. Read
+/// only: what is verified is exactly what was signed.
+#[derive(Clone, Debug)]
+pub struct ParsedCall(Call);
+impl ParsedCall {
+    /// [`Call::parse`] of the envelope.
+    pub fn parse(envelope: &[u8]) -> Result<Self> {
+        Call::parse(envelope).map(Self)
+    }
+    /// The parsed call.
+    pub fn call(&self) -> &Call {
+        &self.0
+    }
+}
+
+/// [`verify_call`] for a call parsed already ([`ParsedCall`]): the same rule and the same
+/// refusals in the same order, without parsing the envelope again.
+pub fn verify_call_parsed(
+    call: ParsedCall,
+    view: &AccountView,
+    cfg: &CallConfig<'_>,
+    store: &mut dyn ReplayStore,
+) -> Result<VerifiedCall> {
+    verify_parsed(call.0, view, cfg, store, Mode::default())
+}
+
+/// [`verify_home_request`] for a call the home has already parsed ([`ParsedCall`]) from the
 /// envelope that came with the request (to look at its purpose before any history work, say): the
 /// same rule and the same refusals in the same order, without parsing the envelope again.
 pub fn verify_home_request_parsed(
-    call: Call,
+    call: ParsedCall,
     view: &AccountView,
     cfg: &CallConfig<'_>,
     store: &mut dyn ReplayStore,
     req: &HomeRequest<'_>,
 ) -> Result<VerifiedCall> {
-    home_request_with(call, view, cfg, store, req, false, &[])
+    home_request_with(call.0, view, cfg, store, req, false, &[])
 }
 
 /// The signer's own judgement of a call it built for a request at a home, before it sends it:
@@ -1384,14 +1411,14 @@ pub fn verify_home_batch(
 
 /// [`verify_home_batch`] for a call parsed already ([`verify_home_request_parsed`]).
 pub fn verify_home_batch_parsed(
-    call: Call,
+    call: ParsedCall,
     view: &AccountView,
     cfg: &CallConfig<'_>,
     store: &mut dyn ReplayStore,
     req: &HomeRequest<'_>,
     paths: &[String],
 ) -> Result<VerifiedCall> {
-    home_request_with(call, view, cfg, store, req, false, paths)
+    home_request_with(call.0, view, cfg, store, req, false, paths)
 }
 
 fn home_request(
