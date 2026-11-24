@@ -589,23 +589,18 @@ export class HomeSlot {
       await this.lockedWrite(req, res, url, section, rest, body);
       return true;
     }
+    // Reads of the change feed and of the history: judged and selected over one state.
+    if (section === 'changes' || (section === 'authority' && method === 'GET') || (section === 'pending' && method !== 'POST')) {
+      await this.lockedRead(req, res, url, section, rest);
+      return true;
+    }
     // Heads (anyone may forward one; the module checks it) record their own effect, or none.
     const effect = writing ? { path: rest, prior: this.slot.current.get(rest)?.sha256 ?? null } : null;
     await this.access(req, section ?? '', rest ?? null, effect, null);
     await this.deps.reach?.(`access ${section ?? ''}`); // a test hook (traced builds only)
-    if (!section || section === 'changes') return false;
+    if (!section) return false;
     if (section === 'head') { await this.serveOwnHead(res); return true; }
     if (section === 'authority') {
-      if (method === 'GET') {
-        const after = clampInt(url.searchParams.get('after'), 0, 0, Number.MAX_SAFE_INTEGER);
-        const limit = clampInt(url.searchParams.get('limit'), 64, 1, 64);
-        let page;
-        // Under the lock: a reader never sees a committed entry before its file is stored.
-        try { page = await this.lock(async () => this.wasm.call({ op: 'authority_page', state: this.state, now: this.clock(), after, limit })); }
-        catch (error) { if (error instanceof ModuleError) throw new HttpError(503, 'The home cannot serve its history now'); throw error; }
-        send(res, 200, { entries: page.entries.map((e) => JSON.parse(unb64(e))), receipts: (page.receipts ?? []).map((r) => JSON.parse(unb64(r))), more: page.more });
-        return true;
-      }
       const body = await readBody(req, this.limits.authorityBodyBytes);
       // A test marker (traced builds only): the upload holds the slot's lock. The provisioning
       // door holds the operator slot's lock from a grant's verification to its durable write,
@@ -618,27 +613,8 @@ export class HomeSlot {
       return true;
     }
     if (section === 'pending') {
-      if (method === 'POST') {
-        const body = await readBody(req, this.limits.pendingBodyBytes);
-        await this.lock(() => this.postPending(res, body));
-        return true;
-      }
-      if (rest === undefined || rest === null) {
-        const after = clampInt(url.searchParams.get('after'), 0, 0, Number.MAX_SAFE_INTEGER);
-        const limit = clampInt(url.searchParams.get('limit'), 64, 1, 64);
-        let page;
-        try { page = await this.lock(async () => this.wasm.call({ op: 'pending_page', state: this.state, now: this.clock(), after, limit })); }
-        catch (error) { if (error instanceof ModuleError) throw new HttpError(503, 'The home cannot list its pending objects now'); throw error; }
-        send(res, 200, {
-          objects: page.objects.map((o) => ({ seq: o.seq, digest: o.digest, kind: o.kind, envelope: JSON.parse(unb64(o.envelope)) })),
-          more: page.more,
-        });
-        return true;
-      }
-      // Under the lock, like every history read: never an object before its file is stored.
-      const r = await this.lock(async () => this.wasm.call({ op: 'pending_object', state: this.state, now: this.clock(), digest: rest }));
-      if (!r.found) throw new HttpError(404, 'Not found');
-      send(res, 200, { envelope: JSON.parse(unb64(r.envelope)), receipts: r.receipts.map((x) => JSON.parse(unb64(x))) });
+      const body = await readBody(req, this.limits.pendingBodyBytes);
+      await this.lock(() => this.postPending(res, body));
       return true;
     }
     if (section === 'predecessor') {
@@ -658,6 +634,46 @@ export class HomeSlot {
       return true;
     }
     throw new HttpError(404, 'Not found');
+  }
+
+  /** `GET {base}/changes`, `GET {base}/authority`, `GET {base}/pending[/<digest>]`. The call is
+   * judged and what it reads is selected under the slot's lock, over one state: a revocation
+   * commits wholly before both or wholly after. A long poll then waits outside the lock, and
+   * ends when the state changes (relay.js, serveChanges). */
+  async lockedRead(req, res, url, section, rest) {
+    const { HttpError, send, clampInt } = this.deps;
+    let judged = null;
+    await this.lock(async () => {
+      await this.access(req, section, rest ?? null, null, null);
+      await this.deps.reach?.(`access ${section}`); // a test hook (traced builds only)
+      if (section === 'changes') {
+        judged = { commits: this.commits, page: this.deps.firstChanges(req, url, rest, this.slot) };
+        return;
+      }
+      const after = () => clampInt(url.searchParams.get('after'), 0, 0, Number.MAX_SAFE_INTEGER);
+      const limit = () => clampInt(url.searchParams.get('limit'), 64, 1, 64);
+      if (section === 'authority') {
+        let page;
+        try { page = this.wasm.call({ op: 'authority_page', state: this.state, now: this.clock(), after: after(), limit: limit() }); }
+        catch (error) { if (error instanceof ModuleError) throw new HttpError(503, 'The home cannot serve its history now'); throw error; }
+        send(res, 200, { entries: page.entries.map((e) => JSON.parse(unb64(e))), receipts: (page.receipts ?? []).map((r) => JSON.parse(unb64(r))), more: page.more });
+        return;
+      }
+      if (rest === undefined || rest === null) {
+        let page;
+        try { page = this.wasm.call({ op: 'pending_page', state: this.state, now: this.clock(), after: after(), limit: limit() }); }
+        catch (error) { if (error instanceof ModuleError) throw new HttpError(503, 'The home cannot list its pending objects now'); throw error; }
+        send(res, 200, {
+          objects: page.objects.map((o) => ({ seq: o.seq, digest: o.digest, kind: o.kind, envelope: JSON.parse(unb64(o.envelope)) })),
+          more: page.more,
+        });
+        return;
+      }
+      const r = this.wasm.call({ op: 'pending_object', state: this.state, now: this.clock(), digest: rest });
+      if (!r.found) throw new HttpError(404, 'Not found');
+      send(res, 200, { envelope: JSON.parse(unb64(r.envelope)), receipts: r.receipts.map((x) => JSON.parse(unb64(x))) });
+    });
+    if (judged) await this.deps.serveChanges(req, res, url, this.slot, rest, judged);
   }
 
   /** `PUT {base}/records/<path>` (not a head) and `PUT {base}/predecessor/<path>`. The call is
@@ -740,6 +756,7 @@ export class HomeSlot {
     const { send } = this.deps;
     const r = this.wasm.call({ op: 'post_authority', state: this.state, now: this.clock(), body: b64(body) });
     await this.commit(r.state); // even a refusal changes state (§13.1)
+    await this.deps.reach?.('authority committed'); // a test hook (traced builds only)
     await this.materialize(r.store);
     const receipts = await this.signReceipts(r.sign);
     const head = r.appointed ? await this.settle() : 'fresh';

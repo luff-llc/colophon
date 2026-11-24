@@ -553,7 +553,7 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
           s.home = new HomeSlot({
             slot: s, wasm: homeModule, key: homeKey, base: homeSlots.get(name).base, account: homeSlots.get(name).account,
             clock, resolve, tracing,
-            deps: { HttpError, send, readBody, clampInt, clientAddress, reach },
+            deps: { HttpError, send, readBody, clampInt, clientAddress, reach, firstChanges, serveChanges },
             limits: { ...effective, requestsPerMinute: effective.requestsPerMinute ?? 0 },
           });
           await s.home.open();
@@ -773,8 +773,6 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
     // Counted from here until the response has ended and this handler has settled.
     if (closing || s.closing || s.releasing || s.released) throw notProvisioned();
     enter(s); work.slot = s;
-    // A home's commits so far: a long poll judged by the home ends once the authority changes.
-    const commits = s.home?.commits;
     if (s.home && await s.home.handle(req, res, url, section, recordPath)) return undefined;
     if (section === 'records' && recordPath === 'batch') {
       // Home authorization and rate limiting run before any batch parsing/classification.
@@ -818,29 +816,7 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
       return send(res, 200, { protocol: PROTOCOL, slot: name, limits: published, ...(slotBytes ? { quotaBytes: slotBytes } : {}),
         ...(s.home ? { home: { member: s.home.key.memberId }, layouts: homeModule.call({ op: 'limits' }).layouts } : {}) });
     }
-    if (section === 'changes') {
-      if (req.method !== 'GET' || recordPath !== undefined) throw new HttpError(405, 'Method not allowed', { allow: 'GET' });
-      const after = url.searchParams.get('after') ?? '';
-      const limit = clampInt(url.searchParams.get('limit'), 500, 1, effective.pageEntries);
-      const wait = clampInt(url.searchParams.get('wait'), 0, 0, effective.waitSeconds);
-      const namespaces = url.searchParams.getAll('namespace').filter((n) => n.length > 0);
-      let page = s.changes(after, limit, namespaces);
-      const deadline = Date.now() + wait * 1000;
-      // A home judged the call once, before the wait. When its state changes during the wait
-      // (a revocation, among others) the poll ends with the page it has (empty, the same
-      // cursor), so the caller is judged again on its next poll.
-      const changed = () => Boolean(s.home) && s.home.commits !== commits;
-      while (page.entries.length === 0 && Date.now() < deadline && !changed()) {
-        const waiting = s.waitForEntry(deadline - Date.now(), res, namespaces);
-        await reach('changes waiting'); // a test hook (traced builds only)
-        await waiting;
-        if (res.destroyed) return undefined;
-        if (s.closing || s.releasing) throw notProvisioned(); // woken by a release
-        if (changed()) break;
-        page = s.changes(page.cursor, limit, namespaces);
-      }
-      return send(res, 200, page);
-    }
+    if (section === 'changes') return serveChanges(req, res, url, s, recordPath);
     const kind = s.classify(recordPath);
     if (!kind) throw new HttpError(400, 'Invalid record path');
     if (url.search) throw new HttpError(400, 'Record URLs take no query');
@@ -892,6 +868,44 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
       res.writeHead(status); return res.end();
     }
     throw new HttpError(405, 'Method not allowed', { allow: kind === 'request' ? 'GET, PUT, DELETE' : 'GET, PUT' });
+  }
+
+  /** `GET {base}/changes`: its query, checked. */
+  function changesQuery(req, url, rest) {
+    if (req.method !== 'GET' || rest !== undefined) throw new HttpError(405, 'Method not allowed', { allow: 'GET' });
+    return {
+      after: url.searchParams.get('after') ?? '',
+      limit: clampInt(url.searchParams.get('limit'), 500, 1, effective.pageEntries),
+      wait: clampInt(url.searchParams.get('wait'), 0, 0, effective.waitSeconds),
+      namespaces: url.searchParams.getAll('namespace').filter((n) => n.length > 0),
+    };
+  }
+  /** A home's first page of the change feed, taken under its lock with the call's judgement. */
+  function firstChanges(req, url, rest, s) {
+    const q = changesQuery(req, url, rest);
+    return s.changes(q.after, q.limit, q.namespaces);
+  }
+  /**
+   * The change feed, and its long poll. A home slot passes `judged`: the first page and its
+   * commit count, taken under its lock with the call's judgement. When the home's state changes
+   * during the wait (a revocation, among others) the poll ends with the page it has (empty, the
+   * same cursor), so the caller is judged again on its next poll.
+   */
+  async function serveChanges(req, res, url, s, rest, judged) {
+    const { limit, wait, namespaces, after } = changesQuery(req, url, rest);
+    let page = judged ? judged.page : s.changes(after, limit, namespaces);
+    const deadline = Date.now() + wait * 1000;
+    const changed = () => Boolean(judged) && s.home.commits !== judged.commits;
+    while (page.entries.length === 0 && Date.now() < deadline && !changed()) {
+      const waiting = s.waitForEntry(deadline - Date.now(), res, namespaces);
+      await reach('changes waiting'); // a test hook (traced builds only)
+      await waiting;
+      if (res.destroyed) return undefined;
+      if (s.closing || s.releasing) throw notProvisioned(); // woken by a release or shutdown
+      if (changed()) break;
+      page = s.changes(page.cursor, limit, namespaces);
+    }
+    return send(res, 200, page);
   }
 
   function listener(req, res) {
