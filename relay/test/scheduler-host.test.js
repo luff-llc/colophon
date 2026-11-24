@@ -182,4 +182,27 @@ describe('forwarding while quiet', () => {
     // The backlog object is no longer listed, so it drops out; only then may the peer go idle.
     assert.equal(passes(h), 2);
   });
+
+  test('a peer marked idle gets a pass again after the clock steps back', async () => {
+    const h = peered();
+    await pass(h); // sends the head
+    await pass(h); // nothing to send: idle
+    const before = passes(h);
+    await pass(h);
+    assert.equal(passes(h), before, 'idle while quiet');
+    // The clock steps back before the quiet's reading: settle asks again and makes a new quiet
+    // over the same state; what the peer was sent was judged at the later reading.
+    const back = h.quiet.now - 60_000;
+    let t = back;
+    h.clock = () => (t += 1);
+    h.wasm.call = ((call) => (req) => (req.op === 'status' || req.op === 'record_due' || req.op === 'head_request'
+      ? ({ status: { appointed: true, peers: [{ id: PEER, endpoints: ['https://peer.example/'] }] },
+        record_due: { state: req.state, store: [], sign: [], notify: [], result: 'ok', settled: true, wakeAt: req.now + 60_000 },
+        head_request: { state: req.state, sign: null, due: false, wakeAt: req.now + 30_000 } })[req.op]
+      : call(req)))(h.wasm.call);
+    await h.settle();
+    assert.ok(h.isQuiet(), 'quiet again, over the same state');
+    await pass(h);
+    assert.equal(passes(h), before + 1, 'the peer gets a pass at the earlier reading');
+  });
 });

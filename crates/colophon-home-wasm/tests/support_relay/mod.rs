@@ -187,6 +187,34 @@ impl Relay {
         port: u16,
         limits: Value,
     ) -> Self {
+        Self::launch(keys, account, base, dir, clock_ms, resolve, port, limits, None).0
+    }
+    /// A relay with no scheduler timer, traced: it waits at the trace point `pause_at` (the first
+    /// time it is reached) until the file `resume` in `dir` exists. Returns the relay and its trace
+    /// lines (stderr), for `trace_marker`.
+    pub fn start_paused(
+        keys: &HomeKeys,
+        account: &str,
+        base: &str,
+        dir: &std::path::Path,
+        clock_ms: i64,
+        pause_at: &str,
+    ) -> (Self, std::sync::mpsc::Receiver<String>) {
+        let limits = json!({"tickMs": 0});
+        let (relay, rx) = Self::launch(keys, account, base, dir, clock_ms, &[], 0, limits, Some(pause_at));
+        (relay, rx.unwrap())
+    }
+    fn launch(
+        keys: &HomeKeys,
+        account: &str,
+        base: &str,
+        dir: &std::path::Path,
+        clock_ms: i64,
+        resolve: &[(&str, u16)],
+        port: u16,
+        limits: Value,
+        pause_at: Option<&str>,
+    ) -> (Self, Option<std::sync::mpsc::Receiver<String>>) {
         let (relay, wasm) = prerequisites().expect("prerequisites");
         std::fs::create_dir_all(dir).unwrap();
         let clock = dir.join("clock");
@@ -194,8 +222,8 @@ impl Relay {
         let config = dir.join("config.json");
         write_resolve(&dir.join("resolve.json"), resolve);
         std::fs::write(&config, json!({"limits": limits}).to_string()).unwrap();
-        let mut child = Command::new("bun")
-            .arg(relay)
+        let mut cmd = Command::new("bun");
+        cmd.arg(relay)
             .arg("--test-clock")
             .arg("--config")
             .arg(&config)
@@ -212,16 +240,33 @@ impl Relay {
             )
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .unwrap();
+            .stderr(Stdio::inherit());
+        if let Some(point) = pause_at {
+            cmd.env("COLOPHON_RELAY_TRACE", "1")
+                .env("COLOPHON_RELAY_PAUSE_AT", point)
+                .env("COLOPHON_RELAY_RESUME_FILE", dir.join("resume"))
+                .stderr(Stdio::piped());
+        }
+        let mut child = cmd.spawn().unwrap();
+        let rx = pause_at.map(|_| {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let err = child.stderr.take().unwrap();
+            std::thread::spawn(move || {
+                for line in BufReader::new(err).lines().map_while(Result::ok) {
+                    if tx.send(line).is_err() {
+                        break;
+                    }
+                }
+            });
+            rx
+        });
         let stdin = child.stdin.take().unwrap();
         let mut stdout = BufReader::new(child.stdout.take().unwrap());
         let mut line = String::new();
         stdout.read_line(&mut line).unwrap();
         let v: Value = serde_json::from_str(&line).expect("the listening line");
         let port = v["listening"]["port"].as_u64().unwrap() as u16;
-        Self {
+        let me = Self {
             child: Some(child),
             control: Some(Mutex::new((stdin, stdout))),
             limits,
@@ -230,7 +275,8 @@ impl Relay {
             clock,
             base: base.to_string(),
             account: account.to_string(),
-        }
+        };
+        (me, rx)
     }
     pub fn set_clock(&self, ms: i64) {
         write_clock(&self.clock, ms);
@@ -761,6 +807,24 @@ pub fn provide_call<S: colophon_core::v05::engine::RecordSource>(
     let sigs = host.sign(action.steps());
     let w = e.finish_write(action, sigs).expect("the engine's own check of its call");
     e.exchange_provide_call(home, n.ticket, &w.artifact.unwrap()).unwrap();
+}
+
+/// Wait for the first of the trace markers `any` (a bound, not a timing assertion: the marker is
+/// the event). Returns the marker seen and the lines before it.
+pub fn trace_marker(
+    rx: &std::sync::mpsc::Receiver<String>,
+    any: &[&str],
+) -> (String, Vec<String>) {
+    let mut seen = Vec::new();
+    loop {
+        let line = rx
+            .recv_timeout(std::time::Duration::from_secs(120))
+            .unwrap_or_else(|_| panic!("no trace marker {any:?}; saw {seen:?}"));
+        if let Some(m) = any.iter().find(|m| line == format!("trace {m}")) {
+            return (m.to_string(), seen);
+        }
+        seen.push(line);
+    }
 }
 
 /// A test directory under the system's temporary directory, removed when dropped (also after a

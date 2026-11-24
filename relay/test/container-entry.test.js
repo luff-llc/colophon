@@ -5,7 +5,9 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync, statSync, symlinkSync, utimesSync, writeFileSync, mkdirSync } from 'node:fs';
+import { existsSync, fstat, futimes, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync, mkdirSync } from 'node:fs';
+import { promisify } from 'node:util';
+import { promises as fsp } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -136,6 +138,21 @@ describe('the volume', { skip: ready ? false : `build the module first (${wasm})
     assert.equal(b.token, undefined);
     assert.equal(JSON.parse(readFileSync(b.configFile, 'utf8')).provision.tokenSha256, undefined);
   });
+  test('a relay data directory mounted at the volume\'s root is not taken for a new home', () => {
+    for (const [name, make] of [
+      ['a provisioning table', (d) => writeFileSync(path.join(d, 'provisioned.json'), '{}\n')],
+      ['a slot', (d) => { mkdirSync(path.join(d, 'lib')); writeFileSync(path.join(d, 'lib', 'meta.json'), '{"instance":"x"}\n'); }],
+      ['a home slot', (d) => { mkdirSync(path.join(d, 'home')); writeFileSync(path.join(d, 'home', 'home-state.json'), '""'); }],
+      ['a relay lock', (d) => writeFileSync(path.join(d, '.relay.lock'), '{"pid":7}\n')],
+    ]) {
+      const data = path.join(root, `legacy-${name.replace(/ /g, '-')}`);
+      mkdirSync(data, { mode: 0o700 });
+      make(data);
+      assert.throws(() => prepare(data, env()), (e) => e instanceof SettingError && /already holds a relay data directory/.test(e.message), name);
+      assert.ok(!existsSync(path.join(data, 'secrets')), `${name}: no key is made`);
+      assert.ok(!existsSync(path.join(data, 'records-dir')), `${name}: no new data directory is made`);
+    }
+  });
   test('a config.json on the volume is used as-is', () => {
     const data = path.join(root, 'hatch');
     mkdirSync(data, { mode: 0o700 });
@@ -151,6 +168,11 @@ describe('the volume', { skip: ready ? false : `build the module first (${wasm})
     assert.equal(p.memberId, undefined);
   });
 });
+
+const until = async (fn) => {
+  for (let i = 0; i < 1000; i++) { if (fn()) return; await new Promise((resolve) => setImmediate(resolve)); }
+  throw new Error('Timed out waiting for condition');
+};
 
 describe('the container lock', () => {
   let root;
@@ -186,6 +208,91 @@ describe('the container lock', () => {
     assert.ok(existsSync(b.file));
     b.release();
   });
+  // The beats are driven by hand: `schedule` holds the next one until the test fires it, and the
+  // lock's file calls go through `io`, which a test can stall or fail.
+  const manual = () => {
+    const h = { next: null };
+    h.schedule = (fn) => { assert.equal(h.next, null, 'one beat scheduled at a time'); h.next = fn; return () => { h.next = null; }; };
+    h.fire = () => { const fn = h.next; h.next = null; assert.ok(fn, 'a beat is scheduled'); return fn(); };
+    return h;
+  };
+  const realIo = { futimes: promisify(futimes), fstat: promisify(fstat), lstat: fsp.lstat };
+  test('the heartbeat touches its own lock asynchronously, one beat at a time, and reports its health', async () => {
+    const m = manual();
+    let calls = 0; let release;
+    const stall = new Promise((resolve) => { release = resolve; });
+    const io = { ...realIo, futimes: async (...args) => { calls += 1; if (calls === 1) await stall; return realIo.futimes(...args); } };
+    let t = Date.now();
+    const a = acquireContainerLock(root, { beatMs: 5_000, schedule: m.schedule, io, now: () => t, onLost: () => assert.fail('lost') });
+    try {
+      t += 5_000;
+      const beat = m.fire();
+      await until(() => calls === 1);
+      assert.equal(m.next, null, 'no beat is scheduled while one is in flight');
+      // Stalled past two beats and a second: unhealthy, though nothing has failed.
+      t += 6_001;
+      assert.equal(a.health().ok, false, 'a stalled beat is unhealthy');
+      release();
+      await beat;
+      assert.ok(m.next, 'the next beat is scheduled once this one ends');
+      assert.equal(a.health().ok, true);
+      assert.equal(a.health().lastBeatAt, t - 6_001, 'the time the beat set on the lock');
+      // A beat that fails is counted and reported, and the next beat tries again.
+      io.futimes = async () => { throw Object.assign(new Error('read-only file system'), { code: 'EROFS' }); };
+      t += 5_000;
+      await m.fire();
+      const h = a.health();
+      assert.equal(h.ok, false);
+      assert.equal(h.failures, 1);
+      assert.match(h.error, /read-only/);
+      assert.ok(m.next, 'a failed beat is tried again');
+      io.futimes = realIo.futimes;
+      t += 5_000;
+      await m.fire();
+      assert.equal(a.health().ok, true);
+    } finally { a.release(); }
+    assert.equal(m.next, null, 'release stops the beats');
+  });
+  test('a beat never touches a lock that another owner put in its place, and then stops', async () => {
+    const m = manual();
+    let lost = false;
+    let replaced;
+    const io = {
+      ...realIo,
+      // Between this holder's beat starting and its touch, another container takes the volume.
+      futimes: async (...args) => {
+        rmSync(path.join(root, '.container.lock'));
+        writeFileSync(path.join(root, '.container.lock'), JSON.stringify({ host: 'b', pid: 1, id: 'b'.repeat(32) }) + '\n');
+        const old = new Date(Date.now() - 600_000);
+        utimesSync(path.join(root, '.container.lock'), old, old);
+        replaced = statSync(path.join(root, '.container.lock')).mtimeMs;
+        return realIo.futimes(...args);
+      },
+    };
+    const a = acquireContainerLock(root, { beatMs: 5_000, schedule: m.schedule, io, onLost: () => { lost = true; } });
+    await m.fire();
+    assert.equal(lost, true, 'the holder found its lock replaced');
+    assert.equal(statSync(path.join(root, '.container.lock')).mtimeMs, replaced, 'the other owner\'s lock was not touched');
+    assert.equal(m.next, null);
+    a.release();
+    assert.ok(existsSync(path.join(root, '.container.lock')), 'release leaves the other owner\'s lock');
+    rmSync(path.join(root, '.container.lock'));
+  });
+  test('a read error while checking ownership is a failed beat, not a lost lock', async () => {
+    const m = manual();
+    const io = { ...realIo, lstat: async () => { throw Object.assign(new Error('i/o error'), { code: 'EIO' }); } };
+    const a = acquireContainerLock(root, { beatMs: 5_000, schedule: m.schedule, io, onLost: () => assert.fail('taken as lost') });
+    try {
+      await m.fire();
+      assert.equal(a.health().ok, false);
+      assert.match(a.health().error, /i\/o error/);
+      assert.ok(m.next, 'tried again');
+      io.lstat = realIo.lstat;
+      await m.fire();
+      assert.equal(a.health().ok, true);
+    } finally { a.release(); }
+    assert.ok(!existsSync(path.join(root, '.container.lock')));
+  });
   test('its own earlier run\'s lock is stale after two missed beats; another container\'s only after staleMs', () => {
     const opts = { staleMs: 30_000, beatMs: 5_000 };
     const a = acquireContainerLock(root, { ...opts, host: 'box-a', pid: 1, onLost: () => {} });
@@ -215,9 +322,29 @@ describe('the container lock', () => {
   test('a dead container\'s relay lock is removed', () => {
     const dir = path.join(root, 'records');
     mkdirSync(dir);
+    // Written by this container's relay in an earlier run: the same process ID, in this
+    // container's own data root.
     writeFileSync(path.join(dir, '.relay.lock'), JSON.stringify({ pid: 1 }));
-    assert.deepEqual(clearDeadRelayLock(dir), ['.relay.lock']);
-    assert.deepEqual(clearDeadRelayLock(dir), []);
+    assert.deepEqual(clearDeadRelayLock(dir, { dataRoot: root, pid: 1 }), ['.relay.lock']);
+    assert.deepEqual(clearDeadRelayLock(dir, { dataRoot: root, pid: 1 }), []);
+  });
+  test('a relay lock that may be another relay\'s is never removed: the start is refused', () => {
+    const dir = path.join(root, 'shared');
+    mkdirSync(dir);
+    const lock = path.join(dir, '.relay.lock');
+    // Another process ID (a relay outside the container, or another process), or no readable
+    // owner at all: whether it is alive cannot be told from here.
+    for (const text of [JSON.stringify({ pid: 4242, at: '2026-11-23T00:00:00Z' }), '', '{"pid":"one"}']) {
+      writeFileSync(lock, text);
+      assert.throws(() => clearDeadRelayLock(dir, { dataRoot: root, pid: 1 }), (e) => e.code === 'ELOCKED' && /stop the other relay/i.test(e.message), text);
+      assert.ok(existsSync(lock), 'left in place');
+    }
+    // A data directory outside the container's own root: never touched.
+    writeFileSync(lock, JSON.stringify({ pid: 1 }));
+    const outside = path.join(tmpdir(), 'not-this-root');
+    assert.throws(() => clearDeadRelayLock(dir, { dataRoot: outside, pid: 1 }), (e) => e.code === 'ELOCKED');
+    assert.ok(existsSync(lock));
+    rmSync(lock);
   });
 });
 

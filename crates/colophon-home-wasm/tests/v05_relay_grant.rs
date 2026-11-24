@@ -1239,9 +1239,22 @@ fn killed_between_reservation_and_write_the_call_is_abandoned_and_after_the_writ
         .unwrap();
     w.restart(&Trace::default());
     let log = std::fs::read_to_string(w.dir().join("data/provision-replay/replay.log")).unwrap();
-    assert!(
-        !log.contains("\"t\":\"abandoned\""),
+    // This call's row completed; the first call's row (killed before its write) stays
+    // abandoned, as a compaction keeps each row's outcome.
+    let outcome = |digest: &str| {
+        log.lines()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .find(|v| v["d"] == json!(digest))
+            .and_then(|v| v["t"].as_str().map(str::to_string))
+    };
+    assert_eq!(
+        outcome(&call_digest(&call)).as_deref(),
+        Some("completed"),
         "completed, not abandoned: {log}"
+    );
+    assert!(
+        log.contains("\"t\":\"abandoned\""),
+        "the first call stays abandoned: {log}"
     );
     let (s, _, b) = w.ask("ci-k2", &acct, Some(&colophon(&call)));
     assert_eq!(
