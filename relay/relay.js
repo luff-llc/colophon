@@ -350,9 +350,9 @@ class Slot {
     });
   }
 
-  async putImmutable(p, body) {
+  /** `digest`: the body's SHA-256 when the caller has it already. */
+  async putImmutable(p, body, digest = sha256(body)) {
     return this.exclusive(async () => {
-      const digest = sha256(body);
       const existing = this.current.get(p);
       if (existing) {
         if (existing.sha256 === digest && existing.size === body.length) return 200;
@@ -375,9 +375,8 @@ class Slot {
     });
   }
 
-  async replaceRequest(p, body, expected) {
+  async replaceRequest(p, body, expected, digest = sha256(body)) {
     return this.exclusive(async () => {
-      const digest = sha256(body);
       const existing = this.current.get(p);
       if (expected !== undefined && (!existing || `"${existing.sha256}"` !== expected)) throw new HttpError(412, 'Live slot changed');
       if (existing && existing.sha256 === digest) return 200;
@@ -712,6 +711,8 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
     for (const name of [...table.keys()]) {
       const e = table.get(name);
       if (configured.has(name) || now - e.at < provisioning.unclaimedHours * 3_600_000) continue;
+      // Appointed is for good (HomeSlot.appointed): no lock, no module call to find it claimed.
+      if (slots.get(name)?.home?.appointed === true) continue;
       try { await release(name, e); }
       catch (error) { if (!(error instanceof HttpError && error.status === 503)) throw error; }
     }
@@ -926,19 +927,20 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
     if (req.method === 'PUT') {
       const max = kind === 'blob' ? effective.blobBytes : effective.recordBytes;
       const body = await readBody(req, max);
-      if (kind === 'blob' && sha256(body) !== recordPath.slice(6)) throw new HttpError(400, 'Blob name must be the SHA-256 of its bytes');
+      const digest = sha256(body); // once, for the check, the index and the ETag
+      if (kind === 'blob' && digest !== recordPath.slice(6)) throw new HttpError(400, 'Blob name must be the SHA-256 of its bytes');
       const conditional = req.headers['if-none-match'];
       let status;
-      if (conditional === '*') status = await s.putImmutable(recordPath, body);
+      if (conditional === '*') status = await s.putImmutable(recordPath, body, digest);
       else if (conditional !== undefined) throw new HttpError(400, 'Only If-None-Match: * is supported');
       else if (kind === 'state') {
         const expected = req.headers['if-match'];
         if (!expected || !/^"[0-9a-f]{64}"$/.test(expected)) throw new HttpError(428, 'Live replacement requires If-Match');
-        status = await s.replaceRequest(recordPath, body, expected);
+        status = await s.replaceRequest(recordPath, body, expected, digest);
       }
-      else if (kind === 'request') status = await s.replaceRequest(recordPath, body);
+      else if (kind === 'request') status = await s.replaceRequest(recordPath, body, undefined, digest);
       else throw new HttpError(428, 'Immutable records require If-None-Match: *');
-      res.writeHead(status, { etag: `"${sha256(body)}"`, 'content-length': 0 });
+      res.writeHead(status, { etag: `"${digest}"`, 'content-length': 0 });
       return res.end();
     }
     if (req.method === 'DELETE') {

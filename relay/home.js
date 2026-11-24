@@ -997,16 +997,17 @@ export class HomeSlot {
     const { HttpError, send } = this.deps;
     const check = this.wasm.call({ op: 'check_record', state: this.state, now: this.clock(), path: recordPath, bytes: b64(body) });
     if (!check.allowed) { send(res, 422, { result: check.code }); return; }
+    const digest = sha(body); // once, for the index and the ETag
     const conditional = req.headers['if-none-match'];
     let status;
-    if (conditional === '*') status = await this.slot.putImmutable(recordPath, body);
+    if (conditional === '*') status = await this.slot.putImmutable(recordPath, body, digest);
     else if (conditional !== undefined) throw new HttpError(400, 'Only If-None-Match: * is supported');
     else if (recordPath.startsWith('state/')) {
       const expected = req.headers['if-match'];
       if (!expected || !/^"[0-9a-f]{64}"$/.test(expected)) throw new HttpError(428, 'Live replacement requires If-Match');
-      status = await this.slot.replaceRequest(recordPath, body, expected);
+      status = await this.slot.replaceRequest(recordPath, body, expected, digest);
     } else throw new HttpError(428, 'Immutable records require If-None-Match: *');
-    res.writeHead(status, { etag: `"${sha(body)}"`, 'content-length': 0 });
+    res.writeHead(status, { etag: `"${digest}"`, 'content-length': 0 });
     res.end();
   }
 
