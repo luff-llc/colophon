@@ -186,6 +186,44 @@ import Observation
             throw error
         }
     }
+    /// Writes `commands` in order as one batch: for an import, a backfill or any run of many writes. Each command is
+    /// signed and admitted on its own, as `perform(_:observed:claimed:)` admits it, but the batch reconciles once, persists
+    /// what it signed in one all-or-none write to the store, publishes one snapshot and asks for one sync. Returns a
+    /// receipt per command, in order.
+    ///
+    /// The whole batch is refused, with nothing written, by the errors a single write gives before it signs:
+    /// `SessionError.destinationChanged`, `.notReady` and `.staleRevision`, and `.invalidCommand` for more than
+    /// `maximumBatchCount` commands. A command that fails after that (a namespace this session does not write, a payload
+    /// over its ceiling, a refusal of the engine such as a spent write budget, or a failure of the keys) stops the batch:
+    /// the commands before it are persisted and visible, and the error is a `BatchInterruption` that carries their receipts
+    /// and the failing command's own error. If the store refuses the batch, nothing of it is durable and that error is
+    /// thrown as for a single write. An empty batch writes nothing and returns no receipts. Claimed dates are not taken
+    /// here; write those with `perform(_:observed:claimed:)`.
+    @discardableResult public func perform(_ commands: [DomainCommand], observed: ObservedRevision) async throws -> [WriteReceipt] {
+        await restore()
+        guard observed.context == context else { throw SessionError.destinationChanged }
+        guard commands.count <= Self.maximumBatchCount else { throw SessionError.invalidCommand }
+        guard !commands.isEmpty else { return [] }
+        do {
+            let (receipts, snapshot) = try await worker.write(commands, observed: observed.revision)
+            guard observed.context == context else { throw SessionError.destinationChanged }
+            apply(snapshot)
+            if homesConfigured { requestSync() }
+            return receipts
+        } catch let refusal as SessionRefusal {
+            if observed.context == context { apply(refusal.snapshot); lastError = refusal.error.localizedDescription }
+            throw refusal.error
+        } catch let stop as BatchStop {
+            if observed.context == context {
+                if let snapshot = stop.snapshot { apply(snapshot); if homesConfigured { requestSync() } }
+                handleCommandError(stop.error)
+            }
+            throw BatchInterruption(receipts: stop.receipts, index: stop.index, error: stop.error)
+        } catch {
+            if observed.context == context { handleCommandError(error) }
+            throw error
+        }
+    }
     /// Approves a member's request with the owner controller (a passkey owner is asked to confirm), spending
     /// `pairing`: confirmed on this device for exactly this request's key (spec §9.1), by the six-digit code
     /// (`beginApproval`, `approvalCode`, then `pairing.confirm()` once the person saw the same digits on both

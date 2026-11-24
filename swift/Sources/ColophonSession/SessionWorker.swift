@@ -28,6 +28,10 @@ struct SessionSnapshot: Sendable {
 /// A refusal that carries the fresh snapshot so the facade shows what the person must now see.
 struct SessionRefusal: Error { let snapshot: SessionSnapshot; let error: SessionError }
 
+/// A batch write stopped at `index`: `receipts` are the durable commands before it, `snapshot` the one built after them
+/// (nil when none was written).
+struct BatchStop: Error { let receipts: [WriteReceipt]; let index: Int; let error: any Error; let snapshot: SessionSnapshot? }
+
 /// Small durable state in the private container: which account, whether the person left, what was shown.
 struct SessionJournalFile: Codable, Sendable {
     var account: String?
@@ -300,6 +304,13 @@ actor SessionWorker {
     private func listed(_ entries: [MediumEntry]) -> [ListedPath] { entries.map { ListedPath(path: $0.path, version: $0.version) } }
 
     private func reconcile() async throws -> SessionSnapshot {
+        if let settled = try await reconcileEngine() { return settled }
+        return try await build()
+    }
+
+    /// Brings the engine up to the store. Returns the snapshot when that alone decides it (no library, locked, an update
+    /// required); nil when the engine is current and `build()` (or `readyForWrite()`) decides the rest.
+    private func reconcileEngine() async throws -> SessionSnapshot? {
         try loadJournal()
         if journal.left { return snapshot(phase: .noLibrary) }
         if locked { return snapshot(phase: .locked) }
@@ -319,7 +330,7 @@ actor SessionWorker {
             if case .integrity = error { await engine?.discard(); engine = nil }
             throw error
         }
-        return try await build()
+        return nil
     }
 
     private func discoverAccount(_ entries: [MediumEntry]) throws -> String {
@@ -410,10 +421,15 @@ actor SessionWorker {
 
     private func snapshot(phase: SessionPhase, members: [AccountMember] = [], requests: [AccessRequest] = [],
                           notices: SessionNotices = .empty, revisions: [String: UInt64] = [:], homes: [Home] = [], duties: HostDuties = .none) -> SessionSnapshot {
-        if phase != lastPhase || revisions != lastRevisions { revision &+= 1 }
-        lastPhase = phase; lastRevisions = revisions
+        advanceRevision(phase: phase, revisions: revisions)
         return SessionSnapshot(phase: phase, revision: revision, namespaceRevisions: revisions, libraryID: accountID, memberID: memberID,
                                members: members, requests: requests, notices: notices, homes: homes, duties: duties)
+    }
+
+    /// The revision counter moves whenever the published phase or namespace revisions change.
+    private func advanceRevision(phase: SessionPhase, revisions: [String: UInt64]) {
+        if phase != lastPhase || revisions != lastRevisions { revision &+= 1 }
+        lastPhase = phase; lastRevisions = revisions
     }
 
     private func build() async throws -> SessionSnapshot {
@@ -425,12 +441,25 @@ actor SessionWorker {
         let members = try await engine.run { try $0.members() }
         let pending = try await pendingRequests(members: members)
         let homes = try await engine.run { try $0.homes() }
+        if standing.kind == .unknown {
+            try await ensureOwnRequest()
+            return snapshot(phase: .waitingForApproval, members: members, requests: pending, homes: homes)
+        }
+        let (phase, revisions) = try await readiness(engine, standing: standing)
+        let notices = try await currentNotices()
+        let duties = try await hostDuties(notices: notices, homes: homes)
+        return snapshot(phase: phase, members: members, requests: pending, notices: notices, revisions: phase == .ready ? revisions : [:],
+                        homes: homes, duties: duties)
+    }
+
+    /// The phase and the published revisions of a controller or member standing: everything in a snapshot that decides
+    /// whether a write may go ahead. The revisions are empty unless the phase is ready.
+    private func readiness(_ engine: ColophonEngine, standing: Standing) async throws -> (SessionPhase, [String: UInt64]) {
         var phase: SessionPhase
         var readable: [String] = []
         switch standing.kind {
         case .unknown:
-            try await ensureOwnRequest()
-            return snapshot(phase: .waitingForApproval, members: members, requests: pending, homes: homes)
+            return (.waitingForApproval, [:])
         case .controller:
             phase = .failed(error: .other(detail: "this identity is a controller, not a member"))
         case .member:
@@ -453,13 +482,26 @@ actor SessionWorker {
         }
         var revisions: [String: UInt64] = [:]
         if phase == .ready { for r in try await engine.run({ try $0.revisions() }) where readable.contains(r.namespace) { revisions[r.namespace] = r.revision } }
-        let notices = try await currentNotices()
         let head = try await engine.run { try $0.headSeq() }
         lastHead = head
-        if phase == .ready { revisions["colophon.authority"] = head }
-        let visible = phase == .ready
-        let duties = try await hostDuties(notices: notices, homes: homes)
-        return snapshot(phase: phase, members: members, requests: pending, notices: notices, revisions: visible ? revisions : [:], homes: homes, duties: duties)
+        guard phase == .ready else { return (phase, [:]) }
+        revisions["colophon.authority"] = head
+        return (phase, revisions)
+    }
+
+    /// Before a write: true when the snapshot `build()` would make now is ready. It advances the revision counter exactly
+    /// as that snapshot would, so `revision` can be compared with what the caller observed, but it skips the members,
+    /// requests, notices and duties a published snapshot carries. When it returns false nothing has changed, and
+    /// `build()` makes the snapshot a refusal carries.
+    private func readyForWrite() async throws -> Bool {
+        guard let engine else { return false }
+        let standing = try await engine.run { try $0.me() }
+        let status = try await engine.run { try $0.status() }
+        guard status.stopped == nil, status.kind != .newerFormat, standing.kind != .unknown else { return false }
+        let (phase, revisions) = try await readiness(engine, standing: standing)
+        guard phase == .ready else { return false }
+        advanceRevision(phase: phase, revisions: revisions)
+        return true
     }
 
     static func isStopped(_ engine: ColophonEngine) async throws -> Bool { try await engine.run { try $0.status() }.stopped != nil }
@@ -1283,27 +1325,15 @@ actor SessionWorker {
     func write(_ command: DomainCommand, observed: UInt64, ingress: IngressEnvelope? = nil, claimed: Date? = nil) async throws -> (WriteReceipt, SessionSnapshot) {
         if let claimed, !Self.claimable(claimed, now: now) { throw SessionError.invalidCommand }
         return try await gated {
-            let fresh = try await reconcile()
-            guard fresh.phase == .ready, let engine, let custody = memberCustody else { throw SessionRefusal(snapshot: fresh, error: .notReady) }
-            guard observed == revision else { throw SessionRefusal(snapshot: fresh, error: .staleRevision) }
-            guard configuration.namespaces.contains(command.namespace), configuration.access.contains(.write) else { throw SessionError.invalidCommand }
-            let ceiling = command.kind == "colophon.blobPublish" ? 1024 * 1024 : 256 * 1024
-            guard command.payload.count <= ceiling else { throw SessionError.invalidCommand }
+            let (engine, custody) = try await writable(observed: observed)
+            try validate(command)
             if let ingress {
                 guard ingress.libraryID == accountID, ingress.memberID == memberID else { throw SessionError.destinationChanged }
                 try ingress.validate()
-                if let operation = journal.ingress[ingress.id] { return (.saved(operationID: operation), fresh) }
+                if let operation = journal.ingress[ingress.id] { return (.saved(operationID: operation), try await build()) }
             }
-            let payload = String(decoding: command.payload, as: UTF8.self)
             let claimedMs = claimed.map { Int64(($0.timeIntervalSince1970 * 1000).rounded(.down)) }
-            let written = try await engine.execute(custody: custody) {
-                engine in try withEntropy(32) { entropy in
-                    if let claimedMs {
-                        return try engine.beginWriteClaimed(namespace: command.namespace, kind: command.kind, payloadJson: payload, claimedMs: claimedMs, entropy: entropy)
-                    }
-                    return try engine.beginWrite(namespace: command.namespace, kind: command.kind, payloadJson: payload, entropy: entropy)
-                }
-            }
+            let written = try await sign(command, claimedMs: claimedMs, engine: engine, custody: custody)
             try await persist(written)
             let operation = Self.operationID(in: written.stores) ?? ""
             if let ingress {
@@ -1312,6 +1342,67 @@ actor SessionWorker {
                 journal.ingress[ingress.id] = operation; try saveJournal()
             }
             return (.saved(operationID: operation), try await build())
+        }
+    }
+
+    /// Writes `commands` in order under one gate and one reconcile, each signed and admitted on its own, and persists what
+    /// was signed in one all-or-none batch. A refusal of the whole batch (not ready, a stale revision) writes nothing. A
+    /// command that fails stops the batch: the commands before it are persisted and the failure is a `BatchStop`.
+    func write(_ commands: [DomainCommand], observed: UInt64) async throws -> ([WriteReceipt], SessionSnapshot) {
+        guard commands.count <= ColophonSession.maximumBatchCount else { throw SessionError.invalidCommand }
+        return try await gated {
+            let (engine, custody) = try await writable(observed: observed)
+            var stores: [Store] = [], receipts: [WriteReceipt] = []
+            var failure: (index: Int, error: any Error)?
+            for (index, command) in commands.enumerated() {
+                do {
+                    try validate(command)
+                    let written = try await sign(command, claimedMs: nil, engine: engine, custody: custody)
+                    observeAuthorityChanges(written.changes, from: engine)
+                    stores += written.stores
+                    receipts.append(.saved(operationID: Self.operationID(in: written.stores) ?? ""))
+                } catch {
+                    failure = (index, error); break
+                }
+            }
+            // Each signed command is already admitted by the engine: persist them before reporting a failure, so the
+            // engine and the store agree. A store that refuses discards the engine and nothing of the batch is durable.
+            try await persist(stores)
+            let snapshot = receipts.isEmpty ? nil : try await build()
+            if let failure { throw BatchStop(receipts: receipts, index: failure.index, error: failure.error, snapshot: snapshot) }
+            if let snapshot { return (receipts, snapshot) }
+            return (receipts, try await build())
+        }
+    }
+
+    /// Reconciles and checks a write may go ahead (inside the gate): the session is ready and `observed` is the current
+    /// revision. Only a refusal builds the full snapshot it carries.
+    private func writable(observed: UInt64) async throws -> (ColophonEngine, KeyCustody) {
+        if let settled = try await reconcileEngine() { throw SessionRefusal(snapshot: settled, error: .notReady) }
+        guard try await readyForWrite(), let engine, let custody = memberCustody else {
+            throw SessionRefusal(snapshot: try await build(), error: .notReady)
+        }
+        guard observed == revision else { throw SessionRefusal(snapshot: try await build(), error: .staleRevision) }
+        return (engine, custody)
+    }
+
+    /// A command this session may write: a configured namespace, write access, and a payload within its ceiling.
+    private func validate(_ command: DomainCommand) throws {
+        guard configuration.namespaces.contains(command.namespace), configuration.access.contains(.write) else { throw SessionError.invalidCommand }
+        let ceiling = command.kind == "colophon.blobPublish" ? 1024 * 1024 : 256 * 1024
+        guard command.payload.count <= ceiling else { throw SessionError.invalidCommand }
+    }
+
+    /// Signs one command through the engine, which admits it (its access, write budget and order) or refuses it.
+    private func sign(_ command: DomainCommand, claimedMs: Int64?, engine: ColophonEngine, custody: KeyCustody) async throws -> Written {
+        let payload = String(decoding: command.payload, as: UTF8.self)
+        return try await engine.execute(custody: custody) {
+            engine in try withEntropy(32) { entropy in
+                if let claimedMs {
+                    return try engine.beginWriteClaimed(namespace: command.namespace, kind: command.kind, payloadJson: payload, claimedMs: claimedMs, entropy: entropy)
+                }
+                return try engine.beginWrite(namespace: command.namespace, kind: command.kind, payloadJson: payload, entropy: entropy)
+            }
         }
     }
     /// A claimed date a write may carry: finite, no later than `now`, and within the years 0001–9999 (spec §2.2), so the
