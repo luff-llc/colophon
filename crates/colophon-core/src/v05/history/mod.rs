@@ -155,17 +155,20 @@ pub struct Persisted {
 const CHECKPOINT_VERSION: u32 = 7;
 
 /// The verification rules this build folds a history by. A host that keeps a checkpoint across
-/// processes may store it beside the checkpoint as proof that this build folded that checkpoint
-/// from genesis ([`Persisted::folded_here`]); a checkpoint stored with another value, or with
-/// none, is not taken as this build's fold until it is verified again.
+/// processes may store it beside the checkpoint as part of its proof that this build folded that
+/// checkpoint from genesis ([`Persisted::folded_here`]); a checkpoint stored with another value,
+/// or with none, is not taken as this build's fold until it is verified again. (The home module
+/// also binds its proof to the SHA-256 of the module it runs as, so a rebuilt module verifies its
+/// checkpoints again even where this value did not change.)
 ///
 /// **Change it whenever a verdict can change**: any change to what an entry, a transition, a veto,
 /// a receipt, a head or a predecessor is judged to be, to how a conflict or a fork is decided, or
 /// to what the folded state holds, even where the checkpoint format stays the same. Raise the
-/// revision (`r1` → `r2`) for a change in code; the digest after it is that of the conformance
-/// vectors of the history verifier (`conformance/0.5/{rules,upgrade,succession}`), and the test
-/// `the_fold_rules_name_the_conformance_vectors` fails until it is updated when they change, so a
-/// changed vector cannot ship under a stale value.
+/// revision (`r1` → `r2`) for a change in code; nothing checks that, so it is the author's to do.
+/// The digest after it is that of the conformance vectors of the history verifier
+/// (`conformance/0.5/{rules,upgrade,succession}`): the test
+/// `the_fold_rules_name_the_conformance_vectors` fails until it is updated when any of their files
+/// changes, which catches a rule change that changes a vector, not one that changes only code.
 pub const FOLD_RULES: &str = "colophon-0.5-fold/r1/ba2e2d0905d50136";
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -399,21 +402,34 @@ impl Persisted {
         self.folded_here
     }
 
+    /// This verifier's local memory without the checkpoint: the high-water mark, the head marks,
+    /// the succession flag and the stop floor, which no replay recomputes. [`verify_history`] over
+    /// the checkpoint's objects with it is the replay from genesis, with nothing saved resumed.
+    pub fn without_fold(&self) -> Self {
+        Self {
+            high_water: self.high_water.clone(),
+            checkpoint: None,
+            head_marks: self.head_marks.clone(),
+            succession_verified: self.succession_verified,
+            stop_floor: self.stop_floor,
+            folded_here: false,
+        }
+    }
+
     /// Take this checkpoint as this build's fold. Only for a caller holding proof, made by this
     /// build for these exact checkpoint bytes, that it is (`HomeState::vouch_fold`).
     pub(crate) fn assume_folded_here(&mut self) {
         self.folded_here = true;
     }
 
-    /// This checkpoint, taken as this build's fold, when a replay of its own objects from genesis
-    /// at the checkpoint's clock gives exactly it: the same bytes, with the same local memory
-    /// (high-water mark, head marks, succession flag, stop floor). `None` when it holds no fold
-    /// or anything differs, for example a fold an older verifier made under other rules.
-    pub fn verified_again(&self) -> Option<Self> {
+    /// This checkpoint, taken as this build's fold, when it was read from `stored` and a replay
+    /// of its own objects from genesis at the checkpoint's clock, with the same local memory
+    /// (high-water mark, head marks, succession flag, stop floor), serializes to exactly `stored`,
+    /// byte for byte. `None` when it holds no fold or anything differs: a fold an older verifier
+    /// made under other rules, or the same checkpoint written in another form (other spacing or
+    /// key order, a field this build does not read).
+    pub fn verified_again(&self, stored: &[u8]) -> Option<Self> {
         let cp = self.checkpoint.as_ref()?;
-        if self.folded_here {
-            return Some(self.clone());
-        }
         let memory = Self {
             head_marks: self.head_marks.clone(),
             succession_verified: self.succession_verified,
@@ -422,8 +438,7 @@ impl Persisted {
         };
         let mut again = Self::checkpoint(&cp.objects, &memory, cp.now_ms);
         again.high_water = self.high_water.clone();
-        let same = again.folded_here
-            && matches!((again.to_bytes(), self.to_bytes()), (Ok(a), Ok(b)) if a == b);
+        let same = again.folded_here && again.to_bytes().is_ok_and(|a| a == stored);
         same.then(|| {
             let mut vouched = self.clone();
             vouched.folded_here = true;
@@ -765,13 +780,16 @@ fn replay_resumed(objects: &Objects, persisted: &Persisted, now_ms: i64) -> (Ver
     }
     // Fast path: append to the verified folded state. An earlier candidate, new head,
     // prior conflict, or backwards clock requires replay of the retained objects. In
-    // particular a high-water marker never freezes a provisional branch.
+    // particular a high-water marker never freezes a provisional branch. Nor does a candidate
+    // held beside a valid one: a fold resumed past it would not visit it again, so its due time
+    // would be lost from the checkpoint the resumed verdict makes, and with it the replay that
+    // judges the candidate once it is due.
     if let Some(cp) = &persisted.checkpoint {
         if let Some(saved) = &cp.state {
             let retained: std::collections::BTreeSet<&Vec<u8>> =
                 cp.objects.entries.iter().collect();
             let safe = !cp.conflicts
-                && cp.held_until.is_none_or(|t| now_ms < t)
+                && cp.held_until.is_none()
                 && now_ms >= cp.now_ms
                 && incoming
                     .predecessor

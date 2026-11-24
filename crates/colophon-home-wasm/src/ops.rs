@@ -84,6 +84,7 @@ fn run(input: &[u8]) -> R<Value> {
     let req: Value = serde_json::from_slice(input).map_err(|e| e.to_string())?;
     match str_of(&req, "op")? {
         "limits" => Ok(limits()),
+        "build" => build(&req),
         "identity" => identity(&req),
         "init" => init(&req),
         "status" => status(&req),
@@ -170,7 +171,8 @@ struct Slot {
     /// `HomeState::to_bytes`, base64, once appointed.
     home_state: Option<String>,
     /// Proof that this build folded the checkpoint `home_state` holds from genesis:
-    /// `{"rules": FOLD_RULES, "checkpoint": its SHA-256}` ([`fold_mark`]). Absent when it is not
+    /// `{"rules": FOLD_RULES, "build": the module's SHA-256, "checkpoint": its SHA-256}`
+    /// ([`fold_mark`]). Absent when it is not
     /// known, and read as absent when it is not that shape. Additive: a reader without the field
     /// ignores it and writes its state without it, so a checkpoint another build replaces is never
     /// left with a proof it did not earn; and the proof names the checkpoint's exact bytes.
@@ -218,9 +220,13 @@ fn load(req: &Value) -> R<Loaded> {
         Some(s) => {
             let mut h = HomeState::from_bytes(&B64.decode(s).map_err(|e| e.to_string())?)
                 .map_err(|e| e.to_string())?;
-            let mark = slot.fold.as_ref().and_then(|m| Some((m.get("rules")?.as_str()?, m.get("checkpoint")?.as_str()?)));
-            if let Some((rules, checkpoint)) = mark {
-                h.vouch_fold(rules, checkpoint);
+            let mark = slot.fold.as_ref().and_then(|m| {
+                Some((m.get("rules")?.as_str()?, m.get("build")?.as_str()?, m.get("checkpoint")?.as_str()?))
+            });
+            if let (Some((rules, build, checkpoint)), Some(ours)) = (mark, BUILD.get()) {
+                if build == ours {
+                    h.vouch_fold(rules, checkpoint, cached_digest);
+                }
             }
             Some(h)
         }
@@ -229,11 +235,61 @@ fn load(req: &Value) -> R<Loaded> {
     Ok(Loaded { slot, home })
 }
 /// The proof stored beside a home state whose checkpoint this build folded from genesis
-/// (`HomeState::fold_vouched`), naming the rules and the checkpoint's exact bytes; `None` when it
-/// did not, so a checkpoint is never stored with a proof it did not earn.
+/// (`HomeState::fold_vouched`), naming the rules, the module build ([`build`]) and the
+/// checkpoint's exact bytes; `None` when it did not, or when the host never named the build, so a
+/// checkpoint is never stored with a proof it did not earn.
 fn fold_mark(h: &HomeState) -> Option<Value> {
-    h.fold_vouched()
-        .then(|| json!({"rules": FOLD_RULES, "checkpoint": h.checkpoint_digest()}))
+    let build = BUILD.get()?;
+    h.fold_vouched().then(|| {
+        json!({"rules": FOLD_RULES, "build": build, "checkpoint": cached_digest(h.checkpoint_bytes())})
+    })
+}
+
+/// The SHA-256 of the module the host instantiated, as the host gives it once per instance
+/// ([`build`]): a proof of a fold names it, so a proof written by any other build of the module
+/// (whatever its rules identifier says) is not taken, and that build's checkpoints are verified
+/// again from genesis once, at the next start.
+static BUILD: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// `{"op": "build", "fingerprint": <SHA-256 of the module's bytes>}`: the host names the build it
+/// instantiated, before anything else. Once named, it does not change for the instance.
+fn build(req: &Value) -> R<Value> {
+    let fingerprint = str_of(req, "fingerprint")?;
+    let hex = fingerprint.len() == 64 && fingerprint.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+    if !hex {
+        return Err("fingerprint is not a SHA-256".into());
+    }
+    let set = BUILD.get_or_init(|| fingerprint.to_string());
+    if set != fingerprint {
+        return Err("this instance was named another build".into());
+    }
+    Ok(json!({}))
+}
+
+/// Checkpoints whose digest this instance computed, by their exact bytes, most recent first: a
+/// slot's checkpoint is the same from call to call until it changes, and hashing it each time
+/// costs about as much as the work its proof saves. A hit compares the bytes themselves, never a
+/// digest the request carries; a new instance starts empty and hashes again.
+const DIGESTS_KEPT: usize = 2;
+/// Checkpoints larger than this are hashed on every use, never kept.
+const DIGEST_CACHE_BYTES: usize = 32 * 1024 * 1024;
+static DIGESTS: std::sync::Mutex<Vec<(Vec<u8>, String)>> = std::sync::Mutex::new(Vec::new());
+
+/// The SHA-256 of `bytes`, from [`DIGESTS`] when it holds exactly these bytes.
+fn cached_digest(bytes: &[u8]) -> String {
+    let mut kept = DIGESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(i) = kept.iter().position(|(b, _)| b.as_slice() == bytes) {
+        let hit = kept.remove(i);
+        let d = hit.1.clone();
+        kept.insert(0, hit);
+        return d;
+    }
+    let d = digest(bytes);
+    if bytes.len() <= DIGEST_CACHE_BYTES {
+        kept.insert(0, (bytes.to_vec(), d.clone()));
+        kept.truncate(DIGESTS_KEPT);
+    }
+    d
 }
 /// What the home holds as verifier input (its checkpoint's objects, which are never stale).
 fn held(h: &HomeState) -> R<Objects> {
@@ -282,6 +338,8 @@ fn limits() -> Value {
         "replayRows": DEFAULT_REPLAY_ROWS,
         // `access` takes a principal's replay rows as `signerLive` and `signerOldest` too.
         "replayCounts": true,
+        // The host names the module build it instantiated (`build`) before anything else.
+        "build": true,
         "authorityPage": 64, "pendingPage": 64, "pendingBatch": 16,
         "authorityBody": bounds::AUTHORITY_BODY,
         "transitionEnvelope": bounds::TRANSITION_ENVELOPE,
@@ -300,9 +358,22 @@ struct View {
     stopped: bool,
     /// The verdict the view was read from, its state moved to `state`.
     verdict: Verdict,
+    /// Read for deciding who may do what ([`authorized_view`]).
+    authorized: bool,
 }
 fn view(h: &HomeState, now_ms: i64) -> R<View> {
-    let (persisted, mut v) = h.verified_history(now_ms).map_err(|e| e.to_string())?;
+    let (persisted, v) = h.verified_history(now_ms).map_err(|e| e.to_string())?;
+    view_of(persisted, v, false)
+}
+/// The view a decision of who may do what is taken from (a call, a principal's standing): the
+/// saved fold only where it is proved this build's and unchanged, otherwise a replay of the held
+/// objects from genesis (`HomeState::authorized_history`). A saved fold that is not proved, which
+/// a verifier under other rules or an inconsistent copy may have written, decides nothing here.
+fn authorized_view(h: &HomeState, now_ms: i64) -> R<View> {
+    let (persisted, v) = h.authorized_history(now_ms).map_err(|e| e.to_string())?;
+    view_of(persisted, v, true)
+}
+fn view_of(persisted: Persisted, mut v: Verdict, authorized: bool) -> R<View> {
     let stopped = v.is_stopped();
     let fork = match &v.stop {
         None => None,
@@ -311,7 +382,7 @@ fn view(h: &HomeState, now_ms: i64) -> R<View> {
         Some(_) => return Err(format!("history: {}", v.code())),
     };
     let state = v.state.take().ok_or("no verified history")?;
-    Ok(View { persisted, state, fork, stopped, verdict: v })
+    Ok(View { persisted, state, fork, stopped, verdict: v, authorized })
 }
 impl View {
     /// The objects the home holds (its checkpoint's).
@@ -323,11 +394,14 @@ impl View {
     /// Without a recorded stop the view was verified at `now_ms` from the same checkpoint, and
     /// the held objects are exactly the checkpoint's (so they add nothing to it and leave its
     /// resumption as it is): that verdict is this one, and the history is not verified again.
+    /// For an authorized view, a verification again resumes no saved fold.
     fn held_verdict(&self, objects: &Objects, now_ms: i64) -> Verdict {
         if self.persisted.stop_floor().is_none() && self.persisted.stopped().is_none() {
             let mut v = self.verdict.clone();
             v.state = Some(self.state.clone());
             v
+        } else if self.authorized {
+            verify_history(objects, &self.persisted.without_fold(), now_ms)
         } else {
             verify_history(objects, &self.persisted, now_ms)
         }
@@ -398,18 +472,29 @@ fn lease(req: &Value) -> R<Value> {
 ///   the open interval stays open;
 /// - otherwise the open interval closes at the lease's end and a new one opens now.
 ///
-/// It is also where a checkpoint stored without this build's proof of its fold (`fold`: an older
+/// It is also where a checkpoint stored without this build's proof of its fold (`fold`: another
 /// build's, or one whose proof does not match) is verified again from genesis, once per start: when
 /// the replay gives exactly the checkpoint, the state is returned with the proof, and the calls
-/// after it may answer from the fold ([`check_record`]); otherwise it stays without one.
+/// after it may answer from the fold ([`check_record`]); otherwise it stays without one. The
+/// answer's `fold` says which: `proved` (the stored proof holds), `verified` (proved now),
+/// `unproved` (the replay is not the checkpoint: every decision replays until a rebuild), or
+/// `unnamed` (the host named no build, so nothing is proved) and `unappointed`.
 fn resume(req: &Value) -> R<Value> {
     let mut l = load(req)?;
     let now_ms = i64_of(req, "now")?;
     let alive = req.get("alive").and_then(Value::as_i64);
     let Some(mut h) = l.home.take() else {
-        return Ok(json!({"state": req["state"], "changed": false}));
+        return Ok(json!({"state": req["state"], "changed": false, "fold": "unappointed"}));
     };
-    let mut changed = !h.fold_vouched() && h.verify_fold().map_err(|e| e.to_string())?;
+    let (fold, mut changed) = if BUILD.get().is_none() {
+        ("unnamed", false)
+    } else if h.fold_vouched() {
+        ("proved", false)
+    } else if h.verify_fold().map_err(|e| e.to_string())? {
+        ("verified", true)
+    } else {
+        ("unproved", false)
+    };
     let mut serving = h.serving().to_vec();
     let open = serving.last().is_some_and(|i| i.through_ms.is_none());
     if let (true, Some(alive)) = (open, alive.filter(|a| *a < now_ms)) {
@@ -420,10 +505,10 @@ fn resume(req: &Value) -> R<Value> {
         changed = true;
     }
     if !changed {
-        return Ok(json!({"state": req["state"], "changed": false}));
+        return Ok(json!({"state": req["state"], "changed": false, "fold": fold}));
     }
     l.home = Some(h);
-    Ok(json!({"state": l.dump()?, "changed": true}))
+    Ok(json!({"state": l.dump()?, "changed": true, "fold": fold}))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -644,7 +729,7 @@ fn access(req: &Value) -> R<Value> {
     if matches!(class, Class::Head) {
         return Ok(json!({"allowed": true, "via": "public"}));
     }
-    let v = view(h, now_ms)?;
+    let v = authorized_view(h, now_ms)?;
     let public = v.state.keyring().policy.history() == HistoryAccess::Public;
     if matches!(class, Class::History) && public {
         return Ok(json!({"allowed": true, "via": "public"}));
@@ -855,7 +940,7 @@ fn stream_standing(req: &Value) -> R<Value> {
     let now = i64_of(req, "now")?;
     let base = str_of(req, "base")?;
     let subscribers = req["subscribers"].as_array().ok_or("missing subscribers")?;
-    let Some(v) = l.home.as_ref().map(|h| view(h, now)).transpose()?
+    let Some(v) = l.home.as_ref().map(|h| authorized_view(h, now)).transpose()?
         .filter(|v| !v.stopped && v.fork.is_none())
     else {
         return Ok(json!({"standing": vec![Value::Null; subscribers.len()]}));
@@ -973,7 +1058,7 @@ fn principals_current(req: &Value) -> R<Value> {
     let Some(v) = l
         .home
         .as_ref()
-        .map(|h| view(h, now))
+        .map(|h| authorized_view(h, now))
         .transpose()?
         .filter(|v| !v.stopped && v.fork.is_none())
     else {
@@ -2635,7 +2720,7 @@ fn provision_access(req: &Value) -> R<Value> {
     let Some(h) = l.home.as_ref() else {
         return unavailable();
     };
-    let v = match view(h, now_ms) {
+    let v = match authorized_view(h, now_ms) {
         Ok(v) => v,
         Err(_) => return unavailable(),
     };

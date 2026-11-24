@@ -44,7 +44,19 @@ struct Home {
     keys: HomeKeys,
     state: String,
 }
+/// The module build these tests name (`build`): a test value, as a host names the SHA-256 of the
+/// module it instantiated.
+const TEST_BUILD: &str = "b1d0000000000000000000000000000000000000000000000000000000000001";
+/// Name the build once for this process, before any request.
+fn named() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let out: Value = serde_json::from_slice(&handle(json!({"op": "build", "fingerprint": TEST_BUILD}).to_string().as_bytes())).unwrap();
+        assert_eq!(out["ok"], true, "{out}");
+    });
+}
 fn call(req: Value) -> Value {
+    named();
     let out = handle(req.to_string().as_bytes());
     let v: Value = serde_json::from_slice(&out).unwrap();
     assert_eq!(v["ok"], true, "{v}");
@@ -1195,6 +1207,7 @@ fn an_authenticated_read_verifies_the_history_once_and_keeps_its_refusal_order()
 
 /// `call`, without asserting the module answered `ok` (a refusal is still an answer).
 fn call_op(req: Value) -> Value {
+    named();
     serde_json::from_slice(&handle(req.to_string().as_bytes())).unwrap()
 }
 
@@ -1317,7 +1330,8 @@ fn a_record_check_does_not_trust_the_fold_a_checkpoint_carries() {
 
 // ---------------------------------------------------------------------------------------------
 // The slot's proof of its fold (`fold`): a home state whose checkpoint this build folded from
-// genesis carries `{"rules": FOLD_RULES, "checkpoint": SHA-256 of the checkpoint}`, and with it
+// genesis carries `{"rules": FOLD_RULES, "build": the module's SHA-256, "checkpoint": SHA-256 of
+// the checkpoint}`, and with it
 // the module answers from the fold where that is the replay's answer.
 
 fn slot_of(state: &str) -> Value {
@@ -1358,6 +1372,7 @@ fn with_checkpoint(state: &str, checkpoint: &[u8]) -> String {
 }
 /// The module's raw answer.
 fn raw(req: &Value) -> Vec<u8> {
+    named();
     handle(req.to_string().as_bytes())
 }
 /// `req` over `state`, and over `state` without its proof: the same bytes, returned with the
@@ -1382,6 +1397,7 @@ fn assert_proved(state: &str) {
     use colophon_core::v05::history::FOLD_RULES;
     let mark = &slot_of(state)["fold"];
     assert_eq!(mark["rules"], FOLD_RULES, "{mark}");
+    assert_eq!(mark["build"], TEST_BUILD, "{mark}");
     assert_eq!(mark["checkpoint"], digest(&checkpoint_of(state)), "{mark}");
 }
 
@@ -1451,21 +1467,27 @@ fn a_proved_fold_answers_record_checks_and_calls_as_the_replay() {
         .collect();
 
     let mut from_fold = 0;
+    let mut answers = Vec::new();
     let mut compare = |home: &Home, at: i64, when: &str| {
         for now in [at - 1_000, at, at + 1, at + HOUR, at + 30 * 24 * HOUR] {
             for (path, bytes) in &records {
                 let req = json!({"op": "check_record", "state": home.state, "now": now, "path": path, "bytes": b(bytes)});
                 let (answer, verifications) = same_as_unproved(&req, &format!("{when} at {now}: {path}"));
                 assert_eq!(answer, check_record_by_replay(&home.state, now, path, bytes), "{when} at {now}: {path}");
-                if verifications == 0 && answer.get("code").is_none_or(|c| c != "malformed") {
+                // A signed record taken without a replay.
+                if verifications == 0 && answer["allowed"] == true && !path.starts_with("blobs/") {
                     from_fold += 1;
                 }
             }
             for (rest, method, sha, call) in &calls {
+                let path = format!("/records/{rest}");
                 let req = json!({"op": "access", "state": home.state, "now": now, "base": BASE_A, "method": method,
-                                 "section": "records", "rest": rest, "path": format!("/records/{rest}"),
+                                 "section": "records", "rest": rest, "path": path,
                                  "bodySha256": sha, "call": b(call), "existing": null, "replayRows": 65_536});
-                same_as_unproved(&req, &format!("{when} at {now}: {method} {rest}"));
+                let (answer, _) = same_as_unproved(&req, &format!("{when} at {now}: {method} {rest}"));
+                let want = call_by_replay(&home.state, now, method, &path, sha, call);
+                assert_eq!(access_answer(&answer), want, "{when} at {now}: {method} {rest}: {answer}");
+                answers.push(((when.to_string(), now - at, rest.contains(writer.as_str()), method.to_string()), want));
             }
         }
     };
@@ -1485,8 +1507,27 @@ fn a_proved_fold_answers_record_checks_and_calls_as_the_replay() {
         let req = json!({"op": "check_record", "state": home.state, "now": now, "path": op_w.0, "bytes": b(&op_w.1)});
         same_as_unproved(&req, "the writer's record")
     };
-    assert_eq!(ok(&home, NOW + 2_000 - 1).1, 2, "behind the checkpoint's clock it replays");
+    let taken = json!({"allowed": true, "ok": true});
+    assert_eq!(ok(&home, NOW + 2_000), (taken.clone(), 0));
+    assert_eq!(ok(&home, NOW + HOUR), (taken.clone(), 0));
+    let (behind, replays) = ok(&home, NOW + 2_000 - 1);
+    assert_eq!(behind, taken);
+    assert!(replays > 0, "behind the checkpoint's clock it replays");
     assert!(from_fold > 0);
+    // The calls name the account's head, which includes the late member's admission: before it
+    // went up the home does not hold that seq and every call is unavailable; after, at the
+    // checkpoint's clock, the replay takes the writer's and the late member's reads and writes.
+    for ((when, offset, by_writer, method), want) in &answers {
+        if *offset != 0 {
+            continue;
+        }
+        let who = if *by_writer { "writer" } else { "late member" };
+        if when == "all current" {
+            assert_eq!(want, &Err("unavailable".to_string()), "{when}: the {who}'s {method}");
+        } else {
+            assert_eq!(want, &Ok(()), "{when}: the {who}'s {method}");
+        }
+    }
 }
 
 /// The conformance vectors' history files of one kind of case, as a home holds them.
@@ -1589,12 +1630,12 @@ fn a_proved_fold_of_any_history_answers_as_the_replay() {
     cases.push(("account".into(), vectors_dir().join("account"), parse_date("2026-11-11T09:01:00Z").unwrap()));
     cases.retain(|(name, _, _)| name == "account" || PICKED.contains(&name.as_str()));
     assert_eq!(cases.len(), PICKED.len() + 1);
-    let mut kinds = std::collections::BTreeSet::new();
+    let mut kinds = std::collections::BTreeMap::<&str, usize>::new();
     let mut proved = 0;
     for (name, dir, now) in &cases {
         let objects = vector_objects(dir);
         let cold = verify_history(&objects, &Persisted::default(), *now);
-        kinds.insert(match &cold.stop {
+        let kind = match &cold.stop {
             _ if name.starts_with("succession") => "successor",
             _ if name.starts_with("upgrade") && cold.state.as_ref().is_some_and(|s| s.upgrade_seq.is_some()) => "upgraded",
             _ if name.contains("suspended-key") => "suspended-key",
@@ -1603,32 +1644,49 @@ fn a_proved_fold_of_any_history_answers_as_the_replay() {
             Some(colophon_core::v05::history::Stop::Fork { .. }) => "fork",
             Some(_) if cold.stopped.is_some() => "stopped",
             Some(_) => "failed",
-        });
+        };
+        let from_fold = kinds.entry(kind).or_default();
         for at in [*now - 60_000, *now + 7 * DAY] {
             let cp = Persisted::checkpoint(&objects, &Persisted::default(), at).to_bytes().unwrap();
             let injected = with_checkpoint(&home.state, &cp);
             let started = call(json!({"op": "resume", "state": injected, "now": at}));
             let state = started["state"].as_str().unwrap().to_string();
             if started["changed"] == true {
+                assert_eq!(started["fold"], "verified");
                 assert_proved(&state);
                 proved += 1;
+                // Started again, the proof holds.
+                assert_eq!(call(json!({"op": "resume", "state": state, "now": at}))["fold"], "proved");
             }
             for now in [at - 1, at, at + 30 * DAY] {
                 for (p, bytes) in &records {
                     let req = json!({"op": "check_record", "state": state, "now": now, "path": p, "bytes": b(bytes)});
-                    same_as_unproved(&req, &format!("{name} checkpointed at {at}, at {now}: {p}"));
+                    let (answer, replays) = same_as_unproved(&req, &format!("{name} checkpointed at {at}, at {now}: {p}"));
+                    assert_eq!(answer, check_record_by_replay(&state, now, p, bytes), "{name} checkpointed at {at}, at {now}: {p}");
+                    if replays == 0 && !p.starts_with("blobs/") {
+                        *from_fold += 1;
+                    }
                 }
                 let req = json!({"op": "access", "state": state, "now": now, "base": BASE_A, "method": "GET",
                                  "section": "records", "rest": rest, "path": path, "bodySha256": digest(b""),
                                  "call": b(&get), "existing": null, "replayRows": 65_536});
-                same_as_unproved(&req, &format!("{name} checkpointed at {at}, at {now}: GET"));
+                let (answer, _) = same_as_unproved(&req, &format!("{name} checkpointed at {at}, at {now}: GET"));
+                assert_eq!(access_answer(&answer), call_by_replay(&state, now, "GET", &path, &digest(b""), &get),
+                           "{name} checkpointed at {at}, at {now}: GET {answer}");
                 let req = json!({"op": "status", "state": state, "now": now});
                 same_as_unproved(&req, &format!("{name} checkpointed at {at}, at {now}: status"));
             }
         }
     }
     for k in ["ok", "held", "fork", "failed", "stopped", "upgraded", "successor", "suspended-key"] {
-        assert!(kinds.contains(k), "no {k} history: {kinds:?}");
+        assert!(kinds.contains_key(k), "no {k} history: {kinds:?}");
+    }
+    // The record checks answered from the fold, per kind: ordinary histories are; a fork, a
+    // failed or stopped history, an upgraded account, a successor and the suspended key's refused
+    // suspend never are.
+    assert!(kinds["ok"] > 0, "{kinds:?}");
+    for k in ["fork", "failed", "stopped", "upgraded", "successor", "suspended-key"] {
+        assert_eq!(kinds[k], 0, "{k}: {kinds:?}");
     }
     assert_eq!(proved, cases.len() * 2, "every checkpoint this build folded is verified again");
 }
@@ -1686,29 +1744,36 @@ fn a_proof_for_other_bytes_or_rules_is_not_taken() {
         booting_predecessor: Vec<String>,
         home_state: Option<String>,
     }
-    let proved_here = with_fold(&doctored, json!({"rules": FOLD_RULES, "checkpoint": here}));
+    let proved_here = with_fold(&doctored, json!({"rules": FOLD_RULES, "build": TEST_BUILD, "checkpoint": here}));
     let older: OlderSlot = serde_json::from_slice(&STANDARD.decode(&proved_here).unwrap()).unwrap();
     let round_tripped = b(&serde_json::to_vec(&older).unwrap());
     assert!(slot_of(&round_tripped).get("fold").is_none(), "an older reader drops what it does not know");
     for (what, state) in [
         ("no proof", with_fold(&doctored, Value::Null)),
         ("the proof of the checkpoint before", with_fold(&doctored, original.clone())),
-        ("other rules", with_fold(&doctored, json!({"rules": "colophon-0.5-fold/r0/0000000000000000", "checkpoint": here}))),
-        ("other rules, same name", with_fold(&doctored, json!({"rules": format!("{FOLD_RULES}x"), "checkpoint": here}))),
+        ("other rules", with_fold(&doctored, json!({"rules": "colophon-0.5-fold/r0/0000000000000000", "build": TEST_BUILD, "checkpoint": here}))),
+        ("other rules, same name", with_fold(&doctored, json!({"rules": format!("{FOLD_RULES}x"), "build": TEST_BUILD, "checkpoint": here}))),
         ("through an older reader", round_tripped.clone()),
-        ("a truncated digest", with_fold(&doctored, json!({"rules": FOLD_RULES, "checkpoint": &here[..63]}))),
-        ("an upper-case digest", with_fold(&doctored, json!({"rules": FOLD_RULES, "checkpoint": here.to_uppercase()}))),
-        ("no digest", with_fold(&doctored, json!({"rules": FOLD_RULES}))),
-        ("no rules", with_fold(&doctored, json!({"checkpoint": here}))),
+        ("a truncated digest", with_fold(&doctored, json!({"rules": FOLD_RULES, "build": TEST_BUILD, "checkpoint": &here[..63]}))),
+        ("an upper-case digest", with_fold(&doctored, json!({"rules": FOLD_RULES, "build": TEST_BUILD, "checkpoint": here.to_uppercase()}))),
+        ("no digest", with_fold(&doctored, json!({"rules": FOLD_RULES, "build": TEST_BUILD}))),
+        ("another build", with_fold(&doctored, json!({"rules": FOLD_RULES, "build": "0".repeat(64), "checkpoint": here}))),
+        ("no build", with_fold(&doctored, json!({"rules": FOLD_RULES, "checkpoint": here}))),
+        ("no rules", with_fold(&doctored, json!({"build": TEST_BUILD, "checkpoint": here}))),
         ("a number", with_fold(&doctored, json!(7))),
         ("a string", with_fold(&doctored, json!(format!("{FOLD_RULES} {here}")))),
         ("a list", with_fold(&doctored, json!([FOLD_RULES, here]))),
-        ("rules of another type", with_fold(&doctored, json!({"rules": 1, "checkpoint": here}))),
+        ("rules of another type", with_fold(&doctored, json!({"rules": 1, "build": TEST_BUILD, "checkpoint": here}))),
     ] {
         assert_eq!(check(&state), replayed, "{what}");
         let started = call(json!({"op": "resume", "state": state, "now": now}));
         assert_eq!(started["changed"], false, "{what}: the replay differs, so nothing is proved");
+        assert_eq!(started["fold"], "unproved", "{what}: a start says so");
     }
+    // An instance is named one build, once.
+    assert_eq!(call_op(json!({"op": "build", "fingerprint": TEST_BUILD}))["ok"], true);
+    assert_eq!(call_op(json!({"op": "build", "fingerprint": "0".repeat(64)}))["ok"], false);
+    assert_eq!(call_op(json!({"op": "build", "fingerprint": "not hex"}))["ok"], false);
     // This build's own proof for these exact bytes is taken (the state is trusted as a whole):
     // the fold answers, and refuses the writer. So the cases above were answered by the replay.
     assert_eq!(check(&proved_here)["code"], "notGranted");
@@ -1736,10 +1801,10 @@ fn a_fold_under_other_rules_is_refused_as_the_replay_refuses_it() {
     let path = format!("ops/{}/{NS}/000000000001-{}.json", "a".repeat(32), "b".repeat(32));
     let refused = check_record_by_replay(&state, now, &path, b"{}");
     assert_eq!(refused["ok"], false, "the replay fails at seq 3: {refused}");
-    assert!(!refused["error"].as_str().unwrap().is_empty(), "{refused}");
+    assert!(refused["error"].as_str().unwrap().starts_with("badSignature"), "{refused}");
     for (what, state) in [
         ("no proof", state.clone()),
-        ("other rules", with_fold(&state, json!({"rules": "colophon-0.5-fold/r0/0000000000000000", "checkpoint": digest(&older)}))),
+        ("other rules", with_fold(&state, json!({"rules": "colophon-0.5-fold/r0/0000000000000000", "build": TEST_BUILD, "checkpoint": digest(&older)}))),
     ] {
         for t in [now, now + HOUR] {
             let got = call_op(json!({"op": "check_record", "state": state, "now": t, "path": path, "bytes": b(b"{}")}));
@@ -1750,9 +1815,9 @@ fn a_fold_under_other_rules_is_refused_as_the_replay_refuses_it() {
     }
     // Under this build's proof the older fold would be taken: the record check would reach the
     // record. That is the answer the cases above did not give.
-    let forged = with_fold(&state, json!({"rules": FOLD_RULES, "checkpoint": digest(&older)}));
+    let forged = with_fold(&state, json!({"rules": FOLD_RULES, "build": TEST_BUILD, "checkpoint": digest(&older)}));
     let taken = call_op(json!({"op": "check_record", "state": forged, "now": now, "path": path, "bytes": b(b"{}")}));
-    assert_eq!(taken["ok"], true, "{taken}");
+    assert_eq!(taken, json!({"allowed": false, "code": "malformed", "ok": true}), "the record itself is judged");
 }
 
 /// The checkpoint an older verifier would write for `objects` if it accepted their third entry:
@@ -1783,3 +1848,129 @@ fn older_rules_fold(objects: &Objects, now: i64) -> Vec<u8> {
     bytes
 }
 
+
+/// The answer a replay of the held objects from genesis gives a call at a home, with no saved
+/// fold (only the home's permanent stop floor, which no replay can recompute): `Ok(())` for a call
+/// the home takes, the refusal's code otherwise. The reference for `access`, independent of it.
+fn call_by_replay(state: &str, now: i64, method: &str, path: &str, body_sha: &str, call: &[u8]) -> Result<(), String> {
+    use colophon_core::v05::calls::verify_home_request;
+    use colophon_core::v05::history::home::HomeState;
+    use colophon_core::v05::replay::MemoryReplayStore;
+    let slot = slot_of(state);
+    let h = HomeState::from_bytes(&STANDARD.decode(slot["home_state"].as_str().unwrap()).unwrap()).unwrap();
+    let p = h.persisted().unwrap();
+    let objects = p.objects().cloned().unwrap_or_default();
+    let mut memory = Persisted::default();
+    if let Some((seq, layout)) = p.stop_floor() {
+        memory = memory.with_stop_floor(seq, layout);
+    }
+    let verdict = verify_history(&objects, &memory, now);
+    // As the home reads its view: a stop answers unavailable, a failed or held history is an error,
+    // a fork leaves the verified prefix.
+    if verdict.is_stopped() || p.stop_floor().is_some() {
+        return Err("unavailable".into());
+    }
+    match &verdict.stop {
+        None | Some(colophon_core::v05::history::Stop::Fork { .. }) => {}
+        Some(_) => return Err(format!("history: {}", verdict.code())),
+    }
+    if verdict.state.is_none() {
+        return Err("no verified history".into());
+    }
+    let view = AccountView::from_history_verifier(&verdict, &objects, now).map_err(|e| e.to_string())?;
+    let audiences = [BASE_A.to_string()];
+    let origins = std::collections::BTreeMap::new();
+    let cfg = CallConfig { now_ms: now, audiences: &audiences, call_origins: &origins, controller_purposes: &[], home_endpoints: &audiences };
+    let writes = colophon_core::v05::calls::home_record_writes(path.trim_start_matches("/records/")).unwrap_or_default();
+    let writes = if method == "PUT" { writes } else { Vec::new() };
+    let request = HomeRequest { method, path, body_sha256: body_sha, writes: &writes };
+    verify_home_request(call, &view, &cfg, &mut MemoryReplayStore::new(), &request).map(|_| ()).map_err(|f| f.code())
+}
+/// `access`'s answer as `call_by_replay` gives it.
+fn access_answer(r: &Value) -> Result<(), String> {
+    if r["allowed"] == true {
+        Ok(())
+    } else if r["ok"] == false {
+        Err(r["error"].as_str().unwrap_or_default().to_string())
+    } else {
+        Err(r["result"].as_str().map(str::to_string).unwrap_or_else(|| r.to_string()))
+    }
+}
+
+/// A call is judged by the history the home holds, never by a saved fold it has not proved. Here
+/// the checkpoint's held entries revoke a member, and a fresh head of the home covers the
+/// revocation, but the fold it carries still has the member current (as a fold under other rules,
+/// or an inconsistent copy, may). A replay from genesis refuses the member's read; so must the
+/// home, with no proof, with the proof of the honest checkpoint, and after a start that could not
+/// prove the fold. The other member's read is taken while the head is fresh, and the honest state
+/// answers the same; an hour later (the head no longer fresh) every answer is still the replay's.
+#[test]
+fn a_call_is_judged_by_the_replay_when_the_fold_is_not_proved() {
+    let mut f = create_with(&[NS], "members", 1);
+    let reader = f.host.identity(41);
+    let leaver = f.host.identity(42);
+    for (id, label) in [(&reader, "Reader"), (&leaver, "Leaver")] {
+        admit(&mut f, id, label, "device", terms_for(&[(NS, "read")]), terms_for(&[(NS, "read")]));
+    }
+    let keys = HomeKeys::new(0x77);
+    appoint_homes(&mut f, &[(&keys, BASE_A)]);
+    let mut home = Home::new(keys, f.account.id().as_str());
+    let entries: Vec<Value> = entries_json(&f).into_iter().map(|(_, e)| e).collect();
+    let uploaded = entries.len() as u64;
+    assert_eq!(home.authority(1, &entries, NOW)["appointed"], true);
+    assert!(home.head(NOW).is_some());
+    f.account.advance(NOW + 1_000).unwrap();
+    let revoke = f.account.begin_revoke(&leaver, &RevokeKeep::Nothing, &[f.d.clone()], [0x7b; 32]).unwrap();
+    run(&mut f.account, &f.host, revoke);
+    let rest: Vec<Value> = entries_json(&f).into_iter().filter(|(s, _)| *s > uploaded).map(|(_, e)| e).collect();
+    let at = NOW + 2_000;
+    assert_eq!(home.authority(uploaded + 1, &rest, at)["outcome"], "ok");
+    assert!(home.head(at).is_some(), "a fresh head over the revocation");
+    let honest = home.state.clone();
+    assert_proved(&honest);
+
+    // The fold forgets the revocation; the held entries and the head are the honest ones.
+    let mut cp: Value = serde_json::from_slice(&checkpoint_of(&honest)).unwrap();
+    let fold = verify_history(&Objects::default(), &Persisted::from_bytes(&checkpoint_of(&honest)).unwrap(), at).state.unwrap();
+    let i = fold.members().iter().position(|m| m.request.member_id() == leaver).unwrap();
+    assert!(fold.members()[i].revoked_seq.is_some());
+    cp["state"]["members"][i]["revoked_seq"] = Value::Null;
+    let doctored = with_checkpoint(&honest, &serde_json::to_vec(&cp).unwrap());
+    let started = call(json!({"op": "resume", "state": doctored, "now": at}));
+    assert_eq!(started["changed"], false, "the replay is not the fold: nothing is proved");
+
+    let rest_of = |id: &str| format!("ops/{id}/{NS}/000000000001-{}.json", "a".repeat(32));
+    let ask = |state: &str, id: &str, n: u8, now: i64| {
+        let rest = rest_of(id);
+        let path = format!("/records/{rest}");
+        let c = call_as(&f.host, &f.account, "member", id, BASE_A, "colophon.home.read",
+                        home_call_args("GET", &path, &digest(b"")), now, [n; 32]);
+        let req = json!({"op": "access", "state": state, "now": now, "base": BASE_A, "method": "GET",
+                         "section": "records", "rest": rest, "path": path, "bodySha256": digest(b""),
+                         "call": b(&c), "existing": null, "replayRows": 65_536});
+        (call_op(req), call_by_replay(state, now, "GET", &path, &digest(b""), &c))
+    };
+    let mut n = 0u8;
+    for now in [at, at + 1_000, at + HOUR] {
+        for (what, state) in [
+            ("honest", honest.clone()),
+            ("no proof", doctored.clone()),
+            ("the honest checkpoint's proof", with_fold(&doctored, slot_of(&honest)["fold"].clone())),
+            ("after a start", started["state"].as_str().unwrap().to_string()),
+        ] {
+            n += 1;
+            let fresh = now < at + HOUR;
+            let (got, want) = ask(&state, &leaver, n, now);
+            if fresh {
+                assert_eq!(want, Err("refused:revoked".to_string()), "{what} at {now}: the replay refuses the revoked member");
+            }
+            assert_eq!(access_answer(&got), want, "{what} at {now}: {got}");
+            n += 1;
+            let (got, want) = ask(&state, &reader, n, now);
+            if fresh {
+                assert_eq!(want, Ok(()), "{what} at {now}: the replay takes the current member");
+            }
+            assert_eq!(access_answer(&got), want, "{what} at {now}: {got}");
+        }
+    }
+}

@@ -348,12 +348,19 @@ impl HomeState {
     pub fn checkpoint_digest(&self) -> String {
         crate::v05::encoding::digest(&self.checkpoint_bytes)
     }
+    /// The checkpoint's exact bytes, for a host that keeps their digest
+    /// ([`HomeState::checkpoint_digest`]) between calls instead of computing it again.
+    pub fn checkpoint_bytes(&self) -> &[u8] {
+        &self.checkpoint_bytes
+    }
     /// Take the checkpoint as this build's fold on the host's word: `rules` is this build's
     /// [`FOLD_RULES`] and `checkpoint` the digest of exactly the checkpoint held, as the host
     /// stored them when [`HomeState::fold_vouched`] said so. Anything else changes nothing.
+    /// `digest` gives the SHA-256 of the checkpoint's bytes (the host may answer it from a cache
+    /// keyed by those exact bytes); it is asked only when the rules match.
     /// Returns whether the fold is now taken as this build's.
-    pub fn vouch_fold(&mut self, rules: &str, checkpoint: &str) -> bool {
-        if rules == FOLD_RULES && checkpoint == self.checkpoint_digest() {
+    pub fn vouch_fold(&mut self, rules: &str, checkpoint: &str, digest: impl FnOnce(&[u8]) -> String) -> bool {
+        if rules == FOLD_RULES && checkpoint == digest(&self.checkpoint_bytes) {
             if let Some(p) = &mut self.parsed {
                 p.assume_folded_here();
             }
@@ -361,13 +368,13 @@ impl HomeState {
         self.fold_vouched()
     }
     /// Verify the checkpoint again from genesis ([`Persisted::verified_again`]) and, when the
-    /// replay gives exactly it, take it as this build's fold. The checkpoint is left as it is.
-    /// Returns whether the fold is now taken as this build's.
+    /// replay serializes to exactly the bytes held, take it as this build's fold. The checkpoint
+    /// is left as it is. Returns whether the fold is now taken as this build's.
     pub fn verify_fold(&mut self) -> Result<bool> {
         if self.fold_vouched() {
             return Ok(true);
         }
-        let again = self.persisted()?.verified_again();
+        let again = self.persisted()?.verified_again(&self.checkpoint_bytes);
         if let (Some(_), Some(p)) = (again, &mut self.parsed) {
             p.assume_folded_here();
         }
@@ -386,6 +393,31 @@ impl HomeState {
         let mut v = verify_history(&Objects::default(), &p, verification_clock(&p, now_ms));
         // Like the device reader, a home keeps a verified stop even without its evidence.
         // In particular, an unknown entry is refused rather than retained in the object store.
+        if let Some((seq, _)) = p.stop_floor() {
+            v.stopped = Some(seq);
+            v.stop = Some(Stop::Failed {
+                seq,
+                failure: Failure::NewerFormat("the home is stopped; update it".into()),
+            });
+        }
+        Ok((p, v))
+    }
+    /// [`HomeState::verified_history`] for deciding who may do what (a call, a principal's
+    /// standing): the saved fold answers only where it is this build's own
+    /// ([`HomeState::fold_vouched`]) and [`verify_history`] answers from it alone
+    /// ([`super::resumes_unchanged`]), where its verdict is a replay's. Everywhere else the verdict
+    /// is a replay of the held objects from genesis, resuming nothing saved; the home's stop floor
+    /// is kept as in `verified_history`. Returns the checkpoint too.
+    pub fn authorized_history(&self, now_ms: i64) -> Result<(Persisted, Verdict)> {
+        let p = self.persisted()?;
+        let clock = verification_clock(&p, now_ms);
+        let none = Objects::default();
+        let mut v = if p.folded_here() && super::resumes_unchanged(&none, &p, clock) {
+            verify_history(&none, &p, clock)
+        } else {
+            let objects = p.objects().cloned().unwrap_or_default();
+            verify_history(&objects, &p.without_fold(), clock)
+        };
         if let Some((seq, _)) = p.stop_floor() {
             v.stopped = Some(seq);
             v.stop = Some(Stop::Failed {

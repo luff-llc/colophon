@@ -962,10 +962,10 @@ fn vectors_digest() -> String {
     colophon_core::v05::encoding::hex(&h.finalize())[..16].to_string()
 }
 
-/// A rule change cannot ship under a stale [`FOLD_RULES`]: a host takes a checkpoint stored with
-/// this value as this build's fold, so the value must change whenever a verdict can. It names the
-/// digest of the conformance vectors, so a changed vector (an `expected` verdict above all)
-/// fails here until the value is updated; a rule changed in code alone raises its revision.
+/// [`FOLD_RULES`] names the digest of the history verifier's conformance vectors, so a changed
+/// vector (an `expected` verdict above all) fails here until the value is updated. It reads no
+/// verifier code: a rule changed in code alone is caught only by raising the revision by hand (and,
+/// at a home, by the module build its proof also names).
 #[test]
 fn the_fold_rules_name_the_conformance_vectors() {
     use colophon_core::v05::history::FOLD_RULES;
@@ -1011,7 +1011,7 @@ fn a_vouched_record_view_is_the_replays() {
         let mut checkpoints = Vec::new();
         for at in [*now - 60_000, *now, *now + 7 * DAY] {
             let p = Persisted::checkpoint(objects, &Persisted::default(), at);
-            checkpoints.push((at, Persisted::checkpoint(objects, &p, at + 1_000), false));
+            checkpoints.push((at + 1_000, Persisted::checkpoint(objects, &p, at + 1_000), false));
             if let Some(d) = cold.branch.last() {
                 let ahead = Persisted::high_water(cold.branch.len() as u64 + 1, d.clone());
                 checkpoints.push((at, Persisted::checkpoint(objects, &ahead, at), true));
@@ -1042,7 +1042,13 @@ fn a_vouched_record_view_is_the_replays() {
             // Verified again from genesis, a checkpoint folded in one replay is this build's fold
             // once more, with the same bytes. (One resumed from an earlier checkpoint may hold what
             // only the later fold found, its held time say, and then is not verified again.)
-            match restored.verified_again() {
+            // The same checkpoint written with other spacing is not the replay's bytes.
+            let bytes = p.to_bytes().unwrap();
+            let mut spaced = b"{ ".to_vec();
+            spaced.extend_from_slice(&bytes[1..]);
+            let respaced = Persisted::from_bytes(&spaced).unwrap();
+            assert!(respaced.verified_again(&spaced).is_none(), "{} respaced", dir.display());
+            match restored.verified_again(&bytes) {
                 Some(again) => {
                     assert!(again.folded_here());
                     assert_eq!(again.to_bytes().unwrap(), p.to_bytes().unwrap());
@@ -1058,8 +1064,14 @@ fn a_vouched_record_view_is_the_replays() {
     for k in ["ok", "held", "fork", "failed", "stopped", "upgraded", "successor", "suspended-key"] {
         assert!(kinds.contains_key(k), "no {k} history: {kinds:?}");
     }
+    // Per kind of history: ordinary ones are answered from the fold at many readings; a fork, a
+    // failed or stopped history, an upgraded account, a successor and the suspended key's refused
+    // suspend never are.
     let ok = kinds["ok"];
     assert!(ok.1 * 3 > ok.0, "ordinary histories answered from the fold {} of {}", ok.1, ok.0);
+    for k in ["fork", "failed", "stopped", "upgraded", "successor", "suspended-key"] {
+        assert_eq!(kinds[k].1, 0, "{k} answered from the fold: {kinds:?}");
+    }
 }
 
 /// A fold another build made under other rules is not this build's fold: verified again, the
@@ -1073,7 +1085,7 @@ fn a_fold_made_under_other_rules_is_not_verified_again() {
     let p = older_rules_fold(&objects, now);
     let restored = Persisted::from_bytes(&p).unwrap();
     assert_eq!(verify_history(&Objects::default(), &restored, now).branch.len(), 3, "the older fold took seq 3");
-    assert!(restored.verified_again().is_none());
+    assert!(restored.verified_again(&p).is_none());
     assert!(RecordAuthority::from_vouched(&restored, now).is_none());
     let replay = RecordAuthority::from_objects(restored.objects().unwrap(), now);
     assert_eq!(replay.unwrap_err().code(), "badSignature");
@@ -1134,4 +1146,42 @@ fn a_successors_fold_is_never_the_record_view() {
     }
     eprintln!("{} successor readings where the fold is not the replay, first {:?}", differs.len(), differs.first());
     assert!(!differs.is_empty(), "no successor fold differs from its replay at a later clock");
+}
+
+/// A checkpoint whose verdict has a candidate held beside a valid one (`held_until`, §8.1) keeps
+/// that due time through every checkpoint taken from it before it comes due, as the replay's
+/// checkpoint at that clock has it, so the candidate is judged again once it is due. Over every
+/// history vector checkpointed at several clock readings, wherever such a due time is pending.
+#[test]
+fn a_checkpoint_taken_before_a_due_time_keeps_it() {
+    let mut all: Vec<(PathBuf, Objects, i64)> =
+        cases().into_iter().map(|(d, now)| (d.clone(), objects_of(&d), now)).collect();
+    all.extend(other_cases());
+    let held = |p: &Persisted| -> Value {
+        serde_json::from_slice::<Value>(&p.to_bytes().unwrap()).unwrap()["held_until"].clone()
+    };
+    let mut pending = 0;
+    for (dir, objects, now) in &all {
+        for at in [*now - 3_600_000, *now - 60_000, *now] {
+            let p = Persisted::checkpoint(objects, &Persisted::default(), at);
+            let Some(due) = held(&p).as_i64() else { continue };
+            if due <= at + 1_000 {
+                continue;
+            }
+            pending += 1;
+            let between = Persisted::checkpoint(&Objects::default(), &p, at + 1_000);
+            let cold = Persisted::checkpoint(objects, &Persisted::default(), at + 1_000);
+            assert_eq!(held(&between), held(&cold), "{} checkpointed at {at}", dir.display());
+            for t in [due, due + 86_400_000] {
+                let later = verify_history(&Objects::default(), &between, t);
+                let replay = verify_history(objects, &Persisted::default(), t);
+                // Everything but the rollback mark, which reads the checkpoint's high water.
+                let fold = |v: &Verdict| format!("{:?} {:?} {:?} {:?} {:?} {}", v.branch, v.stop, v.conflicts,
+                    v.held_until, v.stopped, serde_json::to_string(&v.state).unwrap());
+                assert_eq!(fold(&later), fold(&replay), "{} checkpointed at {at}, at {t}", dir.display());
+            }
+        }
+    }
+    eprintln!("{pending} checkpoints with a pending due time");
+    assert!(pending > 0, "no vector holds a candidate beside a valid one");
 }
