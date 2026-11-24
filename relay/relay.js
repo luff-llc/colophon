@@ -278,9 +278,14 @@ class Slot {
 
   /** Serializes mutations within the slot; reads use the in-memory index. */
   async exclusive(fn) {
-    if (this.closing || this.released) throw new HttpError(503, 'Relay is closing');
+    // At shutdown no new request is admitted, and the work already admitted on the slot (a
+    // request, a scheduler pass) finishes its file work: a checkpoint already committed is not
+    // left without its files, nor answered 503. Anything else is refused once the slot closes,
+    // and everything once it is being released after its work drained.
+    const refused = () => this.released || (this.closing && (this.releasing || !this.active));
+    if (refused()) throw new HttpError(503, 'Relay is closing');
     const execute = () => {
-      if (this.closing || this.released) throw new HttpError(503, 'Relay is closing');
+      if (refused()) throw new HttpError(503, 'Relay is closing');
       return fn();
     };
     const run = this.chain.then(execute, execute);
@@ -610,7 +615,7 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
   // Shutdown, unlike a release, says nothing about the slot: the request may be retried.
   const relayClosing = () => new HttpError(503, 'Relay is closing', { 'retry-after': '1' });
   async function slot(name) {
-    if (closing) throw new HttpError(503, 'Relay is closing');
+    if (closing) throw relayClosing();
     if (slots.has(name)) return slots.get(name);
     // Never opened for a name this relay does not hold (a released slot is not reopened).
     if (!homeSlots.has(name) && !auth.has(name)) throw notProvisioned();
@@ -823,7 +828,9 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
         await reach('provision written');
         if (reserve) await provisionReplay.complete(reserve.key, 'completed');
         homeSlots.set(asked.slot, { base: asked.base, account: asked.account });
-        await slot(asked.slot);
+        // The row is durable: a shutdown that began meanwhile leaves the slot to open at the next
+        // start, and the request is answered, not refused after its effect.
+        await slot(asked.slot).catch((error) => { if (!closing) throw error; });
         return request;
       };
       if (!session) return decide(undefined);
@@ -834,7 +841,7 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
   }
 
   async function handle(req, res, work) {
-    if (closing) throw new HttpError(503, 'Relay is closing');
+    if (closing) throw relayClosing();
     const url = new URL(req.url, 'http://relay.invalid');
     if (url.pathname === '/healthz' && req.method === 'GET') {
       const failing = failingChecks();
@@ -995,6 +1002,10 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
     const deadline = Date.now() + wait * 1000;
     const changed = () => Boolean(judged) && s.home.commits !== judged.commits;
     while (page.entries.length === 0 && Date.now() < deadline && !changed()) {
+      // Checked right before registering (nothing in between waits): a release or a shutdown
+      // that began meanwhile has already woken every waiter, and would not wake this one.
+      if (s.releasing || s.released) throw notProvisioned();
+      if (s.closing) throw relayClosing();
       const waiting = s.waitForEntry(deadline - Date.now(), res, namespaces);
       await reach('changes waiting'); // a test hook (traced builds only)
       await waiting;
@@ -1012,9 +1023,10 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
     const url = new URL(req.url, 'http://relay.invalid');
     const match = STREAM_PATH.exec(url.pathname);
     if (!match || !homeSlots.has(match[1])) throw new HttpError(404, 'Not found');
-    if (closing) throw new HttpError(503, 'Relay is closing');
+    if (closing) throw relayClosing();
     const s = await slot(match[1]); // the home burns the ticket before any other refusal
-    if (closing || s.closing || s.releasing || s.released) { s.home.stream.take(url); throw notProvisioned(); }
+    if (s.releasing || s.released) { s.home.stream.take(url); throw notProvisioned(); }
+    if (closing || s.closing) { s.home.stream.take(url); throw relayClosing(); }
     enter(s);
     try { await s.home.upgrade(req, url, connect); } finally { leave(s); }
   }
