@@ -139,9 +139,9 @@ pub struct HomeState {
     home: String,
     /// The verifier checkpoint. Its pending objects are exactly `pending` and its heads are
     /// pruned to what the guard and the verifier need ([`refresh_checkpoint`]), so it is never
-    /// stale and does not grow with every head.
-    #[serde(with = "b64_bytes")]
-    checkpoint: Vec<u8>,
+    /// stale and does not grow with every head. Written only by [`HomeState::set_checkpoint`].
+    #[serde(rename = "checkpoint", with = "b64_bytes")]
+    checkpoint_bytes: Vec<u8>,
     pending: Vec<PendingObject>,
     next_cursor: u64,
     facts: BTreeMap<String, Fact>,
@@ -155,6 +155,11 @@ pub struct HomeState {
     /// without freeing these slots. The standing entry is retained in addition to these slots.
     #[serde(default)]
     candidate_slots: BTreeMap<u64, BTreeMap<String, String>>,
+    /// `Persisted::from_bytes(checkpoint_bytes)`, decoded when the state was read
+    /// ([`HomeState::from_bytes`]) and dropped whenever the checkpoint is replaced: a memo of the
+    /// bytes, never stored.
+    #[serde(skip)]
+    parsed: Option<Persisted>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct ObservedReceipt {
@@ -255,7 +260,7 @@ impl HomeState {
         let mut state = Self {
             version: STATE_VERSION,
             home,
-            checkpoint: Persisted::checkpoint(objects, &Persisted::default(), now_ms).to_bytes()?,
+            checkpoint_bytes: Persisted::checkpoint(objects, &Persisted::default(), now_ms).to_bytes()?,
             pending: Vec::new(),
             next_cursor: 1,
             facts: BTreeMap::new(),
@@ -264,6 +269,7 @@ impl HomeState {
             unmatched_receipts: Vec::new(),
             signed_heads: Vec::new(),
             candidate_slots: BTreeMap::new(),
+            parsed: None,
         };
         refresh_checkpoint(&mut state, None, now_ms)?;
         Ok(state)
@@ -311,7 +317,16 @@ impl HomeState {
     /// changes the pending objects or the heads replaces the checkpoint's copy of them.
     /// Read-only: nothing here admits anything.
     pub fn persisted(&self) -> Result<Persisted> {
-        Persisted::from_bytes(&self.checkpoint)
+        match &self.parsed {
+            Some(p) => Ok(p.clone()),
+            None => Persisted::from_bytes(&self.checkpoint_bytes),
+        }
+    }
+    /// Replace the checkpoint (the only way it is written), dropping the decoded copy of the
+    /// previous one.
+    fn set_checkpoint(&mut self, bytes: Vec<u8>) {
+        self.checkpoint_bytes = bytes;
+        self.parsed = None;
     }
     /// A permanent format stop, derived from the stored history and stop floor on open (§13.6).
     pub fn is_stopped(&self, now_ms: i64) -> Result<bool> {
@@ -341,12 +356,12 @@ impl HomeState {
     }
     /// Restore trusted local state, including admission decisions and cursor allocation.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        let state: Self = serde_json::from_slice(bytes).map_err(|e| malformed(e.to_string()))?;
+        let mut state: Self = serde_json::from_slice(bytes).map_err(|e| malformed(e.to_string()))?;
         require(
             state.version == STATE_VERSION,
             "unknown home checkpoint version",
         )?;
-        Persisted::from_bytes(&state.checkpoint)?;
+        state.parsed = Some(Persisted::from_bytes(&state.checkpoint_bytes)?);
         check_intervals(&state.serving)?;
         require(
             state.next_cursor > 0
@@ -500,13 +515,29 @@ impl HomeState {
         });
         Ok(())
     }
-    fn visible(&self, object: &PendingObject, state: &State, now_ms: i64) -> bool {
-        !state.recorded.contains(if object.kind == "receipt" {
-            self.pending
-                .iter()
-                .find(|p| p.kind != "receipt" && p.digest == object.target)
-                .map(|p| &p.target)
-                .unwrap_or(&object.target)
+    /// The target of the first stored object that is not a receipt, by digest: what a receipt of
+    /// that object is listed by. Built once for a pass over every stored object, so the pass is
+    /// not quadratic in what the home stores.
+    fn receipted_targets(&self) -> BTreeMap<&str, &str> {
+        let mut out = BTreeMap::new();
+        for p in self.pending.iter().filter(|p| p.kind != "receipt") {
+            out.entry(p.digest.as_str()).or_insert(p.target.as_str());
+        }
+        out
+    }
+    /// Whether `object` is still listed: its target not recorded (a receipt's, the target of
+    /// the object it receipts, when the home stores that object) not in `recorded` (the verified
+    /// state's recorded transitions) and not expired. `targets` is
+    /// [`HomeState::receipted_targets`] of this state.
+    fn visible(
+        &self,
+        object: &PendingObject,
+        recorded: &BTreeSet<String>,
+        now_ms: i64,
+        targets: &BTreeMap<&str, &str>,
+    ) -> bool {
+        !recorded.contains(if object.kind == "receipt" {
+            targets.get(object.target.as_str()).copied().unwrap_or(&object.target)
         } else {
             &object.target
         }) && object.expires_ms.is_none_or(|end| now_ms <= end)
@@ -515,10 +546,11 @@ impl HomeState {
     pub fn pending_page(&self, after: u64, limit: usize, now_ms: i64) -> Result<PendingPage> {
         require((1..=64).contains(&limit), "pending page limit must be 1–64")?;
         let (_, state, _) = self.context_any(now_ms)?;
+        let targets = self.receipted_targets();
         let mut iter = self
             .pending
             .iter()
-            .filter(|p| p.seq > after && p.kind != "succession" && self.visible(p, &state, now_ms));
+            .filter(|p| p.seq > after && p.kind != "succession" && self.visible(p, &state.recorded, now_ms, &targets));
         let objects = iter.by_ref().take(limit).cloned().collect();
         Ok(PendingPage {
             objects,
@@ -528,10 +560,11 @@ impl HomeState {
     /// GET pending/digest, with every held receipt, or absent. The caller authorizes the read.
     pub fn pending_object(&self, digest: &str, now_ms: i64) -> Result<Option<PendingDetail>> {
         let (_, state, _) = self.context_any(now_ms)?;
+        let targets = self.receipted_targets();
         let Some(object) = self
             .pending
             .iter()
-            .find(|p| p.digest == digest && p.kind != "receipt" && self.visible(p, &state, now_ms))
+            .find(|p| p.digest == digest && p.kind != "receipt" && self.visible(p, &state.recorded, now_ms, &targets))
         else {
             return Ok(None);
         };
@@ -939,7 +972,8 @@ fn admit_full(
                 let active: Vec<_> = next
                     .pending
                     .iter()
-                    .filter(|p| p.kind == "transition" && next.visible(p, &st, now_ms))
+                    // Not receipts: their listing needs no receipted targets.
+                    .filter(|p| p.kind == "transition" && next.visible(p, &st.recorded, now_ms, &BTreeMap::new()))
                     .collect();
                 // The proposer is the primary signer's unit; cosigners are not charged (§13.1).
                 if active
@@ -1040,7 +1074,7 @@ fn admit_full(
                     .pending
                     .iter()
                     .filter(|p| {
-                        p.kind == "veto" && p.target == target && next.visible(p, &st, now_ms)
+                        p.kind == "veto" && p.target == target && next.visible(p, &st.recorded, now_ms, &BTreeMap::new())
                     })
                     .collect();
                 if vetoes.len() >= 8 || vetoes.iter().any(|p| !p.units.is_disjoint(&units)) {
@@ -1246,10 +1280,11 @@ fn admit_full(
                 }
                 // §14: the admission caps bound a listing at 10,368 objects. Only what is still
                 // listed counts: settled (recorded) and expired objects do not.
+                let targets = next.receipted_targets();
                 let live = next
                     .pending
                     .iter()
-                    .filter(|p| p.kind != "succession" && next.visible(p, &st, now_ms))
+                    .filter(|p| p.kind != "succession" && next.visible(p, &st.recorded, now_ms, &targets))
                     .count();
                 if live >= 10_368 {
                     return Err(Failure::Unavailable("home pending storage full".into()).into());
@@ -1278,7 +1313,7 @@ fn admit_full(
     // can store a late transition too), so `persisted()` is never stale.
     let changed = admitted_head.is_some()
         || next.pending.len() != home.pending.len()
-        || next.checkpoint != home.checkpoint;
+        || next.checkpoint_bytes != home.checkpoint_bytes;
     if changed || result.is_ok() {
         let refreshed = date(now, "home clock")
             .and_then(|now_ms| refresh_checkpoint(&mut next, admitted_head.as_deref(), now_ms));
@@ -1387,7 +1422,7 @@ fn verification_clock(p: &Persisted, now_ms: i64) -> i64 {
 }
 
 fn refresh_checkpoint(next: &mut HomeState, new_head: Option<&[u8]>, now_ms: i64) -> Result<()> {
-    let mut p = Persisted::from_bytes(&next.checkpoint)?;
+    let mut p = next.persisted()?;
     let now_ms = verification_clock(&p, now_ms);
     let before = p.objects().cloned().unwrap_or_default();
     let mut heads = before.heads.clone();
@@ -1411,7 +1446,7 @@ fn refresh_checkpoint(next: &mut HomeState, new_head: Option<&[u8]>, now_ms: i64
     let heads = kept_heads(&heads, settled, &branch);
     let pending: Vec<Vec<u8>> = next.pending.iter().map(|o| o.envelope.clone()).collect();
     if heads == before.heads && pending == before.pending {
-        next.checkpoint = p.to_bytes()?;
+        next.set_checkpoint(p.to_bytes()?);
         return Ok(());
     }
     let objects = Objects {
@@ -1429,7 +1464,7 @@ fn refresh_checkpoint(next: &mut HomeState, new_head: Option<&[u8]>, now_ms: i64
     if lower {
         rebuilt.high_water = p.high_water.clone();
     }
-    next.checkpoint = rebuilt.to_bytes()?;
+    next.set_checkpoint(rebuilt.to_bytes()?);
     Ok(())
 }
 
@@ -1520,7 +1555,7 @@ fn admit_entry(
         if verdict.stopped == Some(entry.seq)
             && verdict.state.as_ref().is_some_and(|s| s.history() == st.history())
         {
-            next.checkpoint = persisted.clone().with_stop_floor(entry.seq, None).to_bytes()?;
+            next.set_checkpoint(persisted.clone().with_stop_floor(entry.seq, None).to_bytes()?);
         }
         // The entry making a layout raise final is verified and retained. The next entry
         // will be refused by the stopped-home gate, including in the same upload.
@@ -1550,7 +1585,7 @@ fn admit_entry(
         }
     }
     objects.pending = next.pending.iter().map(|p| p.envelope.clone()).collect();
-    next.checkpoint = Persisted::checkpoint(&objects, persisted, now_ms).to_bytes()?;
+    next.set_checkpoint(Persisted::checkpoint(&objects, persisted, now_ms).to_bytes()?);
     Ok(suspend_notice(&entry, st).into_iter().collect())
 }
 
@@ -1834,7 +1869,7 @@ fn admit_candidate(
                 }
             }
         }
-        next.checkpoint = p.to_bytes()?;
+        next.set_checkpoint(p.to_bytes()?);
         return Ok(notices);
     }
     // Non-standing evidence consumes one durable slot of a current covering home; the
@@ -1849,7 +1884,7 @@ fn admit_candidate(
         }
     }
     if stored_as_evidence {
-        next.checkpoint = Persisted::checkpoint(&objects, persisted, now_ms).to_bytes()?;
+        next.set_checkpoint(Persisted::checkpoint(&objects, persisted, now_ms).to_bytes()?);
     }
     if fork.is_some() || (stored_as_evidence && forks) {
         return Err(Failure::Refused(crate::v05::Reason::Fork).into());
@@ -1999,7 +2034,7 @@ pub fn admit_predecessor(
         return Err(stop_failure(stop).into());
     }
     let mut next = home.clone();
-    next.checkpoint = Persisted::checkpoint(&objects, &persisted, now_ms).to_bytes()?;
+    next.set_checkpoint(Persisted::checkpoint(&objects, &persisted, now_ms).to_bytes()?);
     Ok(next)
 }
 
@@ -2406,4 +2441,91 @@ pub fn admit_pending_batch_notices(
     }
     results.extend(by_index.into_iter().map(|r| r.unwrap_or(Err(Refusal::Conflict))));
     Ok((next, results, receipts, notices))
+}
+
+#[cfg(test)]
+mod visible_tests {
+    use super::*;
+
+    fn object(seq: u64, digest: &str, kind: &str, target: &str, expires_ms: Option<i64>) -> PendingObject {
+        PendingObject {
+            seq,
+            digest: digest.into(),
+            kind: kind.into(),
+            envelope: Vec::new(),
+            target: target.into(),
+            units: BTreeSet::new(),
+            expires_ms,
+        }
+    }
+
+    /// The listing rule as it was first written: a receipt is looked up by a scan of every
+    /// stored object, so a pass over all of them was quadratic.
+    fn listed_by_scan(home: &HomeState, object: &PendingObject, recorded: &BTreeSet<String>, now_ms: i64) -> bool {
+        !recorded.contains(if object.kind == "receipt" {
+            home.pending
+                .iter()
+                .find(|p| p.kind != "receipt" && p.digest == object.target)
+                .map(|p| &p.target)
+                .unwrap_or(&object.target)
+        } else {
+            &object.target
+        }) && object.expires_ms.is_none_or(|end| now_ms <= end)
+    }
+
+    /// Transitions (one recorded), vetoes naming them, receipts of each, of a receipt, of an
+    /// object the home never stored, two stored objects under one digest (the first one's target
+    /// counts), and expiries on both sides of the clock: the one-pass map lists exactly what the
+    /// scan listed.
+    #[test]
+    fn the_receipted_targets_map_lists_what_the_scan_listed() {
+        let pending = vec![
+            object(1, "t1", "transition", "t1", None),
+            object(2, "t2", "transition", "t2", Some(1_000)),
+            object(3, "v1", "veto", "t1", None),
+            object(4, "v2", "veto", "t2", None),
+            object(5, "r1", "receipt", "t1", None),
+            object(6, "r2", "receipt", "t2", Some(500)),
+            object(7, "r3", "receipt", "v1", None),
+            object(8, "r4", "receipt", "v2", Some(2_000)),
+            object(9, "r5", "receipt", "unknown", None),
+            object(10, "r6", "receipt", "r1", None),
+            object(11, "d", "transition", "t1", None),
+            object(12, "d", "veto", "t2", None),
+            object(13, "r7", "receipt", "d", None),
+            object(14, "s", "succession", "g", None),
+            object(15, "r8", "receipt", "s", None),
+        ];
+        let home = HomeState {
+            version: STATE_VERSION,
+            home: String::new(),
+            checkpoint_bytes: Vec::new(),
+            next_cursor: pending.len() as u64 + 1,
+            pending,
+            facts: BTreeMap::new(),
+            drafts: BTreeMap::new(),
+            serving: Vec::new(),
+            unmatched_receipts: Vec::new(),
+            signed_heads: Vec::new(),
+            candidate_slots: BTreeMap::new(),
+            parsed: None,
+        };
+        let targets = home.receipted_targets();
+        let mut compared = 0;
+        for recorded in [vec![], vec!["t1"], vec!["t2"], vec!["t1", "t2", "unknown", "g"]] {
+            let recorded: BTreeSet<String> = recorded.into_iter().map(String::from).collect();
+            for now_ms in [0, 500, 501, 1_000, 1_001, 2_001] {
+                for o in &home.pending {
+                    assert_eq!(
+                        home.visible(o, &recorded, now_ms, &targets),
+                        listed_by_scan(&home, o, &recorded, now_ms),
+                        "{} at {now_ms} with {recorded:?}",
+                        o.digest
+                    );
+                    compared += 1;
+                }
+            }
+        }
+        assert_eq!(compared, 4 * 6 * 15);
+    }
 }

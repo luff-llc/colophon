@@ -489,7 +489,7 @@ async function serveBatch(res, slot, decisions) {
   // Include the envelope (false is longer than true), commas, and JSON path escaping.
   const envelopeBytes = Buffer.byteLength(JSON.stringify({ records: [], truncated: false }));
   let total = envelopeBytes;
-  for (const { path: p, status } of decisions) {
+  for (const { path: p, status, kind } of decisions) {
     const entry = status === 200 ? slot.current.get(p) : undefined;
     const encodedSize = entry ? Math.ceil(entry.size / 3) * 4 + Buffer.byteLength(JSON.stringify(p)) + 128 : 0;
     const refusal = !entry ? { path: p, status: status === 200 ? 404 : status }
@@ -498,7 +498,8 @@ async function serveBatch(res, slot, decisions) {
     if (total + cost > BATCH_BYTES) break;
     total += cost;
     if (refusal) { records.push(refusal); continue; }
-    const max = slot.classify(p) === 'blob' ? slot.limits.blobBytes : slot.limits.recordBytes;
+    // A home's decision names the kind (the module's grammar), so it is not asked again.
+    const max = (kind ?? slot.classify(p)) === 'blob' ? slot.limits.blobBytes : slot.limits.recordBytes;
     if (entry.size > max) throw new HttpError(500, 'Stored record exceeds its limit');
     // Indexed, so it must be there: a missing or unreadable file is a storage failure (500,
     // naming no path), never a whole-request 404. The call is spent either way.
@@ -873,7 +874,7 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
     if (s.releasing || s.released) throw notProvisioned();
     if (closing || s.closing) throw relayClosing();
     enter(s); work.slot = s;
-    if (s.home && await s.home.handle(req, res, url, section, recordPath)) return undefined;
+    if (s.home && await s.home.handle(req, res, url, section, recordPath, work)) return undefined;
     if (section === 'records' && recordPath === 'batch') {
       const body = await readBatchBody(req, url);
       let parsed;
@@ -893,7 +894,8 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
         ...(s.home ? { home: { member: s.home.key.memberId }, layouts: homeModule.call({ op: 'limits' }).layouts } : {}) });
     }
     if (section === 'changes') return serveChanges(req, res, url, s, recordPath);
-    const kind = s.classify(recordPath);
+    // A home's access decision named the record's kind already.
+    const kind = work.kind ?? s.classify(recordPath);
     if (!kind) throw new HttpError(400, 'Invalid record path');
     if (url.search) throw new HttpError(400, 'Record URLs take no query');
     if (req.method === 'GET' || req.method === 'HEAD') return serveRecord(req, res, s, recordPath);
