@@ -59,6 +59,11 @@ actor SessionWorker {
     private var medium: (any RecordMedium)?
     private var engine: ColophonEngine? { didSet { if engine == nil { memberOpened = false } } }
     private var memberCustody: KeyCustody?
+    /// The listing the engine last took (see `take(_:into:)`). Nil means the next reconcile refreshes in full.
+    private var listingBaseline: ListingBaseline?
+    /// How many reconciles handed the engine the whole listing, and how many only what changed (tests read these).
+    private(set) var fullRefreshes = 0
+    private(set) var incrementalRefreshes = 0
     private(set) var accountID: String?
     private(set) var memberID: String?
     private var journal = SessionJournalFile()
@@ -258,8 +263,17 @@ actor SessionWorker {
     }
 
     private func refresh(_ engine: ColophonEngine, listing: [ListedPath]) async throws {
+        // The engine's listing is now this one: a baseline taken earlier no longer describes it.
+        listingBaseline = nil
         let changes = try await trackInterruptedAuthorityChange(in: engine) {
             try await engine.run { try $0.refresh(listing: listing) }
+        }
+        observeAuthorityChanges(changes, from: engine)
+    }
+
+    private func applyPaths(_ engine: ColophonEngine, _ paths: [ListedPath]) async throws {
+        let changes = try await trackInterruptedAuthorityChange(in: engine) {
+            try await engine.run { try $0.applyPaths(paths: paths) }
         }
         observeAuthorityChanges(changes, from: engine)
     }
@@ -350,6 +364,8 @@ actor SessionWorker {
             identity: AccountIdentity(kind: .member, id: keyID), account: account, namespaces: configuration.libraryNamespaces,
             saved: saved, deviceKey: key, nowMs: nowMs)
         engine = opened; accountID = account
+        // Without a baseline the next reconcile refreshes in full: never a reason to fail this one.
+        listingBaseline = (try? await ListingBaseline(engine: opened, entries: entries)) ?? nil
         // A member that is not approved yet holds no keys; the records can still be read and the exchange can
         // still bring the approval in. A member opens its epoch shares in `unlockIfPossible`.
         if try await opened.run({ try $0.me() }).kind != .member { try await load(opened) }
@@ -362,9 +378,31 @@ actor SessionWorker {
         // A stopped account reads nothing new (spec §1 "A stop"): what it held when the stop was verified stays readable.
         if try await Self.isStopped(engine) { return }
         try await advance(engine, to: nowMs)
-        try await refresh(engine, listing: listed(entries))
+        try await take(entries, into: engine)
         try await persistDueWrites(engine)
         try await unlockIfPossible()
+    }
+
+    /// Hands the engine a fresh, complete listing of the medium. When the listing only adds paths or changes versions
+    /// relative to the listing the engine last took, the engine reads just those paths (`apply_paths`), which is what
+    /// a full refresh would read: it reads a listed path again only when it is new, its version changed or it is
+    /// unread. Anything else refreshes in full: a removed path, a path without a version, a listing out of path order,
+    /// unread paths the engine retries, or a path the engine reports missing that reappeared. The listing itself is
+    /// always complete, so missing, replaced and unavailable files are still found on every reconcile.
+    private func take(_ entries: [MediumEntry], into engine: ColophonEngine) async throws {
+        let baseline = listingBaseline
+        listingBaseline = nil // set again only once the engine took this listing
+        if let baseline, baseline.engine === engine, let delta = ListingBaseline.delta(from: baseline.entries, to: entries),
+           !delta.contains(where: { baseline.missing.contains($0.path) }),
+           try await engine.run({ try $0.stats() }).unreadPaths == 0 {
+            if !delta.isEmpty { try await applyPaths(engine, listed(delta)) }
+            listingBaseline = ListingBaseline(engine: engine, entries: entries, missing: baseline.missing)
+            incrementalRefreshes += 1
+            return
+        }
+        try await refresh(engine, listing: listed(entries))
+        fullRefreshes += 1
+        listingBaseline = (try? await ListingBaseline(engine: engine, entries: entries)) ?? nil
     }
 
     /// A member opens its epoch shares with its own agreement key (silent for a Secure Enclave key): at first, and
