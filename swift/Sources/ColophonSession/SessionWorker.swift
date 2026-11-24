@@ -77,9 +77,13 @@ actor SessionWorker {
     private var revision: UInt64 = 0
     private var lastRevisions: [String: UInt64] = [:]
     private var lastHead: UInt64 = 0
-    /// True while a write holds admitted operations the store does not have yet (`holdReads`).
+    /// True while a write holds operations the engine admitted and the store does not have yet (`holdReads`).
     private var unpersisted = false
-    private var readWaiters: [CheckedContinuation<Void, Never>] = []
+    /// Reads waiting for that write; each is answered whether the write was stored.
+    private var readWaiters: [UUID: CheckedContinuation<Bool, any Error>] = [:]
+    /// True inside a write's signing: a key provider that reads the session meanwhile is not held (it would wait for
+    /// the write that waits for it).
+    @TaskLocal static var signing = false
     private var lastPhase: SessionPhase = .opening
     /// True once this member opened its epoch shares (the engine then holds loaded records). Until then a
     /// refresh reopens the engine: a member that was not yet approved has nothing to refresh.
@@ -1340,18 +1344,23 @@ actor SessionWorker {
             }
             let claimedMs = claimed.map { Int64(($0.timeIntervalSince1970 * 1000).rounded(.down)) }
             let written: Written
+            do { written = try await sign(command, claimedMs: claimedMs, engine: engine, custody: custody) }
+            catch { if !Self.leavesEngineUnchanged(error) { await discard(engine) }; throw error }
+            observeAuthorityChanges(written.changes, from: engine)
+            var stored = false
             do {
-                holdReads(); defer { releaseReads() }
-                do { written = try await sign(command, claimedMs: claimedMs, engine: engine, custody: custody) }
-                catch { if !Self.leavesEngineUnchanged(error) { await discard(engine) }; throw error }
-                observeAuthorityChanges(written.changes, from: engine)
+                holdReads(); defer { releaseReads(stored: stored) }
                 try await persistWrite(written.stores)
+                stored = true
             }
             let operation = Self.operationID(in: written.stores) ?? ""
             if let ingress {
                 // Receipts only matter while an envelope can still be drained (they expire within 7 days): keep the newest few thousand.
                 if journal.ingress.count >= 4096 { journal.ingress = Dictionary(uniqueKeysWithValues: Array(journal.ingress.prefix(2048))) }
-                journal.ingress[ingress.id] = operation; try saveJournal()
+                // The write is durable: a journal that cannot be saved must not report it as failed (the envelope would stay
+                // queued and be written again). This process keeps the receipt; a relaunch before the envelope is
+                // acknowledged can still write it again.
+                journal.ingress[ingress.id] = operation; try? saveJournal()
             }
             return (.saved(operationID: operation), try await build())
         }
@@ -1369,10 +1378,10 @@ actor SessionWorker {
             let (engine, custody) = try await writable(observed: observed)
             var stores: [Store] = [], receipts: [WriteReceipt] = []
             var failure: (index: Int, error: any Error)?
-            var discarded = false
+            var discarded = false, stored = false
             do {
-                // Reads wait while the engine holds admitted operations the store does not have yet.
-                holdReads(); defer { releaseReads() }
+                // Reads wait from the first admitted command until the batch is stored or discarded.
+                defer { releaseReads(stored: stored) }
                 for (index, command) in commands.enumerated() {
                     do {
                         try validate(command)
@@ -1380,6 +1389,7 @@ actor SessionWorker {
                         if index > 0 { try await advance(engine, to: nowMs) }
                         let written = try await sign(command, claimedMs: nil, engine: engine, custody: custody)
                         observeAuthorityChanges(written.changes, from: engine)
+                        holdReads()
                         stores += written.stores
                         receipts.append(.saved(operationID: Self.operationID(in: written.stores) ?? ""))
                     } catch {
@@ -1389,6 +1399,7 @@ actor SessionWorker {
                 // Each signed command is already admitted by the engine: persist them before reporting a failure, so the
                 // engine and the store agree. A store that refuses discards the engine and nothing of the batch is durable.
                 try await persistWrite(stores)
+                stored = !stores.isEmpty
                 // A command that failed after the engine began to admit it may be held there without its stores: discard
                 // the engine, and the next operation reopens it over what is stored.
                 if let failure, !Self.leavesEngineUnchanged(failure.error) { await discard(engine); discarded = true }
@@ -1401,11 +1412,13 @@ actor SessionWorker {
         }
     }
 
-    /// Whether a failed `sign` is known to leave the engine as it was: a refusal before signing (the session's own checks,
-    /// the engine's denial). Any other failure may come after the engine began to admit the command.
+    /// Whether a failed `sign` is known to leave the engine as it was: a refusal before anything is admitted (the
+    /// session's own checks, the engine's denial or admission refusal). Any other failure may come after the engine began to admit the command.
     static func leavesEngineUnchanged(_ error: any Error) -> Bool {
         if error is SessionError { return true }
         if case ColophonError.denied = error { return true }
+        // The engine's admission refuses (a spent write budget, for one) before it admits anything.
+        if case ColophonError.refused = error { return true }
         return false
     }
     private func discard(_ target: ColophonEngine) async {
@@ -1414,37 +1427,60 @@ actor SessionWorker {
     }
 
     /// While a write holds operations the engine admitted and the store does not have yet, `query`, `view` and `ledger`
-    /// wait (they do not take the gate), so a read never shows what a failed persist would take back.
+    /// wait (they do not take the gate), so a read never shows what a refused persist would take back. Waiting starts at
+    /// the first admitted operation and ends as soon as the write is stored or discarded. Every read waiting then goes
+    /// on, so a later write never holds a read that was waiting already. A read that waited for a write that was stored
+    /// is `staleRevision`: what it would read is newer than the revision its caller observed. A read from inside the
+    /// write's signing (a key provider that reads the session) is not held.
     private func holdReads() { unpersisted = true }
-    private func releaseReads() {
+    private func releaseReads(stored: Bool) {
         unpersisted = false
-        let waiting = readWaiters; readWaiters = []
-        for waiter in waiting { waiter.resume() }
+        let waiting = readWaiters; readWaiters = [:]
+        for waiter in waiting.values { waiter.resume(returning: stored) }
     }
-    /// How many reads wait for a write to persist (for tests).
+    /// How many reads wait for a write to be stored (for tests).
     var waitingReads: Int { readWaiters.count }
-    private func readsSettled() async {
-        while unpersisted { await withCheckedContinuation { readWaiters.append($0) } }
+    private func readsSettled() async throws {
+        guard unpersisted, !Self.signing else { return }
+        let id = UUID()
+        let stored = try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (waiter: CheckedContinuation<Bool, any Error>) in
+                if Task.isCancelled { waiter.resume(throwing: CancellationError()) } else { readWaiters[id] = waiter }
+            }
+        } onCancel: {
+            Task { await self.cancelRead(id) }
+        }
+        if stored { throw SessionError.staleRevision }
     }
+    private func cancelRead(_ id: UUID) { readWaiters.removeValue(forKey: id)?.resume(throwing: CancellationError()) }
 
     /// Persists a write's stores in one all-or-none batch. A store can throw after its commit point (a folder batch that
     /// is recorded and completes on the next open): the write is then durable, and reporting it as failed would invite a
-    /// retry that writes it twice. So on a failure the stores are read back, which completes such a batch, and when every
-    /// one holds exactly these bytes the write stands. Otherwise the engine is discarded, as `persist` does, and the error
-    /// is thrown.
+    /// retry that writes it twice. So on a failure the stores are listed and read back, which completes such a batch:
+    /// when every one holds exactly these bytes the write stands. When one is missing or holds other bytes, nothing was
+    /// written: the engine is discarded, as `persist` does, and the error is thrown. When the read-back itself fails
+    /// (a file not downloaded yet, a locked device), the outcome is unknown: the engine is discarded, so the next
+    /// operation reconciles with what the store holds, and the error is `StorageError.unavailable` saying so.
     private func persistWrite(_ stores: [Store]) async throws {
         guard !stores.isEmpty else { return }
         do { try storage().write(stores.map { MediumWrite(path: $0.path, bytes: $0.bytes) }) }
         catch {
-            if (try? holds(stores)) == true { return }
+            let outcome = readBack(stores)
+            if outcome == .durable { return }
             await engine?.discard(); engine = nil
-            throw error
+            if outcome == .absent { throw error }
+            throw StorageError.unavailable("The write may have been recorded; the next refresh settles it (\(error.localizedDescription))")
         }
     }
-    private func holds(_ stores: [Store]) throws -> Bool {
-        let medium = try storage()
-        for store in stores where try medium.read(store.path) != store.bytes { return false }
-        return true
+    private enum ReadBack { case durable, absent, unknown }
+    private func readBack(_ stores: [Store]) -> ReadBack {
+        guard let medium = try? storage(), let listed = try? Set(medium.listing().map(\.path)) else { return .unknown }
+        if stores.contains(where: { !listed.contains($0.path) }) { return .absent }
+        for store in stores {
+            guard let bytes = try? medium.read(store.path) else { return .unknown }
+            if bytes != store.bytes { return .absent }
+        }
+        return .durable
     }
 
     /// Reconciles and checks a write may go ahead (inside the gate): the session is ready and `observed` is the current
@@ -1468,14 +1504,14 @@ actor SessionWorker {
     /// Signs one command through the engine, which admits it (its access, write budget and order) or refuses it.
     private func sign(_ command: DomainCommand, claimedMs: Int64?, engine: ColophonEngine, custody: KeyCustody) async throws -> Written {
         let payload = String(decoding: command.payload, as: UTF8.self)
-        return try await engine.execute(custody: custody) {
+        return try await Self.$signing.withValue(true) { try await engine.execute(custody: custody) {
             engine in try withEntropy(32) { entropy in
                 if let claimedMs {
                     return try engine.beginWriteClaimed(namespace: command.namespace, kind: command.kind, payloadJson: payload, claimedMs: claimedMs, entropy: entropy)
                 }
                 return try engine.beginWrite(namespace: command.namespace, kind: command.kind, payloadJson: payload, entropy: entropy)
             }
-        }
+        } }
     }
     /// A claimed date a write may carry: finite, no later than `now`, and within the years 0001–9999 (spec §2.2), so the
     /// conversion to milliseconds can never trap.
@@ -1495,7 +1531,7 @@ actor SessionWorker {
     }
 
     func query(namespace: String, name: String, arguments: Data) async throws -> Data {
-        await readsSettled()
+        try await readsSettled()
         guard let engine else { throw SessionError.notReady }
         let args = String(decoding: arguments, as: UTF8.self)
         let text = try await engine.run { try $0.queryJson(namespace: namespace, name: name, argsJson: args) }
@@ -1512,7 +1548,7 @@ actor SessionWorker {
     }
     /// The namespace's whole fold as the engine reports it (`view_json`), unchanged.
     func view(namespace: String) async throws -> Data {
-        await readsSettled()
+        try await readsSettled()
         guard let engine else { throw SessionError.notReady }
         return Data(try await engine.run { try $0.viewJson(namespace: namespace) }.utf8)
     }
@@ -1533,7 +1569,7 @@ actor SessionWorker {
     }
 
     func ledger() async throws -> Data {
-        await readsSettled()
+        try await readsSettled()
         guard let engine else { throw SessionError.notReady }
         return Data(try await engine.run { try $0.ledgerJson() }.utf8)
     }

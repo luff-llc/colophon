@@ -204,7 +204,11 @@ import Observation
     /// a snapshot that cannot be built afterwards is reported in `lastError` and followed by a refresh, and a session that
     /// moved to another library meanwhile still returns the receipts of the one it wrote to. The engine's clock advances
     /// before each command, as between separate writes, so a grant that expires during the batch refuses the commands
-    /// after it. Reads (`query`, `view`) wait while the batch holds signed commands that are not yet stored.
+    /// after it. Reads (`query`, `view`) made while the batch holds signed commands that are not yet stored wait until it
+    /// is stored or discarded; once it is stored they are `SessionError.staleRevision`, to be read again at the new
+    /// revision. A key provider that reads the session while it signs is not held, and sees the commands signed so far.
+    /// A store failure whose outcome cannot be read back is `StorageError.unavailable` saying the batch may have been
+    /// recorded; the next refresh shows whether it was.
     @discardableResult public func perform(_ commands: [DomainCommand], observed: ObservedRevision) async throws -> [WriteReceipt] {
         await restore()
         guard observed.context == context else { throw SessionError.destinationChanged }
