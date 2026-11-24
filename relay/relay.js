@@ -417,7 +417,12 @@ class Slot {
 
 async function ensureRealDir(dir) {
   const st = await fsp.lstat(dir).catch(() => null);
-  if (!st) { await fsp.mkdir(dir, { mode: 0o700 }).catch((e) => { if (e.code !== 'EEXIST') throw e; }); return ensureRealDir(dir); }
+  if (!st) {
+    // A new directory is a new name in its parent: durable only once the parent is synced.
+    const made = await fsp.mkdir(dir, { mode: 0o700 }).then(() => true, (e) => { if (e.code !== 'EEXIST') throw e; return false; });
+    if (made) await syncDir(path.dirname(dir));
+    return ensureRealDir(dir);
+  }
   if (st.isSymbolicLink() || !st.isDirectory()) throw new Error(`Relay storage must be a plain directory: ${dir}`);
 }
 
