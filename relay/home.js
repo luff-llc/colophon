@@ -20,11 +20,12 @@ const b64 = (bytes) => Buffer.from(bytes).toString('base64');
 const unb64 = (text) => Buffer.from(text, 'base64');
 const sha = (bytes) => createHash('sha256').update(bytes).digest('hex');
 
-/** Make a rename or a new name in `dir` durable. Not every file system syncs a directory. */
+/** Make a rename or a new name in `dir` durable. Any error is an error: what a home slot renames
+ * into place (its checkpoint above all) is acknowledged only once the rename is durable, so a
+ * file system that cannot sync a directory cannot hold a home. */
 async function syncDir(dir) {
   const handle = await fsp.open(dir, fsc.O_RDONLY);
-  try { await handle.sync(); } catch (error) { if (error.code !== 'EINVAL' && error.code !== 'EPERM') throw error; }
-  finally { await handle.close(); }
+  try { await handle.sync(); } finally { await handle.close(); }
 }
 
 // Forwarding (§13.1), per peer: each request's own time limit, a pass's wall-time budget, how many
