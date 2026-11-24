@@ -161,14 +161,16 @@ What remains is linear in the state: every call passes and parses the whole stat
 
 ## Session exchange scans and refreshes (0.5.4)
 
-The Swift session's exchange listed the folder and refreshed the engine once per home, and each
+The Swift session's exchange refreshed the engine from the folder before every home, and each
 change it brought in was reconciled twice: once by the folder watcher's refresh (the hint for its
 own writes) and again by the refresh after the pass.
 
-- One exchange lists the folder and refreshes the engine once, before its first home; later homes
-  start from what the engine holds after the earlier ones (everything they brought in was persisted
-  by the session). A change another device makes to the folder meanwhile reaches the engine through
-  the watcher. A test counts one listing for a pass with two homes (two before).
+- An exchange still lists the folder before each home, but refreshes the engine from it only before
+  the first home and, before a later home, only when the folder holds something besides what the
+  session wrote since (a revocation, fork, head or record that another device or the file provider
+  put there while an earlier home ran). A test counts two listings and no engine refresh or full
+  reconcile for the second home of a pass with nothing external, and another injects a record
+  during the first home and sees the second home receive it.
 - The session keeps a folder mark: the listing the engine last read, and the paths it has written
   since (a replaceable `state/` or `heads/` path by its digest). A watcher refresh, or the refresh
   after a pass, lists once and reconciles only when the folder holds something the engine has not

@@ -1405,6 +1405,8 @@ actor SessionWorker {
     /// Tests: refreshes that ran a full reconcile, and those answered from the mark.
     private(set) var markedReconciles = 0
     private(set) var coalescedRefreshes = 0
+    /// Tests: engine refreshes before a later home of an exchange, for a folder change made while an earlier one ran.
+    private(set) var laterHomeRefreshes = 0
     /// Whether an exchange that ended without publishing left a refresh owed to a hint it answered.
     var owesRefresh: Bool { deferredHint }
 
@@ -1502,9 +1504,9 @@ actor SessionWorker {
     func exchange(nowMsOverride: Int64? = nil) async throws -> ExchangeResult {
         exchanges += 1
         defer { exchanges -= 1 }
-        // The folder is listed and read once per exchange, not once per home: a later home starts from what the engine
-        // holds after the earlier ones (everything they brought in was persisted by this worker). A change another
-        // device makes to the folder meanwhile reaches the engine through the folder watcher's refresh.
+        // Each home starts from the folder as it is now. The engine is refreshed from it before the first home, and
+        // before a later home only when the folder holds something besides what this worker wrote since (a revocation,
+        // a fork, a head or a record another device or the file provider put there while an earlier home ran).
         var folderRead = try await gated { () -> Bool in
             guard engine == nil else { return false }
             let entries = try storage().listing()
@@ -1533,15 +1535,16 @@ actor SessionWorker {
                 continue
             }
             if let token = configured.bearerToken { _ = try await engine.run { try $0.exchangeSetBearer(home: home.id, token: token) } }
-            // The pass starts from fresh local state: the folder as listed once for this exchange, the time now.
-            let listFolder = !folderRead
+            // The pass starts from fresh local state: the folder as listed now, the time now.
+            let laterHome = folderRead
             folderRead = try await gated { () -> Bool in
                 guard self.engine === engine else { throw SessionError.destinationChanged }
-                let entries = listFolder ? try storage().listing() : nil
+                let entries = try storage().listing()
                 try await advance(engine, to: nowMs)
-                if let entries {
+                if !laterHome || !engineHasRead(entries, engine) {
                     try await refresh(engine, listing: listed(entries))
                     markRead(entries, by: engine)
+                    if laterHome { laterHomeRefreshes += 1 }
                 }
                 try await unlockIfPossible()
                 return true
