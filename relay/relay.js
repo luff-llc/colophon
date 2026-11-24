@@ -270,9 +270,14 @@ class Slot {
 
   /** Serializes mutations within the slot; reads use the in-memory index. */
   async exclusive(fn) {
-    if (this.closing || this.released) throw new HttpError(503, 'Relay is closing');
+    // At shutdown no new request is admitted, and the work already admitted on the slot (a
+    // request, a scheduler pass) finishes its file work: a checkpoint already committed is not
+    // left without its files, nor answered 503. Anything else is refused once the slot closes,
+    // and everything once it is being released after its work drained.
+    const refused = () => this.released || (this.closing && (this.releasing || !this.active));
+    if (refused()) throw new HttpError(503, 'Relay is closing');
     const execute = () => {
-      if (this.closing || this.released) throw new HttpError(503, 'Relay is closing');
+      if (refused()) throw new HttpError(503, 'Relay is closing');
       return fn();
     };
     const run = this.chain.then(execute, execute);
@@ -458,7 +463,7 @@ function readBody(req, max) {
  * Creates the relay. `libraries` maps slot names to `{ tokenSha256 }`, `{ token }` or
  * `{ open: true }` (no bearer token; local testing only).
  */
-export async function createRelay({ dataDir, libraries, limits = {}, home, clock = Date.now, resolve, tickMs = 0, tracing = false, cors, provision, clientAddress: addressConfig, crashAt, hook }) {
+export async function createRelay({ dataDir, libraries, limits = {}, home, clock = Date.now, resolve, tickMs = 0, tracing = false, cors, provision, clientAddress: addressConfig, crashAt, hook, drainMs = DRAIN_MS }) {
   if (!dataDir) throw new Error('dataDir is required');
   if (cors !== undefined && cors !== null && (typeof cors !== 'object' || Array.isArray(cors))) throw new Error('cors must be an object with origins, an array of origins');
   const origins = corsOrigins(cors?.origins);
@@ -543,8 +548,10 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
   const slots = new Map();
   const opening = new Map();
   const notProvisioned = () => new HttpError(404, 'Not provisioned', {}, { result: 'refused:notProvisioned' });
+  // Shutdown, unlike a release, says nothing about the slot: the request may be retried.
+  const relayClosing = () => new HttpError(503, 'Relay is closing', { 'retry-after': '1' });
   async function slot(name) {
-    if (closing) throw new HttpError(503, 'Relay is closing');
+    if (closing) throw relayClosing();
     if (slots.has(name)) return slots.get(name);
     // Never opened for a name this relay does not hold (a released slot is not reopened).
     if (!homeSlots.has(name) && !auth.has(name)) throw notProvisioned();
@@ -749,7 +756,9 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
         await reach('provision written');
         if (reserve) await provisionReplay.complete(reserve.key, 'completed');
         homeSlots.set(asked.slot, { base: asked.base, account: asked.account });
-        await slot(asked.slot);
+        // The row is durable: a shutdown that began meanwhile leaves the slot to open at the next
+        // start, and the request is answered, not refused after its effect.
+        await slot(asked.slot).catch((error) => { if (!closing) throw error; });
         return request;
       };
       if (!session) return decide(undefined);
@@ -760,7 +769,7 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
   }
 
   async function handle(req, res, work) {
-    if (closing) throw new HttpError(503, 'Relay is closing');
+    if (closing) throw relayClosing();
     const url = new URL(req.url, 'http://relay.invalid');
     if (url.pathname === '/healthz' && req.method === 'GET') return send(res, 200, { ok: true });
     if (provisioning.enabled && url.pathname === '/v1/provision') return door(req, res);
@@ -776,7 +785,8 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
     if (!homeSlots.has(name)) authorize(req, name);
     const s = await slot(name);
     // Counted from here until the response has ended and this handler has settled.
-    if (closing || s.closing || s.releasing || s.released) throw notProvisioned();
+    if (s.releasing || s.released) throw notProvisioned();
+    if (closing || s.closing) throw relayClosing();
     enter(s); work.slot = s;
     if (s.home && await s.home.handle(req, res, url, section, recordPath)) return undefined;
     if (section === 'records' && recordPath === 'batch') {
@@ -902,11 +912,16 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
     const deadline = Date.now() + wait * 1000;
     const changed = () => Boolean(judged) && s.home.commits !== judged.commits;
     while (page.entries.length === 0 && Date.now() < deadline && !changed()) {
+      // Checked right before registering (nothing in between waits): a release or a shutdown
+      // that began meanwhile has already woken every waiter, and would not wake this one.
+      if (s.releasing || s.released) throw notProvisioned();
+      if (s.closing) throw relayClosing();
       const waiting = s.waitForEntry(deadline - Date.now(), res, namespaces);
       await reach('changes waiting'); // a test hook (traced builds only)
       await waiting;
       if (res.destroyed) return undefined;
-      if (s.closing || s.releasing) throw notProvisioned(); // woken by a release or shutdown
+      if (s.releasing) throw notProvisioned(); // woken by a release
+      if (s.closing) throw relayClosing(); // woken by shutdown: retry elsewhere or later
       if (changed()) break;
       page = s.changes(page.cursor, limit, namespaces);
     }
@@ -954,23 +969,33 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
     if (closePromise) return closePromise;
     closing = true;
     if (timer) clearInterval(timer);
-    for (const s of slots.values()) { s.closing = true; for (const waiter of [...s.waiters]) waiter.wake(); }
+    for (const s of slots.values()) {
+      s.closing = true;
+      s.home?.stop();
+      for (const waiter of [...s.waiters]) waiter.wake();
+    }
     const drain = async () => {
       await Promise.allSettled([...requests, ...opening.values(), provisionTail]);
-      await Promise.all([...slots.values()].map(async (s) => { await drained(s); await s.chain; }));
+      // Then each home's own work no request carries (forwarding, its saves, queued lock work).
+      await Promise.all([...slots.values()].map(async (s) => { await drained(s); await s.home?.quiesce(); await s.chain; }));
       await unlock();
     };
-    closePromise = boundedDrain(drain());
+    closePromise = boundedDrain(drain(), drainMs);
     return closePromise;
   } };
   } catch (error) { await unlock(true); throw error; }
 }
 
+/** How long shutdown waits for work in flight: under the 10 s Docker gives a container to stop
+ * by default (docker-compose.yml gives 15 s), with time left to exit. A forwarding pass's waits
+ * on other homes are cut at once; what remains is local commits and requests in flight. */
+export const DRAIN_MS = 8_000;
+
 // The lock stays held until writes settle, even after the shutdown deadline expires.
-function boundedDrain(work) {
+function boundedDrain(work, ms = DRAIN_MS) {
   let timer;
   return Promise.race([work, new Promise((_, reject) => {
-    timer = setTimeout(() => reject(new Error('Relay shutdown timed out draining writes')), 5000);
+    timer = setTimeout(() => reject(new Error('Relay shutdown timed out draining writes')), ms);
   })]).finally(() => clearTimeout(timer));
 }
 

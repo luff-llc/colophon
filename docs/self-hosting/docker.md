@@ -148,7 +148,11 @@ and refuse to start, every time. The entry point therefore keeps a lock of its o
 - A second container started on the same volume exits at once (status 2), saying another
   container holds it.
 - After a clean stop (SIGTERM, as `docker stop` sends) the lock is released, and the next start
-  is immediate. `docker stop` took about 0.4 s in testing.
+  is immediate. `docker stop` took about 0.4 s in testing. On SIGTERM the relay stops taking
+  requests (503 with `Retry-After: 1`, long polls included), cuts its calls to other homes
+  short, and waits up to 8 seconds for what is in flight: requests, forwarding passes and
+  their saved state, and the slot's queued writes. Give the container at least 10 seconds to
+  stop (Docker's default; the Compose file gives 15).
 - After an unclean stop, a start is refused until the lock is stale. Then the lock is taken
   over, and the dead container's relay lock is removed. The same container restarted (same host
   name) waits for two missed updates, 11 seconds; a different container waits 30 seconds. With

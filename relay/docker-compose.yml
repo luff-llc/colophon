@@ -7,7 +7,7 @@ services:
   colophon-home:
     image: colophon-home:dev   # built with: docker build -f relay/Dockerfile -t colophon-home:dev .
     restart: unless-stopped
-    # Ten seconds is Docker's default; the relay drains for at most five.
+    # Ten seconds is Docker's default; the relay drains for at most eight, then exits.
     stop_grace_period: 15s
     ports:
       # Publish on loopback and put a TLS reverse proxy in front; clients need https.
