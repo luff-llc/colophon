@@ -4,6 +4,9 @@ cd "$(dirname "$0")/.."
 export PATH="/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:$PATH"
 # Prerequisites: JDK 17, Android command-line SDK + NDK, cargo-ndk, and these Rust targets.
 # ANDROID_HOME / ANDROID_NDK_HOME default to the machine's installed SDK when present.
+if [[ -z "${ANDROID_HOME:-}" && -n "${ANDROID_SDK_ROOT:-}" ]]; then
+  export ANDROID_HOME="$ANDROID_SDK_ROOT"
+fi
 if [[ -z "${ANDROID_HOME:-}" ]]; then
   for sdk in "$HOME/Library/Android/sdk" "$HOME/Android/Sdk"; do
     if [[ -d "$sdk" ]]; then export ANDROID_HOME="$sdk"; break; fi
@@ -21,6 +24,10 @@ if [[ -z "${ANDROID_NDK_HOME:-}" ]]; then
 fi
 if [[ -z "${JAVA_HOME:-}" && -d /opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home ]]; then
   export JAVA_HOME=/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home
+fi
+if [[ -z "${JAVA_HOME:-}" && -x /usr/libexec/java_home ]]; then
+  java_home=$(/usr/libexec/java_home -v 17 2>/dev/null || true)
+  if [[ -n "$java_home" ]]; then export JAVA_HOME="$java_home"; fi
 fi
 # Homebrew's opt prefix points at bin/java but is not a JDK home. Gradle needs the release file.
 if [[ -n "${JAVA_HOME:-}" && ! -f "$JAVA_HOME/release" && -f "$JAVA_HOME/libexec/openjdk.jdk/Contents/Home/release" ]]; then
@@ -55,9 +62,13 @@ if [[ ! -f "$aar_src" ]]; then
   exit 1
 fi
 mkdir -p sdk/android/build
-cp "$aar_src" sdk/android/build/colophon-android-0.3.0.aar
-# Keep a stable name matching earlier packaging docs.
-cp sdk/android/build/colophon-android-0.3.0.aar sdk/android/build/colophon-0.3.0.aar
-echo "Built sdk/android/build/colophon-android-0.3.0.aar"
-unzip -l sdk/android/build/colophon-android-0.3.0.aar | sed -n '1,80p'
+# The Android project declares its own package version (it does not read Cargo.toml).
+version=$(sed -nE 's/^[[:space:]]*version[[:space:]]*=[[:space:]]*"([^"[:space:]]+)"[[:space:]]*$/\1/p' sdk/android/build.gradle.kts)
+[[ -n "$version" && "$version" != *$'\n'* && "$version" != *'/'* ]] || { echo 'Cannot read Android package version' >&2; exit 1; }
+aar="sdk/android/build/colophon-android-$version.aar"
+cp "$aar_src" "$aar"
+# Keep the compatibility alias used by earlier packaging docs.
+cp "$aar" "sdk/android/build/colophon-$version.aar"
+echo "Built $aar"
+unzip -l "$aar" | sed -n '1,80p'
 echo 'App dependencies: org.jetbrains.kotlin:kotlin-stdlib:2.2.21, net.java.dev.jna:jna:5.18.1@aar, org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2'

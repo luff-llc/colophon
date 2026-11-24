@@ -25,23 +25,28 @@ home's `503 {"result":"unavailable"}`; `HomeProblem.WaitingForApproval` for a jo
 
 **A namespace this member was never granted.** A session is `denied` only when its own member has lost access it was
 granted, never because the library declares namespaces this member was never granted (`libraryNamespaces` wider than
-`namespaces`). For each namespace in `libraryNamespaces` the session asks the engine's `access`: no denial, the namespace
-is readable; `notReadable` or `unavailable`, the phase is `unavailable(reason)`; `notGranted` for a namespace that the
-member's verified grant (`me().member.grant.namespaces`) does not name, while the member is not provisional, is not this
-member's namespace and is skipped (neither denied nor published); anything else (`revoked`, `expired`, `budgetSpent`,
-`notGranted` while provisional or on a granted namespace) is `denied`. Revisions are published only for the library
-namespaces whose `access` has no denial. Tests: `LibraryNamespacesTests` and `GrantedNamespacesTests` (Swift), `LibraryNamespacesTest` and
-`GrantedNamespacesTest` (Kotlin), `library-namespaces.test.ts` and `granted-namespaces.test.ts` (JS).
+`namespaces`). The member itself is judged first, as the core judges a member current (spec §10.1): a member that is
+missing, revoked, provisional or expired (its expiry is inclusive: expired only once the time is past it) is `denied`
+before any namespace is asked about, so a service or identity-only member, or one whose grant shares no namespace with
+`libraryNamespaces`, is `denied` too and never `ready`. Then, for each namespace in `libraryNamespaces`, the session asks
+the engine's `access`: no denial, the namespace is readable; `notReadable` or `unavailable`, the phase is
+`unavailable(reason)`; `notGranted` for a namespace that the member's verified grant (`me().member.grant.namespaces`)
+does not name is not this member's namespace and is skipped (neither denied nor published); anything else (`revoked`,
+`expired`, `budgetSpent`, `notGranted` on a granted namespace, or a reason the SDK does not know) is `denied`. Revisions
+are published only for the library namespaces whose `access` has no denial. Tests: `LibraryNamespacesTests`,
+`GrantedNamespacesTests` and `MemberReadinessTests` (Swift), `LibraryNamespacesTest`, `GrantedNamespacesTest` and
+`MemberReadinessTest` (Kotlin), `library-namespaces.test.ts`, `granted-namespaces.test.ts` and
+`member-readiness.test.ts` (JS).
 
 ## Adopting it in an Android app
 
 Build the AAR (`bash scripts/build-android.sh`: the release library for `arm64-v8a` and `x86_64` with cargo-ndk, the
-bindings, then `assembleRelease`; the artefact is `sdk/android/build/colophon-android-0.3.0.aar`, the script's old
-name) and add it with its runtime:
+bindings, then `assembleRelease`; the artefact is `sdk/android/build/colophon-android-<version>.aar`, named from the
+`version` in `sdk/android/build.gradle.kts`, with a `colophon-<version>.aar` copy) and add it with its runtime:
 
 ```kotlin
 dependencies {
-    implementation(files("libs/colophon-android-0.3.0.aar"))
+    implementation(files("libs/colophon-android-<version>.aar")) // the name the script printed
     implementation("org.jetbrains.kotlin:kotlin-stdlib:2.2.21")
     implementation("net.java.dev.jna:jna:5.18.1@aar")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
@@ -222,7 +227,8 @@ export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/30.0.16248370"
 bash scripts/build-android.sh
 ```
 
-The artifact is `sdk/android/build/colophon-android-0.3.0.aar`.
+The artifact is `sdk/android/build/colophon-android-<version>.aar`, where `<version>` is the `version` declared in
+`sdk/android/build.gradle.kts` (`0.6.0-dev` on `main`); the script prints the path it wrote.
 
 ### Add the AAR to an app
 
@@ -231,7 +237,7 @@ UniFFI/JNA runtime that a local AAR does not carry:
 
 ```kotlin
 dependencies {
-    implementation(files("libs/colophon-android-0.3.0.aar"))
+    implementation(files("libs/colophon-android-<version>.aar")) // the name the script printed
     implementation("org.jetbrains.kotlin:kotlin-stdlib:2.2.21")
     implementation("net.java.dev.jna:jna:5.18.1@aar")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")

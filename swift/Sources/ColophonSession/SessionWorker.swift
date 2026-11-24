@@ -25,6 +25,27 @@ struct SessionSnapshot: Sendable {
     var usable: Bool { [.ready, .refreshing, .waitingForDownload, .retry].contains(phase) || phase.isStopped }
 }
 
+/// A member's readiness, judged as the core judges a member current (spec §10.1): a member that is missing, revoked,
+/// provisional or past its expiry (inclusive: denied only once `nowMs > expiresMs`) is `denied` before any namespace is
+/// asked about, so a service or identity-only grant, or one with no namespace in `namespaces`, cannot come out `ready`.
+/// Then each library namespace: a `notGranted` one its verified grant does not name is skipped (a wider library, or an
+/// approval that narrowed the request, is not a loss of access); a missing epoch key is `unavailable`; any other
+/// reason, including one this SDK does not know, is `denied`.
+func memberReadiness(_ member: AccountMember?, nowMs: Int64, namespaces: [String],
+                     isolation: isolated (any Actor)? = #isolation,
+                     access: (String) async throws -> AccountDenial?) async rethrows -> (phase: SessionPhase, readable: [String]) {
+    guard let member, member.revokedAt == nil, !member.provisional,
+          member.expiresMs.map({ nowMs <= $0 }) ?? true else { return (.denied, []) }
+    let granted = member.grant?.namespaces ?? []
+    var readable: [String] = []
+    for namespace in namespaces {
+        guard let denial = try await access(namespace) else { readable.append(namespace); continue }
+        if denial.reason == .notGranted, !granted.contains(namespace) { continue }
+        return ([.notReadable, .unavailable].contains(denial.reason) ? .unavailable(reason: denial.detail) : .denied, [])
+    }
+    return (.ready, readable)
+}
+
 /// A refusal that carries the fresh snapshot so the facade shows what the person must now see.
 struct SessionRefusal: Error { let snapshot: SessionSnapshot; let error: SessionError }
 
@@ -434,22 +455,11 @@ actor SessionWorker {
         case .controller:
             phase = .failed(error: .other(detail: "this identity is a controller, not a member"))
         case .member:
-            if standing.member?.revokedAt != nil { phase = .denied }
-            else {
-                // Denied only when this member lost access it was granted, never for a library namespace it was never
-                // granted (`libraryNamespaces` wider than its grant, or an approval that narrowed its request):
-                // `notGranted` on a namespace its verified grant does not name, while it is not provisional, is skipped
-                // (neither denied nor published).
-                phase = .ready
-                let granted = standing.member?.grant?.namespaces ?? []
-                let provisional = standing.member?.provisional ?? false
-                for namespace in configuration.libraryNamespaces {
-                    guard let denial = try await engine.run({ try $0.access(namespace: namespace) }) else { readable.append(namespace); continue }
-                    if denial.reason == .notGranted, !provisional, !granted.contains(namespace) { continue }
-                    phase = [.notReadable, .unavailable].contains(denial.reason) ? .unavailable(reason: denial.detail) : .denied
-                    break
-                }
+            let readiness = try await memberReadiness(standing.member, nowMs: nowMs, namespaces: configuration.libraryNamespaces) { namespace in
+                try await engine.run { try $0.access(namespace: namespace) }
             }
+            phase = readiness.phase
+            readable = readiness.readable
         }
         var revisions: [String: UInt64] = [:]
         if phase == .ready { for r in try await engine.run({ try $0.revisions() }) where readable.contains(r.namespace) { revisions[r.namespace] = r.revision } }
