@@ -290,7 +290,9 @@ describe('the cell host', () => {
     r.close();
   });
 
-  // The receiver's side of revocation, at unit level: the end-to-end test shows the same over the home's wire.
+  // The receiver's side of revocation, at unit level (the end-to-end test shows it over the home's wire): a frame the
+  // member sealed under the old head, arriving after the receiver installed the new one. The frame is taken before the
+  // revocation because the member's own session follows the shared store and would stop sending once it sees it.
   test('after a new head that removes a member, its frames are dropped and change nothing', async () => {
     const r = await pair();
     const third = await Device.make({ medium: first.medium, namespaces: [NS] });
@@ -300,18 +302,108 @@ describe('the cell host', () => {
     await second.session.refresh();
     const thirdHost = await SessionCellHost.open({ account: accountOf(third.session), carrier: r.carrier.for(), namespace: NS, cell: CELL, store: new TestStore(), clock: r.clock });
     await settle();
+    r.carrier.paused = true;
+    await thirdHost.command('presence', { command: 'presence', payload: btoa('{"label":"Old phone"}') });
+    const sealed = r.carrier.carried.filter(c => c.from === thirdHost).pop();
+    expect(sealed).toBeDefined();
+    thirdHost.close();
     await first.session.revoke(third.session.memberId!);
     await second.session.refresh();
     r.b.accountChanged();
     await settle();
-    const drops = r.b.stats.drops;
+    expect(r.logs.b.some(e => e.type === 'account')).toBe(true);
+    const mark = r.logs.b.length;
     const view = r.b.current!.view_json();
-    await thirdHost.command('presence', { command: 'presence', payload: btoa('{"label":"Old phone"}') });
+    r.b.deliver(sealed!.frame);
     await settle();
-    expect(r.b.stats.drops).toBeGreaterThan(drops);
+    const judged = r.logs.b.slice(mark).filter(e => e.type === 'drop' || e.type === 'queued' || e.type === 'missed' || e.type === 'session');
+    expect(judged.map(e => e.type)).toEqual(['drop']);
     expect(r.b.current!.view_json()).toBe(view);
-    expect(r.logs.b.some(e => e.type === 'session' && e.event.event === 'presenceChanged' && e.event.member === third.session.memberId)).toBe(false);
-    thirdHost.close(); third.close();
+    third.close();
+    r.close();
+  });
+
+  test('inputs run in admission order: command, frame, command admitted from a listener run in that order', async () => {
+    const r = await pair();
+    await r.a.command('take', { command: 'take', state: null });
+    await settle();
+    // A frame from B, held back by the carrier so the test decides when it is delivered.
+    r.carrier.paused = true;
+    await r.b.command('presence', { command: 'presence', payload: btoa('{"label":"Hall"}') });
+    const frame = r.carrier.carried[r.carrier.carried.length - 1]!.frame;
+    let fired = false;
+    r.a.on(e => {
+      if (fired || e.type !== 'sent' || e.kind !== 'presence') return;
+      fired = true;
+      void r.a.command('publish', { command: 'publish', id: 'AAAAAAAAAAAAAAAAAAAAAA', payload: btoa('1') });
+      r.a.deliver(frame);
+      void r.a.command('publish', { command: 'publish', id: 'AQAAAAAAAAAAAAAAAAAAAA', payload: btoa('2') });
+    });
+    const mark = r.logs.a.length;
+    await r.a.command('presence', { command: 'presence', payload: btoa('{"label":"Desk"}') });
+    await settle();
+    const order = r.logs.a.slice(mark).map(shape).filter(x => x === 'sent:msg' || x === 'event:presenceChanged');
+    expect(order).toEqual(['sent:msg', 'event:presenceChanged', 'sent:msg']);
+    r.close();
+  });
+
+  test('behind a write: a held command keeps its place among commands; a later frame runs at the acknowledgement', async () => {
+    const r = await pair();
+    r.carrier.paused = true;
+    await r.b.command('presence', { command: 'presence', payload: btoa('{"label":"Hall"}') });
+    const frame = r.carrier.carried[r.carrier.carried.length - 1]!.frame;
+    r.stores.a.hold = true;
+    await r.a.command('take', { command: 'take', state: null });
+    const mark = r.logs.a.length;
+    const one = r.a.command('publish', { command: 'publish', id: 'AAAAAAAAAAAAAAAAAAAAAA', payload: btoa('1') });
+    r.a.deliver(frame);
+    const two = r.a.command('publish', { command: 'publish', id: 'AQAAAAAAAAAAAAAAAAAAAA', payload: btoa('2') });
+    await settle();
+    r.stores.a.release();
+    await one; await two;
+    await settle();
+    const order = r.logs.a.slice(mark).map(shape).filter(x => ['commandHeld', 'queued', 'persist:stored', 'event:becameHolder', 'event:presenceChanged', 'sent:msg'].includes(x));
+    expect(order).toEqual(['commandHeld', 'queued', 'persist:stored', 'event:becameHolder', 'event:presenceChanged', 'sent:msg', 'sent:msg']);
+    r.close();
+  });
+
+  test('a write that never settles counts as failed at its deadline, and the cell fails after the attempts', async () => {
+    const clock = new ManualClock();
+    const r = await pair(clock, { persistAttempts: 3, persistTimeoutMs: 1_000 });
+    (r.a as unknown as { store: { save(): Promise<void> } }).store = { save: () => new Promise<void>(() => {}) } as never;
+    await r.a.command('take', { command: 'take', state: null });
+    await settle();
+    await clock.advance(999);
+    expect(r.logs.a.filter(e => e.type === 'persist' && e.phase === 'failed').length).toBe(0);
+    await clock.advance(1);
+    expect(r.logs.a.filter(e => e.type === 'persist' && e.phase === 'failed').map(e => ((e as { error: { code: string } }).error).code)).toEqual(['timeout']);
+    await clock.advance(250 + 1_000 + 250 + 1_000);
+    expect(r.logs.a.some(e => e.type === 'failed' && e.reason === 'store')).toBe(true);
+    expect(r.logs.a.some(e => e.type === 'sent' && e.kind === 'take')).toBe(false);
+    r.close();
+  });
+
+  test('a write that succeeds after its deadline is not acknowledged; the retry is', async () => {
+    const clock = new ManualClock();
+    const r = await pair(clock, { persistTimeoutMs: 1_000 });
+    let late: () => void = () => {};
+    let saves = 0;
+    (r.a as unknown as { store: unknown }).store = {
+      load: async () => undefined,
+      save: () => { saves++; return saves === 1 ? new Promise<void>(resolve => { late = resolve; }) : Promise.resolve(); },
+    };
+    await r.a.command('take', { command: 'take', state: null });
+    await settle();
+    await clock.advance(1_000 + 250);
+    const stored = (): number => r.logs.a.filter(e => e.type === 'persist' && e.phase === 'stored').length;
+    expect(saves).toBe(2);
+    expect(stored()).toBe(1);
+    expect(r.logs.a.filter(e => e.type === 'sent' && e.kind === 'take').length).toBe(1);
+    const before = r.logs.a.length;
+    late();
+    await settle();
+    expect(stored()).toBe(1);
+    expect(r.logs.a.slice(before).filter(e => e.type === 'persist')).toEqual([]);
     r.close();
   });
 });

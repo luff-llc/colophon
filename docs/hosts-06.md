@@ -60,12 +60,22 @@ jobs, so nothing a listener, store, socket or timer does can re-enter the endpoi
   (`sent`, or `unsent` with reason `carrier` when it is down), `Event` to the application, `Persist`
   to the store, `Unsent` reported with its code. Drops and `discarded` are reported, never dropped
   silently.
+- **Order.** Every input takes its place in the queue when it is admitted (a command when
+  `command` is called, a frame when it is delivered), and inputs run in that order. One exception
+  follows from the reference loop: a command the endpoint refuses with `session:persistPending` is
+  held, and every command admitted after it is held behind it, in order, until the write completes;
+  frames, ticks and link changes admitted meanwhile still go to the endpoint, which keeps them behind
+  the `Persist` and runs them at the acknowledgement, so they run before the held commands. Among
+  commands the admission order is never changed.
 - A `Persist` is acknowledged with `persisted(id)` only when its `save` resolved, as a later job.
-  The write is marked in progress before any store code runs. A failed save is retried after
-  `persistRetryMs` and never acknowledged. Only the completed save becomes the claim a new endpoint
+  The write is marked in progress before any store code runs. A save that fails, or does not settle
+  within `persistTimeoutMs` (default 10 s), is a failed attempt: it is retried after
+  `persistRetryMs` and never acknowledged, and an overdue save that completes later acknowledges
+  nothing (the retry saves the same claim). So the `ClaimStore` contract is: saving the same claim
+  twice is harmless, and the last save called wins over an earlier one that completes late. Only the completed save becomes the claim a new endpoint
   starts from.
-- **A store that keeps failing fails the cell.** After `persistAttempts` consecutive failures of one
-  write (default 20, about five seconds) the host stops acting: its endpoint is freed, it is detached
+- **A store that keeps failing fails the cell.** After `persistAttempts` consecutive failed or
+  overdue attempts of one write (default 20) the host stops acting: its endpoint is freed, it is detached
   from the carrier and sends nothing more, every held and new command is refused (`CellHostError`
   `failed`), and it reports `failed` with reason `store`. To the other members it is a member that
   went quiet: its role lapses to them. An application opens a new host once storage works again,
@@ -127,6 +137,10 @@ relay's home module, typecheck strictly and run `bun test test06`:
   waiting for the write in progress and starting from the claim it stored; an `open` whose
   delegation cannot be signed leaving nothing attached; a failed rebuild refusing held and new
   commands; a store that keeps failing failing the cell; bounded command admission keeping order;
+  a command, a frame and a command admitted from a listener running in exactly that order, and
+  behind a write the held commands keeping their order with the frame run at the acknowledgement;
+  a save that never settles counted as failed at its deadline until the cell fails; a save that
+  succeeds after its deadline acknowledging nothing while its retry is acknowledged once;
   and, at unit level, a revoked member's frames dropped by a member holding the new head.
 - `conformance.test.ts`: through `colophon-conformance-wasm`, every machine transcript in
   `conformance/0.6-sessions/` (26), the 9 `offset.json` cases, and `wire/vectors.json` (19 frames,
