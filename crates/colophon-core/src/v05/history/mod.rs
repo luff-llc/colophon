@@ -213,6 +213,12 @@ impl Persisted {
         self.checkpoint.as_ref().and_then(|cp| cp.stopped)
     }
 
+    /// The earliest clock reading at which a candidate held beside a valid one is judged again
+    /// (§8.1, [`Verdict::held_until`]), as the checkpoint carries it.
+    pub fn held_until(&self) -> Option<i64> {
+        self.checkpoint.as_ref().and_then(|cp| cp.held_until)
+    }
+
     /// Whether this verifier saw its account's succession verified (§15.1).
     pub fn succession_verified(&self) -> bool {
         self.succession_verified
@@ -298,12 +304,21 @@ impl Persisted {
                     .last()
                     .map(|d| (verdict.branch.len() as u64, d.clone()))
             });
+        // A resumed fold is this build's when the fold it resumed was, except a successor's: its
+        // succession is judged at the clock of the fold that finished it (fresh heads, §15.1) and
+        // kept as it was when resumed, which a replay at this later clock need not give.
+        let inherits = previous.folded_here
+            && previous
+                .checkpoint
+                .as_ref()
+                .and_then(|cp| cp.state.as_ref())
+                .is_none_or(|s| s.succession.is_none());
         Self {
             high_water: high_water.clone(),
             head_marks: previous.head_marks.clone(),
             succession_verified: previous.succession_verified,
             stop_floor: previous.stop_floor,
-            folded_here: !resumed || previous.folded_here,
+            folded_here: !resumed || inherits,
             checkpoint: Some(Checkpoint {
                 version: CHECKPOINT_VERSION,
                 now_ms,
@@ -396,7 +411,7 @@ impl Persisted {
 
     /// Whether this build's verifier folded the checkpoint's state from the genesis of its own
     /// objects ([`FOLD_RULES`]), directly or by resuming a checkpoint that it folded. Clear for
-    /// a checkpoint read from bytes, until [`Persisted::verified_again`] or a host's own proof
+    /// a checkpoint read from bytes, until [`Persisted::verified_from`] or a host's own proof
     /// for those exact bytes says otherwise.
     pub fn folded_here(&self) -> bool {
         self.folded_here
@@ -422,27 +437,27 @@ impl Persisted {
         self.folded_here = true;
     }
 
-    /// This checkpoint, taken as this build's fold, when it was read from `stored` and a replay
-    /// of its own objects from genesis at the checkpoint's clock, with the same local memory
-    /// (high-water mark, head marks, succession flag, stop floor), serializes to exactly `stored`,
-    /// byte for byte. `None` when it holds no fold or anything differs: a fold an older verifier
-    /// made under other rules, or the same checkpoint written in another form (other spacing or
-    /// key order, a field this build does not read).
-    pub fn verified_again(&self, stored: &[u8]) -> Option<Self> {
-        let cp = self.checkpoint.as_ref()?;
+    /// The checkpoint `stored` holds, taken as this build's fold, when a replay of its own objects
+    /// from genesis at the checkpoint's clock, with the same local memory (high-water mark, head
+    /// marks, succession flag, stop floor), serializes to exactly `stored`, byte for byte. `None`
+    /// when the bytes do not read, hold no fold, or anything differs: a fold an older verifier made
+    /// under other rules, or the same checkpoint written in another form (other spacing or key
+    /// order, a field this build does not read). What it returns is read from `stored` itself.
+    pub fn verified_from(stored: &[u8]) -> Option<Self> {
+        let mut read = Self::from_bytes(stored).ok()?;
+        let cp = read.checkpoint.as_ref()?;
         let memory = Self {
-            head_marks: self.head_marks.clone(),
-            succession_verified: self.succession_verified,
-            stop_floor: self.stop_floor,
+            head_marks: read.head_marks.clone(),
+            succession_verified: read.succession_verified,
+            stop_floor: read.stop_floor,
             ..Self::default()
         };
         let mut again = Self::checkpoint(&cp.objects, &memory, cp.now_ms);
-        again.high_water = self.high_water.clone();
+        again.high_water = read.high_water.clone();
         let same = again.folded_here && again.to_bytes().is_ok_and(|a| a == stored);
         same.then(|| {
-            let mut vouched = self.clone();
-            vouched.folded_here = true;
-            vouched
+            read.folded_here = true;
+            read
         })
     }
 }

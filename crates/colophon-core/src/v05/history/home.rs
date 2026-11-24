@@ -367,16 +367,15 @@ impl HomeState {
         }
         self.fold_vouched()
     }
-    /// Verify the checkpoint again from genesis ([`Persisted::verified_again`]) and, when the
+    /// Verify the checkpoint again from genesis ([`Persisted::verified_from`]) and, when the
     /// replay serializes to exactly the bytes held, take it as this build's fold. The checkpoint
     /// is left as it is. Returns whether the fold is now taken as this build's.
     pub fn verify_fold(&mut self) -> Result<bool> {
         if self.fold_vouched() {
             return Ok(true);
         }
-        let again = self.persisted()?.verified_again(&self.checkpoint_bytes);
-        if let (Some(_), Some(p)) = (again, &mut self.parsed) {
-            p.assume_folded_here();
+        if let Some(p) = Persisted::verified_from(&self.checkpoint_bytes) {
+            self.parsed = Some(p);
         }
         Ok(self.fold_vouched())
     }
@@ -405,20 +404,22 @@ impl HomeState {
     /// [`HomeState::verified_history`] for deciding who may do what (a call, a principal's
     /// standing): the saved fold answers only where it is this build's own
     /// ([`HomeState::fold_vouched`]) and [`verify_history`] answers from it alone
-    /// ([`super::resumes_unchanged`]), where its verdict is a replay's. Everywhere else the verdict
-    /// is a replay of the held objects from genesis, resuming nothing saved; the home's stop floor
-    /// is kept as in `verified_history`. Returns the checkpoint too.
+    /// ([`super::resumes_unchanged`]), where its verdict is a replay's at `now_ms`. Everywhere else
+    /// the verdict is a replay of the held objects from genesis at `now_ms` itself, resuming nothing
+    /// saved. A stop is never lifted by it: the home's stop floor stops it, and so does a stop the
+    /// checkpoint recorded that the replay at this clock does not find (it may need a later clock
+    /// to find it again), so that a later clock never authorizes anything here.
     pub fn authorized_history(&self, now_ms: i64) -> Result<(Persisted, Verdict)> {
         let p = self.persisted()?;
-        let clock = verification_clock(&p, now_ms);
         let none = Objects::default();
-        let mut v = if p.folded_here() && super::resumes_unchanged(&none, &p, clock) {
-            verify_history(&none, &p, clock)
+        let mut v = if p.folded_here() && super::resumes_unchanged(&none, &p, now_ms) {
+            verify_history(&none, &p, now_ms)
         } else {
             let objects = p.objects().cloned().unwrap_or_default();
-            verify_history(&objects, &p.without_fold(), clock)
+            verify_history(&objects, &p.without_fold(), now_ms)
         };
-        if let Some((seq, _)) = p.stop_floor() {
+        let kept = p.stop_floor().map(|(seq, _)| seq).or(p.stopped().filter(|_| !v.is_stopped()));
+        if let Some(seq) = kept {
             v.stopped = Some(seq);
             v.stop = Some(Stop::Failed {
                 seq,
@@ -426,6 +427,29 @@ impl HomeState {
             });
         }
         Ok((p, v))
+    }
+    /// Replace the checkpoint by a replay of its own objects from genesis at `now_ms`, keeping the
+    /// home's local memory (the head marks, the succession flag, the stop floor, and the higher of
+    /// the two high-water marks): the fold this build gives those objects at that clock, taken as
+    /// this build's. For a checkpoint whose fold is not known to be this build's, before anything
+    /// is decided from it.
+    pub fn refold(&mut self, now_ms: i64) -> Result<()> {
+        let p = self.persisted()?;
+        let objects = p.objects().cloned().unwrap_or_default();
+        let mut rebuilt = Persisted::rebuild(&objects, &self.checkpoint_bytes, now_ms);
+        let lower = match (&p.high_water, &rebuilt.high_water) {
+            (Some((old, _)), Some((new, _))) => old > new,
+            (Some(_), None) => true,
+            _ => false,
+        };
+        if lower {
+            rebuilt.high_water = p.high_water.clone();
+        }
+        // A stop the checkpoint recorded and the replay at this clock does not find stays a stop.
+        if let (Some(seq), None) = (p.stopped(), rebuilt.stopped()) {
+            rebuilt = rebuilt.with_stop_floor(seq, None);
+        }
+        self.set_checkpoint(rebuilt)
     }
     /// Persist atomically alongside the caller's committed history.
     pub fn to_bytes(&self) -> Result<Vec<u8>> {

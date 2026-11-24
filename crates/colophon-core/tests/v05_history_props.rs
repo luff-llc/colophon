@@ -1019,7 +1019,7 @@ fn a_vouched_record_view_is_the_replays() {
             checkpoints.push((at, p, true));
         }
         for (at, p, genesis) in &checkpoints {
-            assert!(p.folded_here());
+            assert!(p.folded_here() || !genesis);
             let held = p.objects().unwrap();
             for t in [at - 1, *at, at + 30 * DAY] {
                 compared += 1;
@@ -1040,21 +1040,23 @@ fn a_vouched_record_view_is_the_replays() {
             assert!(!restored.folded_here());
             assert!(RecordAuthority::from_vouched(&restored, *at).is_none());
             // Verified again from genesis, a checkpoint folded in one replay is this build's fold
-            // once more, with the same bytes. (One resumed from an earlier checkpoint may hold what
-            // only the later fold found, its held time say, and then is not verified again.)
+            // once more, with the same bytes. One resumed from an earlier checkpoint that is not
+            // verified again is never taken as this build's fold.
             // The same checkpoint written with other spacing is not the replay's bytes.
             let bytes = p.to_bytes().unwrap();
             let mut spaced = b"{ ".to_vec();
             spaced.extend_from_slice(&bytes[1..]);
             let respaced = Persisted::from_bytes(&spaced).unwrap();
-            assert!(respaced.verified_again(&spaced).is_none(), "{} respaced", dir.display());
-            match restored.verified_again(&bytes) {
+            assert!(Persisted::verified_from(&spaced).is_none(), "{} respaced", dir.display());
+            assert!(!respaced.folded_here());
+            match Persisted::verified_from(&bytes) {
                 Some(again) => {
                     assert!(again.folded_here());
-                    assert_eq!(again.to_bytes().unwrap(), p.to_bytes().unwrap());
+                    assert_eq!(again.to_bytes().unwrap(), bytes);
                 }
                 None => {
                     assert!(!genesis, "{} checkpointed at {at} is not verified again", dir.display());
+                    assert!(!p.folded_here(), "{} checkpointed at {at} is taken as this build's fold but is not verified again", dir.display());
                     not_again += 1;
                 }
             }
@@ -1085,7 +1087,7 @@ fn a_fold_made_under_other_rules_is_not_verified_again() {
     let p = older_rules_fold(&objects, now);
     let restored = Persisted::from_bytes(&p).unwrap();
     assert_eq!(verify_history(&Objects::default(), &restored, now).branch.len(), 3, "the older fold took seq 3");
-    assert!(restored.verified_again(&p).is_none());
+    assert!(Persisted::verified_from(&p).is_none());
     assert!(RecordAuthority::from_vouched(&restored, now).is_none());
     let replay = RecordAuthority::from_objects(restored.objects().unwrap(), now);
     assert_eq!(replay.unwrap_err().code(), "badSignature");
@@ -1184,4 +1186,58 @@ fn a_checkpoint_taken_before_a_due_time_keeps_it() {
     }
     eprintln!("{pending} checkpoints with a pending due time");
     assert!(pending > 0, "no vector holds a candidate beside a valid one");
+}
+
+/// Every checkpoint taken as this build's fold reproduces itself: a replay of its objects from
+/// genesis at its own clock, with its local memory, gives exactly its bytes. Over every history
+/// vector, along chains of checkpoints each taken from the one before (from genesis, resumed with
+/// nothing new, resumed with every object again, and much later), at clock readings from an hour
+/// before the case's clock to 400 days after: wherever `folded_here` is set, `verified_from` of the
+/// bytes holds. A resume that would carry a fold the replay at its clock does not give (a
+/// successor's verified succession whose head has aged out, say) is not taken as this build's.
+#[test]
+fn every_fold_taken_as_this_builds_reproduces_at_its_own_clock() {
+    const DAY: i64 = 86_400_000;
+    let mut all: Vec<(PathBuf, Objects, i64)> =
+        cases().into_iter().map(|(d, now)| (d.clone(), objects_of(&d), now)).collect();
+    all.extend(other_cases());
+    let (mut folded, mut not_folded) = (0usize, 0usize);
+    let mut wrong = Vec::new();
+    for (dir, objects, now) in &all {
+        for start in [*now - 3_600_000, *now] {
+            let mut p = Persisted::checkpoint(objects, &Persisted::default(), start);
+            for (step, (incoming, t)) in [
+                (Objects::default(), start + 1_000),
+                (objects.clone(), start + 7 * DAY),
+                (Objects::default(), start + 400 * DAY),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                for q in [&p] {
+                    if q.folded_here() {
+                        folded += 1;
+                        let bytes = q.to_bytes().unwrap();
+                        if Persisted::verified_from(&bytes).is_none() {
+                            wrong.push(format!("{} from {start}, step {step}", dir.display()));
+                        }
+                    } else {
+                        not_folded += 1;
+                    }
+                }
+                p = Persisted::checkpoint(&incoming, &p, t);
+            }
+            if p.folded_here() {
+                folded += 1;
+                if Persisted::verified_from(&p.to_bytes().unwrap()).is_none() {
+                    wrong.push(format!("{} from {start}, last", dir.display()));
+                }
+            } else {
+                not_folded += 1;
+            }
+        }
+    }
+    eprintln!("{folded} checkpoints taken as this build's fold, {not_folded} not");
+    assert!(wrong.is_empty(), "taken as this build's fold but not reproduced: {wrong:#?}");
+    assert!(folded > not_folded, "{folded} {not_folded}");
 }
