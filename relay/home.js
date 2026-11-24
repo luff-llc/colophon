@@ -1141,7 +1141,10 @@ export class HomeSlot {
       // The last pass to this peer found nothing to send (no new or backlogged object, no entry,
       // its head already taken) and the state has not changed since, nor can anything come
       // due before the quiet ends: another pass would send nothing and save the same rows.
-      if (this.forwardIdle?.get(peer.id) === this.state && this.isQuiet()) continue;
+      // The marker holds for the state and the very quiet it was set in: a clock that stepped
+      // back makes a new quiet (settle asks again), and the peer gets a pass at that reading.
+      const idle = this.forwardIdle?.get(peer.id);
+      if (idle && idle.state === this.state && idle.quiet === this.quiet && this.isQuiet()) continue;
       const base = (resolve?.[endpoint.replace(/\/$/, '')] ?? endpoint).replace(/\/$/, '');
       const row = (this.forward.peers[peer.id] ??= { after: 0, retry: [], head: '' });
       row.retry ??= [];
@@ -1238,10 +1241,10 @@ export class HomeSlot {
     const save = () => this.saveForward();
     const deadline = Date.now() + PASS_MS;
     (this.forwardIdle ??= new Map()).delete(peerId);
-    let seen;
+    let seen; let quiet;
     // (1) New objects, at most a page per pass.
     const page = await this.lock(async () => {
-      seen = this.state;
+      seen = this.state; quiet = this.quiet;
       return this.wasm.call({ op: 'pending_page', state: this.state, now: this.clock(), after: row.after, limit: NEW_PER_PASS });
     });
     const urgent = (o) => (o.kind === 'transition' || o.kind === 'veto' ? 0 : 1);
@@ -1272,8 +1275,8 @@ export class HomeSlot {
     row.retry = [...rest, ...again];
     await save();
     // Nothing was there to send, over a state nothing changed during the pass.
-    if (!page.objects.length && !missed.length && !todo.length && !row.retry.length && sent === false && this.state === seen) {
-      this.forwardIdle.set(peerId, seen);
+    if (!page.objects.length && !missed.length && !todo.length && !row.retry.length && sent === false && this.state === seen && this.quiet === quiet) {
+      this.forwardIdle.set(peerId, { state: seen, quiet });
     }
   }
 
