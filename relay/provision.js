@@ -10,6 +10,7 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { constants as fsc, promises as fsp } from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
+import { appendLines, readLogRows, replayRow, writeAll } from './files.js';
 
 const HEX64 = /^[0-9a-f]{64}$/;
 const KEY_ID = /^[0-9a-f]{32}$/; // a member or key ID: the first 32 hex characters of SHA-256 of its point
@@ -336,7 +337,7 @@ export class ProvisionTable {
     const bytes = Buffer.from(serialize(next));
     const staged = path.join(this.dataDir, `.${TABLE_FILE}.${randomBytes(8).toString('hex')}`);
     const handle = await fsp.open(staged, 'wx', 0o600);
-    try { await handle.write(bytes); await handle.sync(); } finally { await handle.close(); }
+    try { await writeAll(handle, bytes); await handle.sync(); } finally { await handle.close(); }
     await fsp.rename(staged, path.join(this.dataDir, TABLE_FILE));
     const dir = await fsp.open(this.dataDir, 'r');
     try { await dir.sync(); } catch (error) { if (error.code !== 'EINVAL' && error.code !== 'EPERM') throw error; } finally { await dir.close(); }
@@ -491,7 +492,8 @@ export class ProvisionReplay {
   constructor(dir, wasm, clock) {
     this.dir = dir; this.wasm = wasm; this.clock = clock;
     this.retentionMs = wasm.call({ op: 'limits' }).retentionMs;
-    this.rows = new Map(); // key -> {digest, at, signer}
+    this.rows = new Map(); // key -> {digest, at, signer, t (its outcome, once it has one)}
+    this.inFlight = new Map(); // key -> the effect a reservation has not ended yet
     this.bySigner = new Map();
     this.logLines = 0;
   }
@@ -513,23 +515,23 @@ export class ProvisionReplay {
   }
 
   async load(table) {
-    let text = '';
-    try { text = await fsp.readFile(this.file('replay.log'), 'utf8'); } catch { text = ''; }
-    const end = text.lastIndexOf('\n');
-    if (end !== text.length - 1) text = text.slice(0, end + 1); // a torn last line
+    // Fails closed, as a home slot's replay log does.
+    const entries = await readLogRows(this.file('replay.log'), replayRow((e) => typeof e.slot === 'string'), 'The provisioning replay log');
     const pending = new Map();
-    for (const line of text.split('\n')) {
-      if (!line) continue;
-      let e; try { e = JSON.parse(line); } catch { continue; }
+    for (const e of entries) {
       this.logLines += 1;
       if (typeof e.r === 'string') {
-        this.addRow(e.r, { digest: e.d, at: e.at, signer: e.s });
+        this.addRow(e.r, { digest: e.d, at: e.at, signer: e.s, t: e.t });
         if (e.e && !e.t) pending.set(e.r, e.e); else pending.delete(e.r);
-      } else if (typeof e.c === 'string') pending.delete(e.c);
+      } else if (typeof e.c === 'string') {
+        pending.delete(e.c);
+        const row = this.rows.get(e.c);
+        if (row) row.t = e.t;
+      }
     }
     const rows = [...pending].map(([key, effect]) => ({ key, present: table.get(effect.slot)?.by?.call === this.rows.get(key).digest }));
-    const lines = rows.length ? this.wasm.call({ op: 'replay_recover', rows }).states.map((s) => ({ c: s.key, t: s.state })) : [];
-    await this.compact(lines);
+    if (rows.length) for (const s of this.wasm.call({ op: 'replay_recover', rows }).states) this.rows.get(s.key).t = s.state;
+    await this.compact();
   }
 
   addRow(key, row) {
@@ -543,6 +545,7 @@ export class ProvisionReplay {
       const row = this.rows.get(key);
       if (!row) continue;
       this.rows.delete(key);
+      this.inFlight.delete(key);
       const set = this.bySigner.get(row.signer);
       set?.delete(key);
       if (set && set.size === 0) this.bySigner.delete(row.signer);
@@ -578,20 +581,39 @@ export class ProvisionReplay {
   /** Rewrite the log with the rows kept, plus `extra` lines, staged and renamed. */
   async compact(extra = []) {
     this.prune(this.clock());
-    const lines = [...this.rows].map(([key, r]) => JSON.stringify({ r: key, d: r.digest, s: r.signer, at: r.at, t: 'completed' }));
+    // Each row keeps its outcome; a reservation whose effect has not ended stays pending.
+    const lines = [...this.rows].map(([key, r]) => {
+      const effect = this.inFlight.get(key);
+      return JSON.stringify({ r: key, d: r.digest, s: r.signer, at: r.at, ...(effect ? { e: effect } : { t: r.t ?? 'completed' }) });
+    });
     for (const e of extra) lines.push(JSON.stringify(e));
     const staged = this.file(`.replay.${randomBytes(8).toString('hex')}`);
     const handle = await fsp.open(staged, 'wx', 0o600);
-    try { await handle.write(lines.map((l) => l + '\n').join('')); await handle.sync(); } finally { await handle.close(); }
+    try { await writeAll(handle, lines.map((l) => l + '\n').join('')); await handle.sync(); } finally { await handle.close(); }
     await fsp.rename(staged, this.file('replay.log'));
     const dir = await fsp.open(this.dir, 'r');
     try { await dir.sync(); } catch (error) { if (error.code !== 'EINVAL' && error.code !== 'EPERM') throw error; } finally { await dir.close(); }
+    await this.close(); // the append handle names the replaced file
     this.logLines = lines.length;
   }
 
+  /** Close the log's append handle (at compaction and shutdown). */
+  async close() {
+    const handle = this.handle;
+    this.handle = null;
+    await handle?.close();
+  }
+
   async append(entry, durable) {
-    const handle = await fsp.open(this.file('replay.log'), 'a', 0o600);
-    try { await handle.write(JSON.stringify(entry) + '\n'); if (durable) await handle.sync(); } finally { await handle.close(); }
+    if (this.broken) throw this.broken; // a part of a line could not be cut back
+    // One handle, kept open (appends are under the door's lock).
+    this.handle ??= await fsp.open(this.file('replay.log'), fsc.O_WRONLY | fsc.O_APPEND | fsc.O_CREAT | fsc.O_NOFOLLOW, 0o600);
+    try { await appendLines(this.handle, JSON.stringify(entry) + '\n', durable); }
+    catch (error) {
+      if (error.unrepaired) this.broken = error;
+      await this.close().catch(() => {}); // the next append opens the file afresh
+      throw error;
+    }
     this.logLines += 1;
   }
 
@@ -601,10 +623,16 @@ export class ProvisionReplay {
   async reserve(row, effect) {
     const line = { r: row.key, d: row.digest, s: row.signer, at: row.at, ...(effect ? { e: effect } : { t: 'completed' }) };
     await this.append(line, true);
-    this.addRow(row.key, { digest: row.digest, at: row.at, signer: row.signer });
+    this.addRow(row.key, { digest: row.digest, at: row.at, signer: row.signer, t: effect ? undefined : 'completed' });
+    if (effect) this.inFlight.set(row.key, effect);
     if (this.logLines > 2 * this.rows.size + 1024) await this.compact();
   }
-  async complete(key, t) { await this.append({ c: key, t }, false); }
+  async complete(key, t) {
+    await this.append({ c: key, t }, false);
+    this.inFlight.delete(key);
+    const row = this.rows.get(key);
+    if (row) row.t = t;
+  }
 }
 
 /** The door's body: exactly `{"slot","base","account"}`, strings. Anything else is null. */
