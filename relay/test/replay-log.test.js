@@ -4,11 +4,12 @@
 // recorded as the recovery at start-up would record it, never as completed.
 import assert from 'node:assert/strict';
 import { constants as fsc, promises as fsp } from 'node:fs';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, test } from 'node:test';
 import { HomeSlot } from '../home.js';
+import { ProvisionReplay } from '../provision.js';
 
 class HttpError extends Error {
   constructor(status, message) { super(message); this.status = status; }
@@ -109,4 +110,62 @@ describe('the replay log', () => {
       assert.deepEqual(done, [expected], `stored: ${stored}`);
     }
   });
+
+  // Loading: only a log that is not there yet is empty, and only an unterminated last line (an
+  // interrupted append) is dropped. A log that cannot be read, or holds a damaged complete line,
+  // refuses to open: compacting it as empty would forget calls already taken.
+  const linesWith = (effect) => [
+    JSON.stringify({ r: 'k1', d: 'd'.repeat(64), s: 'member:m', at: 1_000_000, t: 'completed' }),
+    JSON.stringify({ r: 'k2', d: 'd'.repeat(64), s: 'member:m', at: 1_000_000, e: effect }),
+    JSON.stringify({ c: 'k2', t: 'completed' }),
+  ];
+  const stubWasm = {
+    call: (req) => {
+      if (req.op === 'limits') return { retentionMs: 7_260_000 };
+      if (req.op === 'replay_keep') return { keep: req.rows.map((r) => r.key) };
+      if (req.op === 'replay_recover') return { states: req.rows.map((r) => ({ key: r.key, state: r.present ? 'completed' : 'abandoned' })) };
+      throw new Error(`unexpected op ${req.op}`);
+    },
+  };
+  const loaders = {
+    home: { effect: { path: 'ops/x.json', prior: null }, file: (dir) => path.join(dir, 'replay.log'), open: async (dir) => { const h = await slotAt(dir); await h.openReplay(); return h; } },
+    provisioning: {
+      effect: { slot: 'tslot00000a' },
+      file: (dir) => path.join(dir, 'provision-replay', 'replay.log'),
+      open: (dir) => ProvisionReplay.open(dir, { wasm: stubWasm, clock: () => 1_000_000, table: { get: () => undefined } }),
+    },
+  };
+  for (const [name, loader] of Object.entries(loaders)) {
+    const goodLines = linesWith(loader.effect);
+    const prepare = async (text) => {
+      const file = loader.file(root);
+      await fsp.mkdir(path.dirname(file), { recursive: true });
+      await writeFile(file, text);
+      return file;
+    };
+    test(`${name}: an absent log is empty, and an unterminated last line is dropped`, async () => {
+      const fresh = await loader.open(root);
+      assert.equal(fresh.rows.size, 0);
+      await prepare(goodLines.join('\n') + '\n{"r":"k3","d":');
+      const r = await loader.open(root);
+      assert.deepEqual([...r.rows.keys()].sort(), ['k1', 'k2']);
+    });
+    test(`${name}: a log that cannot be read refuses to open and is left as it was`, async () => {
+      const text = goodLines.join('\n') + '\n';
+      const file = await prepare(text);
+      await chmod(file, 0o000);
+      try {
+        await assert.rejects(loader.open(root));
+      } finally { await chmod(file, 0o600); }
+      assert.equal(await readFile(file, 'utf8'), text, 'the log was not rewritten');
+    });
+    for (const [what, bad] of [['not JSON', '{"r":"k9",'], ['not a row', '{"x":1}'], ['a row of the wrong shape', '{"r":"k9","d":7,"s":"member:m","at":"soon"}']]) {
+      test(`${name}: a damaged complete line (${what}) refuses to open`, async () => {
+        const text = [goodLines[0], bad, goodLines[1]].join('\n') + '\n';
+        const file = await prepare(text);
+        await assert.rejects(loader.open(root), /replay/i);
+        assert.equal(await readFile(file, 'utf8'), text, 'the log was not rewritten');
+      });
+    }
+  }
 });

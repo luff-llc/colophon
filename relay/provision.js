@@ -10,6 +10,7 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { constants as fsc, promises as fsp } from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
+import { readLogRows, replayRow } from './files.js';
 
 const HEX64 = /^[0-9a-f]{64}$/;
 const KEY_ID = /^[0-9a-f]{32}$/; // a member or key ID: the first 32 hex characters of SHA-256 of its point
@@ -513,14 +514,10 @@ export class ProvisionReplay {
   }
 
   async load(table) {
-    let text = '';
-    try { text = await fsp.readFile(this.file('replay.log'), 'utf8'); } catch { text = ''; }
-    const end = text.lastIndexOf('\n');
-    if (end !== text.length - 1) text = text.slice(0, end + 1); // a torn last line
+    // Fails closed, as a home slot's replay log does.
+    const entries = await readLogRows(this.file('replay.log'), replayRow((e) => typeof e.slot === 'string'), 'The provisioning replay log');
     const pending = new Map();
-    for (const line of text.split('\n')) {
-      if (!line) continue;
-      let e; try { e = JSON.parse(line); } catch { continue; }
+    for (const e of entries) {
       this.logLines += 1;
       if (typeof e.r === 'string') {
         this.addRow(e.r, { digest: e.d, at: e.at, signer: e.s });
