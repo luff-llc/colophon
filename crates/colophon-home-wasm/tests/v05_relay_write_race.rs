@@ -256,14 +256,15 @@ fn a_long_poll_ends_empty_when_the_authority_changes_and_serves_no_later_entry()
     first_upload(&setup, &f, now);
     setup.stop();
     drop(setup);
-    // Traced (for the "changes waiting" marker); the pause point is never reached.
+    // Traced: the revocation's upload pauses once its state is committed, before its entry is
+    // stored (so before anything could wake the poll but the commit itself).
     let (relay, rx) = Relay::start_paused(
         &keys,
         &account,
         BASE_A,
         scratch.path(),
         now,
-        "never reached",
+        "authority committed",
     );
     let port = relay.port;
 
@@ -280,7 +281,8 @@ fn a_long_poll_ends_empty_when_the_authority_changes_and_serves_no_later_entry()
         .as_str()
         .unwrap()
         .to_string();
-    let path = format!("/changes?after={cursor}&wait=20");
+    let path = format!("/changes?after={cursor}&wait=30");
+    let (polled, answer) = std::sync::mpsc::channel();
     let poll = send(
         port,
         "GET",
@@ -288,6 +290,9 @@ fn a_long_poll_ends_empty_when_the_authority_changes_and_serves_no_later_entry()
         read_headers(&f, &m, &path, now),
         Vec::new(),
     );
+    std::thread::spawn(move || {
+        let _ = polled.send(poll.join().unwrap());
+    });
     trace_marker(&rx, &["changes waiting"]);
 
     // Calls by the other member over the history before the revocation.
@@ -307,21 +312,28 @@ fn a_long_poll_ends_empty_when_the_authority_changes_and_serves_no_later_entry()
         .unwrap()
         .1;
     let body = json!({"from": from, "entries": [entry], "receipts": []}).to_string();
-    let (s, _, b) = http(
+    let revoke = send(
         port,
         "POST",
-        "/v1/libraries/home/authority",
-        &[("Content-Type".into(), "application/json".into())],
-        body.as_bytes(),
+        "/authority",
+        vec![("Content-Type".into(), "application/json".into())],
+        body.into_bytes(),
     );
-    assert_eq!(s, 200, "the revocation: {}", String::from_utf8_lossy(&b));
+    trace_marker(&rx, &["authority committed"]);
+    // The revocation is committed and its entry not stored yet: the commit alone ends the poll
+    // (the bound is far shorter than the poll's own 30 s wait).
+    let (s, b) = answer
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("the poll did not end when the authority changed");
+    std::fs::write(scratch.path().join("resume"), b"").unwrap();
+    let (rs, rb) = revoke.join().unwrap();
+    assert_eq!(rs, 200, "the revocation: {}", String::from_utf8_lossy(&rb));
     // Another member's record after it.
-    let (s, b) = send(port, "PUT", &op_path, op_headers, op_bytes)
+    let (ws, wb) = send(port, "PUT", &op_path, op_headers, op_bytes)
         .join()
         .unwrap();
-    assert_eq!(s, 201, "{}", String::from_utf8_lossy(&b));
+    assert_eq!(ws, 201, "{}", String::from_utf8_lossy(&wb));
 
-    let (s, b) = poll.join().unwrap();
     assert_eq!(s, 200, "{}", String::from_utf8_lossy(&b));
     let page: Value = serde_json::from_slice(&b).unwrap();
     assert_eq!(
@@ -348,5 +360,102 @@ fn a_long_poll_ends_empty_when_the_authority_changes_and_serves_no_later_entry()
         "{}",
         String::from_utf8_lossy(&b)
     );
+    drop(relay);
+}
+
+#[test]
+fn a_change_feed_read_is_judged_and_listed_over_one_state() {
+    if prerequisites().is_none() {
+        return;
+    }
+    let keys = HomeKeys::new(0x5d);
+    let mut f = create_v(&[NS], 8);
+    appoint_home_keys(&mut f, &keys, BASE_A);
+    let m = f.host.identity(45);
+    admit(&mut f, &m, "Reader", "app", terms("write"), terms("write"));
+    let scratch = Scratch::new("feed-one-state");
+    let now = f.account.now_ms() + 1_000;
+    let account = f.account.id().as_str().to_string();
+    let mut setup = Relay::start_with(
+        &keys,
+        &account,
+        BASE_A,
+        scratch.path(),
+        now,
+        &[],
+        0,
+        json!({"tickMs": 0}),
+    );
+    first_upload(&setup, &f, now);
+    setup.stop();
+    drop(setup);
+    // The read pauses right after its call is judged.
+    let (relay, rx) = Relay::start_paused(
+        &keys,
+        &account,
+        BASE_A,
+        scratch.path(),
+        now,
+        "access changes",
+    );
+    let port = relay.port;
+    // M reads the feed from the start; the read pauses once its call is judged.
+    let read = send(
+        port,
+        "GET",
+        "/changes",
+        read_headers(&f, &m, "/changes", now),
+        Vec::new(),
+    );
+    trace_marker(&rx, &["access changes"]);
+    // M's revocation is uploaded meanwhile.
+    f.account.advance(now).unwrap();
+    let from = entries_json(&f).last().unwrap().0 + 1;
+    let action = f
+        .account
+        .begin_revoke(&m, &RevokeKeep::Nothing, &[f.d.clone()], [9; 32])
+        .unwrap();
+    run(&mut f.account, &f.host, action);
+    let entry = entries_json(&f)
+        .into_iter()
+        .find(|(s, _)| *s == from)
+        .unwrap()
+        .1;
+    let body = json!({"from": from, "entries": [entry], "receipts": []}).to_string();
+    let (revoked, revoke_done) = std::sync::mpsc::channel();
+    let revoke = send(
+        port,
+        "POST",
+        "/authority",
+        vec![("Content-Type".into(), "application/json".into())],
+        body.into_bytes(),
+    );
+    std::thread::spawn(move || {
+        let _ = revoked.send(revoke.join().unwrap());
+    });
+    // While the read holds its judgement, the revocation cannot commit (a bound: it is the
+    // property, not a timing assumption).
+    let early = revoke_done
+        .recv_timeout(std::time::Duration::from_secs(3))
+        .ok();
+    std::fs::write(scratch.path().join("resume"), b"").unwrap();
+    let (s, b) = read.join().unwrap();
+    assert_eq!(s, 200, "{}", String::from_utf8_lossy(&b));
+    let page: Value = serde_json::from_slice(&b).unwrap();
+    let revoking = format!("authority/{from:08}.json");
+    assert!(
+        !page["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["path"] == json!(revoking)),
+        "a read judged before the revocation listed the revoking entry: {page}"
+    );
+    assert!(
+        early.is_none(),
+        "the revocation committed between the read's judgement and its page"
+    );
+    let (rs, rb) = early.unwrap_or_else(|| revoke_done.recv().unwrap());
+    assert_eq!(rs, 200, "the revocation: {}", String::from_utf8_lossy(&rb));
     drop(relay);
 }
