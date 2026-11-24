@@ -125,6 +125,20 @@ fn h3_resume_reconsiders_a_candidate_held_at_checkpoint_time() {
     let replay = verify_history(&objects, &Persisted::default(), late);
     assert_eq!(resumed.branch, replay.branch);
     assert_eq!(resumed.conflicts, replay.conflicts);
+    // A checkpoint taken from the saved one before the activate is due keeps its due time: it is
+    // the replay's checkpoint at that clock, and after the due time it resumes like the replay.
+    let between = Persisted::checkpoint(&Objects::default(), &saved, early + 1_000);
+    let cold = Persisted::checkpoint(&objects, &Persisted::default(), early + 1_000);
+    assert_eq!(
+        String::from_utf8(between.to_bytes().unwrap()).unwrap(),
+        String::from_utf8(cold.to_bytes().unwrap()).unwrap()
+    );
+    for p in [between.clone(), Persisted::from_bytes(&between.to_bytes().unwrap()).unwrap()] {
+        let later = verify_history(&Objects::default(), &p, late);
+        assert_eq!(later.branch, replay.branch);
+        assert_eq!(later.conflicts, replay.conflicts);
+        assert_eq!(later.held_until, replay.held_until);
+    }
 }
 
 fn chain_objects() -> (Objects, i64) {

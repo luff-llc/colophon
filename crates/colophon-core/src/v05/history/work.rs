@@ -1,5 +1,6 @@
 //! Counts of the expensive work done on the calling thread, for tests that bound it by counting
-//! rather than timing: every [`verify_history`](super::verify_history) run, and every attempt to
+//! rather than timing: every [`verify_history`](super::verify_history) run (and those that parse
+//! the held objects), and every attempt to
 //! build a recording entry (`prepare_activate`, `prepare_vetoed`, `prepare_final`, and their
 //! [`VerifiedObjects`](crate::v05::write::authority::VerifiedObjects) forms). The counters exist
 //! only with the `work-counters` feature; without it the hooks are empty and inlined away.
@@ -12,12 +13,14 @@ pub struct Work {
     pub verifications: usize,
     /// Recording-entry build attempts.
     pub prepares: usize,
+    /// `verify_history` runs that parsed the held objects (all but an unchanged checkpoint's).
+    pub replays: usize,
 }
 
 #[cfg(feature = "work-counters")]
 thread_local! {
     static WORK: std::cell::Cell<Work> = const {
-        std::cell::Cell::new(Work { verifications: 0, prepares: 0 })
+        std::cell::Cell::new(Work { verifications: 0, prepares: 0, replays: 0 })
     };
 }
 
@@ -42,6 +45,14 @@ pub(crate) fn verification() {
     });
 }
 #[cfg(feature = "work-counters")]
+pub(crate) fn replay() {
+    WORK.with(|w| {
+        let mut n = w.get();
+        n.replays += 1;
+        w.set(n);
+    });
+}
+#[cfg(feature = "work-counters")]
 pub(crate) fn prepare() {
     WORK.with(|w| {
         let mut n = w.get();
@@ -56,6 +67,9 @@ pub(crate) fn verification() {}
 #[cfg(not(feature = "work-counters"))]
 #[inline(always)]
 pub(crate) fn prepare() {}
+#[cfg(not(feature = "work-counters"))]
+#[inline(always)]
+pub(crate) fn replay() {}
 
 // Deterministic regression probes for effective pending-object selection.
 #[cfg(test)]

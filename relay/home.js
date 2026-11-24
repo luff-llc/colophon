@@ -132,7 +132,27 @@ export class HomeModule {
   }
 
   static async load(file, options) {
-    return new HomeModule(await WebAssembly.compile(await fsp.readFile(file)), options);
+    const bytes = await fsp.readFile(file);
+    const module = new HomeModule(await WebAssembly.compile(bytes), options);
+    // The build every instance is named (`build`): a home's proof of its fold names it, so a proof
+    // written by any other build is not taken, and the slot is verified again once at its start.
+    module.fingerprint = sha(bytes);
+    return module;
+  }
+
+  /** The instance, made and named its build (when the module takes one) if there is none. */
+  ensure() {
+    if (this.instance) return;
+    this.instance = new WebAssembly.Instance(this.module, {});
+    if (!this.fingerprint) return;
+    try {
+      this.takesBuild ??= this.invoke({ op: 'limits' }).build === true;
+      if (this.takesBuild) this.invoke({ op: 'build', fingerprint: this.fingerprint });
+    } catch (error) {
+      // An instance that was not named is never kept: the next call makes and names another.
+      this.instance = null;
+      throw error;
+    }
   }
 
   /** The current instance's memory, in bytes (0 with no instance). */
@@ -140,7 +160,17 @@ export class HomeModule {
 
   /** One request, one response, both JSON. A response with `ok: false` throws a ModuleError. */
   call(request) {
-    this.instance ??= new WebAssembly.Instance(this.module, {});
+    this.ensure();
+    try {
+      return this.invoke(request);
+    } finally {
+      // A page of memory that grew for one big request is not kept for ever.
+      if (this.memoryBytes() > this.resetBytes) { this.instance = null; this.resets += 1; }
+    }
+  }
+
+  /** One request on the current instance. */
+  invoke(request) {
     const { colophon_alloc: alloc, colophon_free: free, colophon_home: home, memory } = this.instance.exports;
     const text = JSON.stringify(request);
     const size = Buffer.byteLength(text);
@@ -154,8 +184,6 @@ export class HomeModule {
       // Decoded straight from the module's memory (a view, not a copy), before it is freed.
       const answer = Buffer.from(memory.buffer, outPtr + 4, length).toString('utf8');
       free(outPtr, length + 4);
-      // A page of memory that grew for one big request is not kept for ever.
-      if (memory.buffer.byteLength > this.resetBytes) { this.instance = null; this.resets += 1; }
       const out = JSON.parse(answer);
       if (!out.ok) throw new ModuleError(out.error);
       return out;
@@ -287,8 +315,8 @@ export class HomeSlot {
         this.state = this.wasm.call({ op: 'init', home: this.key.memberId, account: this.account }).state;
         fresh = true;
       }
-      const st = this.status();
-      if (st.error) throw new Error(st.error);
+      // Whose slot this is, as stored: its fold is proved later, off the path of the start.
+      const st = this.wasm.call({ op: 'slot', state: this.state });
       if (st.home !== this.key.memberId) throw new Error('state belongs to another home key');
       if (st.account !== this.account) throw new Error(`state belongs to account ${st.account}, not ${this.account}`);
       this.appointed = st.appointed;
@@ -324,6 +352,21 @@ export class HomeSlot {
     const r = this.wasm.call({ op: 'resume', state: this.state, now, alive: until });
     await this.renewLease(now);
     if (r.changed) await this.commit(r.state);
+  }
+
+  /**
+   * Have the stored state carry a proof of its fold (the module's `prove`), once per start, under
+   * the slot's lock, after the slot is open and serving: until then every request replays the
+   * slot's held history before it decides anything, so serving does not wait for this. `fold` is
+   * the module's answer, for the metrics; a state left without a proof is said once in the log.
+   */
+  async prove() {
+    await this.lock(async () => {
+      const r = this.wasm.call({ op: 'prove', state: this.state, now: this.clock() });
+      this.fold = r.fold;
+      if (r.fold === 'unproved') console.warn(`[home ${this.slot.name}] its state cannot carry a proof of its fold: every request replays its history`);
+      if (r.changed) await this.commit(r.state);
+    });
   }
 
   /** A missing checkpoint is safe only when nothing that could outlive it remains. Check the

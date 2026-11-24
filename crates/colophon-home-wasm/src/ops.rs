@@ -23,7 +23,7 @@ use colophon_core::v05::history::home::{
     admit, admit_first_with, admit_pending_batch_notices, admit_predecessor, admit_with, stage_predecessor, FirstUpload, HomeState, ReceiptToSign, Refusal,
 };
 use colophon_core::v05::history::{
-    verify_history, Claim, Objects, Persisted, Principal, State, Stop, Verdict,
+    verify_history, Claim, Objects, Persisted, Principal, State, Stop, Verdict, FOLD_RULES,
 };
 use colophon_core::v05::home_stream::{
     self, check_session_frame, check_subscription, parse_route, stream_namespaces, FrameRefusal,
@@ -53,6 +53,9 @@ type R<T> = Result<T, String>;
 const STATE_VERSION: u32 = 2;
 /// The largest request body this module reads (the host bounds a body before it reads it).
 const MAX_REQUEST: usize = 24 * 1024 * 1024;
+/// The largest state written with a proof of its fold: room is left beside it for the rest of a
+/// request that carries it, so adding the proof never makes a state unreadable.
+const STATE_WITH_PROOF: usize = MAX_REQUEST - 64 * 1024;
 /// Entries a first upload may hold before this home is appointed in them (a bound on what an
 /// unappointed home keeps for its one account).
 const MAX_FIRST_UPLOAD: usize = 512;
@@ -84,10 +87,13 @@ fn run(input: &[u8]) -> R<Value> {
     let req: Value = serde_json::from_slice(input).map_err(|e| e.to_string())?;
     match str_of(&req, "op")? {
         "limits" => Ok(limits()),
+        "build" => build(&req),
         "identity" => identity(&req),
         "init" => init(&req),
         "status" => status(&req),
         "resume" => resume(&req),
+        "prove" => prove(&req),
+        "slot" => slot_info(&req),
         "lease" => lease(&req),
         "classify" => classify(&req),
         "validate_batch" => Ok(match batch_input(&req) {
@@ -169,10 +175,20 @@ struct Slot {
     booting_predecessor: Vec<String>,
     /// `HomeState::to_bytes`, base64, once appointed.
     home_state: Option<String>,
+    /// Proof that this build folded the checkpoint `home_state` holds from genesis:
+    /// `{"rules": FOLD_RULES, "build": the module's SHA-256, "checkpoint": its SHA-256}`
+    /// ([`fold_mark`]). Absent when it is not
+    /// known, and read as absent when it is not that shape. Additive: a reader without the field
+    /// ignores it and writes its state without it, so a checkpoint another build replaces is never
+    /// left with a proof it did not earn; and the proof names the checkpoint's exact bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fold: Option<Value>,
 }
 struct Loaded {
     slot: Slot,
     home: Option<HomeState>,
+    /// The fold was replayed from genesis at this request's clock ([`Loaded::prove`]).
+    refolded: bool,
 }
 impl Loaded {
     fn booting_entries(&self) -> R<Vec<Vec<u8>>> {
@@ -190,16 +206,62 @@ impl Loaded {
             booting: self.slot.booting.clone(),
             booting_predecessor: self.slot.booting_predecessor.clone(),
             home_state: None,
+            fold: None,
         };
         if let Some(h) = &self.home {
             slot.home_state = Some(b64(&h.to_bytes().map_err(|e| e.to_string())?));
+            slot.fold = fold_mark(h);
             slot.booting = Vec::new();
             slot.booting_predecessor = Vec::new();
         }
-        Ok(b64(&serde_json::to_vec(&slot).map_err(|e| e.to_string())?))
+        let with = b64(&serde_json::to_vec(&slot).map_err(|e| e.to_string())?);
+        // The proof is optional: a state it would make too large to send back is written without
+        // it (and its fold is replayed at every request, as for any other unproved one).
+        if slot.fold.is_some() && with.len() > STATE_WITH_PROOF {
+            slot.fold = None;
+            return Ok(b64(&serde_json::to_vec(&slot).map_err(|e| e.to_string())?));
+        }
+        Ok(with)
+    }
+    /// The one rule for a saved fold: no decision is made from one that is not proved this
+    /// build's. A state with a valid proof (`fold`) keeps its fold; any other has its checkpoint
+    /// replaced, in memory, by a replay of the held objects from genesis at the request's clock
+    /// (`HomeState::refold`), before anything reads it, so every acceptance, signature, answer and
+    /// page this request gives rests on this build's fold of the held (and incoming) objects at the
+    /// clock it is made at. Returns how the fold was found.
+    fn prove(&mut self, now_ms: i64) -> R<&'static str> {
+        if self.home.is_none() {
+            return Ok("unappointed");
+        }
+        if self.vouch() {
+            return Ok("proved");
+        }
+        let h = self.home.as_mut().ok_or("no home state")?;
+        h.refold(now_ms).map_err(|e| e.to_string())?;
+        self.refolded = true;
+        Ok("refolded")
     }
 }
-fn load(req: &Value) -> R<Loaded> {
+impl Loaded {
+    /// Take the stored proof of the fold (`fold`), when it names this build's rules, this module
+    /// build and the checkpoint's exact bytes. Changes nothing else: a fold without one stays
+    /// unproved, for a request that decides nothing from it (and keeps a valid proof stored).
+    fn vouch(&mut self) -> bool {
+        let Some(h) = self.home.as_mut() else { return false };
+        let mark = self.slot.fold.as_ref().and_then(|m| {
+            Some((m.get("rules")?.as_str()?, m.get("build")?.as_str()?, m.get("checkpoint")?.as_str()?))
+        });
+        match (mark, BUILD.get()) {
+            (Some((rules, build, checkpoint)), Some(ours)) if build == ours => {
+                h.vouch_fold(rules, checkpoint, cached_digest)
+            }
+            _ => false,
+        }
+    }
+}
+/// The slot state and the home state it holds, read as stored, for a request that decides
+/// nothing from the fold yet ([`Loaded::prove`] comes before that).
+fn parse_slot(req: &Value) -> R<Loaded> {
     let raw = bytes_of(req, "state")?;
     let slot: Slot = serde_json::from_slice(&raw).map_err(|e| format!("state: {e}"))?;
     if slot.v != STATE_VERSION {
@@ -212,7 +274,73 @@ fn load(req: &Value) -> R<Loaded> {
         ),
         None => None,
     };
-    Ok(Loaded { slot, home })
+    Ok(Loaded { slot, home, refolded: false })
+}
+/// The slot state, its fold proved or replayed at the request's clock ([`Loaded::prove`]). A
+/// request without a clock (`objects`) reads only the held objects and decides nothing.
+fn load(req: &Value) -> R<Loaded> {
+    let mut l = parse_slot(req)?;
+    if let Some(now) = req.get("now").and_then(Value::as_i64) {
+        l.prove(now)?;
+    }
+    Ok(l)
+}
+/// The proof stored beside a home state whose checkpoint this build folded from genesis
+/// (`HomeState::fold_vouched`), naming the rules, the module build ([`build`]) and the
+/// checkpoint's exact bytes; `None` when it did not, or when the host never named the build, so a
+/// checkpoint is never stored with a proof it did not earn.
+fn fold_mark(h: &HomeState) -> Option<Value> {
+    let build = BUILD.get()?;
+    h.fold_vouched().then(|| {
+        json!({"rules": FOLD_RULES, "build": build, "checkpoint": cached_digest(h.checkpoint_bytes())})
+    })
+}
+
+/// The SHA-256 of the module the host instantiated, as the host gives it once per instance
+/// ([`build`]): a proof of a fold names it, so a proof written by any other build of the module
+/// (whatever its rules identifier says) is not taken, and that build's checkpoints are verified
+/// again from genesis once, at the next start.
+static BUILD: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// `{"op": "build", "fingerprint": <SHA-256 of the module's bytes>}`: the host names the build it
+/// instantiated, before anything else. Once named, it does not change for the instance.
+fn build(req: &Value) -> R<Value> {
+    let fingerprint = str_of(req, "fingerprint")?;
+    let hex = fingerprint.len() == 64 && fingerprint.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+    if !hex {
+        return Err("fingerprint is not a SHA-256".into());
+    }
+    let set = BUILD.get_or_init(|| fingerprint.to_string());
+    if set != fingerprint {
+        return Err("this instance was named another build".into());
+    }
+    Ok(json!({}))
+}
+
+/// Checkpoints whose digest this instance computed, by their exact bytes, most recent first: a
+/// slot's checkpoint is the same from call to call until it changes, and hashing it each time
+/// costs about as much as the work its proof saves. A hit compares the bytes themselves, never a
+/// digest the request carries; a new instance starts empty and hashes again.
+const DIGESTS_KEPT: usize = 2;
+/// Checkpoints larger than this are hashed on every use, never kept.
+const DIGEST_CACHE_BYTES: usize = 32 * 1024 * 1024;
+static DIGESTS: std::sync::Mutex<Vec<(Vec<u8>, String)>> = std::sync::Mutex::new(Vec::new());
+
+/// The SHA-256 of `bytes`, from [`DIGESTS`] when it holds exactly these bytes.
+fn cached_digest(bytes: &[u8]) -> String {
+    let mut kept = DIGESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(i) = kept.iter().position(|(b, _)| b.as_slice() == bytes) {
+        let hit = kept.remove(i);
+        let d = hit.1.clone();
+        kept.insert(0, hit);
+        return d;
+    }
+    let d = digest(bytes);
+    if bytes.len() <= DIGEST_CACHE_BYTES {
+        kept.insert(0, (bytes.to_vec(), d.clone()));
+        kept.truncate(DIGESTS_KEPT);
+    }
+    d
 }
 /// What the home holds as verifier input (its checkpoint's objects, which are never stale).
 fn held(h: &HomeState) -> R<Objects> {
@@ -238,8 +366,10 @@ fn init(req: &Value) -> R<Value> {
             booting: Vec::new(),
             booting_predecessor: Vec::new(),
             home_state: None,
+            fold: None,
         },
         home: None,
+        refolded: false,
     };
     Ok(json!({"state": l.dump()?}))
 }
@@ -260,6 +390,8 @@ fn limits() -> Value {
         "replayRows": DEFAULT_REPLAY_ROWS,
         // `access` takes a principal's replay rows as `signerLive` and `signerOldest` too.
         "replayCounts": true,
+        // The host names the module build it instantiated (`build`) before anything else.
+        "build": true,
         "authorityPage": 64, "pendingPage": 64, "pendingBatch": 16,
         "authorityBody": bounds::AUTHORITY_BODY,
         "transitionEnvelope": bounds::TRANSITION_ENVELOPE,
@@ -278,9 +410,22 @@ struct View {
     stopped: bool,
     /// The verdict the view was read from, its state moved to `state`.
     verdict: Verdict,
+    /// Read for deciding who may do what ([`authorized_view`]).
+    authorized: bool,
 }
 fn view(h: &HomeState, now_ms: i64) -> R<View> {
-    let (persisted, mut v) = h.verified_history(now_ms).map_err(|e| e.to_string())?;
+    let (persisted, v) = h.verified_history(now_ms).map_err(|e| e.to_string())?;
+    view_of(persisted, v, false)
+}
+/// The view a decision of who may do what is taken from (a call, a principal's standing): the
+/// saved fold only where it is proved this build's and unchanged, otherwise a replay of the held
+/// objects from genesis (`HomeState::authorized_history`). A saved fold that is not proved, which
+/// a verifier under other rules or an inconsistent copy may have written, decides nothing here.
+fn authorized_view(h: &HomeState, now_ms: i64) -> R<View> {
+    let (persisted, v) = h.authorized_history(now_ms).map_err(|e| e.to_string())?;
+    view_of(persisted, v, true)
+}
+fn view_of(persisted: Persisted, mut v: Verdict, authorized: bool) -> R<View> {
     let stopped = v.is_stopped();
     let fork = match &v.stop {
         None => None,
@@ -289,7 +434,7 @@ fn view(h: &HomeState, now_ms: i64) -> R<View> {
         Some(_) => return Err(format!("history: {}", v.code())),
     };
     let state = v.state.take().ok_or("no verified history")?;
-    Ok(View { persisted, state, fork, stopped, verdict: v })
+    Ok(View { persisted, state, fork, stopped, verdict: v, authorized })
 }
 impl View {
     /// The objects the home holds (its checkpoint's).
@@ -301,11 +446,14 @@ impl View {
     /// Without a recorded stop the view was verified at `now_ms` from the same checkpoint, and
     /// the held objects are exactly the checkpoint's (so they add nothing to it and leave its
     /// resumption as it is): that verdict is this one, and the history is not verified again.
+    /// For an authorized view, a verification again resumes no saved fold.
     fn held_verdict(&self, objects: &Objects, now_ms: i64) -> Verdict {
         if self.persisted.stop_floor().is_none() && self.persisted.stopped().is_none() {
             let mut v = self.verdict.clone();
             v.state = Some(self.state.clone());
             v
+        } else if self.authorized {
+            verify_history(objects, &self.persisted.without_fold(), now_ms)
         } else {
             verify_history(objects, &self.persisted, now_ms)
         }
@@ -376,22 +524,75 @@ fn lease(req: &Value) -> R<Value> {
 ///   the open interval stays open;
 /// - otherwise the open interval closes at the lease's end and a new one opens now.
 fn resume(req: &Value) -> R<Value> {
-    let mut l = load(req)?;
+    // Only the serving intervals change: the fold is neither read nor replayed (a stored proof is
+    // kept; `prove` makes one, off the path of the start).
+    let mut l = parse_slot(req)?;
+    l.vouch();
     let now_ms = i64_of(req, "now")?;
     let alive = req.get("alive").and_then(Value::as_i64);
-    let (Some(h), Some(alive)) = (l.home.take(), alive) else {
+    let Some(h) = l.home.take() else {
         return Ok(json!({"state": req["state"], "changed": false}));
     };
     let mut serving = h.serving().to_vec();
     let open = serving.last().is_some_and(|i| i.through_ms.is_none());
-    if !open || alive >= now_ms {
+    if !open || alive.is_none_or(|a| a >= now_ms) {
         return Ok(json!({"state": req["state"], "changed": false}));
     }
     let last = serving.last_mut().ok_or("no serving interval")?;
-    last.through_ms = Some(alive.max(last.from_ms));
+    last.through_ms = alive.map(|a| a.max(last.from_ms));
     serving.push(colophon_core::v05::history::home::ServingInterval { from_ms: now_ms, through_ms: None });
     l.home = Some(h.with_serving(serving).map_err(|e| e.to_string())?);
     Ok(json!({"state": l.dump()?, "changed": true}))
+}
+
+/// Whose slot this is, as stored (`home`, `account`, `appointed`), without reading its fold: what
+/// a host checks before it opens the slot.
+fn slot_info(req: &Value) -> R<Value> {
+    let l = parse_slot(req)?;
+    Ok(json!({"appointed": l.home.is_some(), "home": l.slot.home, "account": l.slot.account}))
+}
+
+/// Make a slot's stored state carry a proof of its fold, which the host asks for once per slot
+/// per start, off the path of the requests it serves (a slot without one is still served: every
+/// request replays its held objects first, [`Loaded::prove`]). The answer's `fold`:
+/// - `proved`: the stored proof holds; nothing changes;
+/// - `verified`: the checkpoint is verified again from genesis at its own clock, byte for byte
+///   (another build's, or one stored before proofs), and is returned with a proof;
+/// - `rebuilt`: it is not (a fold under other rules, or an inconsistent copy), so it is replaced
+///   by this build's fold of the held objects at `now`, returned with a proof;
+/// - `unproved`: a proof would make the state too large to send back, so it is stored without one;
+/// - `unnamed` (the host named no build, so nothing can be proved) or `unappointed`.
+fn prove(req: &Value) -> R<Value> {
+    let now_ms = i64_of(req, "now")?;
+    let mut l = parse_slot(req)?;
+    let unchanged = |fold: &str| Ok(json!({"state": req["state"], "changed": false, "fold": fold}));
+    if l.home.is_none() {
+        return unchanged("unappointed");
+    }
+    if BUILD.get().is_none() {
+        return unchanged("unnamed");
+    }
+    // The stored proof; else the stored checkpoint verified at its own clock, byte for byte; else
+    // this build's fold of the held objects at `now`. One replay at most for each.
+    let found = if l.vouch() {
+        "proved"
+    } else if l.home.as_mut().ok_or("no home state")?.verify_fold().map_err(|e| e.to_string())? {
+        "verified"
+    } else {
+        l.prove(now_ms)?;
+        "rebuilt"
+    };
+    if found == "proved" {
+        return unchanged("proved");
+    }
+    let state = l.dump()?;
+    let written: Value = serde_json::from_slice(&B64.decode(&state).map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())?;
+    if written.get("fold").is_none() {
+        // Too large to carry a proof: what is stored stays as it is.
+        return unchanged("unproved");
+    }
+    Ok(json!({"state": state, "changed": true, "fold": found}))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -582,7 +783,8 @@ fn access(req: &Value) -> R<Value> {
         }
         _ => return answer(404),
     };
-    let l = load(req)?;
+    // Read as stored; the fold is proved (or replayed) only once a decision needs it.
+    let mut l = parse_slot(req)?;
     if matches!(class, Class::Identity | Class::Admit) {
         return Ok(json!({"allowed": true, "via": "open"}));
     }
@@ -591,9 +793,9 @@ fn access(req: &Value) -> R<Value> {
     if matches!(class, Class::PredecessorPut) && l.home.is_none() {
         return Ok(json!({"allowed": true, "via": "open"}));
     }
-    let Some(h) = l.home.as_ref() else {
+    if l.home.is_none() {
         return answer(404);
-    };
+    }
     let call_text = req.get("call").and_then(Value::as_str);
     let batch = if matches!(class, Class::BatchRead) {
         if str_of(req, "path")? != "/records/batch" {
@@ -612,7 +814,20 @@ fn access(req: &Value) -> R<Value> {
     if matches!(class, Class::Head) {
         return Ok(json!({"allowed": true, "via": "public"}));
     }
-    let v = view(h, now_ms)?;
+    // Only a history read may be answered without a call (a public history): every other route
+    // refuses a missing call before any work on the history; a stopped home (by its stop floor or
+    // the stop its checkpoint records, read as stored) answers unavailable first, as it does with
+    // a call.
+    if call_text.is_none() && !matches!(class, Class::History) {
+        let p = l.home.as_ref().ok_or("no home state")?.persisted().map_err(|e| e.to_string())?;
+        if p.stop_floor().is_some() || p.stopped().is_some() {
+            return Ok(json!({"allowed": false, "status": 503, "result": "unavailable"}));
+        }
+        return answer(401);
+    }
+    l.prove(now_ms)?;
+    let h = l.home.as_ref().ok_or("no home state")?;
+    let v = authorized_view(h, now_ms)?;
     let public = v.state.keyring().policy.history() == HistoryAccess::Public;
     if matches!(class, Class::History) && public {
         return Ok(json!({"allowed": true, "via": "public"}));
@@ -823,7 +1038,7 @@ fn stream_standing(req: &Value) -> R<Value> {
     let now = i64_of(req, "now")?;
     let base = str_of(req, "base")?;
     let subscribers = req["subscribers"].as_array().ok_or("missing subscribers")?;
-    let Some(v) = l.home.as_ref().map(|h| view(h, now)).transpose()?
+    let Some(v) = l.home.as_ref().map(|h| authorized_view(h, now)).transpose()?
         .filter(|v| !v.stopped && v.fork.is_none())
     else {
         return Ok(json!({"standing": vec![Value::Null; subscribers.len()]}));
@@ -941,7 +1156,7 @@ fn principals_current(req: &Value) -> R<Value> {
     let Some(v) = l
         .home
         .as_ref()
-        .map(|h| view(h, now))
+        .map(|h| authorized_view(h, now))
         .transpose()?
         .filter(|v| !v.stopped && v.fork.is_none())
     else {
@@ -1446,8 +1661,10 @@ fn post_pending(req: &Value) -> R<Value> {
             booting: vec![],
             booting_predecessor: vec![],
             home_state: None,
+            fold: None,
         },
         home: Some(next),
+        refolded: false,
     };
     Ok(json!({
         "outcome": if refused.is_empty() { "ok" } else { "refused" },
@@ -2096,6 +2313,15 @@ fn record_due(req: &Value) -> R<Value> {
     let Some(mut h) = l.home.take() else {
         return Ok(json!({"entries": [], "store": [], "sign": []}));
     };
+    // A candidate held beside a valid one keeps every verification of this history a full replay
+    // until the checkpoint is folded again after its due time: done here, by the pass the host
+    // schedules for that time (`wakeAt`), and stored. So is a fold this request had to replay.
+    let held_until = h.persisted().map_err(|e| e.to_string())?.held_until();
+    let mut refolded = l.refolded;
+    if held_until.is_some_and(|t| t <= now_ms) {
+        h.refold(now_ms).map_err(|e| e.to_string())?;
+        refolded = true;
+    }
     let v = view(&h, now_ms)?;
     if v.stopped {
         return Ok(json!({"store": [], "sign": [],
@@ -2209,13 +2435,32 @@ fn record_due(req: &Value) -> R<Value> {
         let verified = VerifiedObjects::new(&objects, now_ms);
         note = waiting_over(&h, &objects, &verified, now_ms);
         if result == "ok" && sign.is_empty() && notify.is_empty() {
-            wake = verified.next_due_ms().map_or(Value::Null, |t| json!(t.min(NEVER_MS)));
+            let due = verified.next_due_ms();
+            let held = held_until.filter(|t| *t > now_ms);
+            let next = match (due, held) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            };
+            wake = next.map_or(Value::Null, |t| json!(t.min(NEVER_MS)));
         }
     }
     // Nothing recorded and nothing refused: no admission ran that changed the state (only an
     // admitted entry or a refusal does), so the state is the one given and there is nothing new
     // to store. The answer carries no `state`: the host keeps the one it gave.
     if recorded == 0 && result == "ok" {
+        // A fold replayed here is stored when it can carry its proof, so it is not replayed again.
+        if refolded && BUILD.get().is_some() {
+            l.home = Some(h);
+            let state = l.dump()?;
+            let written: Value = serde_json::from_slice(&B64.decode(&state).map_err(|e| e.to_string())?)
+                .map_err(|e| e.to_string())?;
+            if written.get("fold").is_some() {
+                return Ok(json!({
+                    "state": state, "store": [], "sign": sign, "notify": notify,
+                    "result": result, "note": note, "settled": settled, "wakeAt": wake,
+                }));
+            }
+        }
         return Ok(json!({
             "store": [], "sign": sign, "notify": notify,
             "result": result, "note": note, "settled": settled, "wakeAt": wake,
@@ -2357,11 +2602,19 @@ fn check_record(req: &Value) -> R<Value> {
         }
         Kind::Op { .. } | Kind::Live { .. } | Kind::History => {
             let (persisted, _) = verified.as_ref().ok_or("no home state")?;
-            // Who may write is decided by a replay of the held entries from genesis, not by the
-            // fold the checkpoint carries: that fold is local memory, which a verifier under other
-            // rules (or one that kept an inconsistent copy) may have written.
-            let objects = persisted.objects().cloned().unwrap_or_default();
-            let ra = RecordAuthority::from_objects(&objects, now_ms).map_err(|e| e.to_string())?;
+            // Who may write is decided by a replay of the held entries from genesis. The fold the
+            // checkpoint carries is local memory, which a verifier under other rules (or one that
+            // kept an inconsistent copy) may have written, so it answers only where it is this
+            // build's own fold, proved for these exact bytes, and the replay's answer
+            // (`RecordAuthority::from_vouched`: a quiet history, no successor, no `/4` prefix).
+            let ra = match RecordAuthority::from_vouched(persisted, now_ms) {
+                Some(ra) => ra,
+                None => {
+                    let objects = persisted.objects().cloned().unwrap_or_default();
+                    RecordAuthority::from_objects(&objects, now_ms)
+                }
+            }
+            .map_err(|e| e.to_string())?;
             let Ok((header, env)) = OperationHeader::parse(&bytes) else {
                 return refuse("malformed");
             };
@@ -2409,7 +2662,8 @@ fn check_record(req: &Value) -> R<Value> {
 // Everything the home holds, for the host to serve and to reconcile its files with its state.
 
 fn objects(req: &Value) -> R<Value> {
-    let l = load(req)?;
+    // The held objects only: nothing is decided from the fold.
+    let l = parse_slot(req)?;
     let now_ms = req.get("now").and_then(Value::as_i64).unwrap_or(i64::MAX / 2);
     Ok(json!({"files": file_list(files_of(&files_before(&l)?, now_ms)?)}))
 }
@@ -2594,7 +2848,7 @@ fn provision_access(req: &Value) -> R<Value> {
     let Some(h) = l.home.as_ref() else {
         return unavailable();
     };
-    let v = match view(h, now_ms) {
+    let v = match authorized_view(h, now_ms) {
         Ok(v) => v,
         Err(_) => return unavailable(),
     };
