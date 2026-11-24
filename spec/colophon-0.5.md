@@ -2077,8 +2077,9 @@ replay store or rate limit refuses (§12.4) answers 429 `{"result":"refused:wind
 
 **Refusals a paid home may give** (reserved; no behaviour is defined in 0.5): `refused:overQuota`
 (507), `refused:noEntitlement` (402), `refused:closed` (410), `refused:notProvisioned` (403) and
-`refused:subscriptionLapsed` (403: the home holds the library read-only, and refuses a write while
-it still serves every read), in a JSON body `{"result":"refused:<reason>"}`. Any `refused:` result a client does not know refuses only
+`refused:subscriptionLapsed` (403: the home holds the library's data read-only, and refuses a
+record, blob chunk or live value write while it still serves every read and still takes the
+account's authority history), in a JSON body `{"result":"refused:<reason>"}`. Any `refused:` result a client does not know refuses only
 that request and is shown to the person as received. `refused:closed` is not evidence that anything
 was deleted.
 

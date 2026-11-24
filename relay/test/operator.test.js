@@ -65,14 +65,19 @@ async function homeKey() {
   return { jwk: await crypto.subtle.exportKey('jwk', pair.privateKey) };
 }
 
-/** The writes a home takes with no call, each as a request a home can judge without an account:
- * a predecessor entry (before the first upload), a history upload (member, keyring and home
- * changes), pending objects, and a forwarded head. */
+/** The data writes a home takes with no call, each as a request a home can judge without an
+ * account: a predecessor entry (before the first upload) and a forwarded head. */
 const WRITES = [
   ['PUT', '/predecessor/authority/00000001.json', {}, '{}'],
+  ['PUT', '/records/heads/' + '1'.repeat(32) + '.json', {}, 'garbage'],
+];
+/** The account's authority history: a history upload (member, keyring and home changes) and
+ * pending objects (transitions, vetoes, receipts). Never held back by a suspension, so a lapsed
+ * account can appoint another home and revoke this one (v05_relay_suspend.rs uploads a real
+ * member change to a suspended slot). */
+const AUTHORITY = [
   ['POST', '/authority', JSON_TYPE, '{"from":1,"entries":[],"receipts":[]}'],
   ['POST', '/pending', JSON_TYPE, '{"objects":[]}'],
-  ['PUT', '/records/heads/' + '1'.repeat(32) + '.json', {}, 'garbage'],
 ];
 /** Writes that need a call: a record, a live value, a blob chunk, and a delete. Sent with no call,
  * they are judged first and answered as always, suspended or not: the slot's state is told only to
@@ -186,13 +191,13 @@ describe('the operator API', { skip: ready ? false : `build the module first (${
     assert.equal(json(await op(port, SLOT)).suspended, false);
   });
 
-  test('suspended, every write is 403 refused:subscriptionLapsed and stores nothing; every read answers as before', async () => {
+  test('suspended, every data write is 403 refused:subscriptionLapsed and stores nothing; reads and authority uploads answer as before', async () => {
     const port = await fresh({}, { libraries: { configured0: { home: true, base: `${PREFIX}configured0`, account: OTHER } } });
     assert.equal((await ask(port, SLOT)).status, 200);
     for (const name of [SLOT, 'configured0']) {
       const writesBefore = []; const readsBefore = [];
       for (const w of WRITES) writesBefore.push(answer(await write(port, name, w)));
-      for (const r of [...READS, ...CALLED_WRITES]) readsBefore.push(answer(await (r.length > 2 ? write : read)(port, name, r)));
+      for (const r of [...READS, ...CALLED_WRITES, ...AUTHORITY]) readsBefore.push(answer(await (r.length > 2 ? write : read)(port, name, r)));
       for (const [i, a] of writesBefore.entries()) assert.notEqual(a.status, 403, `${name} ${WRITES[i][0]} ${WRITES[i][1]} before`);
 
       const r = await op(port, name, 'suspend');
@@ -209,7 +214,7 @@ describe('the operator API', { skip: ready ? false : `build the module first (${
         assert.equal(a.status, 403, `${name} ${w[0]} ${w[1]}`);
         assert.deepEqual(json(a), LAPSED, `${name} ${w[0]} ${w[1]}`);
       }
-      for (const [i, r2] of [...READS, ...CALLED_WRITES].entries()) {
+      for (const [i, r2] of [...READS, ...CALLED_WRITES, ...AUTHORITY].entries()) {
         assert.deepEqual(answer(await (r2.length > 2 ? write : read)(port, name, r2)), readsBefore[i], `${name} ${r2[0]} ${r2[1]}`);
       }
       assert.deepEqual(json(await read(port, name, ['GET', '/changes'])) ?? null, changes, 'nothing was stored');
@@ -223,16 +228,16 @@ describe('the operator API', { skip: ready ? false : `build the module first (${
   });
 
   test('a write admitted before a suspension ends before it; none is judged after it', async () => {
-    // The pause point: a history upload holds the slot's lock. The suspension waits for it.
+    // The pause point: a predecessor put, judged, holds the slot's lock. The suspension waits for it.
     let resume; const gate = new Promise((r) => { resume = r; });
     let paused; const pausedAt = new Promise((r) => { paused = r; });
     let armed = false;
-    const hook = (point) => { if (point === 'authority locked' && armed) { armed = false; paused(); return gate; } return undefined; };
+    const hook = (point) => { if (point === 'access predecessor' && armed) { armed = false; paused(); return gate; } return undefined; };
     const port = await fresh({}, { tracing: true, hook });
     assert.equal((await ask(port, SLOT)).status, 200);
-    const before = answer(await write(port, SLOT, WRITES[1]));
+    const before = answer(await write(port, SLOT, WRITES[0]));
     armed = true;
-    const upload = write(port, SLOT, WRITES[1]);
+    const upload = write(port, SLOT, WRITES[0]);
     await pausedAt;
     let suspended = false;
     const suspension = op(port, SLOT, 'suspend').then((r) => { suspended = true; return r; });
@@ -241,7 +246,7 @@ describe('the operator API', { skip: ready ? false : `build the module first (${
     resume();
     assert.deepEqual(answer(await upload), before, 'the admitted write is answered as without the suspension');
     assert.equal((await suspension).status, 204);
-    assert.deepEqual(json(await write(port, SLOT, WRITES[1])), LAPSED);
+    assert.deepEqual(json(await write(port, SLOT, WRITES[0])), LAPSED);
   });
 
   test('a suspension survives a restart, and a resume does too', async () => {
@@ -250,17 +255,17 @@ describe('the operator API', { skip: ready ? false : `build the module first (${
     assert.equal((await op(port, SLOT, 'suspend')).status, 204);
     port = await restart();
     assert.deepEqual(json(await op(port, SLOT)), { slot: SLOT, provisioned: true, suspended: true });
-    assert.deepEqual(json(await write(port, SLOT, WRITES[1])), LAPSED);
+    assert.deepEqual(json(await write(port, SLOT, WRITES[0])), LAPSED);
     assert.equal((await read(port, SLOT, ['GET', ''])).status, 200);
     // With the token gate turned off, the API is gone, and the slot stays read-only.
     port = await restart({ gate: 'open', tokenSha256: undefined });
     assert.equal((await op(port, SLOT)).status, 404);
-    assert.deepEqual(json(await write(port, SLOT, WRITES[1])), LAPSED);
+    assert.deepEqual(json(await write(port, SLOT, WRITES[0])), LAPSED);
     port = await restart();
     assert.equal((await op(port, SLOT, 'resume')).status, 204);
     port = await restart();
     assert.deepEqual(json(await op(port, SLOT)), { slot: SLOT, provisioned: true, suspended: false });
-    assert.notEqual((await write(port, SLOT, WRITES[1])).status, 403);
+    assert.notEqual((await write(port, SLOT, WRITES[0])).status, 403);
   });
 
   test('a suspended slot is never released as unclaimed; once resumed, an unclaimed one is', async () => {

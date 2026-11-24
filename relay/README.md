@@ -147,9 +147,9 @@ revocation is final, whatever the grant's expiry or the state of a subscription:
 entitlement lapses, the gate may stop new slots and the home may stop serving records, but it keeps
 signing heads and receipting authority changes until the account revokes it, or it would block that
 account's key changes. (Entitlements are not built in 0.5; gate `"token"` is the smallest one.)
-A suspension through the operator API (below) is stricter than this: it refuses history
-uploads and pending objects too, so while a slot is suspended its account cannot complete a change
-that needs this home's receipt, its own revocation of this home included. Resume the slot for that.
+A suspension through the operator API (below) keeps to this: it stops data writes only, and the
+home goes on taking and receipting the account's authority changes, so a lapsed account can always
+appoint another home and revoke this one.
 The same holds for a grant: revoking a member that provisioned slots, or its expiry, stops its new
 slots and leaves its slots alone. An appointed one keeps being witnessed; one never appointed is
 released after `unclaimedHours`, as any other.
@@ -218,13 +218,15 @@ token is compared in constant time against `tokenSha256`, as at the door); 400 f
 
 A suspended slot keeps everything it holds and serves every read: `GET {base}`, the head, the
 history and pending objects, records and blob chunks, the change feed and its long poll. Every
-write answers 403 `{"result":"refused:subscriptionLapsed"}` and stores nothing: a record, live
+data write answers 403 `{"result":"refused:subscriptionLapsed"}` and stores nothing: a record, live
 value or blob chunk `PUT` and a predecessor entry (each after its call is judged, so a request with
-no call is still challenged with 401), a history upload `POST {base}/authority` (member, keyring and
-home changes all arrive so), `POST {base}/pending`, and a forwarded head
-`PUT {base}/records/heads/<id>.json`. The check is made under the slot's lock, where every write
-commits, and a suspension is taken under the same lock: a write admitted before it ends before the
-204, and none commits after. The home's own upkeep goes on (it records due entries, signs heads,
+no call is still challenged with 401), and a forwarded head `PUT {base}/records/heads/<id>.json`.
+The account's authority history is never held back: a history upload `POST {base}/authority`
+(member, keyring and home changes) and `POST {base}/pending` (transitions, vetoes and receipts) are
+taken and receipted as always, so a lapsed account can still appoint another home, move its data
+there and revoke this one. The check is made under the slot's lock, where every write commits, and
+a suspension is taken under the same lock: a data write admitted before it ends before the 204, and
+none commits after. The home's own upkeep goes on (it records due entries, signs heads,
 renews its lease and forwards to the account's other homes), so its head stays fresh for readers.
 
 The suspension is the file `<dataDir>/<slot>/suspended.json` (`{"suspended":true,"at":<ms>}`,

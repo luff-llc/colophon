@@ -5,7 +5,7 @@
 No format or reader-rule change. The spec stays Colophon 0.5, revision 18.
 
 - **Operator API and read-only slots** (reference home, `relay/`): with gate `token`, the provisioning token also authorizes `POST /v1/operator/slots/<slot>/suspend` and `/resume` (204) and `GET /v1/operator/slots/<slot>` (`{"slot","provisioned","suspended"}`). Without gate `token` the paths answer 404. Operator requests have their own per-address limit, `provision.operatorPerMinute` (default 60).
-  - A suspended slot serves every read (the head, history, pending objects, records, blob chunks, the change feed and its long poll) and refuses every write with 403 `{"result":"refused:subscriptionLapsed"}`: record, live value, blob chunk and predecessor puts, history uploads, pending objects and forwarded heads. It deletes nothing.
+  - A suspended slot serves every read (the head, history, pending objects, records, blob chunks, the change feed and its long poll) and refuses every data write with 403 `{"result":"refused:subscriptionLapsed"}`: record, live value, blob chunk and predecessor puts, and forwarded heads. History uploads and pending objects (transitions, vetoes, receipts) are still taken and receipted, so the account can appoint another home and revoke this one. It deletes nothing.
   - The suspension is stored as `<slot>/suspended.json`, written atomically, and survives a restart. A suspended slot is never released as unclaimed.
 - **`refused:subscriptionLapsed`** is listed with the reserved home refusals (spec §14). The Swift, Kotlin and JS sessions already show any `refused:` result as received; their documentation now names it.
 

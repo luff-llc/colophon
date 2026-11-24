@@ -33,7 +33,8 @@ async function syncDir(dir) {
 const HISTORY_FILES = new Set(['authority', 'pending', 'receipt', 'predecessor']);
 
 /** The slot's suspension (operator behaviour, not protocol): while this file is in the slot's
- * directory the slot is read-only, every write answering 403 `refused:subscriptionLapsed`. Its
+ * directory the slot's data is read-only, every data write answering 403
+ * `refused:subscriptionLapsed` (the authority history is still taken). Its
  * presence is the state; its body (`{"suspended":true,"at":<ms>}`) only says since when. Written
  * like every durable file of a slot (staged, fsynced, renamed, the directory fsynced), removed on
  * resume, and gone with the slot's directory only when the slot itself is released. */
@@ -436,15 +437,17 @@ export class HomeSlot {
   status(now = this.clock()) { return this.wasm.call({ op: 'status', state: this.state, now }); }
 
   // -------------------------------------------------------------------------------------------
-  // Suspension (operator behaviour): a read-only slot. Every request that can change what the
-  // slot holds is refused under the slot's lock, where every write commits, after its call (if
-  // it needs one) is judged: a record or predecessor put, a history upload (POST authority:
-  // member, keyring and home changes among them), pending objects (POST pending), a forwarded
-  // head, and a delete. A suspension is itself taken under that lock, so a write admitted before
-  // it ends before it is answered, and none commits after it. Reads (GET and HEAD: the slot, its
-  // head, history and pending objects, records and blob chunks, the change feed and its long
-  // poll) and the home's own upkeep (recording due entries, signing heads, forwarding) go on.
-  // Nothing is deleted.
+  // Suspension (operator behaviour): the slot's data is read-only. Every data write is refused
+  // under the slot's lock, where every write commits, after its call (if it needs one) is
+  // judged: a record, live value or blob chunk put, a predecessor put, a forwarded head, and a
+  // delete. A suspension is itself taken under that lock, so a write admitted before it ends
+  // before it is answered, and none commits after it. The account's authority history is never
+  // held back: history uploads (POST authority) and pending objects (POST pending: transitions,
+  // vetoes, receipts) are taken as always, so the account can still appoint another home or
+  // revoke this one, and this home keeps receipting. Reads (GET and HEAD: the slot, its head,
+  // history and pending objects, records and blob chunks, the change feed and its long poll) and
+  // the home's own upkeep (recording due entries, signing heads, forwarding) go on. Nothing is
+  // deleted.
 
   refuseIfSuspended() {
     if (this.suspended) throw new this.deps.HttpError(403, 'This library is read-only', {}, { result: LAPSED });
@@ -823,7 +826,6 @@ export class HomeSlot {
 
   async postAuthority(res, body) {
     const { send } = this.deps;
-    this.refuseIfSuspended();
     const r = this.wasm.call({ op: 'post_authority', state: this.state, now: this.clock(), body: b64(body) });
     await this.commit(r.state); // even a refusal changes state (§13.1)
     await this.deps.reach?.('authority committed'); // a test hook (traced builds only)
@@ -837,7 +839,6 @@ export class HomeSlot {
 
   async postPending(res, body) {
     const { send } = this.deps;
-    this.refuseIfSuspended();
     const r = this.wasm.call({ op: 'post_pending', state: this.state, now: this.clock(), body: b64(body) });
     await this.commit(r.state);
     await this.materialize(r.store);

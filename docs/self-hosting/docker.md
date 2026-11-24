@@ -107,8 +107,8 @@ docker run --rm -v colophon-home:/data --entrypoint /usr/local/bin/bun colophon-
 ```
 
 The token lets someone create new slots, and, through the operator API
-(`/v1/operator/slots/<slot>`, relay README, "The operator API, and read-only slots"), make a slot
-read-only and writable again. It never reads or deletes what a slot holds. It is meant for one
+(`/v1/operator/slots/<slot>`, relay README, "The operator API, and read-only slots"), make a slot's
+data read-only and writable again (the account's authority changes are always taken). It never reads or deletes what a slot holds. It is meant for one
 operator's own tools. Do not ship it in an app; see the relay README,
 "Self-hosting".
 

@@ -2,8 +2,9 @@
 //! in WebAssembly): an account provisions its slot through the door with the provisioning token,
 //! appoints the home, and syncs two devices; the operator suspends the slot with the same token
 //! (`POST /v1/operator/slots/<slot>/suspend`); a device's write is then refused with
-//! `refused:subscriptionLapsed` while the other device still pulls everything already written;
-//! the operator resumes the slot and the write goes through.
+//! `refused:subscriptionLapsed` while the other device still pulls everything already written, and
+//! a member change to the account is still taken; the operator resumes the slot and the write
+//! goes through.
 #![allow(clippy::unwrap_used, clippy::too_many_arguments, dead_code)]
 #[path = "../../colophon-core/tests/v05_engine_support/mod.rs"]
 mod support;
@@ -262,17 +263,40 @@ fn a_suspended_slot_refuses_writes_with_subscription_lapsed_serves_every_read_an
         "the pass pulled, then the write was refused: {:?}",
         wire.requests
     );
-    let (status, _, body) = http(
-        port,
-        "POST",
-        &format!("/v1/libraries/{SLOT}/pending"),
-        &[("Content-Type".into(), "application/json".into())],
-        br#"{"objects":[]}"#,
+    // The account's authority history is never held back: a member change made now is uploaded
+    // and taken, so a lapsed account can still appoint another home and revoke this one.
+    std::mem::swap(&mut f.host, &mut host);
+    f.account.advance(now + 5_500).unwrap();
+    let from = entries_json(&f).last().unwrap().0 + 1;
+    let tablet_id = f.host.identity(33);
+    admit(
+        &mut f,
+        &tablet_id,
+        "Tablet",
+        "device",
+        terms_for(&[(NS, "write")]),
+        terms_for(&[(NS, "write")]),
     );
-    assert_eq!(status, 403);
+    std::mem::swap(&mut f.host, &mut host);
+    let entries: Vec<Value> = entries_json(&f)
+        .into_iter()
+        .filter(|(s, _)| *s >= from)
+        .map(|(_, e)| e)
+        .collect();
+    assert!(!entries.is_empty(), "the member change is an entry");
+    relay.set_clock(now + 5_500);
+    let (status, out) = relay.post(
+        "/authority",
+        &json!({"from": from, "entries": entries, "receipts": []}),
+    );
+    assert_eq!(status, 200, "an authority change while suspended: {out}");
+    let (status, page) = relay.get(&format!("/authority?after={}", from - 1));
+    assert_eq!(status, 200);
+    let page: Value = serde_json::from_slice(&page).unwrap();
     assert_eq!(
-        serde_json::from_slice::<Value>(&body).unwrap(),
-        json!({"result": "refused:subscriptionLapsed"})
+        page["entries"].as_array().map(Vec::len),
+        Some(entries.len()),
+        "the home holds the member change: {page}"
     );
     let mut laptop = member_engine(&f, &host, &laptop_src, &laptop_id, now + 6_000);
     let faults = relay_pass(
