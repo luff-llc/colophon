@@ -180,8 +180,16 @@ fn a_suspended_slot_refuses_writes_with_subscription_lapsed_serves_every_read_an
         b"",
     );
     assert_eq!(status, 404, "nor the operator API");
-    let (status, _, request) = http(private, "POST", "/v1/provision", &headers, body.as_bytes());
+    let (status, answer_headers, request) =
+        http(private, "POST", "/v1/provision", &headers, body.as_bytes());
     assert_eq!(status, 200, "{}", String::from_utf8_lossy(&request));
+    // The slot's generation comes with the member request, from the same decision.
+    let generation = answer_headers
+        .iter()
+        .find(|(k, _)| k == "colophon-slot-generation")
+        .map(|(_, v)| v.clone())
+        .expect("a Colophon-Slot-Generation header");
+    assert_eq!(generation.len(), 32);
     appoint_with(&mut f, &request);
     let phone_id = f.host.identity(31);
     let laptop_id = f.host.identity(32);

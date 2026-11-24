@@ -4,14 +4,14 @@
 // on real time: every relay runs on a clock the test sets.
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { existsSync } from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import http from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { after, before, describe, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { provisionConfig } from '../provision.js';
+import { isPrivateHost, parsePrivateListen, provisionConfig } from '../provision.js';
 import { startRelay } from '../relay.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -42,7 +42,9 @@ function raw(port, urlPath, { method = 'GET', headers = {}, body } = {}) {
   return new Promise((resolve, reject) => {
     const h = { ...headers };
     if (body !== undefined && h['content-length'] === undefined) h['content-length'] = Buffer.byteLength(body);
-    const req = http.request({ host: '127.0.0.1', port, path: urlPath, method, headers: h }, (res) => {
+    // `port` may be a Unix socket's path.
+    const to = typeof port === 'string' ? { socketPath: port } : { host: '127.0.0.1', port };
+    const req = http.request({ ...to, path: urlPath, method, headers: h }, (res) => {
       const chunks = [];
       res.on('data', (c) => chunks.push(c));
       res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks) }));
@@ -465,5 +467,118 @@ describe('the operator API', { skip: ready ? false : `build the module first (${
     assert.deepEqual(json(await write(port, SLOT, WRITES[0])), LAPSED);
     assert.equal((await raw(priv, `/v1/libraries/${SLOT}`)).status, 404);
     assert.equal((await raw(priv, '/healthz')).status, 200);
+  });
+
+  test('a provision answers the slot\'s generation with the member request, in the same decision', async () => {
+    const port = await fresh();
+    const r = await ask(port, SLOT);
+    assert.equal(r.status, 200);
+    const g = r.headers['colophon-slot-generation'];
+    assert.match(g, /^[0-9a-f]{32}$/);
+    assert.equal(g, await generationOf(port, SLOT));
+    JSON.parse(r.body.toString('utf8')); // the body is the member request, as before
+    const again = await ask(port, SLOT);
+    assert.equal(again.headers['colophon-slot-generation'], g, 'the same answer again');
+    assert.equal(again.body.toString(), r.body.toString());
+    assert.equal((await op(port, SLOT, 'suspend', { query: `?generation=${g}` })).status, 204, 'usable at once, with no read');
+  });
+
+  test('a slot whose suspension is uncertain, or whose marker is on disk, is never released', async () => {
+    let fail = null;
+    const hook = (point) => { if (point === fail) { fail = null; throw new Error('simulated sync failure'); } return undefined; };
+    const port = await fresh({ unclaimedHours: 24 }, { tracing: true, hook });
+    const r = await ask(port, SLOT);
+    const g = r.headers['colophon-slot-generation'];
+    fail = 'suspension renamed';
+    assert.equal((await op(port, SLOT, 'suspend', { query: `?generation=${g}` })).status, 500);
+    const s = await running.relay.slot(SLOT);
+    assert.equal(s.home.suspended, false);
+    assert.equal(s.home.suspensionUncertain, true);
+    now = T0 + 25 * HOUR;
+    assert.equal((await ask(port, 'tslot00000b')).status, 200);
+    assert.ok(existsSync(path.join(dir, SLOT, 'suspended.json')), 'uncertain: kept');
+    // Memory certain and wrong (as after a lost update): the marker on disk still keeps it.
+    s.home.suspensionUncertain = false;
+    assert.equal((await ask(port, 'tslot00000c')).status, 200);
+    assert.ok(existsSync(path.join(dir, SLOT, 'suspended.json')), 'the marker on disk: kept');
+    const rows = Object.keys(JSON.parse(await readFile(path.join(dir, 'provisioned.json'), 'utf8'))).sort();
+    assert.ok(rows.includes(SLOT));
+  });
+
+  test('with gate grant,token, a grant request that fails its stateless judgement starts no sweep', async () => {
+    let draining = 0;
+    const hook = (point) => { if (point.startsWith('release draining')) draining += 1; return undefined; };
+    const port = await fresh({ unclaimedHours: 24, gate: ['grant', 'token'], operator: { account: OTHER, slot: 'operator0000' },
+      audience: 'https://home.example/v1/provision' }, { tracing: true, hook });
+    assert.equal((await ask(port, SLOT)).status, 200);
+    now = T0 + 25 * HOUR;
+    for (const authorization of ['Colophon AAAA', 'Colophon ' + Buffer.from('{"not":"a call"}').toString('base64url')]) {
+      const r = await ask(port, 'tslot00000b', { headers: { authorization } });
+      assert.notEqual(r.status, 200);
+    }
+    assert.equal(draining, 0, 'no release started');
+    assert.ok(existsSync(path.join(dir, SLOT)));
+    assert.equal((await ask(port, 'tslot00000b')).status, 200, 'the token path sweeps');
+    assert.equal(draining, 1);
+    assert.equal(existsSync(path.join(dir, SLOT)), false);
+  });
+
+  test('a full home waits for a release under way, outside the lock, before it answers 507', async () => {
+    let resume; const gate = new Promise((r) => { resume = r; });
+    let paused; const pausedAt = new Promise((r) => { paused = r; });
+    let draining; const drainingAt = new Promise((r) => { draining = r; });
+    let armed = false;
+    const hook = (point) => {
+      if (point === 'access predecessor' && armed) { armed = false; paused(); return gate; }
+      if (point.startsWith('release draining')) draining();
+      return undefined;
+    };
+    const port = await fresh({ unclaimedHours: 24, maxSlots: 1 }, { tracing: true, hook });
+    assert.equal((await ask(port, SLOT)).status, 200);
+    armed = true;
+    const slow = write(port, SLOT, WRITES[0]);
+    await pausedAt;
+    now = T0 + 25 * HOUR;
+    // A token request that starts the release (and is then refused for its body) ...
+    const starter = raw(port, '/v1/provision', { method: 'POST', headers: { ...JSON_TYPE, ...BEARER },
+      body: JSON.stringify({ slot: 'tslot00000c', base: 'https://elsewhere.example/', account: ACCOUNT }) });
+    await drainingAt;
+    // ... and another while the slot drains: the home is full until the release ends.
+    const waiting = ask(port, 'tslot00000d');
+    await new Promise((r) => setTimeout(r, 50));
+    resume();
+    await slow;
+    assert.equal((await starter).status, 400);
+    const r = await waiting;
+    assert.equal(r.status, 200, r.body.toString());
+    assert.deepEqual(Object.keys(JSON.parse(await readFile(path.join(dir, 'provisioned.json'), 'utf8'))), ['tslot00000d']);
+    assert.ok(!(await import('node:fs/promises').then((f) => f.readdir(dir))).some((n) => n.startsWith('.released-')), 'the released directory is gone');
+  });
+
+  test('the private listener on a Unix socket, made 0600; a public address is refused unless allowed', async () => {
+    const sock = path.join(await mkdtemp(path.join(tmpdir(), 'colophon-sock-')), 'private.sock');
+    const port = await fresh({}, { privateListen: { path: sock } });
+    assert.equal(running.privatePath, sock);
+    assert.equal(statSync(sock).mode & 0o777, 0o600);
+    assert.equal((await ask(port, SLOT)).status, 404, 'not on the public listener');
+    const r = await ask(sock, SLOT);
+    assert.equal(r.status, 200);
+    assert.equal((await op(sock, SLOT, 'suspend', { query: `?generation=${r.headers['colophon-slot-generation']}` })).status, 204);
+    // A restart replaces the socket an earlier run left.
+    await running.close();
+    running = await start({}, { privateListen: { path: sock } });
+    assert.equal((await state(sock, SLOT)).suspended, true);
+    await running.close(); running = null;
+    for (const host of ['0.0.0.0', '::', '203.0.113.7']) {
+      await assert.rejects(start({}, { privateListen: { host, port: 0 } }), /not a loopback or private address/, host);
+    }
+    running = await start({}, { privateListen: { host: '0.0.0.0', port: 0 }, privateListenAllowPublic: true });
+    assert.ok(running.privatePort > 0, 'allowed explicitly');
+    assert.deepEqual(parsePrivateListen('unix:/run/colophon/private.sock'), { path: '/run/colophon/private.sock' });
+    assert.deepEqual(parsePrivateListen('[fd00::2]:8788'), { host: 'fd00::2', port: 8788 });
+    for (const bad of ['unix:relative.sock', '8788', 'host:']) assert.throws(() => parsePrivateListen(bad), Error, bad);
+    for (const [h, ok] of [['127.0.0.1', true], ['10.1.2.3', true], ['172.20.0.2', true], ['192.168.1.1', true], ['::1', true], ['fd00::2', true], ['0.0.0.0', false], ['::', false], ['8.8.8.8', false], ['2001:db8::1', false]]) {
+      assert.equal(isPrivateHost(h), ok, h);
+    }
   });
 });

@@ -99,7 +99,7 @@ home holds no account secret: no controller or member key, no PRF output, no see
 | TLS | `COLOPHON_RELAY_TLS_CERT`, `COLOPHON_RELAY_TLS_KEY`, or `"tls":{…}` | off |
 | CORS origins | `COLOPHON_RELAY_CORS_ORIGINS="https://app.example,…"` or `cors.origins`: each exactly `scheme://host[:port]`, lower case, compared whole; `*`, `null`, a path or a default port refuse start-up | none: no CORS header |
 | Provisioning | config `provision` (below) | off |
-| Private listener | `COLOPHON_PRIVATE_LISTEN=host:port` or config `privateListen: {"host","port"}`: serves `/v1/provision` and `/v1/operator/*` only, and the public listener answers 404 for them (below) | none: the public listener serves both |
+| Private listener | `COLOPHON_PRIVATE_LISTEN=unix:/path/to.sock` (preferred) or `host:port`, or config `privateListen: {"path"}` / `{"host","port"}`: serves `/v1/provision` and `/v1/operator/*` only, and the public listener answers 404 for them (below) | none: the public listener serves both |
 | Client address | config `clientAddress`: `{"header": "CF-Connecting-IP", "trustedPeers": ["127.0.0.1", "::1", "172.16.0.0/12"]}` (addresses or CIDR ranges; a `/0` or a range with host bits set refuses start-up) | the socket address |
 
 **Provisioning.** A home slot serves one account, by its account ID, from before anything is
@@ -138,16 +138,20 @@ module finds well formed, signed by this home's key, and naming the row's accoun
 A bad table refuses start-up with a message naming the row.
 
 **Release, and a lapsed entitlement.** Only a slot that was never appointed, holds no genesis and
-is not suspended is ever released (`unclaimedHours`). A provision that passes the door's first
-checks (for gate `"token"`, the address's share and the token itself) sweeps such slots before it
-is decided; a request those checks refuse starts nothing. The release takes the slot out of service
+is not suspended is ever released (`unclaimedHours`); a slot counts as suspended when its marker is
+on disk or its suspension's state is uncertain, whatever the state in memory says. A provision
+that passes the door's first checks (for gate `"token"`, the address's share and the token itself;
+for gate `"grant"`, the module's judgement of the call made with no state) sweeps such slots before
+it is decided; a request those checks refuse starts nothing. A full home (`maxSlots`) with releases
+under way waits for them, outside the lock, before it answers 507. The release takes the slot out of service
 first, under the door's lock (new requests answer `refused:notProvisioned`, a waiting change feed is
 woken and ended, a provision of the name and an operator call on it wait for the release to end),
 then drains every request and scheduler pass still running on it outside that lock, so a slow
 request on one slot never holds up the door or the operator API for others. Back under the lock it
 checks that the row and the slot are still the ones it started from, and again under the slot's own
-lock that nothing is held; only then are its directory and its row removed, and only then can the
-name be provisioned again. If an upload landed meanwhile, the release is abandoned and the slot
+lock that nothing is held; only then is its directory renamed aside (`<dataDir>/.released-<slot>.*`,
+removed after the lock is released, or at the next start-up after a crash) and its row removed, and
+only then can the name be provisioned again. If an upload landed meanwhile, the release is abandoned and the slot
 stays. An
 appointed home keeps witnessing and receipting the account's authority history until its
 revocation is final, whatever the grant's expiry or the state of a subscription: when an
@@ -205,12 +209,19 @@ So the answers tell the kinds of slot apart: an unknown name is 404, a configure
 without its token is 401, and a home slot answers `GET {base}` with 200. That is intended: slot
 names are not secrets, and access is by call (or, at a 0.3 slot, by token), never by knowing a name.
 
-**The private listener.** `COLOPHON_PRIVATE_LISTEN=host:port` (or `privateListen:
-{"host","port"}` in the config file) starts a second, plain HTTP listener that serves the door
-(`/v1/provision`) and the operator API (`/v1/operator/*`), and `/healthz`, and nothing else. The
-public listener then answers 404 for both, as for any unknown path, before any check or body read.
-Bind it to an address only the operator's own network reaches (a VM's private interface, a
-container network), never to the public ingress. A hosted home should always use it.
+**The private listener.** `COLOPHON_PRIVATE_LISTEN` (or `privateListen` in the config file)
+starts a second, plain HTTP listener that serves the door (`/v1/provision`) and the operator API
+(`/v1/operator/*`), and `/healthz`, and nothing else. The public listener then answers 404 for both,
+as for any unknown path, before any check or body read. A hosted home should always use it. The
+token crosses it in plain text, so:
+
+- Prefer a Unix domain socket: `unix:/run/colophon/private.sock` (`{"path": …}`). It is made mode
+  0600 for the relay's user; a socket left by an earlier run is replaced, and anything else at that
+  path refuses start-up. Nothing on any network carries the token.
+- Otherwise `host:port` on a loopback or private address (127.0.0.0/8, ::1, 10/8, 172.16/12,
+  192.168/16, fc00::/7, link-local): loopback, or a container-internal network the provisioner
+  alone shares. A wildcard (`0.0.0.0`, `::`) or a public address refuses start-up unless
+  `COLOPHON_PRIVATE_LISTEN_ALLOW_PUBLIC=1` (`privateListenAllowPublic: true`) allows it.
 
 **The operator API, and read-only slots.** With gate `"token"`, the same token also lets the
 operator's own tools (a billing service beside the home, say) make a home slot's data read-only and
@@ -223,7 +234,9 @@ path does.
 | `POST /v1/operator/slots/<slot>/suspend?generation=<g>` | 204: the slot's data is read-only, durably, before the answer. Again: 204 |
 | `POST /v1/operator/slots/<slot>/resume?generation=<g>` | 204: the slot takes data writes again, durably. Again: 204 |
 
-A provisioner reads and keeps the generation right after each provision. A suspend or resume names
+The door's 200 carries the slot's generation in a `Colophon-Slot-Generation` header, read in the
+same decision as the member request (the body is unchanged): a provisioner keeps it from there,
+with no separate read that could see a name released and provisioned again meanwhile. A suspend or resume names
 it, and it is compared under the door's lock: a command for a library whose name has since been
 released and provisioned again (another library) answers 409 `{"result":"refused:staleGeneration"}`
 and changes nothing.

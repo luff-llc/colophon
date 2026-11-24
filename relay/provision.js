@@ -223,6 +223,54 @@ export function clientAddressResolver(cfg) {
   };
 }
 
+/**
+ * The private listener's address (operator behaviour): `unix:/absolute/path` (a Unix domain
+ * socket, preferred: nothing on the network carries the token) or `host:port` (an IPv6 host in
+ * brackets). Returns `{path}` or `{host, port}`; throws naming `name` otherwise.
+ */
+export function parsePrivateListen(text, name = 'privateListen') {
+  const t = String(text ?? '').trim();
+  if (t.startsWith('unix:')) {
+    const file = t.slice(5);
+    if (!path.isAbsolute(file) || file.includes('\0')) throw new Error(`${name}: a Unix socket is unix:/absolute/path, not ${JSON.stringify(text)}`);
+    return { path: file };
+  }
+  const m = /^(?:\[([0-9A-Fa-f:.]+)\]|([^:\s\[\]]+)):(\d{1,5})$/.exec(t);
+  if (!m || Number(m[3]) > 65535) throw new Error(`${name} must be unix:/path/to.sock or host:port (for example 127.0.0.1:8788), not ${JSON.stringify(text)}`);
+  return { host: m[1] ?? m[2], port: Number(m[3]) };
+}
+
+/** Whether an address is loopback or private (RFC 1918, RFC 4193 unique local, link-local), or
+ * `localhost`. A wildcard (`0.0.0.0`, `::`) is neither: it binds every interface. */
+export function isPrivateHost(host) {
+  if (host === 'localhost') return true;
+  const bits = ipBits(host);
+  if (!bits) return false;
+  const inRange = (text) => { const r = parseRange(text); return r.family === bits.family && (bits.value >> r.shift) === r.network; };
+  const ranges = bits.family === 4
+    ? ['127.0.0.0/8', '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '169.254.0.0/16']
+    : ['::1/128', 'fc00::/7', 'fe80::/10'];
+  if (bits.family === 6 && /^::ffff:/i.test(host)) return isPrivateHost(normalIp(host));
+  return ranges.some(inRange);
+}
+
+/** Checks a private listener's setting: `{path}` (absolute) or `{host, port}`, the host loopback
+ * or private unless `allowPublic`. Throws otherwise (the relay refuses to start). */
+export function checkPrivateListen(v, allowPublic = false) {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) throw new Error('privateListen must be {"path": "/run/colophon/private.sock"} or {"host": "<address>", "port": <port>}');
+  if (v.path !== undefined) {
+    if (Object.keys(v).join() !== 'path' || typeof v.path !== 'string' || !path.isAbsolute(v.path)) throw new Error('privateListen.path must be an absolute path, and alone');
+    return v;
+  }
+  if (Object.keys(v).sort().join() !== 'host,port' || typeof v.host !== 'string' || !Number.isSafeInteger(v.port) || v.port < 0 || v.port > 65535) {
+    throw new Error('privateListen must be {"host": "<address>", "port": <port>}');
+  }
+  if (!allowPublic && !isPrivateHost(v.host)) {
+    throw new Error(`privateListen host ${JSON.stringify(v.host)} is not a loopback or private address: the token crosses it in plain text. Use a Unix socket (unix:/path), loopback, or a private network address, or allow it explicitly (COLOPHON_PRIVATE_LISTEN_ALLOW_PUBLIC=1, privateListenAllowPublic)`);
+  }
+  return v;
+}
+
 /** The most bytes a stored member request may hold (decoded); its body is bounded at 16 KiB. */
 export const MAX_REQUEST_BYTES = 32 * 1024;
 /** A row's bound in the file: the request in base64 and the other fields. */

@@ -47,7 +47,7 @@ curl http://127.0.0.1:8080/healthz          # {"ok":true}
 | `COLOPHON_PROVISION` | `on` | `off` turns off the door at `POST /v1/provision`. |
 | `COLOPHON_PROVISION_GATE` | `token` | `token`, `open`, `grant`, or a list such as `grant,token` (relay README, "Provisioning"). |
 | `COLOPHON_PROVISION_TOKEN_SHA256` | made on first start | The SHA-256 of a token you made (`bun relay/server.js token`). Leave it unset to have a token made and printed once (not in hosted mode). |
-| `COLOPHON_PRIVATE_LISTEN` | none | `host:port` of a private listener that alone serves `/v1/provision` and `/v1/operator/*`; the public port then answers 404 for both. Bind it to your private network only. Setting it turns on hosted mode. |
+| `COLOPHON_PRIVATE_LISTEN` | none | A private listener that alone serves `/v1/provision` and `/v1/operator/*`; the public port then answers 404 for both. `unix:/run/colophon/private.sock` (recommended), or `host:port` on loopback or a private address (a public or wildcard address is refused unless `COLOPHON_PRIVATE_LISTEN_ALLOW_PUBLIC=1`). Setting it turns on hosted mode. |
 | `COLOPHON_HOSTED` | off | Hosted mode: with gate `token`, `COLOPHON_PROVISION_TOKEN_SHA256` is required, and no token is ever made or printed (a hash left on the volume is not used). |
 | `COLOPHON_PROVISION_OPERATOR_ACCOUNT`, `COLOPHON_PROVISION_OPERATOR_SLOT` | none | Required with gate `grant`. The audience is `<origin>/v1/provision`. |
 | `COLOPHON_MAX_SLOTS` | `200` | `provision.maxSlots` |
@@ -91,12 +91,18 @@ If you lose the volume, you lose the key, and those accounts must appoint a new 
 
 ## The provisioning token
 
-**Hosted deployments** (a home you run for other people) set `COLOPHON_PRIVATE_LISTEN` or
-`COLOPHON_HOSTED=1`, make the token themselves, keep it in their secret manager, and pass only
-its hash in `COLOPHON_PROVISION_TOKEN_SHA256`. The container then refuses to start without that
-hash and never prints a token. If a token was ever printed to a log that others can read (an
-earlier start without hosted mode), treat it as known: make a new one, set its hash, restart,
-and give the new token to your tools. The old one stops working at that restart.
+**Hosted deployments** (a home you run for other people) must set `COLOPHON_HOSTED=1` and a
+private listener, make the token themselves, keep it in their secret manager, and pass only its
+hash in `COLOPHON_PROVISION_TOKEN_SHA256`. The container then refuses to start without that hash
+and never prints a token.
+
+- **Rotate any token printed before.** If this volume ever started without hosted mode, a token
+  was printed to its log: treat it as known. Make a new one (`bun relay/server.js token`), set its
+  hash, restart, and give the new token to your tools. The old one stops working at that restart.
+- **Keep the private listener off the network.** Prefer a Unix socket on a volume the
+  provisioner's container also mounts (`COLOPHON_PRIVATE_LISTEN=unix:/run/colophon/private.sock`;
+  the socket is mode 0600, so run the provisioner as the same user, 65532), or loopback, or an
+  address on a container-internal network only the provisioner joins. Never publish its port.
 
 For a home of your own:
 

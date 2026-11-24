@@ -8,7 +8,7 @@ import { appendLines, writeAll } from './files.js';
 import { HomeKey, HomeModule, HomeSlot, ModuleError } from './home.js';
 import {
   ProvisionReplay, ProvisionTable, REPLAY_DIR, TABLE_FILE, clientAddressConfig, tableKind, clientAddressResolver, isJsonType, memberRequest,
-  grantLimits, operatorGate, parseProvisionBody, provisionConfig, provisionGate, provisionRoute,
+  checkPrivateListen, grantLimits, operatorGate, parseProvisionBody, provisionConfig, provisionGate, provisionRoute,
 } from './provision.js';
 import path from 'node:path';
 
@@ -28,6 +28,9 @@ export const DEFAULT_LIMITS = Object.freeze({
 });
 
 const SLOT = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+/** A released slot's directory, renamed aside before it is removed (never a slot name: slots
+ * start with a letter or digit). Left by a crash, it is removed at the next start-up. */
+const RELEASED_PREFIX = '.released-';
 const HEX64 = /^[0-9a-f]{64}$/;
 const BATCH_BYTES = 4 * 1024 * 1024; // Encoded JSON/base64 response budget.
 
@@ -488,6 +491,9 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
   await ensureRealDir(path.resolve(dataDir));
   const unlock = await lockDataDir(dataDir);
   try {
+  for (const name of await fsp.readdir(path.resolve(dataDir))) {
+    if (name.startsWith(RELEASED_PREFIX)) await fsp.rm(path.join(path.resolve(dataDir), name), { recursive: true, force: true });
+  }
   let closing = false;
   const requests = new Set();
   const auth = new Map();
@@ -616,7 +622,13 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
   let provisionTail = Promise.resolve();
   const provisionLock = (fn) => { const run = provisionTail.then(fn, fn); provisionTail = run.catch(() => {}); return run; };
   // A suspended slot counts as claimed: it is never released as unclaimed, however long after.
-  const claimed = (s) => { if (s.home.suspended) return true; const st = s.home.status(); return Boolean(st.appointed || st.held > 0); };
+  // A suspended slot counts as claimed, and so does one whose suspension is uncertain or whose
+  // marker is on disk whatever the state in memory says (a suspend that failed after the rename).
+  const claimed = async (s) => {
+    if (s.home.suspended || s.home.suspensionUncertain || await s.home.suspensionOnDisk()) return true;
+    const st = s.home.status();
+    return Boolean(st.appointed || st.held > 0);
+  };
 
   /**
    * Release one provisioned slot that holds no genesis (never appointed) and is not suspended,
@@ -645,7 +657,7 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
     try { s = await slot(name); } catch (error) { if (error instanceof HttpError && error.status === 503) return null; throw error; }
     // A first look at the state as it stands, without waiting for the slot's lock (a slow request
     // may hold it): the decision is made again under that lock in step 3, before anything goes.
-    if (claimed(s)) return null;
+    if (await claimed(s)) return null;
     s.releasing = true;
     homeSlots.delete(name);
     for (const waiter of [...s.waiters]) waiter.wake();
@@ -657,30 +669,37 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
       s.closing = true;
       await s.chain;
       await reach(`release drained ${name}`);
-      await provisionLock(() => finishRelease(name, e, s));
+      const trash = await provisionLock(() => finishRelease(name, e, s));
+      // The released directory was renamed aside under the lock; it is removed outside it.
+      if (trash) await fsp.rm(trash, { recursive: true, force: true });
     })().finally(() => releases.delete(name));
     releases.set(name, done);
     return { done }; // wrapped: an async function returning the promise itself would wait for it
   }
   async function finishRelease(name, e, s) {
     const same = table.get(name) === e && slots.get(name) === s && !s.released;
+    const trash = path.join(path.resolve(dataDir), `${RELEASED_PREFIX}${name}.${randomBytes(8).toString('hex')}`);
     const removed = same && await s.home.lock(async () => {
-      if (claimed(s)) return false;
+      if (await claimed(s)) return false;
       const refuse = () => Promise.reject(new Error(`slot ${name} was released`));
       s.released = true;
       s.home.lock = refuse; s.home.replayLock = refuse; s.exclusive = refuse;
       slots.delete(name); opening.delete(name);
-      await fsp.rm(s.root, { recursive: true, force: true });
+      // One rename takes the directory out of the slot's name at once; its contents are removed
+      // after the lock (a crash leaves the renamed directory, removed at the next start-up).
+      await fsp.rename(s.root, trash);
+      await syncDir(path.resolve(dataDir));
       return true;
     });
     if (!removed) {
       s.releasing = false; s.closing = closing;
       if (table.get(name) === e) homeSlots.set(name, { base: e.base, account: e.account });
       await reach(`release abandoned ${name}`);
-      return;
+      return null;
     }
     await table.write(name, null);
     await reach(`released ${name}`);
+    return trash;
   }
 
   /** A provisioned slot holding no genesis `unclaimedHours` after it was provisioned is
@@ -711,7 +730,11 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
     for (;;) {
       const r = await provisionLock(async () => {
         const pending = releases.get(name);
-        return pending ? { pending } : { value: await fn() };
+        if (pending) return { pending };
+        // `fn` may ask to wait outside the lock too (`waitFor`), and is then run again.
+        let waitFor = null;
+        const value = await fn((promise) => { waitFor = promise; });
+        return waitFor ? { pending: waitFor } : { value };
       });
       if (!r.pending) return r.value;
       await r.pending.catch(() => {});
@@ -743,6 +766,22 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
    * set up, or stopped answers 503 unavailable. The replay table changes only under the door's
    * own lock, so both asks see the same rows.
    */
+  /** Whether a grant call passes the module's judgement made with no state (the first ask of
+   * `grantSession`'s verify): only then may it start work such as a sweep. Pure. */
+  function grantPassesEarly(call, body) {
+    if (!call || !provisionReplay) return false;
+    try {
+      const parsed = homeModule.call({ op: 'call_key', call });
+      const rows = parsed.parsed ? provisionReplay.lookup(parsed.key, parsed.signer) : { existing: null, signerRows: [] };
+      const member = parsed.parsed && parsed.signer.startsWith('member:') ? parsed.signer.slice('member:'.length) : null;
+      const early = homeModule.call({ op: 'provision_access', state: null, call, body: body.toString('base64'),
+        operator: provisioning.operator.account, audience: provisioning.audience, now: clock(),
+        existing: rows.existing, signerRows: rows.signerRows, replayRows: provisioning.replayRows,
+        perHour: grantLimits(provisioning, member).perHour });
+      return early.status === 503; // needs the operator slot's state: it passed everything else
+    } catch (error) { if (error instanceof ModuleError) return false; throw error; }
+  }
+
   function grantSession(call, body) {
     let s = null; let unlock = null;
     const verify = async () => {
@@ -799,12 +838,20 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
         early.result ? { result: early.result } : undefined);
     }
     // Releases of unclaimed slots drain outside the lock; a release of the asked name is waited
-    // for before the request is decided.
-    await sweepUnclaimed();
-    const answer = await afterRelease(asked.slot, async () => {
+    // for before the request is decided. A grant request sweeps only once its call passes the
+    // module's stateless judgement (possession, account, audience, purpose, args): anything else
+    // is refused under the lock as before, having started nothing.
+    if (route !== 'grant' || grantPassesEarly(call, body)) await sweepUnclaimed();
+    const answer = await afterRelease(asked.slot, async (waitFor) => {
       const valid = typeof asked.slot === 'string' && SLOT.test(asked.slot);
       const occupied = valid && (configured.has(asked.slot)
         || (!table.get(asked.slot) && await fsp.lstat(path.join(path.resolve(dataDir), asked.slot)).then(() => true, () => false)));
+      // A full home with releases under way: wait for them outside the lock, then decide again,
+      // so a slot being reclaimed is not answered 507.
+      if (!table.get(asked.slot) && table.size >= provisioning.maxSlots && releases.size > 0) {
+        waitFor(Promise.allSettled([...releases.values()]));
+        return null;
+      }
       const session = route === 'grant' && provisioning.enabled ? grantSession(call, body) : null;
       const decide = async (verify) => {
         const verdict = await admitProvision({ ...asked, address, authorization,
@@ -822,7 +869,7 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
           // An idempotent answer: the call is recorded (it counts against its grant's rate) and
           // has no effect.
           if (reserve) await provisionReplay.reserve(reserve, null);
-          return Buffer.from(verdict.existing.request, 'base64');
+          return { request: Buffer.from(verdict.existing.request, 'base64'), generation: generationOf(asked.slot) };
         }
         // Verify, reserve, make the slot (the durable write names the call's digest), complete.
         if (reserve) { await provisionReplay.reserve(reserve, { slot: asked.slot }); await reach('grant reserved'); }
@@ -835,13 +882,15 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
         // The row is durable: a shutdown that began meanwhile leaves the slot to open at the next
         // start, and the request is answered, not refused after its effect.
         await slot(asked.slot).catch((error) => { if (!closing) throw error; });
-        return request;
+        return { request, generation: generationOf(asked.slot) };
       };
       if (!session) return decide(undefined);
       try { return await decide(session.verify); } finally { session.finish(); }
     });
-    res.writeHead(200, { 'content-type': 'application/json', 'content-length': answer.length });
-    res.end(answer);
+    // The slot's generation, read under the same lock as the answer: the operator API's commands
+    // name it, and a later read could see a name released and provisioned again.
+    res.writeHead(200, { 'content-type': 'application/json', 'content-length': answer.request.length, 'colophon-slot-generation': answer.generation });
+    res.end(answer.request);
   }
 
   // ---------------------------------------------------------------------------------------------
@@ -1239,14 +1288,18 @@ function send(res, status, json, headers = {}) {
 }
 
 /** Starts an HTTP (or HTTPS when `tls` holds PEM `cert` and `key`) server. With
- * `privateListen: {host, port}`, a second, plain HTTP server on that address serves provisioning
- * (`/v1/provision`) and the operator API (`/v1/operator/*`), which the public server then answers
- * 404 for. Bind it to an address only the operator's own network reaches. */
-export async function startRelay({ host = '127.0.0.1', port = 8787, tls, privateListen, ...options }) {
-  if (privateListen !== undefined && privateListen !== null) {
-    if (typeof privateListen !== 'object' || typeof privateListen.host !== 'string' || !Number.isSafeInteger(privateListen.port) || privateListen.port < 0 || privateListen.port > 65535) {
-      throw new Error('privateListen must be {"host": "<address>", "port": <port>}');
-    }
+ * `privateListen`, a second, plain HTTP server serves provisioning (`/v1/provision`) and the
+ * operator API (`/v1/operator/*`), which the public server then answers 404 for: `{path}`, a Unix
+ * domain socket (preferred: made mode 0600, nothing on a network carries the token), or
+ * `{host, port}` on a loopback or private address (any other refuses start-up unless
+ * `privateListenAllowPublic`). */
+export async function startRelay({ host = '127.0.0.1', port = 8787, tls, privateListen, privateListenAllowPublic = false, ...options }) {
+  if (privateListen !== undefined && privateListen !== null) checkPrivateListen(privateListen, privateListenAllowPublic);
+  if (privateListen?.path) {
+    // A socket left by an earlier run is replaced; anything else at that path refuses start-up.
+    const st = await fsp.lstat(privateListen.path).catch((error) => { if (error.code === 'ENOENT') return null; throw error; });
+    if (st && !st.isSocket()) throw new Error(`privateListen.path ${privateListen.path} exists and is not a socket`);
+    if (st) await fsp.unlink(privateListen.path);
   }
   const relay = await createRelay({ ...options, privateApi: Boolean(privateListen) });
   const make = (handler, secure) => {
@@ -1255,12 +1308,20 @@ export async function startRelay({ host = '127.0.0.1', port = 8787, tls, private
     server.headersTimeout = 20_000;
     return server;
   };
-  const listen = (server, p, h) => new Promise((resolve, reject) => { server.once('error', reject); server.listen(p, h, resolve); });
+  const listen = (server, p, h) => new Promise((resolve, reject) => {
+    server.once('error', reject);
+    if (typeof p === 'object') server.listen(p, resolve); else server.listen(p, h, resolve);
+  });
   const server = make(relay.listener, Boolean(tls));
   const privateServer = privateListen ? make(relay.privateListener, false) : null;
   try {
     await listen(server, port, host);
-    if (privateServer) await listen(privateServer, privateListen.port, privateListen.host);
+    if (privateServer && privateListen.path) {
+      // Made private before it is bound: only this user may connect.
+      const mask = process.umask(0o177);
+      try { await listen(privateServer, { path: privateListen.path }); } finally { process.umask(mask); }
+      await fsp.chmod(privateListen.path, 0o600);
+    } else if (privateServer) await listen(privateServer, privateListen.port, privateListen.host);
   } catch (error) {
     if (server.listening) await new Promise((resolve) => server.close(() => resolve()));
     await relay.close();
@@ -1269,7 +1330,8 @@ export async function startRelay({ host = '127.0.0.1', port = 8787, tls, private
   const address = server.address();
   const privateAddress = privateServer?.address();
   return { server, relay, host: address.address, port: address.port,
-    ...(privateServer ? { privateServer, privateHost: privateAddress.address, privatePort: privateAddress.port } : {}),
+    ...(privateServer ? (typeof privateAddress === 'string' ? { privateServer, privatePath: privateAddress }
+      : { privateServer, privateHost: privateAddress.address, privatePort: privateAddress.port }) : {}),
     close: async () => {
       const stopped = [server, privateServer].filter(Boolean).map((x) => new Promise((resolve) => x.close(() => resolve())));
       try { await relay.close(); }

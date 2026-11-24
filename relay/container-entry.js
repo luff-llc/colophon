@@ -25,6 +25,7 @@ import { closeSync, constants as fsc, fsyncSync, lchownSync, linkSync, lstatSync
 import { hostname } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { checkPrivateListen, parsePrivateListen } from './provision.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const SERVER = path.join(here, 'server.js');
@@ -78,10 +79,10 @@ export function readSettings(env) {
   // printed, and no hash left on the volume by an earlier start is trusted.
   let privateListen;
   const privateText = env.COLOPHON_PRIVATE_LISTEN?.trim();
+  const privateListenAllowPublic = env.COLOPHON_PRIVATE_LISTEN_ALLOW_PUBLIC?.trim() === '1';
   if (privateText) {
-    const m = /^(?:\[([0-9A-Fa-f:.]+)\]|([^:\s]+)):(\d{1,5})$/.exec(privateText);
-    if (!m || Number(m[3]) > 65535) throw new SettingError(`COLOPHON_PRIVATE_LISTEN must be host:port, for example 10.0.0.2:8788, not ${JSON.stringify(privateText)}`);
-    privateListen = { host: m[1] ?? m[2], port: Number(m[3]) };
+    try { privateListen = checkPrivateListen(parsePrivateListen(privateText, 'COLOPHON_PRIVATE_LISTEN'), privateListenAllowPublic); }
+    catch (error) { throw new SettingError(error.message.startsWith('COLOPHON_') ? error.message : `COLOPHON_PRIVATE_LISTEN: ${error.message}`); }
   }
   const hostedText = (env.COLOPHON_HOSTED ?? '').trim().toLowerCase();
   if (!['', 'on', 'off', 'true', 'false', '1', '0'].includes(hostedText)) throw new SettingError('COLOPHON_HOSTED must be on or off');
@@ -103,6 +104,7 @@ export function readSettings(env) {
     operator,
     hosted,
     privateListen,
+    privateListenAllowPublic,
     maxSlots: int(env, 'COLOPHON_MAX_SLOTS', { min: 1 }),
     perAddressPerHour: int(env, 'COLOPHON_PROVISION_PER_ADDRESS_PER_HOUR', { min: 1 }),
     unclaimedHours: int(env, 'COLOPHON_PROVISION_UNCLAIMED_HOURS', { min: 1 }),
@@ -125,6 +127,7 @@ export function relayConfig(s, { dataDir, keyFile, tokenSha256 }) {
   if (s.slotBytes !== undefined) config.limits = { slotBytes: s.slotBytes };
   if (s.clientAddress) config.clientAddress = s.clientAddress;
   if (s.privateListen) config.privateListen = s.privateListen;
+  if (s.privateListen && s.privateListenAllowPublic) config.privateListenAllowPublic = true;
   // The prefix stays set when provisioning is off: a table written while it was on is checked
   // against it at start-up.
   const provision = { enabled: s.provisioning, prefix: s.prefix };

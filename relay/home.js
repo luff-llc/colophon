@@ -473,6 +473,12 @@ export class HomeSlot {
     this.suspensionUncertain = false;
   }
 
+  /** Whether the marker is on disk now, whatever memory says (a release consults it). */
+  async suspensionOnDisk() {
+    const st = await fsp.lstat(this.file(SUSPENSION_FILE)).catch((error) => { if (error.code === 'ENOENT') return null; throw error; });
+    return Boolean(st);
+  }
+
   /** The operator's read of the state: reconciled first when it is uncertain. */
   async reconcileSuspension() {
     if (!this.suspensionUncertain) return;

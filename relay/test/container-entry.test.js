@@ -80,7 +80,14 @@ describe('settings from the environment', () => {
     assert.deepEqual(s.privateListen, { host: 'fd00::2', port: 8788 });
     assert.deepEqual(relayConfig(s, { dataDir: 'd', keyFile: 'k', tokenSha256: s.tokenSha256 }).privateListen, { host: 'fd00::2', port: 8788 });
     assert.equal(readSettings({ COLOPHON_PUBLIC_URL: URL_, COLOPHON_HOSTED: '1', COLOPHON_PROVISION_GATE: 'open' }).hosted, true, 'no token gate: nothing to supply');
-    for (const bad of ['8788', 'host:', 'host:70000', 'a b:1']) {
+    const sock = readSettings({ COLOPHON_PUBLIC_URL: URL_, COLOPHON_PRIVATE_LISTEN: 'unix:/run/colophon/private.sock', COLOPHON_PROVISION_TOKEN_SHA256: 'ab'.repeat(32) });
+    assert.deepEqual(relayConfig(sock, { dataDir: 'd', keyFile: 'k', tokenSha256: sock.tokenSha256 }).privateListen, { path: '/run/colophon/private.sock' });
+    for (const pub of ['0.0.0.0:8788', '[::]:8788', '203.0.113.7:8788']) {
+      assert.throws(() => readSettings({ COLOPHON_PUBLIC_URL: URL_, COLOPHON_PRIVATE_LISTEN: pub, COLOPHON_PROVISION_TOKEN_SHA256: 'ab'.repeat(32) }), (e) => e instanceof SettingError && /not a loopback or private address/.test(e.message), pub);
+    }
+    const allowed = readSettings({ COLOPHON_PUBLIC_URL: URL_, COLOPHON_PRIVATE_LISTEN: '0.0.0.0:8788', COLOPHON_PRIVATE_LISTEN_ALLOW_PUBLIC: '1', COLOPHON_PROVISION_TOKEN_SHA256: 'ab'.repeat(32) });
+    assert.equal(relayConfig(allowed, { dataDir: 'd', keyFile: 'k', tokenSha256: allowed.tokenSha256 }).privateListenAllowPublic, true);
+    for (const bad of ['8788', 'host:', 'host:70000', 'a b:1', 'unix:relative.sock']) {
       assert.throws(() => readSettings({ COLOPHON_PUBLIC_URL: URL_, COLOPHON_PRIVATE_LISTEN: bad, COLOPHON_PROVISION_TOKEN_SHA256: 'ab'.repeat(32) }), (e) => e instanceof SettingError && /COLOPHON_PRIVATE_LISTEN/.test(e.message), bad);
     }
     assert.throws(() => readSettings({ COLOPHON_PUBLIC_URL: URL_, COLOPHON_HOSTED: 'yes' }), (e) => e instanceof SettingError && /COLOPHON_HOSTED/.test(e.message));
