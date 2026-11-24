@@ -52,6 +52,43 @@ const NEW_PER_PASS = 64;
 const RETRY_PER_PASS = 16;
 const ENTRIES_RESEND_MS = 2000;
 
+/** A peer's answer was over its bound: the read was cancelled. */
+export class PeerAnswerTooLarge extends Error {
+  constructor(max) { super(`the answer is over ${max} bytes`); this.max = max; }
+}
+
+/**
+ * The body of a peer's answer, read as a stream and bounded in decoded bytes (what fetch hands
+ * over after any content coding): over `max`, the read is cancelled and PeerAnswerTooLarge is
+ * thrown, so a peer cannot make this home hold more than `max` bytes for one answer. A declared
+ * `Content-Length` over `max` is refused before anything is read.
+ */
+export async function readCapped(response, max) {
+  const declared = Number(response.headers?.get?.('content-length'));
+  if (Number.isFinite(declared) && declared > max) {
+    await response.body?.cancel().catch(() => {});
+    throw new PeerAnswerTooLarge(max);
+  }
+  if (!response.body) return Buffer.alloc(0);
+  const reader = response.body.getReader();
+  const chunks = []; let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > max) { await reader.cancel().catch(() => {}); throw new PeerAnswerTooLarge(max); }
+    chunks.push(Buffer.from(value.buffer, value.byteOffset, value.byteLength));
+  }
+  return Buffer.concat(chunks, size);
+}
+
+/** At most this much of a refusal's text is read, for a note. */
+const NOTE_BYTES = 4096;
+const noteText = async (r) => {
+  try { return (await readCapped(r, NOTE_BYTES)).toString('utf8').slice(0, 200); }
+  catch (error) { return error instanceof PeerAnswerTooLarge ? '(an answer over its bound)' : `(unreadable: ${error.message})`; }
+};
+
 /** A loaded home module. The module is pure: an instance that traps is dropped and replaced. */
 export class HomeModule {
   constructor(module) { this.module = module; this.instance = null; }
@@ -932,9 +969,18 @@ export class HomeSlot {
     if (this.stopping?.signal.aborted) return;
     const resolve = typeof this.resolve === 'function' ? this.resolve() : this.resolve;
     this.passes ??= new Map();
+    // Bounded: at most `forwardPeersPerSlot` passes run for this slot, and `forwardPasses` for the
+    // whole home (`deps.forwarding`, shared by every slot). A peer left out gets its pass at a
+    // later tick, when one has ended.
+    const budget = this.deps?.forwarding ?? (this.ownForwarding ??= { running: 0, max: Infinity });
+    const perSlot = this.limits?.forwardPeersPerSlot ?? Infinity;
     for (const peer of st.peers ?? []) {
       const endpoint = (peer.endpoints ?? [])[0];
       if (!endpoint || this.passes.has(peer.id)) continue; // its last pass is still running
+      if (this.passes.size >= perSlot || budget.running >= budget.max) {
+        this.note('forward budget', `forwarding passes are at their bound (${this.passes.size} here, ${budget.running} in all); the rest wait for a later tick`);
+        break;
+      }
       // The last pass to this peer found nothing to send (no new or backlogged object, no entry,
       // its head already taken) and the state has not changed since, nor can anything come
       // due before the quiet ends: another pass would send nothing and save the same rows.
@@ -945,10 +991,11 @@ export class HomeSlot {
       const base = (resolve?.[endpoint.replace(/\/$/, '')] ?? endpoint).replace(/\/$/, '');
       const row = (this.forward.peers[peer.id] ??= { after: 0, retry: [], head: '' });
       row.retry ??= [];
+      budget.running += 1;
       const pass = this.forwardTo(base, row, peer.id)
         .then(() => this.note(`forward ${peer.id}`, ''))
         .catch((error) => this.note(`forward ${peer.id}`, `forwarding to home ${peer.id} failed (it will be retried): ${error.message}`))
-        .finally(() => this.passes.delete(peer.id));
+        .finally(() => { this.passes.delete(peer.id); budget.running -= 1; });
       this.passes.set(peer.id, pass);
     }
   }
@@ -998,7 +1045,9 @@ export class HomeSlot {
     const timeout = Math.min(PEER_TIMEOUT_MS, deadline - Date.now());
     if (timeout <= 0) return false;
     const r = await fetch(`${base}/pending`, { signal: this.peerSignal(timeout), method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ objects }) });
-    const body = Buffer.from(await r.arrayBuffer());
+    // Bounded: a peer's answer (its receipts) is read up to `peerAnswerBytes`, and an answer over
+    // it counts as not delivered (offered again later), never held whole.
+    const body = await readCapped(r, this.limits?.peerAnswerBytes ?? 1024 * 1024);
     const a = this.wasm.call({ op: 'peer_answer', status: r.status, body: b64(body) });
     if (a.receipts?.length) {
       await this.lock(async () => {
@@ -1106,7 +1155,9 @@ export class HomeSlot {
       const timeout = Math.min(PEER_TIMEOUT_MS, deadline - Date.now());
       if (timeout <= 0) return 0;
       const r = await fetch(`${base}/authority`, { signal: this.peerSignal(timeout), method: 'POST', headers: { 'content-type': 'application/json' }, body });
-      this.note(`entries ${peerId}`, r.status === 200 ? '' : `home ${peerId} did not take this home's entries from ${fwd.from}: ${r.status} ${(await r.text()).slice(0, 200)}`);
+      const said = r.status === 200 ? '' : await noteText(r);
+      if (r.status === 200) await r.body?.cancel().catch(() => {});
+      this.note(`entries ${peerId}`, r.status === 200 ? '' : `home ${peerId} did not take this home's entries from ${fwd.from}: ${r.status} ${said}`);
       return r.status;
     };
     const putHead = async () => {
@@ -1118,8 +1169,8 @@ export class HomeSlot {
       const timeout = Math.min(PEER_TIMEOUT_MS, deadline - Date.now());
       if (timeout <= 0) return;
       const r = await fetch(`${base}/records/heads/${this.key.memberId}.json`, { signal: this.peerSignal(timeout), method: 'PUT', headers: { 'content-type': 'application/json' }, body: text });
-      if (r.status === 200) { row.head = sha(text); await this.saveForward(); this.note(`head ${peerId}`, ''); }
-      else this.note(`head ${peerId}`, `home ${peerId} refused this home's head: ${r.status} ${(await r.text()).slice(0, 200)}`);
+      if (r.status === 200) { await r.body?.cancel().catch(() => {}); row.head = sha(text); await this.saveForward(); this.note(`head ${peerId}`, ''); }
+      else this.note(`head ${peerId}`, `home ${peerId} refused this home's head: ${r.status} ${await noteText(r)}`);
     };
     // Nothing to send at all: no entry the peer lacks, and the peer took this very head.
     if (!fwd.entries.length && head && sha(JSON.stringify(head)) === row.head) return false;

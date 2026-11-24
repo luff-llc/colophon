@@ -53,7 +53,7 @@ curl http://127.0.0.1:8080/healthz          # {"ok":true}
 | `COLOPHON_MAX_SLOTS` | `200` | `provision.maxSlots` |
 | `COLOPHON_PROVISION_PER_ADDRESS_PER_HOUR` | `10` | `provision.perAddressPerHour` |
 | `COLOPHON_PROVISION_UNCLAIMED_HOURS` | `24` | `provision.unclaimedHours` |
-| `COLOPHON_SLOT_BYTES` | `0` (no quota) | `limits.slotBytes`: the most bytes one slot may hold |
+| `COLOPHON_SLOT_BYTES` | `0` (no quota) | `limits.slotBytes`: the most bytes of data one slot may hold. Only data counts (records, live values, blob chunks); a write over it answers 507 `refused:overQuota`, while the account's history and every read go on. Set it on a hosted home. |
 | `COLOPHON_CORS_ORIGINS` | none | A comma-separated list of exact `scheme://host[:port]` origins |
 | `COLOPHON_CLIENT_IP_HEADER`, `COLOPHON_TRUSTED_PROXIES` | none | Set both or neither. The header holding the client's address (for example `X-Real-IP` or `CF-Connecting-IP`), and the peers it is read from: IP addresses or CIDR ranges, comma-separated. A `/0` range is refused. |
 

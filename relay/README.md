@@ -96,6 +96,8 @@ home holds no account secret: no controller or member key, no PRF output, no see
 | Scheduler tick | `COLOPHON_RELAY_TICK_MS` or `tickMs` | `2000` |
 | Other homes | config `resolve`: `{"https://other.example/v1/libraries/acct": "http://10.0.0.7:8787/v1/libraries/acct"}` (the endpoint an account names, to the URL to reach it) | the endpoint itself |
 | Request rate | `limits.requestsPerMinute` (per address) | `1200` |
+| Slot quota | `limits.slotBytes` (`COLOPHON_SLOT_BYTES` in the container): the most bytes of data one slot may hold. At a home slot only data counts (records under `ops/` and `history/`, live values under `state/`, blob chunks), and a data write over it answers 507 `{"result":"refused:overQuota"}`; the account's history, and everything the module stores, is never refused, and reads never are. A hosted home should set it | `0`: none |
+| Forwarding bounds | `limits.peerAnswerBytes` (the most decoded bytes read of one peer's answer; a longer answer is cancelled and the object offered again later), `limits.forwardPeersPerSlot` and `limits.forwardPasses` (forwarding passes running at once for one slot, and for the whole home; a peer left out gets its pass at a later tick) | `1048576`, `8`, `64` |
 | TLS | `COLOPHON_RELAY_TLS_CERT`, `COLOPHON_RELAY_TLS_KEY`, or `"tls":{…}` | off |
 | CORS origins | `COLOPHON_RELAY_CORS_ORIGINS="https://app.example,…"` or `cors.origins`: each exactly `scheme://host[:port]`, lower case, compared whole; `*`, `null`, a path or a default port refuse start-up | none: no CORS header |
 | Provisioning | config `provision` (below) | off |
@@ -141,7 +143,8 @@ A bad table refuses start-up with a message naming the row.
 is not suspended is ever released (`unclaimedHours`); a slot counts as suspended when its marker is
 on disk or its suspension's state is uncertain, whatever the state in memory says. A provision
 that passes the door's first checks (for gate `"token"`, the address's share and the token itself;
-for gate `"grant"`, the module's judgement of the call made with no state) sweeps such slots before
+for gate `"grant"`, the module's judgement of the call, membership included, over the operator
+slot's state as it stands) sweeps such slots before
 it is decided; a request those checks refuse starts nothing. A full home (`maxSlots`) with releases
 under way waits for them, outside the lock, before it answers 507. The release takes the slot out of service
 first, under the door's lock (new requests answer `refused:notProvisioned`, a waiting change feed is
@@ -170,7 +173,7 @@ released after `unclaimedHours`, as any other.
 | `enabled` | `false` | The door answers 404 when off, and every other answer is as without the setting |
 | `prefix` | none, required when on (and while a table file exists) | The public `https://` URL prefix, ending in `/`: `base` must equal `prefix + slot`. Plain `http://` only to a loopback host, for tests; anything else refuses start-up |
 | `maxSlots` | `200` | Provisioned slots this home holds |
-| `perAddressPerHour` | `10` | New slots (open path), refused tokens and requests no listed path takes, one client address may spend in an hour; separately, the grant requests from one address that may be refused in an hour (see below) |
+| `perAddressPerHour` | `10` | New slots (open and token paths), refused tokens and requests no listed path takes, one client address may spend in an hour; separately, the grant requests from one address that may be refused in an hour (see below). The same slot provisioned again for the same account spends none and is never refused by it. Behind a private listener every request shares one address (a Unix socket's is empty): set it to the new slots the provisioner may make in an hour |
 | `unclaimedHours` | `24` | A provisioned slot holding no genesis this long after it was made is released (its directory, then its row, removed) at the next provision or start-up, on the relay's clock |
 | `slotPattern` | `^[a-z0-9][a-z0-9._-]{7,63}$` | Names an app may pick, besides the slot grammar |
 | `gate` | `"open"` | Who may provision: `"open"` (anyone within the bounds), `"token"` (`Authorization: Bearer <token>` whose SHA-256 is `tokenSha256`; `bun relay/server.js token` prints one), `"grant"` (a call by a member of the operator account, below), or a list of them, such as `["grant", "open"]`. No value twice, and not `"open"` with `"token"` (open admits everything token would). Anything else refuses start-up |
@@ -196,7 +199,7 @@ released after `unclaimedHours`, as any other.
 | 409 | The slot is held by another account, configured by the operator, or a directory of that name is in the data directory |
 | 411, 413 | No `Content-Length`, or a body over 4 KiB |
 | 415 | The media type is not `application/json` (checked before the body is read; a browser must preflight such a request, and only a listed origin's preflight succeeds) |
-| 429 `{"result":"refused:overQuota"}` | The address is over `perAddressPerHour`, with `Retry-After` (checked first: a guesser over its share learns nothing about its token); for a grant request, the address is over its attempts or its refusals, the replay table is full, or the grant is over `grantPerHour`, each with `Retry-After` |
+| 429 `{"result":"refused:overQuota"}` | A new slot, or a refused token, while the address is over `perAddressPerHour`, with `Retry-After` (a repeat provision of an existing slot is never refused so); for a grant request, the address is over its attempts or its refusals, the replay table is full, or the grant is over `grantPerHour`, each with `Retry-After` |
 | 429 `{"result":"refused:window"}` | A grant over its share of the replay table, with `Retry-After` |
 | 503 `{"result":"unavailable"}` | A grant request while the operator slot is not set up (not held, no genesis, not appointed, stopped), or its account's heads cannot be judged here |
 | 507 `{"result":"refused:overQuota"}` | `maxSlots` are held, or the grant holds `grantMaxSlots` |
@@ -230,6 +233,7 @@ path does.
 
 | Request (`Authorization: Bearer <token>`) | Answer |
 | --- | --- |
+| `GET /v1/operator/slots?after=<slot>&limit=<n>` | 200 `{"slots":[{"slot","provisioned","suspended","generation"}…],"next"}`: every home slot, configured or provisioned, in name order, `limit` (1-1000, default 100) at a time after the cursor `after`; `next` is the cursor for the next page, or null at the end. A slot whose release is under way is left out. For a billing cutover: list, then suspend or resume each by its generation |
 | `GET /v1/operator/slots/<slot>` | 200 `{"slot","provisioned","suspended","generation"}`: `provisioned` is whether the door made the slot (false for a configured home slot), `suspended` whether its data is read-only, `generation` an opaque string that changes whenever the name is released and provisioned again (it is the same across restarts) |
 | `POST /v1/operator/slots/<slot>/suspend?generation=<g>` | 204: the slot's data is read-only, durably, before the answer. Again: 204 |
 | `POST /v1/operator/slots/<slot>/resume?generation=<g>` | 204: the slot takes data writes again, durably. Again: 204 |
@@ -265,6 +269,8 @@ there and revoke this one. The check is made under the slot's lock, where every 
 a suspension is taken under the same lock: a data write admitted before it ends before the 204, and
 none commits after. The home's own upkeep goes on (it records due entries, signs heads,
 renews its lease and forwards to the account's other homes), so its head stays fresh for readers.
+Forwarding is not stopped for a suspended slot: what it carries is the account's authority history
+and its receipts, which another home needs to take over; it is bounded like every slot's (above).
 
 The suspension is the file `<dataDir>/<slot>/suspended.json` (`{"suspended":true,"at":<ms>}`,
 staged, fsynced and renamed into place, then the directory fsynced; a resume removes it and fsyncs

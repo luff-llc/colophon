@@ -12,6 +12,7 @@ import path from 'node:path';
 import { after, before, describe, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { isPrivateHost, parsePrivateListen, provisionConfig } from '../provision.js';
+import { HomeSlot, PeerAnswerTooLarge, readCapped } from '../home.js';
 import { startRelay } from '../relay.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -580,5 +581,102 @@ describe('the operator API', { skip: ready ? false : `build the module first (${
     for (const [h, ok] of [['127.0.0.1', true], ['10.1.2.3', true], ['172.20.0.2', true], ['192.168.1.1', true], ['::1', true], ['fd00::2', true], ['0.0.0.0', false], ['::', false], ['8.8.8.8', false], ['2001:db8::1', false]]) {
       assert.equal(isPrivateHost(h), ok, h);
     }
+  });
+
+  test('GET /v1/operator/slots lists every home slot, a page at a time, behind the same gate', async () => {
+    const port = await fresh({ operatorRefusedPerMinute: 100 }, { libraries: { configured0: { home: true, base: `${PREFIX}configured0`, account: OTHER } } });
+    const names = ['tslot00000c', 'tslot00000a', 'tslot00000b'];
+    const gens = {};
+    for (const n of names) gens[n] = (await ask(port, n)).headers['colophon-slot-generation'];
+    assert.equal((await act(port, 'tslot00000b', 'suspend')).status, 204);
+    const list = (q = '', headers = BEARER) => raw(port, `/v1/operator/slots${q}`, { headers });
+    const all = json(await list());
+    assert.deepEqual(all, { next: null, slots: [
+      { slot: 'configured0', provisioned: false, suspended: false, generation: await generationOf(port, 'configured0') },
+      { slot: 'tslot00000a', provisioned: true, suspended: false, generation: gens.tslot00000a },
+      { slot: 'tslot00000b', provisioned: true, suspended: true, generation: gens.tslot00000b },
+      { slot: 'tslot00000c', provisioned: true, suspended: false, generation: gens.tslot00000c },
+    ] });
+    // Pages, by cursor.
+    const one = json(await list('?limit=2'));
+    assert.deepEqual(one.slots.map((x) => x.slot), ['configured0', 'tslot00000a']);
+    assert.equal(one.next, 'tslot00000a');
+    const two = json(await list(`?limit=2&after=${one.next}`));
+    assert.deepEqual(two.slots.map((x) => x.slot), ['tslot00000b', 'tslot00000c']);
+    assert.equal(two.next, null);
+    // The same gate and the same answers to a bad request.
+    assert.deepEqual(json(await list('', {})), { result: 'refused:noEntitlement' });
+    assert.equal((await raw(port, '/v1/operator/slots', { method: 'POST', headers: BEARER })).status, 405);
+    assert.equal((await list('?x=1')).status, 400);
+    assert.equal((await list('?limit=a')).status, 400);
+    assert.equal((await list('', { ...BEARER, origin: 'https://page.example' })).status, 403);
+  });
+
+  test('re-provisioning an existing slot spends no new-slot share, and no share refuses it', async () => {
+    const sock = path.join(await mkdtemp(path.join(tmpdir(), 'colophon-sock-')), 'private.sock');
+    await fresh({ perAddressPerHour: 1 }, { privateListen: { path: sock } });
+    const first = await ask(sock, SLOT);
+    assert.equal(first.status, 200);
+    for (let i = 0; i < 5; i += 1) {
+      const again = await ask(sock, SLOT);
+      assert.equal(again.status, 200, 'the same slot again, over the socket\'s one bucket');
+      assert.equal(again.body.toString(), first.body.toString());
+    }
+    const other = await ask(sock, 'tslot00000b');
+    assert.equal(other.status, 429, 'a new slot is over the share');
+    assert.deepEqual(json(other), { result: 'refused:overQuota' });
+    assert.equal((await ask(sock, SLOT)).status, 200, 'and the existing one still answers');
+  });
+
+  test('slotBytes counts a home slot\'s data only, and is published', async () => {
+    const port = await fresh({}, { limits: { requestsPerMinute: 0, slotBytes: 1 } });
+    assert.equal((await ask(port, SLOT)).status, 200);
+    assert.equal(json(await raw(port, `/v1/libraries/${SLOT}`)).quotaBytes, 1);
+    // History the module stores (a staged predecessor entry here) is never refused by it.
+    const s = await running.relay.slot(SLOT);
+    assert.equal(s.isData('authority/00000001.json'), false);
+    assert.equal(s.isData('predecessor/authority/00000001.json'), false);
+    for (const p of ['ops/a/b/c.json', 'history/a/b/c.json', 'state/a/b/c.json', 'blobs/' + '0'.repeat(64)]) assert.equal(s.isData(p), true, p);
+    assert.doesNotThrow(() => s.checkQuota(1000, 'authority/00000001.json'));
+    assert.throws(() => s.checkQuota(2, 'ops/a/b/c.json'), (e) => e.status === 507 && e.body?.result === 'refused:overQuota');
+  });
+});
+
+describe('forwarding is bounded', () => {
+  const body = (chunks) => new ReadableStream({ pull(c) { const n = chunks.shift(); if (n === undefined) c.close(); else c.enqueue(new Uint8Array(n)); } });
+
+  test('a peer\'s answer is read up to its bound, then cancelled', async () => {
+    assert.equal((await readCapped(new Response(body([10, 10])), 20)).length, 20);
+    let cancelled = false;
+    const big = new ReadableStream({ pull(c) { c.enqueue(new Uint8Array(1024)); }, cancel() { cancelled = true; } });
+    await assert.rejects(readCapped(new Response(big), 4096), PeerAnswerTooLarge);
+    assert.equal(cancelled, true, 'an endless answer is cancelled, not held');
+    const declared = new Response('x'.repeat(10), { headers: { 'content-length': '100000' } });
+    await assert.rejects(readCapped(declared, 1000), PeerAnswerTooLarge, 'a declared length over the bound is refused before reading');
+    assert.equal((await readCapped(new Response(null), 10)).length, 0);
+  });
+
+  test('passes per slot and for the whole home are bounded; the rest wait for a later tick', async () => {
+    const forwarding = { running: 0, max: 5 };
+    const slotOf = (n) => {
+      const h = Object.create(HomeSlot.prototype);
+      Object.assign(h, {
+        deps: { forwarding }, limits: { forwardPeersPerSlot: 3 }, forward: { peers: {} }, said: new Map(),
+        key: { memberId: 'f'.repeat(32) }, clock: () => 0, stopping: new AbortController(),
+        lock: async (fn) => fn(), isQuiet: () => false,
+        status: () => ({ peers: Array.from({ length: n }, (_, i) => ({ id: `peer${i}`, endpoints: [`https://peer${i}.example/`] })) }),
+        forwardTo: () => new Promise(() => {}), // a peer that never answers
+      });
+      h.note = () => {};
+      return h;
+    };
+    const a = slotOf(10); const b = slotOf(10);
+    await a.forwardAll();
+    assert.equal(a.passes.size, 3, 'at most forwardPeersPerSlot for one slot');
+    await b.forwardAll();
+    assert.equal(b.passes.size, 2, 'the home-wide bound');
+    assert.equal(forwarding.running, 5);
+    await a.forwardAll();
+    assert.equal(a.passes.size, 3, 'nothing more starts while they run');
   });
 });

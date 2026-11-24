@@ -5,7 +5,7 @@ import { constants as fsc, promises as fsp, writeSync } from 'node:fs';
 import http from 'node:http';
 import https from 'node:https';
 import { appendLines, writeAll } from './files.js';
-import { HomeKey, HomeModule, HomeSlot, ModuleError } from './home.js';
+import { HomeKey, HomeModule, HomeSlot, ModuleError, SUSPENSION_FILE } from './home.js';
 import {
   ProvisionReplay, ProvisionTable, REPLAY_DIR, TABLE_FILE, clientAddressConfig, tableKind, clientAddressResolver, isJsonType, memberRequest,
   checkPrivateListen, grantLimits, operatorGate, parseProvisionBody, provisionConfig, provisionGate, provisionRoute,
@@ -25,7 +25,13 @@ export const DEFAULT_LIMITS = Object.freeze({
   pendingBodyBytes: 12 * 1024 * 1024,
   replayRows: 65536, // replay rows per slot, shared out per principal by the home module
   requestsPerMinute: 1200, // per address; 0 = unlimited
+  // Forwarding to the account's other homes (§13.1), bounded in memory and in concurrency:
+  peerAnswerBytes: 1024 * 1024, // the most decoded bytes read of one peer's answer
+  forwardPeersPerSlot: 8, // passes running at once for one slot
+  forwardPasses: 64, // passes running at once for the whole home
 });
+/** Limits that are the home's own business, not published at `GET {base}`. */
+const UNPUBLISHED = ['slotBytes', 'authorityBodyBytes', 'pendingBodyBytes', 'replayRows', 'requestsPerMinute', 'peerAnswerBytes', 'forwardPeersPerSlot', 'forwardPasses'];
 
 const SLOT = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 /** A released slot's directory, renamed aside before it is removed (never a slot name: slots
@@ -169,6 +175,9 @@ class Slot {
   constructor(root, name, limits, classify = classifyPath) {
     this.root = root; this.name = name; this.limits = limits; this.classify = classify; this.home = null;
     this.entries = []; this.current = new Map(); this.bytes = 0;
+    // A home slot counts only its data (records, live values, blob chunks) against `slotBytes`:
+    // `isData` says which paths those are. Null (a 0.3 slot): every path counts, as always.
+    this.isData = null; this.dataBytes = 0;
     this.waiters = new Set(); this.chain = Promise.resolve(); this.instance = null;
   }
   recordsDir() { return path.join(this.root, 'records'); }
@@ -254,9 +263,10 @@ class Slot {
   indexEntry(e) {
     this.entries.push(e);
     const old = this.current.get(e.path);
-    if (old) this.bytes -= old.size;
+    const data = this.isData?.(e.path) ?? false;
+    if (old) { this.bytes -= old.size; if (data) this.dataBytes -= old.size; }
     if (e.deleted) this.current.delete(e.path);
-    else { this.current.set(e.path, { size: e.size, sha256: e.sha256 }); this.bytes += e.size; }
+    else { this.current.set(e.path, { size: e.size, sha256: e.sha256 }); this.bytes += e.size; if (data) this.dataBytes += e.size; }
   }
 
   async log(e) {
@@ -364,7 +374,7 @@ class Slot {
         if (existing.sha256 === digest && existing.size === body.length) return 200;
         throw new HttpError(412, 'A different record already exists at this path');
       }
-      this.checkQuota(body.length);
+      this.checkQuota(body.length, p);
       const file = await this.target(p, true);
       const staged = await this.stage(body);
       try {
@@ -387,7 +397,7 @@ class Slot {
       const existing = this.current.get(p);
       if (expected !== undefined && (!existing || `"${existing.sha256}"` !== expected)) throw new HttpError(412, 'Live slot changed');
       if (existing && existing.sha256 === digest) return 200;
-      this.checkQuota(body.length - (existing ? existing.size : 0));
+      this.checkQuota(body.length - (existing ? existing.size : 0), p);
       const file = await this.target(p, true);
       const staged = await this.stage(body);
       try { await fsp.rename(staged, file); } finally { await fsp.rm(staged, { force: true }); }
@@ -407,10 +417,15 @@ class Slot {
     });
   }
 
-  checkQuota(added) {
-    if (this.limits.slotBytes > 0 && this.bytes + added > this.limits.slotBytes) {
-      throw new HttpError(507, 'Library slot quota exceeded');
+  checkQuota(added, p) {
+    if (!(this.limits.slotBytes > 0)) return;
+    if (this.isData) {
+      // A home slot: the account's history and everything the module stores is never refused
+      // (an account must always be able to change its keys and homes); data writes are.
+      if (!this.isData(p) || added <= 0 || this.dataBytes + added <= this.limits.slotBytes) return;
+      throw new HttpError(507, 'Library slot quota exceeded', {}, { result: 'refused:overQuota' });
     }
+    if (this.bytes + added > this.limits.slotBytes) throw new HttpError(507, 'Library slot quota exceeded');
   }
 
   async stage(body) {
@@ -487,6 +502,11 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
     if (hook) await hook(point);
   };
   const effective = { ...DEFAULT_LIMITS, ...limits };
+  for (const k of ['peerAnswerBytes', 'forwardPeersPerSlot', 'forwardPasses']) {
+    if (!Number.isSafeInteger(effective[k]) || effective[k] < 1) throw new Error(`limits.${k} must be a positive integer`);
+  }
+  // Forwarding passes running now, across every home slot (bounded by `forwardPasses`).
+  const forwarding = { running: 0, max: effective.forwardPasses };
   await fsp.mkdir(dataDir, { recursive: true, mode: 0o700 });
   await ensureRealDir(path.resolve(dataDir));
   const unlock = await lockDataDir(dataDir);
@@ -572,11 +592,12 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
         // A home slot's path grammar is the module's (the engine's paths).
         const homeClassify = (p) => homeModule.call({ op: 'classify', path: p }).kind;
         const s = new Slot(path.join(path.resolve(dataDir), name), name, effective, isHome ? homeClassify : classifyPath);
+        if (isHome) s.isData = (p) => /^(ops|history|state|blobs)\//.test(p);
         if (isHome) {
           s.home = new HomeSlot({
             slot: s, wasm: homeModule, key: homeKey, base: homeSlots.get(name).base, account: homeSlots.get(name).account,
             clock, resolve, tracing,
-            deps: { HttpError, send, readBody, clampInt, clientAddress, reach, firstChanges, serveChanges, serveRecord },
+            deps: { HttpError, send, readBody, clampInt, clientAddress, reach, firstChanges, serveChanges, serveRecord, forwarding },
             limits: { ...effective, requestsPerMinute: effective.requestsPerMinute ?? 0 },
           });
           await s.home.open();
@@ -766,10 +787,15 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
    * set up, or stopped answers 503 unavailable. The replay table changes only under the door's
    * own lock, so both asks see the same rows.
    */
-  /** Whether a grant call passes the module's judgement made with no state (the first ask of
-   * `grantSession`'s verify): only then may it start work such as a sweep. Pure. */
+  /** Whether a grant call is by a member of the operator account the home holds now: the module's
+   * judgement with no state (possession, account, audience, purpose, args), then with the operator
+   * slot's current state (membership, revocation, expiry, the grant's rate), read as it stands,
+   * with no lock taken. Only then may the call start work such as a sweep; the call is judged
+   * again, under the operator slot's lock, before it has any effect. Pure. */
   function grantPassesEarly(call, body) {
     if (!call || !provisionReplay) return false;
+    const operatorSlot = slots.get(provisioning.operator.slot);
+    if (!operatorSlot?.home?.state || operatorSlot.releasing || operatorSlot.released) return false;
     try {
       const parsed = homeModule.call({ op: 'call_key', call });
       const rows = parsed.parsed ? provisionReplay.lookup(parsed.key, parsed.signer) : { existing: null, signerRows: [] };
@@ -778,7 +804,12 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
         operator: provisioning.operator.account, audience: provisioning.audience, now: clock(),
         existing: rows.existing, signerRows: rows.signerRows, replayRows: provisioning.replayRows,
         perHour: grantLimits(provisioning, member).perHour });
-      return early.status === 503; // needs the operator slot's state: it passed everything else
+      if (early.status !== 503) return false; // refused with no state
+      const judged = homeModule.call({ op: 'provision_access', state: operatorSlot.home.state, call, body: body.toString('base64'),
+        operator: provisioning.operator.account, audience: provisioning.audience, now: clock(),
+        existing: rows.existing, signerRows: rows.signerRows, replayRows: provisioning.replayRows,
+        perHour: grantLimits(provisioning, member).perHour });
+      return Boolean(judged.allowed);
     } catch (error) { if (error instanceof ModuleError) return false; throw error; }
   }
 
@@ -900,6 +931,7 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
   const admitOperator = provisioning.gates.has('token') ? operatorGate(provisioning, clock) : null;
 
   async function operator(req, res, url) {
+    if (admitOperator && url.pathname === '/v1/operator/slots') return operatorList(req, res, url);
     const m = /^\/v1\/operator\/slots\/([^/]+)(?:\/(suspend|resume))?$/.exec(url.pathname);
     if (!admitOperator || !m) { req.resume(); throw new HttpError(404, 'Not found'); }
     const [, name, action] = m;
@@ -945,6 +977,53 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
     });
     res.writeHead(204);
     return res.end();
+  }
+
+  /** The operator's gate for a request: method, origin, then the token and its share, as for
+   * every operator route. Throws the refusal. */
+  function operatorAdmit(req, allow) {
+    if (req.method !== allow) { req.resume(); throw new HttpError(405, 'Method not allowed', { allow }); }
+    if (req.headers.origin !== undefined && !origins.has(req.headers.origin)) { req.resume(); throw new HttpError(403, 'Requests from this origin are refused'); }
+    req.resume();
+    const refused = admitOperator({ address: clientAddress(req), authorization: req.headers.authorization });
+    if (refused) {
+      throw new HttpError(refused.status, 'Refused', refused.retryAfter ? { 'retry-after': String(refused.retryAfter) } : {}, { result: refused.result });
+    }
+  }
+
+  /**
+   * `GET /v1/operator/slots?after=<slot>&limit=<n>`: every home slot this home holds, configured
+   * or provisioned, in name order, a page at a time (`limit` 1-1000, default 100), each as
+   * `{slot, provisioned, suspended, generation}`; `next` is the cursor for the page after (the
+   * last name), or null at the end. A slot whose release is under way is left out (it may yet be
+   * abandoned: it is listed again once it is). Read under the door's lock, so a page never shows
+   * a generation a provision or release is changing.
+   */
+  async function operatorList(req, res, url) {
+    operatorAdmit(req, 'GET');
+    for (const k of url.searchParams.keys()) if (k !== 'after' && k !== 'limit') throw new HttpError(400, `GET /v1/operator/slots takes after and limit only, not ${k}`);
+    if (url.searchParams.getAll('after').length > 1 || url.searchParams.getAll('limit').length > 1) throw new HttpError(400, 'after and limit are given once');
+    const after = url.searchParams.get('after') ?? '';
+    const limit = clampInt(url.searchParams.get('limit'), 100, 1, 1000);
+    const page = await provisionLock(async () => {
+      const names = [...homeSlots.keys()].filter((n) => n > after).sort();
+      const out = [];
+      for (const name of names.slice(0, limit)) {
+        let suspended;
+        try {
+          const s = await slot(name);
+          await s.home.reconcileSuspension();
+          suspended = s.home.suspended;
+        } catch (error) {
+          // A slot that cannot be opened now: its marker on disk says.
+          if (!(error instanceof HttpError)) throw error;
+          suspended = await fsp.lstat(path.join(path.resolve(dataDir), name, SUSPENSION_FILE)).then(() => true, () => false);
+        }
+        out.push({ slot: name, provisioned: table.get(name) !== undefined, suspended, generation: generationOf(name) });
+      }
+      return { slots: out, next: names.length > limit ? out[out.length - 1].slot : null };
+    });
+    return send(res, 200, page);
   }
 
   /** Which listener a path belongs to. With a private listener, provisioning and the operator API
@@ -1013,7 +1092,8 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
     if (!s.home && ['head', 'authority', 'pending', 'predecessor'].includes(section)) throw new HttpError(404, 'Not found');
     if (!section) {
       if (req.method !== 'GET') throw new HttpError(405, 'Method not allowed', { allow: 'GET' });
-      const { slotBytes, authorityBodyBytes, pendingBodyBytes, replayRows, requestsPerMinute, ...published } = effective;
+      const published = Object.fromEntries(Object.entries(effective).filter(([k]) => !UNPUBLISHED.includes(k)));
+      const { slotBytes } = effective;
       return send(res, 200, { protocol: PROTOCOL, slot: name, limits: published, ...(slotBytes ? { quotaBytes: slotBytes } : {}),
         ...(s.home ? { home: { member: s.home.key.memberId }, layouts: homeModule.call({ op: 'limits' }).layouts } : {}) });
     }

@@ -839,10 +839,17 @@ fn revocation_ended_sessions_expiry_and_links_and_a_revoked_grants_slots_are_lef
         issued >= format_date(w.now - 300_000),
         "a fresh head at the new clock: {issued}"
     );
-    // Past unclaimedHours, at the next request to the door: M's unclaimed slots are released,
-    // the appointed one stays.
+    // Past unclaimedHours, a call by the revoked M is refused and starts no sweep: cleanup runs
+    // only for a call by a current member. The next start-up's sweep releases M's unclaimed
+    // slots, and the appointed one stays.
     let (s, _) = w.grant(&m, "ci-u3", &acct);
     assert_eq!(s, 403);
+    let t = table(w.dir());
+    assert!(
+        t.get("ci-u1").is_some() && t.get("ci-l1").is_some(),
+        "a refused call released nothing: {t}"
+    );
+    w.restart(&Trace::default());
     let t = table(w.dir());
     assert!(
         t.get("ci-u1").is_none() && t.get("ci-l1").is_none(),
@@ -853,7 +860,13 @@ fn revocation_ended_sessions_expiry_and_links_and_a_revoked_grants_slots_are_lef
         acct2.as_str(),
         "the appointed slot stays"
     );
-    assert_eq!(head_issued(), issued, "still served");
+    // Still served after the restart (a head as fresh as before).
+    let (s, _, b) = http(w.port(), "GET", "/v1/libraries/home/head", &[], &[]);
+    assert_eq!(s, 200, "still served");
+    let v: Value = serde_json::from_slice(&b).unwrap();
+    let body: Value =
+        serde_json::from_slice(&STANDARD.decode(v["body"].as_str().unwrap()).unwrap()).unwrap();
+    assert!(body["issued"].as_str().unwrap() >= issued.as_str());
 }
 
 #[test]

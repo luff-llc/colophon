@@ -39,6 +39,15 @@ fn bearer() -> Vec<(String, String)> {
 /// A relay with provisioning on behind gate "token" and no slot configured, on the test clock.
 /// Returns the process, the public port and the private port.
 fn start(keys: &HomeKeys, dir: &std::path::Path, clock_ms: i64) -> (Child, u16, u16) {
+    start_with(keys, dir, clock_ms, json!({"requestsPerMinute": 0}))
+}
+
+fn start_with(
+    keys: &HomeKeys,
+    dir: &std::path::Path,
+    clock_ms: i64,
+    limits: Value,
+) -> (Child, u16, u16) {
     let (relay, wasm) = prerequisites().expect("prerequisites");
     std::fs::create_dir_all(dir).unwrap();
     write_clock(&dir.join("clock"), clock_ms);
@@ -52,7 +61,7 @@ fn start(keys: &HomeKeys, dir: &std::path::Path, clock_ms: i64) -> (Child, u16, 
         json!({
             "provision": {"enabled": true, "prefix": PREFIX, "slotPattern": "^[a-z]{4,64}$",
                 "gate": "token", "tokenSha256": token_sha256},
-            "limits": {"requestsPerMinute": 0},
+            "limits": limits,
         })
         .to_string(),
     )
@@ -390,4 +399,117 @@ fn a_suspended_slot_refuses_writes_with_subscription_lapsed_serves_every_read_an
     );
     let _ = child.kill();
     let _ = child.wait();
+}
+
+#[test]
+fn slot_bytes_refuses_data_writes_over_the_limit_with_over_quota_and_never_the_history() {
+    if prerequisites().is_none() {
+        return;
+    }
+    let keys = HomeKeys::new(0x5d);
+    let scratch = Scratch::new("quota-journey");
+    let mut f = create_public(&[NS]);
+    let account = f.account.id().as_str().to_string();
+    // One byte of data: any record write is over it.
+    let (mut child, port, private) = start_with(
+        &keys,
+        scratch.path(),
+        f.account.now_ms(),
+        json!({"requestsPerMinute": 0, "slotBytes": 1}),
+    );
+    let relay = Relay::attached(port, &base(), &account, scratch.path());
+    let mut headers = bearer();
+    headers.push(("Content-Type".into(), "application/json".into()));
+    let body = json!({"slot": SLOT, "base": base(), "account": account}).to_string();
+    let (status, _, request) = http(private, "POST", "/v1/provision", &headers, body.as_bytes());
+    assert_eq!(status, 200);
+    appoint_with(&mut f, &request);
+    let phone_id = f.host.identity(31);
+    admit(
+        &mut f,
+        &phone_id,
+        "Phone",
+        "device",
+        terms_for(&[(NS, "write")]),
+        terms_for(&[(NS, "write")]),
+    );
+    let now = f.account.now_ms() + 1_000;
+    // The whole history is stored, far over one byte: it never counts.
+    first_upload(&relay, &f, now);
+    let authority = MemSource::new();
+    authority.store_account(&f.account);
+    let phone_src = MemSource::new();
+    for p in authority.listing() {
+        phone_src.put(&p, authority.get(&p).unwrap());
+    }
+    let mut phone = member_engine(&f, &f.host, &phone_src, &phone_id, now + 1_000);
+    let mut host = std::mem::replace(&mut f.host, Host::new());
+    let mut wire = RealRelay::new(&relay);
+    engine_write(
+        &mut phone,
+        &mut host,
+        &phone_src,
+        NS,
+        "follow",
+        json!({"id": "show", "url": "https://example.org/feed", "title": "The Show"}),
+    );
+    let faults = relay_pass(
+        &mut phone,
+        &phone_src,
+        &keys.id,
+        &mut wire,
+        &host,
+        now + 2_000,
+    );
+    // The home answers 507 {"result":"refused:overQuota"} (the session layers surface the code);
+    // the engine keeps the write pending, and nothing of it is stored.
+    let _ = faults;
+    assert!(
+        wire.requests
+            .iter()
+            .any(|r| r.starts_with("PUT /records/ops/")),
+        "the write was sent: {:?}",
+        wire.requests
+    );
+    let ops = scratch
+        .path()
+        .join("data")
+        .join(SLOT)
+        .join("records")
+        .join("ops");
+    let stored = walk_files(&ops);
+    assert!(stored.is_empty(), "no data was stored: {stored:?}");
+    let history = walk_files(
+        &scratch
+            .path()
+            .join("data")
+            .join(SLOT)
+            .join("records")
+            .join("authority"),
+    );
+    assert!(!history.is_empty(), "the history was");
+    // Reads go on.
+    let (status, _) = relay.get("/head");
+    assert_eq!(status, 200);
+    let (status, _) = relay.get("");
+    assert_eq!(status, 200);
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// Every file under `dir` (none when it does not exist).
+fn walk_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return out;
+    };
+    for e in entries.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            out.extend(walk_files(&p));
+        } else {
+            out.push(p);
+        }
+    }
+    out
 }

@@ -562,18 +562,22 @@ export function provisionGate(cfg, clock) {
    * unclaimed slots included): the address's share, then the token. Null when the request may go
    * on (it is judged again, whole, under the lock), or the refusal. A grant request goes on: its
    * call is judged under the lock. */
+  /** A request no path admits (no listed path takes it, or the token is missing or wrong): 429
+   * once its address is over its share, else 403, counted. Null when the request is authorized
+   * (the open path, or the right token). */
+  const refuseUnauthorized = (route, address, authorization, now) => {
+    if (route !== 'none' && !(route === 'token' && !tokenOk(authorization))) return null;
+    const wait = open.over(address, now, cfg.perAddressPerHour);
+    if (wait) return { status: 429, result: 'refused:overQuota', retryAfter: wait };
+    open.count(address, now);
+    return { status: 403, result: 'refused:noEntitlement' };
+  };
+
   const preflight = ({ address, authorization }) => {
     if (!cfg.enabled) return { status: 404, error: 'Not found' };
     const route = provisionRoute(cfg, authorization);
     if (route === 'grant') return null;
-    const now = clock();
-    const wait = open.over(address, now, cfg.perAddressPerHour);
-    if (wait) return { status: 429, result: 'refused:overQuota', retryAfter: wait };
-    if (route === 'none' || (route === 'token' && !tokenOk(authorization))) {
-      open.count(address, now);
-      return { status: 403, result: 'refused:noEntitlement' };
-    }
-    return null;
+    return refuseUnauthorized(route, address, authorization, clock());
   };
 
   const admitProvision = async function admitProvision({ slot, account, base, address, authorization, held, grant }) {
@@ -582,17 +586,20 @@ export function provisionGate(cfg, clock) {
     const asked = { slot, account, base };
     const route = provisionRoute(cfg, authorization);
     if (route === 'grant') return grantPath(asked, address, held, grant, now);
-    // The share first: a guesser over its share learns nothing about its token.
-    const wait = open.over(address, now, cfg.perAddressPerHour);
-    if (wait) return { status: 429, result: 'refused:overQuota', retryAfter: wait };
-    if (route === 'none' || (route === 'token' && !tokenOk(authorization))) {
-      open.count(address, now);
-      return { status: 403, result: 'refused:noEntitlement' };
-    }
+    // Unauthorized: refused, against the address's share. The token is 256 random bits, so it is
+    // compared first; a refused one is counted.
+    const refused = refuseUnauthorized(route, address, authorization, now);
+    if (refused) return refused;
     if (!wellFormed(asked)) return { status: 400, result: 'malformed' };
     const r = room(asked, held);
     if (r.status) return r;
+    // The same slot for the same account again: idempotent, it makes nothing, so it spends no
+    // share and no share refuses it (a provisioner behind one address, or one Unix socket,
+    // re-provisions as often as it must).
     if (r.existing) return { admit: true, existing: r.existing };
+    // A new slot: the address's share of new slots an hour.
+    const wait = open.over(address, now, cfg.perAddressPerHour);
+    if (wait) return { status: 429, result: 'refused:overQuota', retryAfter: wait };
     open.count(address, now);
     return { admit: true, existing: null, by: { gate: route } };
   };
