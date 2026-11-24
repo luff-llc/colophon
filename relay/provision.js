@@ -492,7 +492,8 @@ export class ProvisionReplay {
   constructor(dir, wasm, clock) {
     this.dir = dir; this.wasm = wasm; this.clock = clock;
     this.retentionMs = wasm.call({ op: 'limits' }).retentionMs;
-    this.rows = new Map(); // key -> {digest, at, signer}
+    this.rows = new Map(); // key -> {digest, at, signer, t (its outcome, once it has one)}
+    this.inFlight = new Map(); // key -> the effect a reservation has not ended yet
     this.bySigner = new Map();
     this.logLines = 0;
   }
@@ -520,13 +521,17 @@ export class ProvisionReplay {
     for (const e of entries) {
       this.logLines += 1;
       if (typeof e.r === 'string') {
-        this.addRow(e.r, { digest: e.d, at: e.at, signer: e.s });
+        this.addRow(e.r, { digest: e.d, at: e.at, signer: e.s, t: e.t });
         if (e.e && !e.t) pending.set(e.r, e.e); else pending.delete(e.r);
-      } else if (typeof e.c === 'string') pending.delete(e.c);
+      } else if (typeof e.c === 'string') {
+        pending.delete(e.c);
+        const row = this.rows.get(e.c);
+        if (row) row.t = e.t;
+      }
     }
     const rows = [...pending].map(([key, effect]) => ({ key, present: table.get(effect.slot)?.by?.call === this.rows.get(key).digest }));
-    const lines = rows.length ? this.wasm.call({ op: 'replay_recover', rows }).states.map((s) => ({ c: s.key, t: s.state })) : [];
-    await this.compact(lines);
+    if (rows.length) for (const s of this.wasm.call({ op: 'replay_recover', rows }).states) this.rows.get(s.key).t = s.state;
+    await this.compact();
   }
 
   addRow(key, row) {
@@ -540,6 +545,7 @@ export class ProvisionReplay {
       const row = this.rows.get(key);
       if (!row) continue;
       this.rows.delete(key);
+      this.inFlight.delete(key);
       const set = this.bySigner.get(row.signer);
       set?.delete(key);
       if (set && set.size === 0) this.bySigner.delete(row.signer);
@@ -575,7 +581,11 @@ export class ProvisionReplay {
   /** Rewrite the log with the rows kept, plus `extra` lines, staged and renamed. */
   async compact(extra = []) {
     this.prune(this.clock());
-    const lines = [...this.rows].map(([key, r]) => JSON.stringify({ r: key, d: r.digest, s: r.signer, at: r.at, t: 'completed' }));
+    // Each row keeps its outcome; a reservation whose effect has not ended stays pending.
+    const lines = [...this.rows].map(([key, r]) => {
+      const effect = this.inFlight.get(key);
+      return JSON.stringify({ r: key, d: r.digest, s: r.signer, at: r.at, ...(effect ? { e: effect } : { t: r.t ?? 'completed' }) });
+    });
     for (const e of extra) lines.push(JSON.stringify(e));
     const staged = this.file(`.replay.${randomBytes(8).toString('hex')}`);
     const handle = await fsp.open(staged, 'wx', 0o600);
@@ -601,10 +611,16 @@ export class ProvisionReplay {
   async reserve(row, effect) {
     const line = { r: row.key, d: row.digest, s: row.signer, at: row.at, ...(effect ? { e: effect } : { t: 'completed' }) };
     await this.append(line, true);
-    this.addRow(row.key, { digest: row.digest, at: row.at, signer: row.signer });
+    this.addRow(row.key, { digest: row.digest, at: row.at, signer: row.signer, t: effect ? undefined : 'completed' });
+    if (effect) this.inFlight.set(row.key, effect);
     if (this.logLines > 2 * this.rows.size + 1024) await this.compact();
   }
-  async complete(key, t) { await this.append({ c: key, t }, false); }
+  async complete(key, t) {
+    await this.append({ c: key, t }, false);
+    this.inFlight.delete(key);
+    const row = this.rows.get(key);
+    if (row) row.t = t;
+  }
 }
 
 /** The door's body: exactly `{"slot","base","account"}`, strings. Anything else is null. */
