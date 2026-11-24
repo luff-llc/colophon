@@ -36,8 +36,19 @@ public final class FolderMedium: RecordMedium, @unchecked Sendable {
     public let folder: URL
     private let coordinated: Bool
     private let lock = NSLock()
-    private var presenters: [UUID: FolderPresenter] = [:]
+    /// One presenter for the whole medium, registered while any `changes()` stream is open. Coordinated writes name it
+    /// as their own presenter, so the coordinator never waits on this process's presenter for this process's writes.
+    private var presenter: FolderPresenter?
+    private var observers: [UUID: AsyncStream<Void>.Continuation] = [:]
+    /// Serialises registering and removing the presenter, so `changes()` returns only once it is registered. The
+    /// presenter's callbacks never take it (they take `lock`), so Foundation can call them while it is held.
+    private let registration = NSLock()
     private var hook: (@Sendable (FolderBatchStep) throws -> Void)?
+    /// The folder (device and inode) last found not to be an iCloud item: its ubiquity resource values need not be
+    /// read again while the same folder is there. Placeholders and dataless flags are still checked on every open.
+    private var localFolder: FileIdentity?
+    /// The journal directory (device and inode) this medium last gave its file protection class.
+    private var protectedJournal: FileIdentity?
     static let journalName = ".colophon.nosync"
 
     public init(folder: URL) {
@@ -74,10 +85,8 @@ public final class FolderMedium: RecordMedium, @unchecked Sendable {
     }
 
     deinit {
-        for presenter in presenters.values {
-            NSFileCoordinator.removeFilePresenter(presenter)
-            presenter.continuation.finish()
-        }
+        if let presenter { NSFileCoordinator.removeFilePresenter(presenter) }
+        for continuation in observers.values { continuation.finish() }
     }
 
     // MARK: Reading
@@ -188,6 +197,8 @@ public final class FolderMedium: RecordMedium, @unchecked Sendable {
             if clean { return try withExtendedLifetime(shared) { try body(root) } }
         }
         // A batch was left behind: complete or discard it under the exclusive lock, then read under that lock.
+        // Completing it changes the folder, and this medium's own presenter is not told: wake the observers.
+        defer { signal() }
         return try coordinate { () -> T in
             let exclusive = try FolderFiles.Lock(journal, exclusive: true)
             return try withExtendedLifetime(exclusive) {
@@ -205,6 +216,8 @@ public final class FolderMedium: RecordMedium, @unchecked Sendable {
             try RecordPaths.validate(item.path)
         }
         guard !writes.isEmpty else { return }
+        // Also after a failure: recovering an earlier batch may have changed the folder before this one failed.
+        defer { signal() }
         try downloadAfterUnlock {
             try coordinate {
                 try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
@@ -217,21 +230,25 @@ public final class FolderMedium: RecordMedium, @unchecked Sendable {
                 }
             }
         }
-        signal()
     }
 
     private func publish(_ writes: [MediumWrite], root: DirectoryHandle, journal: DirectoryHandle) throws {
         // Nothing is staged until no write conflicts.
-        var plan: [(path: String, bytes: Data, replace: Bool)] = []
+        // A path written twice keeps its last bytes, at the position of its last write. Superseded slots are
+        // emptied in place (found through `slot`) and dropped at the end, so this stays linear in the batch.
+        var slots: [(path: String, bytes: Data, replace: Bool)?] = []
+        var slot: [String: Int] = [:]
         var pending: [String: Data] = [:]
         for item in writes {
             var previous = pending[item.path]
             if previous == nil { previous = try readFile(root, item.path, maximumBytes: RecordPaths.maximumBytes) }
             if previous == item.bytes { continue }
             if previous != nil, !RecordPaths.isReplaceable(item.path) { throw StorageError.conflict(item.path) }
-            if let index = plan.firstIndex(where: { $0.path == item.path }) { plan.remove(at: index) }
-            plan.append((item.path, item.bytes, RecordPaths.isReplaceable(item.path))); pending[item.path] = item.bytes
+            if let index = slot[item.path] { slots[index] = nil }
+            slot[item.path] = slots.count
+            slots.append((item.path, item.bytes, RecordPaths.isReplaceable(item.path))); pending[item.path] = item.bytes
         }
+        let plan = slots.compactMap { $0 }
         guard !plan.isEmpty else { return }
         let id = UUID().uuidString.lowercased()
         var record = BatchRecord(entries: [])
@@ -276,6 +293,10 @@ public final class FolderMedium: RecordMedium, @unchecked Sendable {
     private func complete(_ id: String, _ record: BatchRecord, root: DirectoryHandle, journal: DirectoryHandle) throws {
         guard let staging = try journal.directory(id, create: false) else { throw StorageError.unavailable("The staging directory of batch \(id) is missing") }
         var linked: [(DirectoryHandle, String)] = []
+        // Each parent directory is synchronised once, after every entry is in place and before the record is removed
+        // (the batch stays recorded until then, so an interrupted batch is completed on the next open).
+        var parents: [String] = []
+        var parentHandles: [String: DirectoryHandle] = [:]
         for (index, entry) in record.entries.enumerated() {
             let (parentHandle, leaf) = try resolveParent(root, entry.path, create: true)
             guard let parent = parentHandle else { throw StorageError.unavailable("Cannot create the directory of \(entry.path)") }
@@ -304,9 +325,11 @@ public final class FolderMedium: RecordMedium, @unchecked Sendable {
                     throw StorageError.conflict(entry.path)
                 }
             }
-            try parent.sync()
+            let parentPath = String(entry.path.dropLast(leaf.count))
+            if parentHandles.updateValue(parent, forKey: parentPath) == nil { parents.append(parentPath) }
             try step(.applied(index))
         }
+        for parentPath in parents { try parentHandles[parentPath]?.sync() }
         try journal.remove(id + ".record")
         try journal.sync()
         try step(.recordRemoved)
@@ -359,8 +382,18 @@ public final class FolderMedium: RecordMedium, @unchecked Sendable {
     private func openJournal(_ root: DirectoryHandle) throws -> DirectoryHandle {
         guard let journal = try root.directory(Self.journalName, create: true) else { throw StorageError.unavailable("Cannot open the batch journal") }
         #if os(iOS) || os(visionOS)
-        try? FileManager.default.setAttributes([.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
-                                               ofItemAtPath: folder.appendingPathComponent(Self.journalName).path)
+        // Once per journal directory: when it is created, or when this medium first meets it (an existing journal
+        // keeps or regains the class). A journal replaced since then has another inode and is protected again.
+        let identity = FileIdentity(fd: journal.fd)
+        if identity == nil || lock.withLock({ protectedJournal }) != identity {
+            do {
+                try FileManager.default.setAttributes([.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
+                                                      ofItemAtPath: folder.appendingPathComponent(Self.journalName).path)
+                lock.withLock { protectedJournal = identity }
+            } catch {
+                // As before: a journal that cannot take the class is still usable; the next open tries again.
+            }
+        }
         #endif
         return journal
     }
@@ -430,7 +463,10 @@ public final class FolderMedium: RecordMedium, @unchecked Sendable {
         guard coordinated else { return try body() }
         var coordinationError: NSError?
         var result: Result<T, any Error>?
-        NSFileCoordinator().coordinate(writingItemAt: folder, options: [], error: &coordinationError) { _ in
+        // Name this medium's own presenter: a coordinator that does not know it waits on it (about half a second per
+        // write on macOS and iOS). Observers still hear about this write, from `signal()` after it.
+        let own = lock.withLock { presenter }
+        NSFileCoordinator(filePresenter: own).coordinate(writingItemAt: folder, options: [], error: &coordinationError) { _ in
             result = Result { try body() }
         }
         if let coordinationError { throw StorageError.unavailable("File coordination is unavailable: " + coordinationError.localizedDescription) }
@@ -446,16 +482,32 @@ public final class FolderMedium: RecordMedium, @unchecked Sendable {
     public func changes() -> AsyncStream<Void> {
         let id = UUID()
         let (stream, continuation) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
-        let presenter = FolderPresenter(folder: folder, continuation: continuation)
-        lock.withLock { presenters[id] = presenter }
-        NSFileCoordinator.addFilePresenter(presenter)
+        registration.withLock {
+            let added: FolderPresenter? = lock.withLock {
+                observers[id] = continuation
+                guard presenter == nil else { return nil }
+                let created = FolderPresenter(folder: folder) { [weak self] in self?.signal() }
+                presenter = created
+                return created
+            }
+            // Outside `lock`: the presenter's callbacks take it.
+            if let added { NSFileCoordinator.addFilePresenter(added) }
+        }
         continuation.onTermination = { [weak self] _ in
             guard let self else { return }
-            if let presenter = self.lock.withLock({ self.presenters.removeValue(forKey: id) }) { NSFileCoordinator.removeFilePresenter(presenter) }
+            self.registration.withLock {
+                let removed: FolderPresenter? = self.lock.withLock {
+                    self.observers.removeValue(forKey: id)
+                    guard self.observers.isEmpty, let current = self.presenter else { return nil }
+                    self.presenter = nil
+                    return current
+                }
+                if let removed { NSFileCoordinator.removeFilePresenter(removed) }
+            }
         }
         return stream
     }
-    private func signal() { for presenter in lock.withLock({ Array(presenters.values) }) { presenter.signal() } }
+    private func signal() { for continuation in lock.withLock({ Array(observers.values) }) { continuation.yield(()) } }
 
     private func checkAvailability(_ url: URL) throws {
         let name = url.lastPathComponent
@@ -470,10 +522,18 @@ public final class FolderMedium: RecordMedium, @unchecked Sendable {
         }
         if info.st_mode & S_IFMT == S_IFLNK { throw StorageError.invalidPath(url.path) }
         try checkDataless(info, "")
+        // A folder already found not to be an iCloud item has no download status to read.
+        let identity = FileIdentity(info)
+        if lock.withLock({ localFolder }) == identity { return }
         do {
             let values = try url.resourceValues(forKeys: [.isUbiquitousItemKey, .ubiquitousItemDownloadingStatusKey])
-            if values.isUbiquitousItem == true && values.ubiquitousItemDownloadingStatus != .current {
-                throw DownloadPending(url: url, name: name)
+            switch values.isUbiquitousItem {
+            case true?:
+                if values.ubiquitousItemDownloadingStatus != .current { throw DownloadPending(url: url, name: name) }
+            case false?:
+                lock.withLock { localFolder = identity }
+            case nil:
+                break // undetermined: nothing is remembered, and the next open asks again
             }
         } catch let error as CocoaError where error.code == .fileReadNoSuchFile || error.code == .fileNoSuchFile {
             return
@@ -481,23 +541,34 @@ public final class FolderMedium: RecordMedium, @unchecked Sendable {
     }
 }
 
+/// A file's device and inode: the same item while both match.
+private struct FileIdentity: Equatable {
+    let device: dev_t
+    let inode: ino_t
+    init(_ info: stat) { device = info.st_dev; inode = info.st_ino }
+    init?(fd: Int32) {
+        var info = stat()
+        guard fstat(fd, &info) == 0 else { return nil }
+        self.init(info)
+    }
+}
+
 /// Immutable callback bridge. Foundation owns scheduling; no mutable state is shared.
 private final class FolderPresenter: NSObject, NSFilePresenter, Sendable {
     let presentedItemURL: URL?
     let presentedItemOperationQueue: OperationQueue
-    let continuation: AsyncStream<Void>.Continuation
-    init(folder: URL, continuation: AsyncStream<Void>.Continuation) {
+    private let changed: @Sendable () -> Void
+    init(folder: URL, changed: @escaping @Sendable () -> Void) {
         presentedItemURL = folder
-        self.continuation = continuation
+        self.changed = changed
         let queue = OperationQueue()
         queue.maxConcurrentOperationCount = 1
         presentedItemOperationQueue = queue
     }
-    func signal() { continuation.yield(()) }
-    func presentedItemDidChange() { signal() }
-    func presentedSubitemDidAppear(at url: URL) { signal() }
-    func presentedSubitemDidChange(at url: URL) { signal() }
+    func presentedItemDidChange() { changed() }
+    func presentedSubitemDidAppear(at url: URL) { changed() }
+    func presentedSubitemDidChange(at url: URL) { changed() }
     func accommodatePresentedSubitemDeletion(at url: URL, completionHandler: @escaping (Error?) -> Void) {
-        signal(); completionHandler(nil)
+        changed(); completionHandler(nil)
     }
 }
