@@ -144,4 +144,53 @@ struct FolderMediumTests {
         #expect(await iterator.next() != nil, "a hint arrives after a write")
         #expect(try medium.read("authority/00000001.json") == Data([1]))
     }
+
+    /// A coordinator that is not told about this medium's own presenter waits on it: about half a second per write.
+    /// 0.5.3 and earlier paid that on every write while a session watched its folder.
+    @Test(.enabled(if: FileCoordinationProbe.available, FileCoordinationProbe.reason))
+    func aWriteDoesNotWaitOnThisMediumsOwnPresenter() async throws {
+        let root = try folder(); defer { try? FileManager.default.removeItem(at: root) }
+        let medium = FolderMedium(folder: root)
+        let watching = medium.changes()
+        var durations: [Duration] = []
+        for index in 0..<5 {
+            let started = ContinuousClock.now
+            try medium.write([MediumWrite(path: "ops/a/listening/\(index)-x.json", bytes: Data([UInt8(index)]))])
+            durations.append(ContinuousClock.now - started)
+        }
+        let median = durations.sorted()[2]
+        #expect(median < .milliseconds(200), "a coordinated write waited \(median) with an observer open")
+        withExtendedLifetime(watching) {}
+    }
+
+    @Test(.enabled(if: FileCoordinationProbe.available, FileCoordinationProbe.reason))
+    func everyObserverHearsAWriteAndOneEndingLeavesTheOthers() async throws {
+        let root = try folder(); defer { try? FileManager.default.removeItem(at: root) }
+        let medium = FolderMedium(folder: root)
+        var first = medium.changes().makeAsyncIterator()
+        var second = medium.changes().makeAsyncIterator()
+        let thirdStream = medium.changes()
+        let third = Task { for await _ in thirdStream {} }
+        try medium.write([MediumWrite(path: "authority/00000001.json", bytes: Data([1]))])
+        #expect(await first.next() != nil)
+        #expect(await second.next() != nil)
+        third.cancel()
+        _ = await third.value
+        let registered = NSFileCoordinator.filePresenters.contains { $0.presentedItemURL == medium.folder }
+        #expect(registered, "the presenter stays registered while other streams are open")
+        try medium.write([MediumWrite(path: "authority/00000002.json", bytes: Data([2]))])
+        #expect(await first.next() != nil, "the remaining observers still hear writes")
+        #expect(await second.next() != nil)
+    }
+
+    /// Another writer's change reaches this medium through its presenter, not through `signal()`.
+    @Test(.enabled(if: FileCoordinationProbe.available, FileCoordinationProbe.reason), .timeLimit(.minutes(1)))
+    func anotherWritersChangeReachesTheObserverThroughThePresenter() async throws {
+        let root = try folder(); defer { try? FileManager.default.removeItem(at: root) }
+        let watched = FolderMedium(folder: root)
+        try watched.write([MediumWrite(path: "authority/00000001.json", bytes: Data([1]))])
+        var hints = watched.changes().makeAsyncIterator()
+        try FolderMedium(folder: root).write([MediumWrite(path: "authority/00000002.json", bytes: Data([2]))])
+        #expect(await hints.next() != nil, "a write by another medium wakes this medium's observer")
+    }
 }

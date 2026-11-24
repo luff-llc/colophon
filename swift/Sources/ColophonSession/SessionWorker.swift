@@ -4,10 +4,27 @@ import Foundation
 /// The record source the engine reads through: the medium, nothing else. It never calls the engine.
 final class MediumSource: HostSource, @unchecked Sendable {
     let medium: any RecordMedium
+    /// Protects `unconfirmed`, the only mutable property.
+    private let lock = NSLock()
+    private var unconfirmed: UInt64 = 0
     init(_ medium: any RecordMedium) { self.medium = medium }
+    /// Record reads the engine may have dropped without holding the path: a read that threw (the engine skips the path
+    /// and goes on), or one larger than the smallest bound the engine reads records under (it refuses those bytes).
+    var unconfirmedReads: UInt64 { lock.withLock { unconfirmed } }
+    /// The engine's object bound (`MAX_OBJECT_BYTES`), the smaller of the two it reads records under.
+    static let smallestReadBound = 2_097_152 + 4_096
     // Each callback in its own autorelease pool: Foundation's file reads autorelease, and the engine's queue runs a
     // whole engine call (many callbacks) as one job.
-    func read(path: String) throws -> Data { try autoreleasepool { try medium.read(path) } }
+    func read(path: String) throws -> Data {
+        do {
+            let bytes = try autoreleasepool { try medium.read(path) }
+            if bytes.count > Self.smallestReadBound { lock.withLock { unconfirmed &+= 1 } }
+            return bytes
+        } catch {
+            lock.withLock { unconfirmed &+= 1 }
+            throw error
+        }
+    }
     func readBlob(path: String) throws -> Data { try autoreleasepool { try medium.readBlob(path) } }
 }
 
@@ -49,6 +66,13 @@ func memberReadiness(_ member: AccountMember?, nowMs: Int64, namespaces: [String
 /// A refusal that carries the fresh snapshot so the facade shows what the person must now see.
 struct SessionRefusal: Error { let snapshot: SessionSnapshot; let error: SessionError }
 
+/// A batch write stopped at `index`: `receipts` are the durable commands before it, `snapshot` the one built after them
+/// or the error that kept it from being built (nil when nothing was written and the engine is unchanged).
+struct BatchStop: Error { let receipts: [WriteReceipt]; let index: Int; let error: any Error; let snapshot: Result<SessionSnapshot, any Error>? }
+
+/// A durable batch: its receipts, and the snapshot built after it or the error that kept it from being built.
+struct BatchWritten: Sendable { let receipts: [WriteReceipt]; let snapshot: Result<SessionSnapshot, any Error> }
+
 /// Small durable state in the private container: which account, whether the person left, what was shown.
 struct SessionJournalFile: Codable, Sendable {
     var account: String?
@@ -80,6 +104,13 @@ actor SessionWorker {
     private var medium: (any RecordMedium)?
     private var engine: ColophonEngine? { didSet { if engine == nil { memberOpened = false } } }
     private var memberCustody: KeyCustody?
+    /// The listing the engine last took (see `take(_:into:)`). Nil means the next reconcile refreshes in full.
+    private var listingBaseline: ListingBaseline?
+    /// The source `engine` reads through, which counts the reads it could not confirm (tests read it).
+    private(set) var engineSource: MediumSource?
+    /// How many reconciles handed the engine the whole listing, and how many only what changed (tests read these).
+    private(set) var fullRefreshes = 0
+    private(set) var incrementalRefreshes = 0
     private(set) var accountID: String?
     private(set) var memberID: String?
     private var journal = SessionJournalFile()
@@ -241,7 +272,7 @@ actor SessionWorker {
     /// the disk: discard it so the next operation reopens over what is really stored, then fail.
     private func persist(_ stores: [Store], on target: ColophonEngine? = nil) async throws {
         guard !stores.isEmpty else { return }
-        do { try storage().write(stores.map { MediumWrite(path: $0.path, bytes: $0.bytes) }) }
+        do { try storage().write(stores.map { MediumWrite(path: $0.path, bytes: $0.bytes) }); noteOwnWrites(stores) }
         catch {
             if let target, target !== engine { await target.discard() } else { await engine?.discard(); engine = nil }
             throw error
@@ -279,8 +310,17 @@ actor SessionWorker {
     }
 
     private func refresh(_ engine: ColophonEngine, listing: [ListedPath]) async throws {
+        // The engine's listing is now this one: a baseline taken earlier no longer describes it.
+        listingBaseline = nil
         let changes = try await trackInterruptedAuthorityChange(in: engine) {
             try await engine.run { try $0.refresh(listing: listing) }
+        }
+        observeAuthorityChanges(changes, from: engine)
+    }
+
+    private func applyPaths(_ engine: ColophonEngine, _ paths: [ListedPath]) async throws {
+        let changes = try await trackInterruptedAuthorityChange(in: engine) {
+            try await engine.run { try $0.applyPaths(paths: paths) }
         }
         observeAuthorityChanges(changes, from: engine)
     }
@@ -320,12 +360,20 @@ actor SessionWorker {
 
     private func listed(_ entries: [MediumEntry]) -> [ListedPath] { entries.map { ListedPath(path: $0.path, version: $0.version) } }
 
-    private func reconcile() async throws -> SessionSnapshot {
+    private func reconcile(listing given: [MediumEntry]? = nil) async throws -> SessionSnapshot {
+        if let settled = try await reconcileEngine(listing: given) { return settled }
+        return try await build()
+    }
+
+    /// Brings the engine up to the store (from `given` when the caller already listed it). Returns the snapshot when
+    /// that alone decides it (no library, locked, an update required); nil when the engine is current and `build()`
+    /// (or `readyForWrite()`) decides the rest.
+    private func reconcileEngine(listing given: [MediumEntry]? = nil) async throws -> SessionSnapshot? {
         try loadJournal()
         if journal.left { return snapshot(phase: .noLibrary) }
         if locked { return snapshot(phase: .locked) }
         let medium = try storage()
-        let entries = try medium.listing()
+        let entries = try given ?? medium.listing()
         guard entries.contains(where: { $0.path.hasPrefix("authority/") }) else {
             if journal.account != nil { throw StorageError.unavailable("Selected library is unavailable") }
             return snapshot(phase: .noLibrary)
@@ -340,7 +388,7 @@ actor SessionWorker {
             if case .integrity = error { await engine?.discard(); engine = nil }
             throw error
         }
-        return try await build()
+        return nil
     }
 
     private func discoverAccount(_ entries: [MediumEntry]) throws -> String {
@@ -367,10 +415,17 @@ actor SessionWorker {
         memberCustody = try await KeyCustody([memberKeys])
         let saved = try await loadSaved(account)
         let key = try configuration.deviceSecrets.key(for: account)
-        let opened = try await ColophonEngine.open(source: MediumSource(try storage()), listing: listed(entries),
+        let source = MediumSource(try storage())
+        let opened = try await ColophonEngine.open(source: source, listing: listed(entries),
             identity: AccountIdentity(kind: .member, id: keyID), account: account, namespaces: configuration.libraryNamespaces,
             saved: saved, deviceKey: key, nowMs: nowMs)
-        engine = opened; accountID = account
+        engine = opened; accountID = account; engineSource = source
+        // Without a baseline the next reconcile refreshes in full: never a reason to fail this one. A read the open
+        // could not confirm leaves none, so the next reconcile's full refresh reads that path again. The load and
+        // unlock below can still drop a path; the next reconcile sees the counters moved and refreshes in full.
+        if source.unconfirmedReads == 0, let stale = try? await opened.run({ try $0.staleLive() }).count, stale == 0 {
+            listingBaseline = (try? await ListingBaseline(engine: opened, entries: entries, drops: .init(reads: 0, stale: 0))) ?? nil
+        }
         // A member that is not approved yet holds no keys; the records can still be read and the exchange can
         // still bring the approval in. A member opens its epoch shares in `unlockIfPossible`.
         if try await opened.run({ try $0.me() }).kind != .member { try await load(opened) }
@@ -383,9 +438,49 @@ actor SessionWorker {
         // A stopped account reads nothing new (spec §1 "A stop"): what it held when the stop was verified stays readable.
         if try await Self.isStopped(engine) { return }
         try await advance(engine, to: nowMs)
-        try await refresh(engine, listing: listed(entries))
+        try await take(entries, into: engine)
         try await persistDueWrites(engine)
         try await unlockIfPossible()
+    }
+
+    /// Hands the engine a fresh, complete listing of the medium. When the listing only adds paths or changes versions
+    /// relative to the listing the engine last took, the engine reads just those paths (`apply_paths`), which is what
+    /// a full refresh would read: it reads a listed path again only when it is new, its version changed or it is
+    /// unread. Anything else refreshes in full: a removed path, a path without a version, a listing out of path order
+    /// or over the engine's listing bound, unread paths the engine retries, or a path the engine reports missing that
+    /// reappeared. The listing itself is always complete, so missing, replaced and unavailable files are still found
+    /// on every reconcile.
+    ///
+    /// A baseline is kept only when the engine held every path it was given: no read failed or was refused for its
+    /// size, and no live slot was refused as stale. Otherwise a path may be listed but not held, which only a full
+    /// refresh reads again, so the next reconcile refreshes in full. The baseline records those counters, and is used
+    /// only while they have not moved since: a load, unlock or other call after it that dropped a path retires it too.
+    private func take(_ entries: [MediumEntry], into engine: ColophonEngine) async throws {
+        let baseline = listingBaseline
+        listingBaseline = nil // set again only once the engine took this listing
+        let before = await drops(engine)
+        if let baseline, let before, baseline.drops == before, baseline.engine === engine,
+           let delta = ListingBaseline.delta(from: baseline.entries, to: entries),
+           !delta.contains(where: { baseline.missing.contains($0.path) }),
+           try await engine.run({ try $0.stats() }).unreadPaths == 0 {
+            if !delta.isEmpty { try await applyPaths(engine, listed(delta)) }
+            incrementalRefreshes += 1
+            if let after = await drops(engine), after == before {
+                listingBaseline = ListingBaseline(engine: engine, entries: entries, missing: baseline.missing, drops: after)
+            }
+            return
+        }
+        try await refresh(engine, listing: listed(entries))
+        fullRefreshes += 1
+        if let before, let after = await drops(engine), after == before {
+            listingBaseline = (try? await ListingBaseline(engine: engine, entries: entries, drops: after)) ?? nil
+        }
+    }
+
+    /// The counters of paths `engine` may have dropped, or nil when they cannot be read (no baseline is kept then).
+    private func drops(_ engine: ColophonEngine) async -> ListingBaseline.Drops? {
+        guard let source = engineSource, let stale = try? await engine.run({ try $0.staleLive() }).count else { return nil }
+        return ListingBaseline.Drops(reads: source.unconfirmedReads, stale: stale)
     }
 
     /// A member opens its epoch shares with its own agreement key (silent for a Secure Enclave key): at first, and
@@ -431,10 +526,15 @@ actor SessionWorker {
 
     private func snapshot(phase: SessionPhase, members: [AccountMember] = [], requests: [AccessRequest] = [],
                           notices: SessionNotices = .empty, revisions: [String: UInt64] = [:], homes: [Home] = [], duties: HostDuties = .none) -> SessionSnapshot {
-        if phase != lastPhase || revisions != lastRevisions { revision &+= 1 }
-        lastPhase = phase; lastRevisions = revisions
+        advanceRevision(phase: phase, revisions: revisions)
         return SessionSnapshot(phase: phase, revision: revision, namespaceRevisions: revisions, libraryID: accountID, memberID: memberID,
                                members: members, requests: requests, notices: notices, homes: homes, duties: duties)
+    }
+
+    /// The revision counter moves whenever the published phase or namespace revisions change.
+    private func advanceRevision(phase: SessionPhase, revisions: [String: UInt64]) {
+        if phase != lastPhase || revisions != lastRevisions { revision &+= 1 }
+        lastPhase = phase; lastRevisions = revisions
     }
 
     private func build() async throws -> SessionSnapshot {
@@ -446,12 +546,25 @@ actor SessionWorker {
         let members = try await engine.run { try $0.members() }
         let pending = try await pendingRequests(members: members)
         let homes = try await engine.run { try $0.homes() }
+        if standing.kind == .unknown {
+            try await ensureOwnRequest()
+            return snapshot(phase: .waitingForApproval, members: members, requests: pending, homes: homes)
+        }
+        let (phase, revisions) = try await readiness(engine, standing: standing)
+        let notices = try await currentNotices()
+        let duties = try await hostDuties(notices: notices, homes: homes)
+        return snapshot(phase: phase, members: members, requests: pending, notices: notices, revisions: phase == .ready ? revisions : [:],
+                        homes: homes, duties: duties)
+    }
+
+    /// The phase and the published revisions of a controller or member standing: everything in a snapshot that decides
+    /// whether a write may go ahead. The revisions are empty unless the phase is ready.
+    private func readiness(_ engine: ColophonEngine, standing: Standing) async throws -> (SessionPhase, [String: UInt64]) {
         var phase: SessionPhase
         var readable: [String] = []
         switch standing.kind {
         case .unknown:
-            try await ensureOwnRequest()
-            return snapshot(phase: .waitingForApproval, members: members, requests: pending, homes: homes)
+            return (.waitingForApproval, [:])
         case .controller:
             phase = .failed(error: .other(detail: "this identity is a controller, not a member"))
         case .member:
@@ -463,13 +576,26 @@ actor SessionWorker {
         }
         var revisions: [String: UInt64] = [:]
         if phase == .ready { for r in try await engine.run({ try $0.revisions() }) where readable.contains(r.namespace) { revisions[r.namespace] = r.revision } }
-        let notices = try await currentNotices()
         let head = try await engine.run { try $0.headSeq() }
         lastHead = head
-        if phase == .ready { revisions["colophon.authority"] = head }
-        let visible = phase == .ready
-        let duties = try await hostDuties(notices: notices, homes: homes)
-        return snapshot(phase: phase, members: members, requests: pending, notices: notices, revisions: visible ? revisions : [:], homes: homes, duties: duties)
+        guard phase == .ready else { return (phase, [:]) }
+        revisions["colophon.authority"] = head
+        return (phase, revisions)
+    }
+
+    /// Before a write: true when the snapshot `build()` would make now is ready. It advances the revision counter exactly
+    /// as that snapshot would, so `revision` can be compared with what the caller observed, but it skips the members,
+    /// requests, notices and duties a published snapshot carries. When it returns false nothing has changed, and
+    /// `build()` makes the snapshot a refusal carries.
+    private func readyForWrite() async throws -> Bool {
+        guard let engine else { return false }
+        let standing = try await engine.run { try $0.me() }
+        let status = try await engine.run { try $0.status() }
+        guard status.stopped == nil, status.kind != .newerFormat, standing.kind != .unknown else { return false }
+        let (phase, revisions) = try await readiness(engine, standing: standing)
+        guard phase == .ready else { return false }
+        advanceRevision(phase: phase, revisions: revisions)
+        return true
     }
 
     static func isStopped(_ engine: ColophonEngine) async throws -> Bool { try await engine.run { try $0.status() }.stopped != nil }
@@ -1293,35 +1419,158 @@ actor SessionWorker {
     func write(_ command: DomainCommand, observed: UInt64, ingress: IngressEnvelope? = nil, claimed: Date? = nil) async throws -> (WriteReceipt, SessionSnapshot) {
         if let claimed, !Self.claimable(claimed, now: now) { throw SessionError.invalidCommand }
         return try await gated {
-            let fresh = try await reconcile()
-            guard fresh.phase == .ready, let engine, let custody = memberCustody else { throw SessionRefusal(snapshot: fresh, error: .notReady) }
-            guard observed == revision else { throw SessionRefusal(snapshot: fresh, error: .staleRevision) }
-            guard configuration.namespaces.contains(command.namespace), configuration.access.contains(.write) else { throw SessionError.invalidCommand }
-            let ceiling = command.kind == "colophon.blobPublish" ? 1024 * 1024 : 256 * 1024
-            guard command.payload.count <= ceiling else { throw SessionError.invalidCommand }
+            let (engine, custody) = try await writable(observed: observed)
+            try validate(command)
             if let ingress {
                 guard ingress.libraryID == accountID, ingress.memberID == memberID else { throw SessionError.destinationChanged }
                 try ingress.validate()
-                if let operation = journal.ingress[ingress.id] { return (.saved(operationID: operation), fresh) }
+                if let operation = journal.ingress[ingress.id] { return (.saved(operationID: operation), try await build()) }
             }
-            let payload = String(decoding: command.payload, as: UTF8.self)
             let claimedMs = claimed.map { Int64(($0.timeIntervalSince1970 * 1000).rounded(.down)) }
-            let written = try await engine.execute(custody: custody) {
-                engine in try withEntropy(32) { entropy in
-                    if let claimedMs {
-                        return try engine.beginWriteClaimed(namespace: command.namespace, kind: command.kind, payloadJson: payload, claimedMs: claimedMs, entropy: entropy)
-                    }
-                    return try engine.beginWrite(namespace: command.namespace, kind: command.kind, payloadJson: payload, entropy: entropy)
-                }
-            }
-            try await persist(written)
+            let written: Written
+            do { written = try await sign(command, claimedMs: claimedMs, engine: engine, custody: custody) }
+            catch { if !Self.leavesEngineUnchanged(error) { await discard(engine) }; throw error }
+            observeAuthorityChanges(written.changes, from: engine)
+            try await persistWrite(written.stores)
             let operation = Self.operationID(in: written.stores) ?? ""
             if let ingress {
                 // Receipts only matter while an envelope can still be drained (they expire within 7 days): keep the newest few thousand.
                 if journal.ingress.count >= 4096 { journal.ingress = Dictionary(uniqueKeysWithValues: Array(journal.ingress.prefix(2048))) }
-                journal.ingress[ingress.id] = operation; try saveJournal()
+                // The write is durable: a journal that cannot be saved must not report it as failed (the envelope would stay
+                // queued and be written again). This process keeps the receipt; a relaunch before the envelope is
+                // acknowledged can still write it again.
+                journal.ingress[ingress.id] = operation; try? saveJournal()
             }
             return (.saved(operationID: operation), try await build())
+        }
+    }
+
+    /// Writes `commands` in order under one gate and one reconcile. Each command is signed and admitted on its own and its
+    /// stores are persisted at once, in their own all-or-none store write, before the next command is signed. A refusal
+    /// of the whole batch (not ready, a stale revision) writes nothing. A command that fails, or whose stores the store
+    /// refuses, stops the batch: the commands before it are durable and the failure is a `BatchStop`.
+    ///
+    /// Once a command is durable its receipt is always returned: the snapshot built after the batch is a `Result`, so a
+    /// failure to build it never hides what was written.
+    func write(_ commands: [DomainCommand], observed: UInt64) async throws -> BatchWritten {
+        guard commands.count <= ColophonSession.maximumBatchCount else { throw SessionError.invalidCommand }
+        return try await gated {
+            let (engine, custody) = try await writable(observed: observed)
+            var receipts: [WriteReceipt] = []
+            var failure: (index: Int, error: any Error)?
+            var discarded = false
+            for (index, command) in commands.enumerated() {
+                let written: Written
+                do {
+                    try validate(command)
+                    // The clock moves as it would between separate writes: a grant that expires mid-batch is refused.
+                    if index > 0 { try await advance(engine, to: nowMs) }
+                    written = try await sign(command, claimedMs: nil, engine: engine, custody: custody)
+                } catch {
+                    // A command that failed after the engine began to admit it may be held there without its stores:
+                    // discard the engine, and the next operation reopens it over what is stored.
+                    if !Self.leavesEngineUnchanged(error) { await discard(engine); discarded = true }
+                    failure = (index, error); break
+                }
+                observeAuthorityChanges(written.changes, from: engine)
+                do { try await persistWrite(written.stores) }
+                catch {
+                    // `persistWrite` discarded the engine: the command is not known to be stored.
+                    discarded = true; failure = (index, error); break
+                }
+                receipts.append(.saved(operationID: Self.operationID(in: written.stores) ?? ""))
+            }
+            if let failure, receipts.isEmpty, !discarded { throw BatchStop(receipts: [], index: failure.index, error: failure.error, snapshot: nil) }
+            let snapshot: Result<SessionSnapshot, any Error>
+            do { snapshot = .success(discarded ? try await reconcile() : try await build()) } catch { snapshot = .failure(error) }
+            if let failure { throw BatchStop(receipts: receipts, index: failure.index, error: failure.error, snapshot: snapshot) }
+            return BatchWritten(receipts: receipts, snapshot: snapshot)
+        }
+    }
+
+    /// Whether a failed `sign` is known to leave the engine as it was: a refusal before anything is admitted (the
+    /// session's own checks, the engine's denial or admission refusal). Any other failure may come after the engine began to admit the command.
+    static func leavesEngineUnchanged(_ error: any Error) -> Bool {
+        if error is SessionError { return true }
+        if case ColophonError.denied = error { return true }
+        // The engine's admission refuses (a spent write budget, for one) before it admits anything.
+        if case ColophonError.refused = error { return true }
+        return false
+    }
+    private func discard(_ target: ColophonEngine) async {
+        await target.discard()
+        if engine === target { engine = nil }
+    }
+
+    /// Persists a write's stores in one all-or-none batch. A store can throw after its commit point (a folder batch that
+    /// is recorded and completes on the next open): the write is then durable, and reporting it as failed would invite a
+    /// retry that writes it twice. So on a failure each written path is looked up again, which completes such a batch:
+    /// when every one holds exactly these bytes the write stands. Otherwise the engine is discarded, as `persist` does, so
+    /// the next operation reconciles with what the store holds. When a path is absent or holds other bytes nothing was
+    /// written, and the error is thrown. When a lookup itself fails (a file not downloaded yet, a locked device, an I/O
+    /// error) the outcome is unknown, and the error is `StorageError.unavailable` saying the write may have been recorded.
+    private func persistWrite(_ stores: [Store]) async throws {
+        guard !stores.isEmpty else { return }
+        do { try storage().write(stores.map { MediumWrite(path: $0.path, bytes: $0.bytes) }); noteOwnWrites(stores) }
+        catch {
+            let outcome = readBack(stores)
+            // Durable: the folder holds exactly these bytes, which the engine wrote.
+            if outcome == .durable { noteOwnWrites(stores); return }
+            await engine?.discard(); engine = nil
+            if outcome == .absent { throw error }
+            throw StorageError.unavailable("The write may have been recorded; the next refresh settles it (\(error.localizedDescription))")
+        }
+    }
+    private enum ReadBack { case durable, absent, unknown }
+    /// Looks up only the written paths: each one's directory is listed (a missing record reads as an ambiguous
+    /// `unavailable`, a listing tells absent apart), then the present ones are read. Unrelated directories are untouched.
+    private func readBack(_ stores: [Store]) -> ReadBack {
+        guard let medium = try? storage() else { return .unknown }
+        var listed: [String: Set<String>] = [:]
+        for store in stores {
+            let directory = (store.path as NSString).deletingLastPathComponent
+            let prefix = directory.isEmpty ? "" : directory + "/"
+            if listed[prefix] == nil {
+                guard let entries = try? medium.listing(prefix: prefix) else { return .unknown }
+                listed[prefix] = Set(entries.map(\.path))
+            }
+            if listed[prefix]?.contains(store.path) != true { return .absent }
+        }
+        for store in stores {
+            guard let bytes = try? medium.read(store.path) else { return .unknown }
+            if bytes != store.bytes { return .absent }
+        }
+        return .durable
+    }
+
+    /// Reconciles and checks a write may go ahead (inside the gate): the session is ready and `observed` is the current
+    /// revision. Only a refusal builds the full snapshot it carries.
+    private func writable(observed: UInt64) async throws -> (ColophonEngine, KeyCustody) {
+        if let settled = try await reconcileEngine() { throw SessionRefusal(snapshot: settled, error: .notReady) }
+        guard try await readyForWrite(), let engine, let custody = memberCustody else {
+            throw SessionRefusal(snapshot: try await build(), error: .notReady)
+        }
+        guard observed == revision else { throw SessionRefusal(snapshot: try await build(), error: .staleRevision) }
+        return (engine, custody)
+    }
+
+    /// A command this session may write: a configured namespace, write access, and a payload within its ceiling.
+    private func validate(_ command: DomainCommand) throws {
+        guard configuration.namespaces.contains(command.namespace), configuration.access.contains(.write) else { throw SessionError.invalidCommand }
+        let ceiling = command.kind == "colophon.blobPublish" ? 1024 * 1024 : 256 * 1024
+        guard command.payload.count <= ceiling else { throw SessionError.invalidCommand }
+    }
+
+    /// Signs one command through the engine, which admits it (its access, write budget and order) or refuses it.
+    private func sign(_ command: DomainCommand, claimedMs: Int64?, engine: ColophonEngine, custody: KeyCustody) async throws -> Written {
+        let payload = String(decoding: command.payload, as: UTF8.self)
+        return try await engine.execute(custody: custody) {
+            engine in try withEntropy(32) { entropy in
+                if let claimedMs {
+                    return try engine.beginWriteClaimed(namespace: command.namespace, kind: command.kind, payloadJson: payload, claimedMs: claimedMs, entropy: entropy)
+                }
+                return try engine.beginWrite(namespace: command.namespace, kind: command.kind, payloadJson: payload, entropy: entropy)
+            }
         }
     }
     /// A claimed date a write may carry: finite, no later than `now`, and within the years 0001–9999 (spec §2.2), so the
@@ -1330,9 +1579,11 @@ actor SessionWorker {
         let seconds = claimed.timeIntervalSince1970
         return seconds.isFinite && seconds >= -62_135_596_800 && seconds < 253_402_300_800 && claimed <= now
     }
-    /// `ops/<author>/<namespace>/<clock>-<id>.json`: the operation ID is the part after the clock.
+    /// `ops/<author>/<namespace>/<clock>-<id>.json`: the operation ID is the part after the clock. A write that relies on
+    /// a live head retains that head under `ops/` too, and the engine lists retained records before the new operation,
+    /// so the new operation is the last `ops/` store.
     static func operationID(in stores: [Store]) -> String? {
-        for store in stores where store.path.hasPrefix("ops/") {
+        for store in stores.reversed() where store.path.hasPrefix("ops/") {
             let name = (store.path as NSString).lastPathComponent.replacingOccurrences(of: ".json", with: "")
             if let dash = name.firstIndex(of: "-") { return String(name[name.index(after: dash)...]) }
         }
@@ -1388,6 +1639,120 @@ actor SessionWorker {
         return homeConfigurations.first { configured in home.endpoints.contains { base($0) == base(configured.endpoint.absoluteString) } }
     }
 
+    // MARK: Coalesced refreshes
+
+    /// What an engine last read from the folder: the listing it was refreshed with, that engine, and the counters of
+    /// paths it may have dropped (`ListingBaseline.Drops`) when it held every path of that listing. A mark exists only
+    /// for a listing the engine took in full; either counter moving since, or an unread path, retires it.
+    private struct FolderMark {
+        weak var engine: ColophonEngine?
+        var versions: [String: String?]
+        let drops: ListingBaseline.Drops
+        init(engine: ColophonEngine, entries: [MediumEntry], drops: ListingBaseline.Drops) {
+            self.engine = engine; self.drops = drops
+            versions = Dictionary(entries.map { ($0.path, $0.version) }, uniquingKeysWith: { first, _ in first })
+        }
+    }
+    /// A path this worker wrote since the mark: an immutable one cannot be replaced by different bytes, so any version of
+    /// it holds what the engine wrote; a replaceable one (`state/`, `heads/`) is identified by its digest.
+    private enum OwnWrite { case immutable, replaceable(SHA256.Digest) }
+    private var folderMark: FolderMark?
+    private var ownWrites: [String: OwnWrite] = [:]
+    /// The engine holds something the last snapshot this worker built after a marked reconcile does not show: a write
+    /// persisted since, or an exchange step that changed the engine.
+    private var unpublished = false
+    /// A refresh hint was answered from the mark while an exchange was running and the engine held unpublished state: the
+    /// exchange's caller refreshes when it ends.
+    private var deferredHint = false
+    /// Exchanges in flight (a test may run two at once).
+    private var exchanges = 0
+    /// Tests: refreshes that ran a full reconcile, and those answered from the mark.
+    private(set) var markedReconciles = 0
+    private(set) var coalescedRefreshes = 0
+    /// Tests: engine refreshes before a later home of an exchange, for a folder change made while an earlier one ran.
+    private(set) var laterHomeRefreshes = 0
+    /// Whether an exchange that ended without publishing left a refresh owed to a hint it answered.
+    var owesRefresh: Bool { deferredHint }
+
+    private func noteOwnWrites(_ stores: [Store]) {
+        for store in stores {
+            ownWrites[store.path] = RecordPaths.isReplaceable(store.path) ? .replaceable(SHA256.hash(data: store.bytes)) : .immutable
+        }
+        unpublished = true
+        // A long run of writes with no marked reconcile: forget the mark rather than track every path.
+        if ownWrites.count > 4096 { folderMark = nil; ownWrites = [:] }
+    }
+
+    /// Whether `entries` hold nothing `engine` has not already read or written itself: every path is as the mark listed
+    /// it, or is one this worker wrote since (a replaceable one still holding the bytes it wrote). A deleted path, a new
+    /// path from elsewhere, a version this worker did not write or a replaceable path with no version is a change.
+    /// The engine must also still hold every path of the mark: no read it could not confirm and no live slot refused as
+    /// stale since, and no path it retries (`unreadPaths`). A path it may have dropped is read again only by a refresh.
+    private func engineHasRead(_ entries: [MediumEntry], _ engine: ColophonEngine) async -> Bool {
+        guard let mark = folderMark, mark.engine === engine, await drops(engine) == mark.drops,
+              (try? await engine.run({ try $0.stats() }).unreadPaths) == 0 else { return false }
+        var seen = 0
+        for entry in entries {
+            if let listed = mark.versions[entry.path] {
+                seen += 1
+                if listed == entry.version, entry.version != nil || !RecordPaths.isReplaceable(entry.path) { continue }
+            }
+            switch ownWrites[entry.path] {
+            case .immutable?: continue
+            case .replaceable(let digest)?:
+                guard let bytes = try? storage().read(entry.path), SHA256.hash(data: bytes) == digest else { return false }
+            case nil: return false
+            }
+        }
+        return seen == mark.versions.count
+    }
+
+    /// The engine was refreshed with `entries` (an exchange's own refresh), the drop counters `before` it: they become
+    /// the mark when the refresh dropped nothing. A change the old mark did not hold is unpublished until the exchange's
+    /// caller refreshes.
+    private func markRead(_ entries: [MediumEntry], by engine: ColophonEngine, covered: Bool, before: ListingBaseline.Drops?) async {
+        if !covered { unpublished = true }
+        ownWrites = [:]
+        if let before, await drops(engine) == before { folderMark = FolderMark(engine: engine, entries: entries, drops: before) }
+        else { folderMark = nil }
+    }
+
+    /// One listing, then a full reconcile only when the folder holds something the engine has not read, or the engine
+    /// holds something not yet shown. Nil: nothing to show. A hint that arrives during an exchange and finds only what the
+    /// exchange itself wrote is left to the refresh that follows the exchange. Never answers from the mark when the last
+    /// built phase is not `ready`, and any failure forgets the mark, so the next refresh reconciles.
+    func refreshIfStale() async throws -> SessionSnapshot? {
+        try await gated {
+            do {
+                try loadJournal()
+                let entries = try storage().listing()
+                if let engine, !locked, !journal.left, phaseIsReady, exchanges > 0 || !unpublished, await engineHasRead(entries, engine) {
+                    if unpublished { deferredHint = true }
+                    coalescedRefreshes += 1
+                    return nil
+                }
+                return try await reconcileMarked(entries)
+            } catch {
+                folderMark = nil
+                throw error
+            }
+        }
+    }
+
+    /// A full reconcile over `entries` (inside the gate), which become the mark. Writes the reconcile itself makes (due
+    /// writes) are tracked against it.
+    private func reconcileMarked(_ entries: [MediumEntry]) async throws -> SessionSnapshot {
+        folderMark = nil; ownWrites = [:]
+        let snapshot = try await reconcile(listing: entries)
+        markedReconciles += 1
+        // Marked only when the reconcile kept a listing baseline for exactly this listing: the engine held every path.
+        if let engine, let baseline = listingBaseline, baseline.engine === engine, baseline.entries == entries {
+            folderMark = FolderMark(engine: engine, entries: entries, drops: baseline.drops)
+        }
+        unpublished = false; deferredHint = false
+        return snapshot
+    }
+
     struct ExchangeResult: Sendable {
         var passes = 0; var faults: [HomeFault] = []; var issues: [HomeIssue] = []; var changed = false; var unauthorized = false
         /// A pass that did not finish (the engine still waited after its one recovery): the exchange failed.
@@ -1397,6 +1762,9 @@ actor SessionWorker {
         var stopped = false
         /// A home answered `503 {"result":"unavailable"}`: the home is not available. Retried with backoff; not about this device.
         var homeUnavailable = false
+        /// A folder hint arrived during the exchange and was left to the refresh after it (`refreshIfStale`): the caller
+        /// refreshes even when nothing changed.
+        var owesRefresh = false
     }
     /// One pass with every home. The network calls run outside the gate; each engine step and the
     /// persistence of its stores run inside it, so an unpersisted answer is never visible to a refresh.
@@ -1406,7 +1774,17 @@ actor SessionWorker {
     func setNextStepOverride(_ override: (@Sendable (String) -> ExchangeStep?)?) { nextStepOverride = override }
 
     func exchange(nowMsOverride: Int64? = nil) async throws -> ExchangeResult {
-        try await gated { if engine == nil { _ = try await reconcile() } }
+        exchanges += 1
+        defer { exchanges -= 1 }
+        // Each home starts from the folder as it is now. The engine is refreshed from it before the first home, and
+        // before a later home only when the folder holds something besides what this worker wrote since (a revocation,
+        // a fork, a head or a record another device or the file provider put there while an earlier home ran).
+        var folderRead = try await gated { () -> Bool in
+            guard engine == nil else { return false }
+            let entries = try storage().listing()
+            _ = try await reconcileMarked(entries)
+            return true
+        }
         var result = ExchangeResult()
         guard let engine else { return result }
         let homes = try await engine.run { try $0.exchangeHomes() }
@@ -1429,14 +1807,27 @@ actor SessionWorker {
                 continue
             }
             if let token = configured.bearerToken { _ = try await engine.run { try $0.exchangeSetBearer(home: home.id, token: token) } }
-            // The pass starts from fresh local state.
-            try await gated {
+            // The pass starts from fresh local state: the folder as listed now, the time now.
+            let laterHome = folderRead
+            folderRead = try await gated { () -> Bool in
                 guard self.engine === engine else { throw SessionError.destinationChanged }
                 let entries = try storage().listing()
                 try await advance(engine, to: nowMs)
-                try await refresh(engine, listing: listed(entries))
+                let covered = await engineHasRead(entries, engine)
+                if !laterHome || !covered {
+                    let before = await drops(engine)
+                    try await refresh(engine, listing: listed(entries))
+                    await markRead(entries, by: engine, covered: covered, before: before)
+                    if laterHome { laterHomeRefreshes += 1 }
+                }
                 try await unlockIfPossible()
+                return true
             }
+            // Computed once per home rather than per request: this home's base, and the public head URL of every
+            // configured home (`headQuorum` above 1), the first configuration for a URL winning as `first(where:)` did.
+            let homePrefix = Self.base(configured.endpoint.absoluteString) + "/"
+            let heads = Dictionary(homeConfigurations.map { (Self.base($0.endpoint.absoluteString) + "/head", $0) },
+                                   uniquingKeysWith: { first, _ in first })
             // A stopped account runs no exchange pass (spec §1 "A stop": it accepts no head and asks no call).
             if try await Self.isStopped(engine) { result.stopped = true; break }
             let started = ContinuousClock.now
@@ -1446,6 +1837,12 @@ actor SessionWorker {
             var recovered = false
             // The pass was left for a `Retry-After`: the answer was not given to the engine, so its request is abandoned.
             var abandon = false
+            // The engine's next step, fetched in the same gate as the answer before it rather than in a second one.
+            var prefetched: Result<ExchangeStep, any Error>?
+            func nextStep() async throws -> ExchangeStep {
+                if let override = nextStepOverride, let step = override(home.id) { return step }
+                return try await engine.run { try $0.exchangeNext(home: home.id) }
+            }
             do {
             // A pass can end before everything moved (the engine plans the next stage from what the home just
             // said): run passes until one moves nothing, at most `HomeLimits.passes`.
@@ -1459,10 +1856,9 @@ actor SessionWorker {
                 if ContinuousClock.now - started > HomeLimits.exchangeTime {
                     stopped = .tooSlow(seconds: Int(HomeLimits.exchangeTime.components.seconds)); break homeLoop
                 }
-                let step = try await gated { () -> ExchangeStep in
-                    if let override = nextStepOverride, let step = override(home.id) { return step }
-                    return try await engine.run { try $0.exchangeNext(home: home.id) }
-                }
+                let step: ExchangeStep
+                if let ready = prefetched { prefetched = nil; step = try ready.get() }
+                else { step = try await gated { try await nextStep() } }
                 switch step.kind {
                 case .done: break loop
                 // This loop answers every request it is given, so an outstanding one belongs to a pass that was interrupted
@@ -1482,9 +1878,9 @@ actor SessionWorker {
                     // A request is for this home, except another home's public head (`headQuorum` above 1), which goes
                     // to the transport configured for the home its URL names, with no credential.
                     let target: HomeConfiguration
-                    if request.url.hasPrefix(Self.base(configured.endpoint.absoluteString) + "/") { target = configured }
+                    if request.url.hasPrefix(homePrefix) { target = configured }
                     else if request.method == .get, request.url.hasSuffix("/head"), !request.headers.contains(where: { $0.name.lowercased() == "authorization" }),
-                            let other = homeConfigurations.first(where: { request.url == Self.base($0.endpoint.absoluteString) + "/head" }), other.isAllowed {
+                            let other = heads[request.url], other.isAllowed {
                         target = other
                     } else {
                         stopped = .callNotBound("a request for another host than the configured home"); break homeLoop
@@ -1535,21 +1931,25 @@ actor SessionWorker {
                             abandon = true; break homeLoop
                         }
                     }
-                    let report = try await gated { () -> Report in
+                    let (report, next) = try await gated { () -> (Report, Result<ExchangeStep, any Error>?) in
                         guard self.engine === engine else { throw SessionError.destinationChanged }
                         let report = try await trackInterruptedAuthorityChange(in: engine) {
                             try await engine.run { try $0.exchangeAnswer(home: home.id, ticket: request.ticket, answer: answer) }
                         }
                         try await persist(report, on: engine)
-                        return report
+                        // A refused call ends the pass: no next step is asked for. An error asking for it is raised where
+                        // the loop would have asked, after this answer is counted.
+                        guard refusedCall == nil else { return (report, nil) }
+                        do { return (report, .success(try await nextStep())) } catch { return (report, .failure(error)) }
                     }
+                    prefetched = next
                     for fault in report.faults {
                         result.faults.append(HomeFault(home: home.id, fault: fault))
                         if fault.kind == .unauthorized { result.unauthorized = true }
                     }
                     if !report.store.isEmpty || report.changes.reorganized
                         || report.changes.authorityToSeq != report.changes.authorityFromSeq || !report.changes.namespaces.isEmpty {
-                        result.changed = true; progress = true
+                        result.changed = true; progress = true; unpublished = true
                     }
                     if let refusedCall { stopped = refusedCall; result.unauthorized = true; break homeLoop }
                 }
@@ -1575,6 +1975,7 @@ actor SessionWorker {
         }
         faults = result.faults
         issues = result.issues
+        result.owesRefresh = deferredHint
         return result
     }
 
