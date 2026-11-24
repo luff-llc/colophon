@@ -91,6 +91,19 @@ jobs:
         # The default five-second per-test limit is too short for crypto-heavy
         # relay fixtures under load; explicit longer journey limits still apply.
         run: bun test --timeout 30000 test05
+      # The 0.6 hosts: unit tests, the session vectors replayed through the
+      # test-only conformance build, and handoff against a real home.
+      - name: Build the conformance bindings for the JS host tests
+        run: |
+          cargo build --locked -p colophon-conformance-wasm --target wasm32-unknown-unknown --profile release-wasm
+          wasm-bindgen --target web --out-dir js/.conformance --out-name colophon_conformance target/wasm32-unknown-unknown/release-wasm/colophon_conformance_wasm.wasm
+      - name: Typecheck JS host tests
+        run: js/node_modules/.bin/tsc -p js/test06/tsconfig.json
+      - name: Run JS host tests, vector replay and handoff journeys under Bun
+        working-directory: js
+        env:
+          COLOPHON_HOME_WASM: ${{ github.workspace }}/target/wasm32-unknown-unknown/release/colophon_home_wasm.wasm
+        run: bun test --timeout 30000 test06
 
   home-and-relay:
     runs-on: ubuntu-latest
