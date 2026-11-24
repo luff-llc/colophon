@@ -33,6 +33,7 @@ export const PROVISION_DEFAULTS = Object.freeze({
   unclaimedHours: 24,
   slotPattern: '^[a-z0-9][a-z0-9._-]{7,63}$',
   gate: 'open',
+  operatorPerMinute: 60,
 });
 /** Defaults that apply only with gate "grant". */
 export const GRANT_DEFAULTS = Object.freeze({
@@ -63,7 +64,7 @@ function gateSet(gate) {
 export function provisionConfig(raw) {
   if (raw === undefined || raw === null) return { ...PROVISION_DEFAULTS, gates: new Set(['open']), slotRegex: new RegExp(PROVISION_DEFAULTS.slotPattern) };
   if (typeof raw !== 'object' || Array.isArray(raw)) throw new Error('provision must be an object');
-  const known = new Set(['enabled', 'prefix', 'maxSlots', 'perAddressPerHour', 'unclaimedHours', 'slotPattern', 'gate', 'tokenSha256', ...GRANT_FIELDS]);
+  const known = new Set(['enabled', 'prefix', 'maxSlots', 'perAddressPerHour', 'unclaimedHours', 'slotPattern', 'gate', 'tokenSha256', 'operatorPerMinute', ...GRANT_FIELDS]);
   for (const k of Object.keys(raw)) if (!known.has(k)) throw new Error(`provision.${k} is not a setting`);
   const c = { ...PROVISION_DEFAULTS, ...raw };
   if (typeof c.enabled !== 'boolean') throw new Error('provision.enabled must be true or false');
@@ -77,6 +78,8 @@ export function provisionConfig(raw) {
     throw new Error('provision.gate "token" needs provision.tokenSha256, the 64-hex SHA-256 of the token (bun relay/server.js token prints one)');
   }
   if (!c.gates.has('token') && c.tokenSha256 !== undefined) throw new Error('provision.tokenSha256 is used only with gate "token"');
+  if (!c.gates.has('token') && raw.operatorPerMinute !== undefined) throw new Error('provision.operatorPerMinute is used only with gate "token" (the operator API answers 404 without it)');
+  if (!positiveInt(c.operatorPerMinute)) throw new Error('provision.operatorPerMinute must be a positive integer');
   if (c.gates.has('grant')) grantConfig(c);
   else for (const k of GRANT_FIELDS) if (raw[k] !== undefined) throw new Error(`provision.${k} is used only with gate "grant"`);
   if (c.enabled && c.prefix === undefined) throw new Error('provision.prefix is required when provisioning is on: the public https URL prefix of the slots, ending in "/" (base = prefix + slot)');
@@ -370,6 +373,43 @@ function hourly() {
   };
 }
 
+/** Whether `authorization` is exactly `Bearer <token>` with the token whose SHA-256 is
+ * `tokenSha256`, compared in constant time (a missing header hashes the empty string, so every
+ * request costs the same). Only with gate "token". */
+export function tokenMatcher(cfg) {
+  const expected = Buffer.from(cfg.tokenSha256, 'hex');
+  return (authorization) => {
+    const m = /^Bearer (\S+)$/.exec(typeof authorization === 'string' ? authorization : '');
+    const given = createHash('sha256').update(m ? m[1] : '').digest();
+    return timingSafeEqual(given, expected) && m !== null;
+  };
+}
+
+/**
+ * The operator API's gate (`/v1/operator/...`, gate "token" only): its own per-address share,
+ * `operatorPerMinute` requests a minute (every request counts, so a guesser over its share learns
+ * nothing about its token), then the provisioning token. Resolves to null (admitted) or a refusal
+ * `{status, result, retryAfter?}`. Apart from the door's shares: neither spends the other's.
+ */
+export function operatorGate(cfg, clock) {
+  const tokenOk = tokenMatcher(cfg);
+  const rows = new Map(); // address -> {start, count}
+  return function admitOperator({ address, authorization }) {
+    const now = clock();
+    if (rows.size > 10_000) for (const [a, r] of rows) if (now - r.start >= 60_000 || now < r.start) rows.delete(a);
+    let row = rows.get(address);
+    if (!row || now - row.start >= 60_000 || now < row.start) {
+      if (!row && rows.size > 10_000) return { status: 429, result: 'refused:overQuota', retryAfter: 60 };
+      row = { start: now, count: 0 };
+      rows.set(address, row);
+    }
+    row.count += 1;
+    if (row.count > cfg.operatorPerMinute) return { status: 429, result: 'refused:overQuota', retryAfter: Math.max(1, Math.ceil((row.start + 60_000 - now) / 1000)) };
+    if (!tokenOk(authorization)) return { status: 403, result: 'refused:noEntitlement' };
+    return null;
+  };
+}
+
 /** Which path of the gate a request takes, by its `Authorization`: a `Colophon` call to the grant
  * path when "grant" is listed (its refusal is final); a `Bearer` token to the token path when
  * "token" is listed; otherwise the open path when "open" is listed; otherwise none (403
@@ -413,12 +453,7 @@ export function provisionGate(cfg, clock) {
   const open = hourly(); // the open and token paths: new slots, refused tokens
   const attempts = hourly(); // the grant path: every request
   const refusals = hourly(); // the grant path: refused requests
-  const expected = cfg.gates.has('token') ? Buffer.from(cfg.tokenSha256, 'hex') : null;
-  const tokenOk = (authorization) => {
-    const m = /^Bearer (\S+)$/.exec(authorization ?? '');
-    const given = createHash('sha256').update(m ? m[1] : '').digest();
-    return timingSafeEqual(given, expected) && m !== null;
-  };
+  const tokenOk = cfg.gates.has('token') ? tokenMatcher(cfg) : () => false;
   const wellFormed = ({ slot, account, base }) => typeof slot === 'string' && SLOT.test(slot) && slot !== TABLE_FILE
     && !(cfg.gates.has('grant') && slot === REPLAY_DIR) && cfg.slotRegex.test(slot)
     && typeof account === 'string' && HEX64.test(account) && base === cfg.prefix + slot;

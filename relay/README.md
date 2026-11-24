@@ -147,6 +147,9 @@ revocation is final, whatever the grant's expiry or the state of a subscription:
 entitlement lapses, the gate may stop new slots and the home may stop serving records, but it keeps
 signing heads and receipting authority changes until the account revokes it, or it would block that
 account's key changes. (Entitlements are not built in 0.5; gate `"token"` is the smallest one.)
+A suspension through the operator API (below) is stricter than this: it refuses history
+uploads and pending objects too, so while a slot is suspended its account cannot complete a change
+that needs this home's receipt, its own revocation of this home included. Resume the slot for that.
 The same holds for a grant: revoking a member that provisioned slots, or its expiry, stops its new
 slots and leaves its slots alone. An appointed one keeps being witnessed; one never appointed is
 released after `unclaimedHours`, as any other.
@@ -161,6 +164,7 @@ released after `unclaimedHours`, as any other.
 | `slotPattern` | `^[a-z0-9][a-z0-9._-]{7,63}$` | Names an app may pick, besides the slot grammar |
 | `gate` | `"open"` | Who may provision: `"open"` (anyone within the bounds), `"token"` (`Authorization: Bearer <token>` whose SHA-256 is `tokenSha256`; `bun relay/server.js token` prints one), `"grant"` (a call by a member of the operator account, below), or a list of them, such as `["grant", "open"]`. No value twice, and not `"open"` with `"token"` (open admits everything token would). Anything else refuses start-up |
 | `tokenSha256` | none | 64 hex; required with gate `"token"`, compared in constant time |
+| `operatorPerMinute` | `60` | Gate `"token"` only: requests to the operator API (below) one client address may make in a minute, apart from the door's shares |
 | `operator` | none, required with `"grant"` | `{"account": "<64-hex ID>", "slot": "<slot>"}`: the operator account, and this home's own slot for it (configured or provisioned) |
 | `audience` | none, required with `"grant"` | The door's canonical audience (§10.1), its own: for example `https://home.example/v1/provision`. Not a slot's base, nor `prefix + slot`; one per deployment, so staging's grants do not reach production |
 | `grantMaxSlots` | `20` | Slots one grant may hold (made by it, claimed or not; a released slot frees its place) |
@@ -192,6 +196,44 @@ not produced. With provisioning on, a request to a slot this home does not hold 
 So the answers tell the kinds of slot apart: an unknown name is 404, a configured token slot asked
 without its token is 401, and a home slot answers `GET {base}` with 200. That is intended: slot
 names are not secrets, and access is by call (or, at a 0.3 slot, by token), never by knowing a name.
+
+**The operator API, and read-only slots.** With gate `"token"`, the same token also lets the
+operator's own tools (a billing service beside the home, say) make a home slot read-only and
+writable again. Without gate `"token"` these paths do not exist: every one answers 404 as an unknown
+path does.
+
+| Request (`Authorization: Bearer <token>`) | Answer |
+| --- | --- |
+| `POST /v1/operator/slots/<slot>/suspend` | 204: the slot is read-only, durably, before the answer. Again: 204 |
+| `POST /v1/operator/slots/<slot>/resume` | 204: the slot takes writes again. Again: 204 |
+| `GET /v1/operator/slots/<slot>` | 200 `{"slot","provisioned","suspended"}`: `provisioned` is whether the door made the slot (false for a configured home slot), `suspended` whether it is read-only |
+
+No body is read. Refusals, in this order: 405 for another method (`Allow` names the one); 403 for
+an `Origin` not on the CORS list; 429 `{"result":"refused:overQuota"}` with `Retry-After` once the
+address is over `operatorPerMinute` (every request counts, a refused one too, and the token is not
+looked at); 403 `{"result":"refused:noEntitlement"}` when the token is missing or wrong (the
+token is compared in constant time against `tokenSha256`, as at the door); 400 for a query; 404
+`{"result":"refused:notProvisioned"}` for a name that is not a home slot of this home (unknown, a
+0.3 slot, or released). The token is checked before the slot is looked up.
+
+A suspended slot keeps everything it holds and serves every read: `GET {base}`, the head, the
+history and pending objects, records and blob chunks, the change feed and its long poll. Every
+write answers 403 `{"result":"refused:subscriptionLapsed"}` and stores nothing: a record, live
+value or blob chunk `PUT` and a predecessor entry (each after its call is judged, so a request with
+no call is still challenged with 401), a history upload `POST {base}/authority` (member, keyring and
+home changes all arrive so), `POST {base}/pending`, and a forwarded head
+`PUT {base}/records/heads/<id>.json`. The check is made under the slot's lock, where every write
+commits, and a suspension is taken under the same lock: a write admitted before it ends before the
+204, and none commits after. The home's own upkeep goes on (it records due entries, signs heads,
+renews its lease and forwards to the account's other homes), so its head stays fresh for readers.
+
+The suspension is the file `<dataDir>/<slot>/suspended.json` (`{"suspended":true,"at":<ms>}`,
+written staged, fsynced and renamed, then the directory fsynced); its presence is the state, and a
+resume removes it. It survives a restart, and a restart with gate `"token"` turned off (the slot
+stays read-only; turn the gate back on to resume it). It is never deleted except with the slot's
+directory, and a suspended slot is never released as unclaimed (`unclaimedHours`): the release
+checks under the provisioning lock, which a suspension also takes, so neither can overtake the
+other. Nothing is ever deleted by a suspension.
 
 **Provisioning by a grant.** Gate `"grant"` lets a key the operator's own Colophon account has
 delegated provision, within bounds, revocable alone: a test rig or agent is granted once and then
@@ -442,6 +484,7 @@ flooding cannot take a place the genuine entry needs. Nothing staged is served.
                                   fsynced before any effect; a completion line after it)
 <dataDir>/<slot>/forward.json     home slots: what each other home has been sent
 <dataDir>/<slot>/alive.json       home slots: the serving lease's end (serving intervals, §13.1)
+<dataDir>/<slot>/suspended.json   home slots, only while read-only (the operator API)
 ```
 
 Home slots add `authority/<8 digits>.json`, `transitions/<digest>.json`, `vetoes/<digest>.json`,

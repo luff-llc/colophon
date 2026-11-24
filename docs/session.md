@@ -96,7 +96,8 @@ The existing `updateRequired` remains for an account the engine cannot open at a
 **A home's refusals.** A home's error answer is read for its `result` only, validated against the §1 grammar (a named
 result, or `refused:` and a reason of a lower-case letter then letters and digits, at most 48 characters) from a JSON body
 of at most 64 KiB; no other byte of the body is kept (`HomeRefusal`, JS `homeRefusal`). A `refused:<name>` the session does
-not know, the reserved `refused:overQuota`, `refused:noEntitlement`, `refused:closed` and `refused:notProvisioned`
+not know, the reserved `refused:overQuota`, `refused:noEntitlement`, `refused:closed`, `refused:notProvisioned` and
+`refused:subscriptionLapsed`
 included, is the existing home issue `remoteCallRefused`, now with the name as given and the home's `Retry-After`: it
 refuses only that request (the pass goes on), except a refusal of this device's signed call (403), which ends the pass as
 before; a 403 that names a refusal for a request that carried no call is not retried with a call. It is never a state of

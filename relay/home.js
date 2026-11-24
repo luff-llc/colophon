@@ -32,6 +32,15 @@ async function syncDir(dir) {
  * selected under the slot's lock. */
 const HISTORY_FILES = new Set(['authority', 'pending', 'receipt', 'predecessor']);
 
+/** The slot's suspension (operator behaviour, not protocol): while this file is in the slot's
+ * directory the slot is read-only, every write answering 403 `refused:subscriptionLapsed`. Its
+ * presence is the state; its body (`{"suspended":true,"at":<ms>}`) only says since when. Written
+ * like every durable file of a slot (staged, fsynced, renamed, the directory fsynced), removed on
+ * resume, and gone with the slot's directory only when the slot itself is released. */
+export const SUSPENSION_FILE = 'suspended.json';
+/** The answer to a write while the slot is suspended. */
+export const LAPSED = 'refused:subscriptionLapsed';
+
 // Forwarding (§13.1), per peer: each request's own time limit, a pass's wall-time budget, how many
 // newly listed objects and how many backlog objects one pass offers, and how soon the same
 // entries are offered again while the peer's head lags. PASS_MS bounds all network request
@@ -159,6 +168,7 @@ export class HomeSlot {
     this.rate = new RateLimit(o.limits.requestsPerMinute);
     this.said = new Map();
     this.commits = 0; // committed state changes, for long polls judged before one
+    this.suspended = false; // read-only (SUSPENSION_FILE); read at open
     // Aborted at shutdown: a forwarding pass's waits on other homes end at once.
     this.stopping = new AbortController();
   }
@@ -200,6 +210,10 @@ export class HomeSlot {
     }
     await this.slot.open();
     if (fresh) await this.writeJson('home-state.json', this.state);
+    // Any entry of that name is a suspension: a damaged one never reopens the slot to writes.
+    const suspension = await fsp.lstat(this.file(SUSPENSION_FILE)).catch((error) => { if (error.code === 'ENOENT') return null; throw error; });
+    if (suspension && !suspension.isFile()) throw new Error(`Home slot ${this.slot.name}: ${this.file(SUSPENSION_FILE)} is not a regular file`);
+    this.suspended = Boolean(suspension);
     // Reconcile storage with the state before serving: a crash between a commit and its files
     // (a missing entry, a head file older than the committed head) heals here, not later.
     await this.materialize(files);
@@ -422,6 +436,35 @@ export class HomeSlot {
   status(now = this.clock()) { return this.wasm.call({ op: 'status', state: this.state, now }); }
 
   // -------------------------------------------------------------------------------------------
+  // Suspension (operator behaviour): a read-only slot. Every request that can change what the
+  // slot holds is refused under the slot's lock, where every write commits, after its call (if
+  // it needs one) is judged: a record or predecessor put, a history upload (POST authority:
+  // member, keyring and home changes among them), pending objects (POST pending), a forwarded
+  // head, and a delete. A suspension is itself taken under that lock, so a write admitted before
+  // it ends before it is answered, and none commits after it. Reads (GET and HEAD: the slot, its
+  // head, history and pending objects, records and blob chunks, the change feed and its long
+  // poll) and the home's own upkeep (recording due entries, signing heads, forwarding) go on.
+  // Nothing is deleted.
+
+  refuseIfSuspended() {
+    if (this.suspended) throw new this.deps.HttpError(403, 'This library is read-only', {}, { result: LAPSED });
+  }
+
+  /** Suspend (`on`) or resume the slot, durably before it is answered, under the slot's lock. */
+  async setSuspended(on) {
+    await this.lock(async () => {
+      if (on === this.suspended) return;
+      if (on) {
+        await this.writeJson(SUSPENSION_FILE, { suspended: true, at: this.clock() });
+      } else {
+        await fsp.rm(this.file(SUSPENSION_FILE), { force: true });
+        await syncDir(this.slot.root);
+      }
+      this.suspended = on;
+    });
+  }
+
+  // -------------------------------------------------------------------------------------------
   // The replay table (§12.4). The module decides; this keeps the rows durable: an append-only
   // log, a reservation line (fsynced) before any effect, a completion line after it, and
   // recovery at start-up from the effect's own record.
@@ -607,6 +650,9 @@ export class HomeSlot {
     const effect = writing ? { path: rest, prior: this.slot.current.get(rest)?.sha256 ?? null } : null;
     await this.access(req, section ?? '', rest ?? null, effect, null);
     await this.deps.reach?.(`access ${section ?? ''}`); // a test hook (traced builds only)
+    // A write the relay's own code would serve (a delete) is refused here; the others are
+    // refused under the lock where they commit.
+    if (method !== 'GET' && method !== 'HEAD' && section === 'records' && !writing) this.refuseIfSuspended();
     if (!section) return false;
     if (section === 'head') { await this.serveOwnHead(res); return true; }
     if (section === 'authority') {
@@ -703,6 +749,12 @@ export class HomeSlot {
       const allowed = await this.access(req, section, rest, effect, body);
       await this.deps.reach?.(`access ${section}`); // a test hook (traced builds only)
       const key = allowed.reserve?.key;
+      if (this.suspended) {
+        // Judged first, so the caller's own call is what is refused (a request with no call is
+        // challenged, as always); the reservation ends with no effect, and the call is spent.
+        if (key) await this.complete(key, 'completed');
+        this.refuseIfSuspended();
+      }
       let ended = false;
       try {
         if (section === 'predecessor') {
@@ -734,6 +786,7 @@ export class HomeSlot {
     const { readBody } = this.deps;
     const body = await readBody(req, 8192);
     await this.lock(async () => {
+      this.refuseIfSuspended();
       const r = this.wasm.call({ op: 'admit_one', state: this.state, now: this.clock(), bytes: b64(body), path: recordPath });
       await this.commit(r.state);
       await this.materialize(r.store);
@@ -770,6 +823,7 @@ export class HomeSlot {
 
   async postAuthority(res, body) {
     const { send } = this.deps;
+    this.refuseIfSuspended();
     const r = this.wasm.call({ op: 'post_authority', state: this.state, now: this.clock(), body: b64(body) });
     await this.commit(r.state); // even a refusal changes state (§13.1)
     await this.deps.reach?.('authority committed'); // a test hook (traced builds only)
@@ -783,6 +837,7 @@ export class HomeSlot {
 
   async postPending(res, body) {
     const { send } = this.deps;
+    this.refuseIfSuspended();
     const r = this.wasm.call({ op: 'post_pending', state: this.state, now: this.clock(), body: b64(body) });
     await this.commit(r.state);
     await this.materialize(r.store);

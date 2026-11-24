@@ -170,7 +170,7 @@ class StoppedAccountTest {
  */
 class HomeRefusalTest {
     @Test fun theResultGrammarIsBoundedAndNothingElseIsRead() {
-        for (good in listOf("refused:overQuota", "refused:noEntitlement", "refused:closed", "refused:notProvisioned", "refused:somethingNew2", "unavailable")) {
+        for (good in listOf("refused:overQuota", "refused:noEntitlement", "refused:closed", "refused:notProvisioned", "refused:subscriptionLapsed", "refused:somethingNew2", "unavailable")) {
             assertTrue(HomeRefusal.isValid(good), good)
         }
         for (bad in listOf("refused:", "refused:Upper", "refused:a-b", "refused:<script>", "refused:" + "a".repeat(49), "nope", "refused:é")) {

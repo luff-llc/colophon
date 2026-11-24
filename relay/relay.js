@@ -8,7 +8,7 @@ import { appendLines, writeAll } from './files.js';
 import { HomeKey, HomeModule, HomeSlot, ModuleError } from './home.js';
 import {
   ProvisionReplay, ProvisionTable, REPLAY_DIR, TABLE_FILE, clientAddressConfig, tableKind, clientAddressResolver, isJsonType, memberRequest,
-  grantLimits, parseProvisionBody, provisionConfig, provisionGate, provisionRoute,
+  grantLimits, operatorGate, parseProvisionBody, provisionConfig, provisionGate, provisionRoute,
 } from './provision.js';
 import path from 'node:path';
 
@@ -615,7 +615,8 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
   const admitProvision = provisionGate(provisioning, clock);
   let provisionTail = Promise.resolve();
   const provisionLock = (fn) => { const run = provisionTail.then(fn, fn); provisionTail = run.catch(() => {}); return run; };
-  const claimed = (s) => { const st = s.home.status(); return Boolean(st.appointed || st.held > 0); };
+  // A suspended slot counts as claimed: it is never released as unclaimed, however long after.
+  const claimed = (s) => { if (s.home.suspended) return true; const st = s.home.status(); return Boolean(st.appointed || st.held > 0); };
 
   /**
    * Release one provisioned slot that holds no genesis (never appointed). Under the
@@ -773,11 +774,53 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
     res.end(answer);
   }
 
+  // ---------------------------------------------------------------------------------------------
+  // The operator API (operator behaviour, not protocol): suspend and resume a home slot, and read
+  // its state. Only with gate "token", by the same token; otherwise it does not exist (404).
+
+  const admitOperator = provisioning.gates.has('token') ? operatorGate(provisioning, clock) : null;
+
+  async function operator(req, res, url) {
+    const m = /^\/v1\/operator\/slots\/([^/]+)(?:\/(suspend|resume))?$/.exec(url.pathname);
+    if (!admitOperator || !m) { req.resume(); throw new HttpError(404, 'Not found'); }
+    const [, name, action] = m;
+    const allow = action ? 'POST' : 'GET';
+    if (req.method !== allow) { req.resume(); throw new HttpError(405, 'Method not allowed', { allow }); }
+    // For an operator's own tools, never a page: a page on an origin not listed is refused.
+    if (req.headers.origin !== undefined && !origins.has(req.headers.origin)) { req.resume(); throw new HttpError(403, 'Requests from this origin are refused'); }
+    req.resume(); // no body is read
+    const refused = admitOperator({ address: clientAddress(req), authorization: req.headers.authorization });
+    if (refused) {
+      throw new HttpError(refused.status, 'Refused', refused.retryAfter ? { 'retry-after': String(refused.retryAfter) } : {}, { result: refused.result });
+    }
+    if (url.search) throw new HttpError(400, 'Operator URLs take no query');
+    // A slot this home holds as a home slot, configured or provisioned; anything else is unknown.
+    const held = async () => {
+      if (!SLOT.test(name) || !homeSlots.has(name)) throw notProvisioned();
+      const s = await slot(name);
+      if (!s.home || s.releasing || s.released) throw notProvisioned();
+      return s;
+    };
+    if (!action) {
+      const s = await held();
+      return send(res, 200, { slot: name, provisioned: table.get(name) !== undefined, suspended: s.home.suspended });
+    }
+    // Under the provisioning lock, as a release is: a release either ended before (the slot is
+    // unknown) or sees the suspension and keeps the slot.
+    await provisionLock(async () => {
+      const s = await held();
+      await s.home.setSuspended(action === 'suspend');
+    });
+    res.writeHead(204);
+    return res.end();
+  }
+
   async function handle(req, res, work) {
     if (closing) throw relayClosing();
     const url = new URL(req.url, 'http://relay.invalid');
     if (url.pathname === '/healthz' && req.method === 'GET') return send(res, 200, { ok: true });
     if (provisioning.enabled && url.pathname === '/v1/provision') return door(req, res);
+    if (url.pathname.startsWith('/v1/operator/')) return operator(req, res, url);
     const route = /^\/v1\/libraries\/([^/]+)(?:\/(changes|records|head|authority|pending|predecessor)(?:\/(.*))?)?$/.exec(url.pathname);
     if (!route) throw new HttpError(404, 'Not found');
     const [, name, section, recordPath] = route;

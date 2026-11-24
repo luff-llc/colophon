@@ -124,7 +124,8 @@ public enum HomeProblem: Error, Equatable, Sendable {
     case stillWaiting
     /// A home refused a request of this device with a `refused:<reason>` result (spec §14, §19). `code` is the result as
     /// the home gave it, validated against the result grammar and bounded (`HomeRefusal`); a name this session does not
-    /// know, the reserved `refused:overQuota`, `refused:noEntitlement`, `refused:closed` and `refused:notProvisioned`
+    /// know, the reserved `refused:overQuota`, `refused:noEntitlement`, `refused:closed`, `refused:notProvisioned` and
+    /// `refused:subscriptionLapsed`
     /// included, is shown as received. It refuses only that request: an unverified remote claim, never a verified state of
     /// the account (`refused:closed` is not evidence that anything was deleted, and `refused:revoked` is not proof of
     /// revocation; only verified authority records deny local reads or change custody). A refused call (401/403) ends the
