@@ -1,6 +1,6 @@
 {
   "name": "@colophon/core",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "description": "Colophon for JavaScript: the Rust core in WebAssembly with host-owned WebCrypto keys, and the 0.5 session",
   "type": "module",
   "license": "Apache-2.0",
