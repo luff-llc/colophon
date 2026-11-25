@@ -216,7 +216,7 @@ fn a_suspended_slot_refuses_writes_with_subscription_lapsed_serves_every_read_an
     first_upload(&relay, &f, now);
     assert_eq!(
         operator_state(private),
-        json!({"slot": SLOT, "provisioned": true, "suspended": false})
+        json!({"slot": SLOT, "provisioned": true, "suspended": false, "standing": "home"})
     );
 
     let authority = MemSource::new();
@@ -256,7 +256,7 @@ fn a_suspended_slot_refuses_writes_with_subscription_lapsed_serves_every_read_an
     operate(private, "suspend");
     assert_eq!(
         operator_state(private),
-        json!({"slot": SLOT, "provisioned": true, "suspended": true})
+        json!({"slot": SLOT, "provisioned": true, "suspended": true, "standing": "home"})
     );
 
     // Every read still works: the laptop pulls what the phone wrote before the suspension.
