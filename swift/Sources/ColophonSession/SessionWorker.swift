@@ -2069,6 +2069,35 @@ actor SessionWorker {
         return (try await engine.run { try $0.receiptedBy(object: object) }.count, homes)
     }
 
+    // MARK: The 0.6 hosts (SessionHostAccess)
+
+    /// The `colophon.home.stream` call that mints a stream ticket for `home` (docs/bindings-05.md §10), signed by this
+    /// device's member key and judged by the core at the session's clock, as the envelope's bytes.
+    func streamCall(home: String) async throws -> Data {
+        try await gated {
+            if engine == nil { _ = try await reconcile() }
+            guard let engine, let custody = memberCustody, let id = memberID else { throw SessionError.notReady }
+            let signing = try await custody.provider(for: id).publicKeys().signing
+            try await advance(engine, to: nowMs)
+            let written = try await engine.execute(custody: custody) { engine in
+                try withEntropy(32) { try engine.streamBeginCall(home: home, key: signing, entropy: $0) }
+            }
+            observeAuthorityChanges(written.changes, from: engine)
+            guard let artifact = written.artifact else { throw ColophonError.internalFailure(code: "internal", detail: "a call returned no envelope") }
+            return artifact
+        }
+    }
+    /// A raw P-256 signature (`r || s`) by this device's member key over `body` (a session delegation, sessions §S2).
+    func signRaw(_ body: Data) async throws -> Data {
+        guard let custody = memberCustody, let id = memberID else { throw SessionError.notReady }
+        return try await custody.provider(for: id).sign(body: body)
+    }
+    /// The configured transport of the home `home` (matched by its endpoints), if any.
+    func transport(home: String) async -> (any HomeTransport)? {
+        guard let engine, let homes = try? await engine.run({ try $0.exchangeHomes() }), let found = homes.first(where: { $0.id == home }) else { return nil }
+        return transport(for: found)?.transport
+    }
+
     // MARK: Engine access for blobs and tests
 
     func requireEngine() throws -> ColophonEngine { guard let engine else { throw SessionError.notReady }; return engine }
