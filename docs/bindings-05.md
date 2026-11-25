@@ -1028,5 +1028,5 @@ acknowledgement refused; held effects discarded when the head moves before the a
 thread holds the engine in a slow host callback. The core's `v06_session_engine` shows two member engines' endpoints opening each
 other's frames, and that the epoch capability and `EpochSecret` are not `Debug`, `Clone` or serializable
 (at compile time). The WebSocket transports are the next stage: the JavaScript hosts, their tests and the
-end-to-end proof against the real relay are in [hosts-06.md](hosts-06.md); the Swift and Kotlin hosts are not
-built yet.
+end-to-end proof against the real relay are in [hosts-06.md](hosts-06.md), with the Swift host in its §6
+and the Kotlin host (JVM only for now) in its §7.
