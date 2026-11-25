@@ -1,10 +1,10 @@
-# 0.6 hosts: the home stream and session cells (JavaScript)
+# 0.6 hosts: the home stream and session cells (JavaScript and Swift)
 
 **Status:** stage 2 of Colophon 0.6 for JavaScript. Stage 1 is the binding surface of
 [bindings-05.md](bindings-05.md) §10 (`HomeStream`, `SessionEndpoint` and the engine's stream and
 session calls). This stage adds the host layer that drives that surface over a real WebSocket, in
-`js/src/hosts` (`@colophon/core/hosts`), and proves the flagship behaviour end to end. The Swift and
-Kotlin hosts follow the same shape.
+`js/src/hosts` (`@colophon/core/hosts`), and proves the flagship behaviour end to end. The Swift host (§6) follows the same shape; the Kotlin host
+is built separately.
 
 The rule is the one stage 1 states: the core decides, the host carries. The host owns the socket,
 the ticket request, the timers and the durable store. It adds no retry timing, cap or backoff of its
@@ -271,3 +271,194 @@ additions this stage makes (`streamCall`, `transportOf`).
   `crypto.getRandomValues`, `performance.now` and timers, but the test06 suites were not run in
   headless Chrome), Node, a real network between the devices, or a home other than the reference
   relay.
+
+## 6. The Swift host
+
+`ColophonHosts` (a library product of the root package, `swift/Sources/ColophonHosts`) is the same host
+for Apple platforms, on the generated `HomeStream` and `SessionEndpoint` of `ColophonKit`. It follows
+§2 and §3 rule for rule; this section gives the Swift names and what differs because of the runtime.
+
+| Type | What it is |
+| --- | --- |
+| `ColophonHostAccount` | The account a host acts for: `ColophonHostAccount(session:)` from a ready `ColophonSession` (on the main actor). It is opaque: the engine, the member key and the exchange (the session's own `syncNow`) stay inside the hosts, which reach them only from their serial queues. The session hands them to the hosts with `package` access (`SessionHostAccess`, `hostAccess`): only targets of this SwiftPM package can name it, never an app, which depends on the products. |
+| `HomeStreamHost` | An actor, one per home. `init(account:home:transport:socket:clock:configure:cursor:saveCursor:client:)`; `start()`, `stop()`, `retryNow()`, `historyChanged()` and `on(_:)` are `nonisolated` and may be called from anywhere, listeners included; `status`, `polling`, `cursor`, `live`, `attach(_:)`, `detach(_:)`, `sendSession(_:)`, `onPass(_:)`. |
+| `SessionCellHost` | An actor, one member of one cell: `SessionCellHost.open(_:listener:)` with `CellHostOptions` (the same options as §1). `submit(_:json:)` admits a command synchronously and returns a `CellCommand` whose `value()` waits for it; `command(_:json:)` does both. `deliver`, `linkUp`, `linkDown`, `accountChanged`, `close` are `nonisolated`; `leave()`, `state`, `writePending`, `stats`; `snapshot` (a `CellState` value) and `storedClaim` are readable without entering the actor. |
+| `CellSession` | The typed API: `CellSession.join(_:)`; `state` (`CellState`: `joined`, `holder`, `isHolder`, `gated`, `claim`, `state`, `seq`, `entitled`, `canWrite`), `subscribe(_:)`, `events(_:)` (`CellEvent`, bytes decoded); `take`, `ask`, `pass(to:snapshot:)`, `decline`, `release`, `publish`, `submit`, `presence`, `ping`, `leave`, `close`. |
+| `ClaimStore`, `Fence`, `StoredClaim`, `compareAndSet(held:record:expected:)` | The contract of §3. A fence is two integers in 0 … 2^53 − 1 (the range every host stores exactly); anything else is `ClaimStoreError.badFence`. |
+| `MemoryClaimStore`, `SQLiteClaimStore` | The stores that provide it (below). |
+| `SessionFrames.frameText(ofMessage:)` | `sessionFrameText` of §1, over the message's UTF-8 bytes. |
+| `URLSessionSocketFactory`, `SocketFactory`, `HostSocket`, `SocketHandlers` | The socket behind a small interface; tests inject a fake. |
+| `HostClock`, `SystemClock` | Monotonic and wall milliseconds and a timer. `SystemClock` reads `CLOCK_MONOTONIC`, which keeps counting while the device sleeps, and sleeps on the continuous clock. |
+
+**One serial queue per host.** Each host is an actor whose inputs arrive through one ordered stream
+(`AsyncStream`) and run one at a time, in arrival order. A stream host's job never suspends. A cell
+host's job may suspend to read the engine (`HostAccount.engine()`), but the next job starts only when it
+ends, so actor re-entrancy never lets two jobs interleave over the endpoint; the work that runs beside the
+jobs (a save in flight, the per-beat fence read, a delegation being signed, a rebuild) touches only the
+host's own fencing state and hands its result back as a later job. Listeners are synchronous closures,
+called between jobs; anything they do (a command, a frame, `accountChanged`, `stop`) is a later job, in
+the order they did it. A command's caller resumes only after the listeners heard the events of the job
+that ran it. Socket callbacks arrive on one serial delegate queue and reach the host in order.
+
+**What is not public.** Nothing public hands out the engine, a raw signer, the endpoint, the stream client or an
+account view, or lets a caller act on them outside a host's queue: the account behind `ColophonHostAccount`, the
+endpoint and an injected client are internal, and the session's access for the hosts is `package`, not public and
+not SPI (SPI is opt-in visibility, not access control). The modules ship as source in this one package (the
+XCFramework carries only the Rust library), so `package` access is enforced for every app and crosses no boundary
+a legitimate consumer needs. Checked from the compiler's view: `scripts/check-swift-hosts-api.py` reads the symbol
+graphs `swift package dump-symbol-graph` emits (public and SPI symbols, extension blocks included) and fails on any
+SPI symbol in `ColophonHosts` or `ColophonSession`, on any public symbol, relationship or signature of
+`ColophonHosts` that names the engine, an endpoint, the stream client, an account view or the host access, and on any
+change from the pinned surface (`swift/Tests/ColophonHostsTests/ColophonHosts.public-api`, generated from that graph).
+And from outside: `swift/HostsClient` depends on the package as an app does, opens a cell host from a session with
+the public API (its test runs), and each snippet in `swift/HostsClient/Refused` (the session's host access, with or
+without an SPI import; the account, signer or endpoint behind a host; handing a host a stream client) must fail to
+compile with an error naming what it reached for.
+
+**History.** The head is read for `historyChanged` one read at a time (a request during a read runs one more after
+it), and a sequence below the greatest one already given to `on_history` is discarded, whether it came from a read
+or from a pass: the history the core is told never goes back.
+
+**The engine.** The hosts' account keeps the `AccountEngine` handle of the session's current
+`ColophonEngine` and takes a new one when the session opens another engine. Stream and endpoint calls go
+straight to the handle, which serializes its own calls; they do not queue behind a long call on the
+engine actor's queue (an endpoint reads the engine's gate, never its lock: bindings-05 §10).
+
+**The socket.** `URLSessionSocketFactory` opens a `URLSessionWebSocketTask` (only `wss`, and `ws` to a
+loopback address when `allowingLoopback` is set) in its own ephemeral session, never logs or reports its
+URL, and reports `open`, every text message in order, and one end. Unlike a browser's `WebSocket`,
+`URLSessionWebSocketTask` keeps the HTTP response of a refused upgrade on the task: its status and headers
+reach the core through `on_refused` (the end-to-end suite shows a ticket the home never issued reported as
+`refused 403`). The body is not available, so the answer's body is empty: a 429 or 503 is read with its
+`Retry-After`, a 404 as unsupported, and a `403 refused:revoked` as an unrecognised refusal, which backs off
+within the ticket budget (close 1008 still ends a live stream). A failure without a response is
+`on_closed(None)`. `close(code:)` sends the code the step names (`CloseCode` is an open enumeration).
+
+### 6a. The durable claim store
+
+`SQLiteClaimStore(path:name:busyTimeout:)` keeps each cell's claim in one row of one table of a SQLite
+database, through the system's `libsqlite3` (part of the OS; no dependency is added):
+
+```sql
+CREATE TABLE colophon_claims (name TEXT PRIMARY KEY NOT NULL,
+  generation INTEGER NOT NULL CHECK (generation BETWEEN 0 AND 9007199254740991),
+  seq INTEGER NOT NULL CHECK (seq BETWEEN 0 AND 9007199254740991),
+  claim TEXT) STRICT
+```
+
+- **The compare-and-set** is one `BEGIN IMMEDIATE` transaction: read the row, compare, write, commit.
+  `BEGIN IMMEDIATE` takes the database's write lock before the read, so of all the clients of one file
+  (instances, processes, an app and its extensions sharing a container) exactly one is between its read
+  and its commit at a time, and each compares against what the last commit left. A client that cannot
+  take the lock within `busyTimeout` (5 s) fails the save with an error, never `stale`; the host treats it
+  as a failed attempt and reads the held fence before trying again (§3).
+- **Durability.** WAL mode with `synchronous = FULL` and `fullfsync = ON` (`checkpoint_fullfsync = ON`
+  for checkpoints): a commit returns only after its WAL frames are synced with `F_FULLFSYNC`, which on
+  Apple platforms also flushes the drive's cache, so `stored` survives a crash or power loss. In WAL mode a
+  commit becomes visible to other connections only when it updates the WAL index, after that sync, so no
+  reader can see a fence that could still be withdrawn (§3a, 1 and 2). `synchronous = NORMAL` would make a
+  commit visible before it is synced and could lose the last commits on power loss; it is not used. The
+  store checks that WAL and `FULL` are in force when it opens and refuses to open otherwise.
+- **Failing closed** (§3a, 3). The database file is the store's alone: `sqlite_schema` must hold exactly the
+  claim table and its primary key's index. Any other object (a trigger that could delete or rewrite the row, a
+  view under the table's name, another table or index) is an error when the store opens and inside every read
+  and write transaction, so one added later is found at the next read or save. Every write is read back
+  inside its transaction and must equal what was written before it commits; anything unexpected rolls back.
+  The table is `STRICT` and range-checked, and every read checks each column's type and range. A file that
+  is not a database cannot be opened. SQLite's own tables (`sqlite_stat1` after `ANALYZE`, `sqlite_sequence`)
+  are allowed: no statement can create a table under the `sqlite_` prefix, and a table carries no behaviour.
+  The scan of `sqlite_schema` runs in every transaction rather than comparing `PRAGMA schema_version`: the
+  scan reads two or three rows, and it checks what the schema is rather than only that it has not changed.
+- **Settings are read back.** SQLite accepts an unknown or ignored pragma silently, so each connection sets
+  the busy timeout (its result checked) and `journal_mode`, `synchronous`, `fullfsync`,
+  `checkpoint_fullfsync` and `trusted_schema = OFF`, then reads every one back (and the busy timeout) and
+  refuses to open unless each reports the value required. A client that cannot take the write lock within
+  the busy timeout fails its save (a failed attempt to the host), and writes nothing.
+- **File protection.** On iOS, iPadOS, visionOS, tvOS and watchOS the database, `-wal` and `-shm` files get
+  `completeUntilFirstUserAuthentication`: readable while the device is locked after its first unlock. The
+  open flag asks SQLite for it, and the store also sets the class itself on each file as it appears (the
+  database at open, the `-wal` and `-shm` files after the first write) and reads it back before reporting
+  success; a file that already has another class, stricter or none, is moved to it. On macOS nothing is set
+  (a file's protection attribute there is not a data-protection class an app relies on). A device playing in the background with its screen locked
+  must keep checking its fence every beat; under `complete` protection those reads would fail and the cell
+  would fail closed (`store`) after three beats. A store whose reads fail does exactly that (tested by
+  injecting the failure).
+- Each instance is one client with two connections, each on its own serial queue (SQLite's calls block,
+  and never run on the cooperative pool): one writes, one reads `load` and the per-beat `fence`, so a slow
+  write does not delay a fence check. Several cells may share one file under different `name`s.
+
+A store for other storage follows §3a. There is no file-and-lock or file-and-rename store: both designs
+fail §3a (a lock that can be stolen; a commit visible before it is irrevocable).
+
+### 6b. Suspension and the background on iOS
+
+The host adds no machinery for the app's life cycle; the core's steps cover it, and the app's part is
+small. What Apple documents (TN2277, "Networking and Multitasking"): a suspended app runs no code, and
+the system may reclaim a suspended app's sockets at times it does not document; on resume an operation on
+a reclaimed socket fails. An app with the `audio` background mode is not suspended while it plays, and
+becomes eligible for suspension when playback stops. A background task (`beginBackgroundTask`) gives
+limited time to finish work, not a way to keep a socket open.
+
+- **Suspended.** Nothing runs: no frame is read, no tick or timer fires (timers on the continuous clock
+  fire at once on resume if they fell due). The other members see the device go quiet: a holder lapses to
+  them after `holderTimeoutMs` and one of them may take. On resume the host's pending timers fire and the
+  socket reports its end (a failure, `on_closed(None)`), or the home's idle close; either way every cell
+  hears `linkDown`, and the stream backs off and reconnects through its own steps. `CLOCK_MONOTONIC` kept
+  counting, so the endpoint sees the true length of the outage, never a backwards clock; a holder that
+  was out of contact is gated and then retakes or yields (§S6), as the offline journey shows.
+- **Playing audio in the background** (the `audio` mode, an active audio session): the app keeps
+  running, so the socket, the ticks and the beat continue, and the playing device receives an `ask` and
+  can `pass` from the background. When playback stops the app may be suspended as above; an application
+  that passes or releases the role should do so before it stops its audio session.
+- **What an app does.** Call `HomeStreamHost.retryNow()` on entering the foreground (and on a network
+  change), so the stream reconnects at once instead of waiting out a backoff; keep the existing poll timer
+  while `polling` is true. Nothing else is required: the core's steps, not the host, decide when to
+  reconnect, mint or lapse.
+
+Not verified: these behaviours on an iOS device or simulator, and the protection class on a locked device.
+The Swift suites run on macOS only.
+
+### 6c. What was run
+
+`scripts/test-swift-hosts.sh` builds a macOS slice of `colophon-ffi` and of the conformance crate and
+the relay's home module (or takes them from `COLOPHON_FFI_LIB`, `COLOPHON_CONFORMANCE_LIB`,
+`COLOPHON_HOME_WASM` and `UNIFFI_BINDGEN`), keeps private copies in `.build/hosts06`, and runs:
+
+- `ColophonHostsTests` (`swift/Tests/ColophonHostsTests`), on macOS with the real `HomeStream` and real
+  endpoints of a local account: `StreamHostTests` (the matrix of `stream-host.test.ts`, the socket
+  factory refusing anything but `wss` or an allowed loopback `ws`, and a pass completing with an older head after
+  a newer read, discarded), `CellHostTests` (that of
+  `cell-host.test.ts`, every test also checking that no cell ever had two saves in flight),
+  `ClaimFenceTests` (two clients of one storage opening in all six interleavings, a rebuild racing an
+  open in all three, a superseded holder stopping within one beat, fences out of range, and the SQLite
+  store: its compare-and-set across connections, eight clients of one file racing from one fence twice,
+  two hosts on two connections opening at once, a restart from what it stored, failing closed on a foreign
+  table, trigger, view, index or file before open and on a trigger added after it (while `ANALYZE`'s own
+  table is accepted), every setting read back
+  on both connections, a write that fails before its commit rolling back, a save that cannot take the write
+  lock failing at the busy timeout, and a cell whose reads start failing failing closed with `store`),
+  `FramesTests` (the adversarial matrix of `frames.test.ts`), `ShippingSurfaceTests` (the 9 `offset.json`
+  cases through the shipping `sessionClockSample`, and no conformance name in the shipped package), and
+  `EndToEndTests`.
+- `swift/Conformance06`, a separate test-only package that links the conformance crate's artifact:
+  every machine transcript (26), `wire/vectors.json` (19 frames, 20 scenario steps, 26 negative frames)
+  and strict decoding. The root package neither links nor exports it.
+
+`EndToEndTests` runs the five journeys of §4 against `relay/server.js` on Bun with the home module, each
+member with its own `HomeStreamHost` over a real `URLSessionWebSocketTask` on loopback. Measured on one
+Mac: from B's ask to A observing that it yielded about 1.2 ms, to B holding about 2 ms; a restarted holder
+retakes after about 303 ms against `askTimeoutMs` 300; B sees A lapse 1.5 s after A's network is cut and
+holds about 1 ms after its take; A yields about 15 ms after its network returns; the revoked member's frame
+is dropped by B (`delegation`), the home ends its stream (`Blocked`, `AccessEnded`), and its next command
+reports the stale view and then `entitled = false`. One difference from §4 journey 4: the stores take
+250 ms per write, under the fast policy's `askTimeoutMs` (300). A holder whose pass is being written sends
+nothing as holder meanwhile, so with a longer write the asker may take on its own once `askTimeoutMs` has
+passed without a holder frame (§S5) and then receives the pass as a late pass; whether it does depends on
+whether a beat happened to reach it in that window.
+
+Not run: iOS, visionOS or a simulator (only a macOS slice is built), a real network, or a home other
+than the reference relay. Not verified for the SQLite store: clients in separate processes (the tests use
+several connections in one process, which take the same file locks), durability across a crash or power
+loss (it rests on SQLite's documented WAL and `F_FULLFSYNC` behaviour, not on a test), reads on a
+locked device, and the protection class set and read back on a device: that code is compiled only for the device
+platforms, which the macOS suites do not run.
