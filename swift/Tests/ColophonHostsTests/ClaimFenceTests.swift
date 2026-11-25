@@ -269,6 +269,24 @@ import ColophonSession
         }
     }
 
+    @Test func sqlitesOwnTablesAfterAnalyzeDoNotBreakTheStoreButATriggerStillDoes() async throws {
+        let path = Self.database()
+        defer { Self.remove(path) }
+        let store = try await SQLiteClaimStore(path: path, name: "cell")
+        let f1 = try Fence(generation: 1, seq: 0), f2 = try Fence(generation: 1, seq: 1), f3 = try Fence(generation: 1, seq: 2)
+        #expect(try await store.save(StoredClaim(claim: "a", fence: f1), expected: nil) == .stored)
+        try Self.exec(path, "ANALYZE")
+        #expect(try await store.save(StoredClaim(claim: "b", fence: f2), expected: f1) == .stored, "sqlite_stat1 is SQLite's own")
+        #expect(try await store.fence() == f2)
+        let reopened = try await SQLiteClaimStore(path: path, name: "cell")
+        #expect(try await reopened.load()?.claim == "b")
+        try Self.exec(path, "CREATE TRIGGER t AFTER UPDATE ON colophon_claims BEGIN DELETE FROM colophon_claims; END")
+        await #expect(throws: ClaimStoreError.self) { _ = try await store.save(StoredClaim(claim: "c", fence: f3), expected: f2) }
+        await #expect(throws: ClaimStoreError.self) { _ = try await SQLiteClaimStore(path: path, name: "cell") }
+        // A table no statement may create under SQLite's reserved prefix.
+        #expect(throws: (any Error).self) { try Self.exec(path, "CREATE TABLE sqlite_mine (x)") }
+    }
+
     @Test func aWriteThatFailsBeforeItsCommitRollsBackAndTheNextSaveWorks() async throws {
         let path = Self.database()
         defer { Self.remove(path) }

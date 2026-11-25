@@ -1,5 +1,5 @@
 import Foundation
-@_spi(Hosts) import ColophonSession
+import ColophonSession
 
 /// The account a host acts for, made from a ready `ColophonSession`. It is opaque: the engine, the member key and the
 /// session's exchange stay inside the hosts, which use them only from their own serial queues. Nothing in the hosts'
@@ -7,7 +7,7 @@ import Foundation
 public struct ColophonHostAccount: Sendable {
     let source: any HostAccount
     /// The host account of `session`, which must be ready (it knows its account and member).
-    @MainActor init(session: ColophonSession) throws { source = try SessionHostAccount(session: session) }
+    @MainActor public init(session: ColophonSession) throws { source = try SessionHostAccount(session: session) }
     init(_ source: any HostAccount) { self.source = source }
     /// The account (64 hex).
     public var account: String { source.account }

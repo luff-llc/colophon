@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The Swift 0.6 hosts' tests (docs/hosts-06.md section 6): ColophonHostsTests (the unit suites and the end-to-end
-# journeys against the real relay) and the conformance replay in swift/Conformance06, which links the conformance
-# crate's artifact. Builds a macOS slice only. Each library is built here unless given:
+# journeys against the real relay), the conformance replay in swift/Conformance06, which links the conformance
+# crate's artifact, the public-API check over the compiler's symbol graphs, and the outside client swift/HostsClient. Builds a macOS slice only. Each library is built here unless given:
 #   COLOPHON_FFI_LIB            libcolophon_ffi.a (release)
 #   COLOPHON_CONFORMANCE_LIB    libcolophon_conformance.a (release; its .dylib beside it is read for the bindings)
 #   COLOPHON_HOME_WASM          colophon_home_wasm.wasm (the relay's home module)
@@ -56,3 +56,28 @@ export COLOPHON_SOFTWARE_KEYS=1
 export COLOPHON_HOME_WASM="$work/colophon_home_wasm.wasm"
 swift test --disable-sandbox --filter ColophonHostsTests "$@"
 swift test --disable-sandbox --package-path swift/Conformance06
+
+# The public surface as the compiler sees it: symbol graphs of every module, public and SPI symbols included.
+graphs=$(swift package --disable-sandbox dump-symbol-graph --minimum-access-level public --include-spi-symbols \
+  --emit-extension-block-symbols 2>&1 | sed -n 's/^Files written to //p' | tail -1)
+python3 scripts/check-swift-hosts-api.py "$graphs"
+
+# An application's view: swift/HostsClient depends on the package as an app does. It must build and open a host
+# with the public API, and each snippet in Refused/ (reaching the engine, the signer, the endpoint or a client) must
+# fail to compile, with an error naming what it reached for.
+client=swift/HostsClient
+rm -f "$client/Sources/HostsClient/Refused.swift"
+swift test --disable-sandbox --package-path "$client"
+for snippet in "$client"/Refused/*.swift; do
+  expect=$(sed -n 's|^// expect: ||p' "$snippet")
+  cp "$snippet" "$client/Sources/HostsClient/Refused.swift"
+  if out=$(swift build --disable-sandbox --package-path "$client" 2>&1); then
+    rm -f "$client/Sources/HostsClient/Refused.swift"
+    echo "compiled, but must not: $snippet" >&2; exit 1
+  fi
+  rm -f "$client/Sources/HostsClient/Refused.swift"
+  if ! grep -E "error:.*$expect" <<<"$out" >/dev/null; then
+    echo "failed to compile for another reason than $expect: $snippet" >&2; grep -E "error:" <<<"$out" | head -5 >&2; exit 1
+  fi
+  echo "refused as it must be: $(basename "$snippet") ($(grep -E -m1 "error:.*$expect" <<<"$out" | sed 's/.*error: //' | cut -c1-120))"
+done

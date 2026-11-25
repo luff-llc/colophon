@@ -1,168 +1,315 @@
-CellSession.swift: public struct Claim: Sendable, Hashable, Codable
-CellSession.swift: public let term: Int64
-CellSession.swift: public let rank: Int
-CellSession.swift: public let holder: String
-CellSession.swift: public let via: String?
-CellSession.swift: public struct CellState: Sendable, Equatable
-CellSession.swift: public var joined = false
-CellSession.swift: public var holder: String?
-CellSession.swift: public var isHolder = false
-CellSession.swift: public var gated = false
-CellSession.swift: public var claim: Claim?
-CellSession.swift: public var state: Data?
-CellSession.swift: public var seq: Int64 = 0
-CellSession.swift: public var entitled = false
-CellSession.swift: public var canWrite = false
-CellSession.swift: public enum CellEvent: Sendable, Equatable
-CellSession.swift: public var name: String
-CellSession.swift: public init(event: String, json: String)
-CellSession.swift: public final class CellSession: Sendable
-CellSession.swift: public let host: SessionCellHost
-CellSession.swift: public static func join(_ options: CellHostOptions) async throws -> CellSession
-CellSession.swift: public var state: CellState
-CellSession.swift: public func subscribe(_ listener: @escaping @Sendable (CellState) -> Void) -> ListenerToken
-CellSession.swift: public func events(_ listener: @escaping @Sendable (CellEvent) -> Void) -> ListenerToken
-CellSession.swift: public func take(_ state: Data? = nil) async throws
-CellSession.swift: public func ask() async throws
-CellSession.swift: public func pass(to: String, snapshot: Data) async throws
-CellSession.swift: public func decline(_ to: String) async throws
-CellSession.swift: public func release() async throws
-CellSession.swift: @discardableResult public func publish(_ payload: Data, id: Data = CellSession.randomID()) async throws -> Data
-CellSession.swift: @discardableResult public func submit(_ payload: Data, id: Data = CellSession.randomID()) async throws -> Data
-CellSession.swift: public func presence(_ payload: Data) async throws
-CellSession.swift: public func ping(_ to: String) async throws
-CellSession.swift: public func leave() async throws
-CellSession.swift: public func close()
-CellSession.swift: public static func randomID() -> Data
-CellSession.swift: public enum Base64
-CellSession.swift: public static func encode(_ data: Data) -> String
-CellSession.swift: public static func url(_ data: Data) -> String
-CellSession.swift: public static func decode(_ text: String) -> Data?
-ClaimStore.swift: public struct Fence: Sendable, Hashable, Comparable, CustomStringConvertible
-ClaimStore.swift: public static let maximum: Int64 = (1 << 53) - 1
-ClaimStore.swift: public let generation: Int64
-ClaimStore.swift: public let seq: Int64
-ClaimStore.swift: public init(generation: Int64, seq: Int64) throws
-ClaimStore.swift: public static func < (a: Fence, b: Fence) -> Bool
-ClaimStore.swift: public var description: String
-ClaimStore.swift: public struct StoredClaim: Sendable, Hashable
-ClaimStore.swift: public let claim: String?
-ClaimStore.swift: public let fence: Fence
-ClaimStore.swift: public init(claim: String?, fence: Fence)
-ClaimStore.swift: public enum SaveOutcome: Sendable, Equatable
-ClaimStore.swift: public enum ClaimStoreError: Error, Equatable, Sendable
-ClaimStore.swift: public protocol ClaimStore: Sendable
-ClaimStore.swift: public func compareAndSet(held: StoredClaim?, record: StoredClaim, expected: Fence?) -> StoredClaim?
-ClaimStore.swift: public final class MemoryClaimStore: ClaimStore
-ClaimStore.swift: public init(_ initial: StoredClaim? = nil)
-ClaimStore.swift: public func load() async throws -> StoredClaim?
-ClaimStore.swift: public func fence() async throws -> Fence?
-ClaimStore.swift: public func save(_ new: StoredClaim, expected: Fence?) async throws -> SaveOutcome
-HomeStreamHost.swift: public protocol StreamCell: AnyObject, Sendable
-HomeStreamHost.swift: public protocol CellCarrier: Sendable
-HomeStreamHost.swift: public struct ListenerToken: Sendable
-HomeStreamHost.swift: public func cancel()
-HomeStreamHost.swift: public enum StreamHostEvent: Sendable
-HomeStreamHost.swift: public actor HomeStreamHost: CellCarrier
-HomeStreamHost.swift: public nonisolated let home: String
-HomeStreamHost.swift: public init(account: ColophonHostAccount, home: String, transport: any HomeTransport, socket: SocketFactory? = nil, clock: any HostClock = SystemClock(), configure: (@Sendable (inout StreamConfig) -> Void)? = nil, cursor: String? = nil, saveCursor: (@Sendable (String?) async -> Void)? = nil) async throws
-HomeStreamHost.swift: public nonisolated func start()
-HomeStreamHost.swift: public nonisolated func stop()
-HomeStreamHost.swift: public nonisolated func retryNow()
-HomeStreamHost.swift: public nonisolated func historyChanged()
-HomeStreamHost.swift: public nonisolated func on(_ listener: @escaping @Sendable (StreamHostEvent) -> Void) -> ListenerToken
-HomeStreamHost.swift: public func onPass(_ listener: @escaping @Sendable () -> Void) -> ListenerToken?
-HomeStreamHost.swift: public var status: StreamStatus?
-HomeStreamHost.swift: public var polling: Bool
-HomeStreamHost.swift: public var cursor: String?
-HomeStreamHost.swift: public var live: Bool
-HomeStreamHost.swift: public func attach(_ cell: any StreamCell) throws
-HomeStreamHost.swift: public func detach(_ cell: any StreamCell)
-HomeStreamHost.swift: public func sendSession(_ frame: String) -> Bool
-HostAccount.swift: public struct ColophonHostAccount: Sendable
-HostAccount.swift: public var account: String
-HostAccount.swift: public var member: String
-HostAccount.swift: public func transport(home: String) async -> (any HomeTransport)?
-HostAccount.swift: public enum HostError: Error, Equatable, Sendable
-HostClock.swift: public protocol HostClock: Sendable
-HostClock.swift: public struct HostTimer: Sendable
-HostClock.swift: public init(cancel: @escaping @Sendable () -> Void)
-HostClock.swift: public func cancel()
-HostClock.swift: public struct SystemClock: HostClock
-HostClock.swift: public init()
-HostClock.swift: public func monoMs() -> Int64
-HostClock.swift: public func wallMs() -> Int64
-HostClock.swift: public func schedule(after ms: Int64, _ run: @escaping @Sendable () -> Void) -> HostTimer
-HostSocket.swift: public struct SocketHandlers: Sendable
-HostSocket.swift: public let open: @Sendable () -> Void
-HostSocket.swift: public let message: @Sendable (String) -> Void
-HostSocket.swift: public let refused: @Sendable (HttpAnswer) -> Void
-HostSocket.swift: public let closed: @Sendable (UInt32?) -> Void
-HostSocket.swift: public init(open: @escaping @Sendable () -> Void, message: @escaping @Sendable (String) -> Void, refused: @escaping @Sendable (HttpAnswer) -> Void, closed: @escaping @Sendable (UInt32?) -> Void)
-HostSocket.swift: public protocol HostSocket: Sendable
-HostSocket.swift: public typealias SocketFactory = @Sendable (_ url: String, _ handlers: SocketHandlers) throws -> any HostSocket
-HostSocket.swift: public struct URLSessionSocketFactory: Sendable
-HostSocket.swift: public let allowingLoopback: Bool
-HostSocket.swift: public let maximumMessageSize: Int
-HostSocket.swift: public init(allowingLoopback: Bool = false, maximumMessageSize: Int = 1 << 20)
-HostSocket.swift: public var factory: SocketFactory
-SQLiteClaimStore.swift: public final class SQLiteClaimStore: ClaimStore
-SQLiteClaimStore.swift: public static let schema = """
-SQLiteClaimStore.swift: public let name: String
-SQLiteClaimStore.swift: public init(path: URL, name: String, busyTimeout: Duration = .seconds(5)) async throws
-SQLiteClaimStore.swift: public func load() async throws -> StoredClaim?
-SQLiteClaimStore.swift: public func fence() async throws -> Fence?
-SQLiteClaimStore.swift: public func save(_ record: StoredClaim, expected: Fence?) async throws -> SaveOutcome
-SessionCellHost.swift: public struct CellHostError: Error, Equatable, Sendable, CustomStringConvertible
-SessionCellHost.swift: public enum Code: String, Sendable
-SessionCellHost.swift: public let code: Code
-SessionCellHost.swift: public let message: String
-SessionCellHost.swift: public init(_ code: Code, _ message: String)
-SessionCellHost.swift: public var description: String
-SessionCellHost.swift: public enum RebuildReason: String, Sendable
-SessionCellHost.swift: public enum FailReason: String, Sendable
-SessionCellHost.swift: public enum KeptInput: String, Sendable
-SessionCellHost.swift: public enum CellHostEvent: Sendable
-SessionCellHost.swift: public enum PersistPhase: String, Sendable
-SessionCellHost.swift: public struct CellHostOptions: Sendable
-SessionCellHost.swift: public var carrier: any CellCarrier
-SessionCellHost.swift: public var namespace: String
-SessionCellHost.swift: public var cell: String
-SessionCellHost.swift: public var store: any ClaimStore
-SessionCellHost.swift: public var policy: String?
-SessionCellHost.swift: public var clock: any HostClock = SystemClock()
-SessionCellHost.swift: public var state: @Sendable () -> Data? =
-SessionCellHost.swift: public var delegationMs: Int64 = 86_400_000
-SessionCellHost.swift: public var persistRetryMs: Int64 = 250
-SessionCellHost.swift: public var persistAttempts: Int = 20
-SessionCellHost.swift: public var persistTimeoutMs: Int64 = 10_000
-SessionCellHost.swift: public var fenceCheckMisses: Int = 3
-SessionCellHost.swift: public var maxCommands: Int = 64
-SessionCellHost.swift: public var random: @Sendable (Int) -> Data =
-SessionCellHost.swift: public init(account: ColophonHostAccount, carrier: any CellCarrier, namespace: String, cell: String, store: any ClaimStore)
-SessionCellHost.swift: public struct CellCommand: Sendable
-SessionCellHost.swift: public func value() async throws
-SessionCellHost.swift: public actor SessionCellHost: StreamCell
-SessionCellHost.swift: public nonisolated let namespace: String
-SessionCellHost.swift: public nonisolated let cell: String
-SessionCellHost.swift: public nonisolated let me: String
-SessionCellHost.swift: public enum Phase: String, Sendable
-SessionCellHost.swift: public struct Stats: Sendable
-SessionCellHost.swift: public private(set) var stats = Stats()
-SessionCellHost.swift: public static func open(_ options: CellHostOptions, listener: (@Sendable (CellHostEvent) -> Void)? = nil) async throws -> SessionCellHost
-SessionCellHost.swift: public nonisolated func on(_ listener: @escaping @Sendable (CellHostEvent) -> Void) -> ListenerToken
-SessionCellHost.swift: public nonisolated var snapshot: CellState?
-SessionCellHost.swift: public nonisolated var storedClaim: String?
-SessionCellHost.swift: public var writePending: Bool
-SessionCellHost.swift: public var state: Phase
-SessionCellHost.swift: public nonisolated func submit(_ name: String, json: String) -> CellCommand
-SessionCellHost.swift: public nonisolated func command(_ name: String, json: String) async throws
-SessionCellHost.swift: public nonisolated func deliver(_ frame: String)
-SessionCellHost.swift: public nonisolated func linkUp()
-SessionCellHost.swift: public nonisolated func linkDown()
-SessionCellHost.swift: public nonisolated func accountChanged()
-SessionCellHost.swift: public nonisolated func close()
-SessionCellHost.swift: public func leave() async throws
-SessionFrames.swift: public enum SessionFrames
-SessionFrames.swift: public static func frameText(ofMessage message: String) -> String?
-SessionFrames.swift: public static func cell(ofFrame frame: String) -> (namespace: String, cell: String)?
+swift.class CellSession: final class CellSession
+swift.class HomeStreamHost: actor HomeStreamHost
+swift.class MemoryClaimStore: final class MemoryClaimStore
+swift.class SQLiteClaimStore: final class SQLiteClaimStore
+swift.class SessionCellHost: actor SessionCellHost
+swift.enum Base64: enum Base64
+swift.enum CellEvent: enum CellEvent
+swift.enum CellHostError.Code: enum Code
+swift.enum CellHostEvent.PersistPhase: enum PersistPhase
+swift.enum CellHostEvent: enum CellHostEvent
+swift.enum ClaimStoreError: enum ClaimStoreError
+swift.enum FailReason: enum FailReason
+swift.enum HostError: enum HostError
+swift.enum KeptInput: enum KeptInput
+swift.enum RebuildReason: enum RebuildReason
+swift.enum SaveOutcome: enum SaveOutcome
+swift.enum SessionCellHost.Phase: enum Phase
+swift.enum SessionFrames: enum SessionFrames
+swift.enum StreamHostEvent: enum StreamHostEvent
+swift.enum.case CellEvent.askReceived(from:): case askReceived(from: String)
+swift.enum.case CellEvent.becameHolder(claim:snapshot:via:): case becameHolder(claim: Claim, snapshot: Data, via: String)
+swift.enum.case CellEvent.declined(from:): case declined(from: String)
+swift.enum.case CellEvent.displaced(from:claim:seq:snapshot:): case displaced(from: String, claim: Claim, seq: Int64, snapshot: Data)
+swift.enum.case CellEvent.holderChanged(claim:): case holderChanged(claim: Claim?)
+swift.enum.case CellEvent.holderLapsed(holder:): case holderLapsed(holder: String)
+swift.enum.case CellEvent.latePass(from:claim:snapshot:): case latePass(from: String, claim: Claim, snapshot: Data)
+swift.enum.case CellEvent.message(claim:seq:origin:id:payload:): case message(claim: Claim, seq: Int64, origin: String, id: Data, payload: Data)
+swift.enum.case CellEvent.offsetChanged(peer:offset:error:): case offsetChanged(peer: String, offset: Int64, error: Int64)
+swift.enum.case CellEvent.other(event:json:): case other(event: String, json: String)
+swift.enum.case CellEvent.presenceChanged(member:payload:): case presenceChanged(member: String, payload: Data?)
+swift.enum.case CellEvent.refused(id:reason:): case refused(id: Data, reason: String)
+swift.enum.case CellEvent.rejected(command:reason:): case rejected(command: String, reason: String)
+swift.enum.case CellEvent.snapshot(claim:seq:snapshot:): case snapshot(claim: Claim, seq: Int64, snapshot: Data)
+swift.enum.case CellEvent.submitFailed(id:): case submitFailed(id: Data)
+swift.enum.case CellEvent.yielded(to:): case yielded(to: Claim)
+swift.enum.case CellHostError.Code.closed: case closed
+swift.enum.case CellHostError.Code.commandQueueFull: case commandQueueFull
+swift.enum.case CellHostError.Code.failed: case failed
+swift.enum.case CellHostError.Code.notRun: case notRun
+swift.enum.case CellHostError.Code.superseded: case superseded
+swift.enum.case CellHostError.Code.timeout: case timeout
+swift.enum.case CellHostEvent.PersistPhase.failed: case failed
+swift.enum.case CellHostEvent.PersistPhase.started: case started
+swift.enum.case CellHostEvent.PersistPhase.stored: case stored
+swift.enum.case CellHostEvent.account(entitled:canWrite:seq:): case account(entitled: Bool, canWrite: Bool, seq: UInt64)
+swift.enum.case CellHostEvent.commandHeld(command:): case commandHeld(command: String)
+swift.enum.case CellHostEvent.discarded(count:): case discarded(count: UInt32)
+swift.enum.case CellHostEvent.drop(reason:helloTo:): case drop(reason: String, helloTo: String?)
+swift.enum.case CellHostEvent.error(code:during:): case error(code: String, during: String)
+swift.enum.case CellHostEvent.failed(reason:error:): case failed(reason: FailReason, error: String?)
+swift.enum.case CellHostEvent.missed: case missed
+swift.enum.case CellHostEvent.persist(phase:ack:error:): case persist(phase: PersistPhase, ack: UInt64, error: String?)
+swift.enum.case CellHostEvent.queued(input:): case queued(input: KeptInput)
+swift.enum.case CellHostEvent.rebuilt(reason:): case rebuilt(reason: RebuildReason)
+swift.enum.case CellHostEvent.sent(kind:frame:): case sent(kind: String, frame: String)
+swift.enum.case CellHostEvent.session(event:json:): case session(event: String, json: String)
+swift.enum.case CellHostEvent.stale: case stale
+swift.enum.case CellHostEvent.unsent(kind:reason:frame:): case unsent(kind: String, reason: String, frame: String?)
+swift.enum.case ClaimStoreError.badFence: case badFence
+swift.enum.case ClaimStoreError.storage(_:): case storage(String)
+swift.enum.case ClaimStoreError.unreadable(_:): case unreadable(String)
+swift.enum.case FailReason.rebuild: case rebuild
+swift.enum.case FailReason.store: case store
+swift.enum.case FailReason.superseded: case superseded
+swift.enum.case HostError.insecureSocket: case insecureSocket
+swift.enum.case HostError.notReady: case notReady
+swift.enum.case KeptInput.frame: case frame
+swift.enum.case KeptInput.link: case link
+swift.enum.case KeptInput.tick: case tick
+swift.enum.case RebuildReason.clockBackwards: case clockBackwards
+swift.enum.case RebuildReason.sessionChanged: case sessionChanged
+swift.enum.case RebuildReason.wrongView: case wrongView
+swift.enum.case SaveOutcome.stale: case stale
+swift.enum.case SaveOutcome.stored: case stored
+swift.enum.case SessionCellHost.Phase.closed: case closed
+swift.enum.case SessionCellHost.Phase.failed: case failed
+swift.enum.case SessionCellHost.Phase.open: case open
+swift.enum.case SessionCellHost.Phase.opening: case opening
+swift.enum.case SessionCellHost.Phase.rebuilding: case rebuilding
+swift.enum.case StreamHostEvent.connect(url:): case connect(url: String)
+swift.enum.case StreamHostEvent.error(code:during:): case error(code: String, during: String)
+swift.enum.case StreamHostEvent.event(_:): case event(StreamEvent)
+swift.enum.case StreamHostEvent.pass(seq:error:): case pass(seq: UInt64?, error: String?)
+swift.enum.case StreamHostEvent.status(_:): case status(StreamStatus)
+swift.enum.case StreamHostEvent.ticketCallFailed(code:): case ticketCallFailed(code: String)
+swift.enum.case StreamHostEvent.unrouted(reason:): case unrouted(reason: String)
+swift.func compareAndSet(held:record:expected:): func compareAndSet(held: StoredClaim?, record: StoredClaim, expected: Fence?) -> StoredClaim?
+swift.func.op CellEvent.!=(_:_:): static func != (lhs: borrowing Self, rhs: borrowing Self) -> Bool
+swift.func.op CellHostError.!=(_:_:): static func != (lhs: borrowing Self, rhs: borrowing Self) -> Bool
+swift.func.op CellHostError.Code.!=(_:_:): static func != (lhs: borrowing Self, rhs: borrowing Self) -> Bool
+swift.func.op CellHostEvent.PersistPhase.!=(_:_:): static func != (lhs: borrowing Self, rhs: borrowing Self) -> Bool
+swift.func.op CellState.!=(_:_:): static func != (lhs: borrowing Self, rhs: borrowing Self) -> Bool
+swift.func.op Claim.!=(_:_:): static func != (lhs: borrowing Self, rhs: borrowing Self) -> Bool
+swift.func.op ClaimStoreError.!=(_:_:): static func != (lhs: borrowing Self, rhs: borrowing Self) -> Bool
+swift.func.op FailReason.!=(_:_:): static func != (lhs: borrowing Self, rhs: borrowing Self) -> Bool
+swift.func.op Fence.!=(_:_:): static func != (lhs: borrowing Self, rhs: borrowing Self) -> Bool
+swift.func.op Fence....(_:): static func ... (maximum: Self) -> PartialRangeThrough<Self>
+swift.func.op Fence....(_:): static func ... (minimum: Self) -> PartialRangeFrom<Self>
+swift.func.op Fence....(_:_:): static func ... (minimum: Self, maximum: Self) -> ClosedRange<Self>
+swift.func.op Fence...<(_:): static func ..< (maximum: Self) -> PartialRangeUpTo<Self>
+swift.func.op Fence...<(_:_:): static func ..< (minimum: Self, maximum: Self) -> Range<Self>
+swift.func.op Fence.<(_:_:): static func < (a: Fence, b: Fence) -> Bool
+swift.func.op Fence.<=(_:_:): static func <= (lhs: borrowing Self, rhs: borrowing Self) -> Bool
+swift.func.op Fence.>(_:_:): static func > (lhs: borrowing Self, rhs: borrowing Self) -> Bool
+swift.func.op Fence.>=(_:_:): static func >= (lhs: borrowing Self, rhs: borrowing Self) -> Bool
+swift.func.op HostError.!=(_:_:): static func != (lhs: borrowing Self, rhs: borrowing Self) -> Bool
+swift.func.op KeptInput.!=(_:_:): static func != (lhs: borrowing Self, rhs: borrowing Self) -> Bool
+swift.func.op RebuildReason.!=(_:_:): static func != (lhs: borrowing Self, rhs: borrowing Self) -> Bool
+swift.func.op SaveOutcome.!=(_:_:): static func != (lhs: borrowing Self, rhs: borrowing Self) -> Bool
+swift.func.op SessionCellHost.Phase.!=(_:_:): static func != (lhs: borrowing Self, rhs: borrowing Self) -> Bool
+swift.func.op StoredClaim.!=(_:_:): static func != (lhs: borrowing Self, rhs: borrowing Self) -> Bool
+swift.init CellEvent.init(event:json:): init(event: String, json: String)
+swift.init CellHostError.Code.init(rawValue:): init?(rawValue: String)
+swift.init CellHostError.init(_:_:): init(_ code: Code, _ message: String)
+swift.init CellHostEvent.PersistPhase.init(rawValue:): init?(rawValue: String)
+swift.init CellHostOptions.init(account:carrier:namespace:cell:store:): init(account: ColophonHostAccount, carrier: any CellCarrier, namespace: String, cell: String, store: any ClaimStore)
+swift.init Claim.init(from:): init(from decoder: any Decoder) throws
+swift.init ColophonHostAccount.init(session:): @MainActor init(session: ColophonSession) throws
+swift.init FailReason.init(rawValue:): init?(rawValue: String)
+swift.init Fence.init(generation:seq:): init(generation: Int64, seq: Int64) throws
+swift.init HomeStreamHost.init(account:home:transport:socket:clock:configure:cursor:saveCursor:): convenience init(account: ColophonHostAccount, home: String, transport: any HomeTransport, socket: SocketFactory? = nil, clock: any HostClock = SystemClock(), configure: (@Sendable (inout StreamConfig) -> Void)? = nil, cursor: String? = nil, saveCursor: (@Sendable (String?) async -> Void)? = nil) async throws
+swift.init HostTimer.init(cancel:): init(cancel: @escaping @Sendable () -> Void)
+swift.init KeptInput.init(rawValue:): init?(rawValue: String)
+swift.init MemoryClaimStore.init(_:): init(_ initial: StoredClaim? = nil)
+swift.init RebuildReason.init(rawValue:): init?(rawValue: String)
+swift.init SQLiteClaimStore.init(path:name:busyTimeout:): init(path: URL, name: String, busyTimeout: Duration = .seconds(5)) async throws
+swift.init SessionCellHost.Phase.init(rawValue:): init?(rawValue: String)
+swift.init SocketHandlers.init(open:message:refused:closed:): init(open: @escaping @Sendable () -> Void, message: @escaping @Sendable (String) -> Void, refused: @escaping @Sendable (HttpAnswer) -> Void, closed: @escaping @Sendable (UInt32?) -> Void)
+swift.init StoredClaim.init(claim:fence:): init(claim: String?, fence: Fence)
+swift.init SystemClock.init(): init()
+swift.init URLSessionSocketFactory.init(allowingLoopback:maximumMessageSize:): init(allowingLoopback: Bool = false, maximumMessageSize: Int = 1 << 20)
+swift.method CellCarrier.attach(_:): func attach(_ cell: any StreamCell) async throws
+swift.method CellCarrier.detach(_:): func detach(_ cell: any StreamCell) async
+swift.method CellCarrier.onPass(_:): func onPass(_ listener: @escaping @Sendable () -> Void) async -> ListenerToken?
+swift.method CellCarrier.sendSession(_:): func sendSession(_ frame: String) async -> Bool
+swift.method CellCommand.value(): func value() async throws
+swift.method CellHostError.Code.hash(into:): func hash(into hasher: inout Hasher)
+swift.method CellHostEvent.PersistPhase.hash(into:): func hash(into hasher: inout Hasher)
+swift.method CellSession.ask(): func ask() async throws
+swift.method CellSession.close(): func close()
+swift.method CellSession.decline(_:): func decline(_ to: String) async throws
+swift.method CellSession.events(_:): func events(_ listener: @escaping @Sendable (CellEvent) -> Void) -> ListenerToken
+swift.method CellSession.leave(): func leave() async throws
+swift.method CellSession.pass(to:snapshot:): func pass(to: String, snapshot: Data) async throws
+swift.method CellSession.ping(_:): func ping(_ to: String) async throws
+swift.method CellSession.presence(_:): func presence(_ payload: Data) async throws
+swift.method CellSession.publish(_:id:): @discardableResult func publish(_ payload: Data, id: Data = CellSession.randomID()) async throws -> Data
+swift.method CellSession.release(): func release() async throws
+swift.method CellSession.submit(_:id:): @discardableResult func submit(_ payload: Data, id: Data = CellSession.randomID()) async throws -> Data
+swift.method CellSession.subscribe(_:): func subscribe(_ listener: @escaping @Sendable (CellState) -> Void) -> ListenerToken
+swift.method CellSession.take(_:): func take(_ state: Data? = nil) async throws
+swift.method ClaimStore.fence(): func fence() async throws -> Fence?
+swift.method ClaimStore.load(): func load() async throws -> StoredClaim?
+swift.method ClaimStore.save(_:expected:): func save(_ record: StoredClaim, expected: Fence?) async throws -> SaveOutcome
+swift.method ColophonHostAccount.transport(home:): func transport(home: String) async -> (any HomeTransport)?
+swift.method FailReason.hash(into:): func hash(into hasher: inout Hasher)
+swift.method HomeStreamHost.assertIsolated(_:file:line:): @backDeployed(before: macOS 14.0, iOS 17.0, watchOS 10.0, tvOS 17.0) nonisolated func assertIsolated(_ message: @autoclosure () -> String = String(), file: StaticString = #fileID, line: UInt = #line)
+swift.method HomeStreamHost.assumeIsolated(_:file:line:): nonisolated func assumeIsolated<T>(_ operation: (isolated Self) throws -> T, file: StaticString = #fileID, line: UInt = #line) rethrows -> T where T : Sendable
+swift.method HomeStreamHost.attach(_:): func attach(_ cell: any StreamCell) throws
+swift.method HomeStreamHost.detach(_:): func detach(_ cell: any StreamCell)
+swift.method HomeStreamHost.historyChanged(): nonisolated func historyChanged()
+swift.method HomeStreamHost.on(_:): nonisolated func on(_ listener: @escaping @Sendable (StreamHostEvent) -> Void) -> ListenerToken
+swift.method HomeStreamHost.onPass(_:): func onPass(_ listener: @escaping @Sendable () -> Void) -> ListenerToken?
+swift.method HomeStreamHost.preconditionIsolated(_:file:line:): @backDeployed(before: macOS 14.0, iOS 17.0, watchOS 10.0, tvOS 17.0) nonisolated func preconditionIsolated(_ message: @autoclosure () -> String = String(), file: StaticString = #fileID, line: UInt = #line)
+swift.method HomeStreamHost.retryNow(): nonisolated func retryNow()
+swift.method HomeStreamHost.sendSession(_:): func sendSession(_ frame: String) -> Bool
+swift.method HomeStreamHost.start(): nonisolated func start()
+swift.method HomeStreamHost.stop(): nonisolated func stop()
+swift.method HomeStreamHost.withSerialExecutor(_:): nonisolated func withSerialExecutor<T, E>(_ operation: (any SerialExecutor) throws(E) -> T) throws(E) -> T where E : Error, T : ~Copyable
+swift.method HomeStreamHost.withSerialExecutor(_:): nonisolated func withSerialExecutor<T, E>(_ operation: nonisolated(nonsending) (any SerialExecutor) async throws(E) -> T) async throws(E) -> T where E : Error, T : ~Copyable
+swift.method HostClock.monoMs(): func monoMs() -> Int64
+swift.method HostClock.schedule(after:_:): func schedule(after ms: Int64, _ run: @escaping @Sendable () -> Void) -> HostTimer
+swift.method HostClock.wallMs(): func wallMs() -> Int64
+swift.method HostSocket.close(code:): func close(code: UInt32)
+swift.method HostSocket.send(_:): func send(_ text: String)
+swift.method HostTimer.cancel(): func cancel()
+swift.method KeptInput.hash(into:): func hash(into hasher: inout Hasher)
+swift.method ListenerToken.cancel(): func cancel()
+swift.method MemoryClaimStore.fence(): func fence() async throws -> Fence?
+swift.method MemoryClaimStore.load(): func load() async throws -> StoredClaim?
+swift.method MemoryClaimStore.save(_:expected:): func save(_ new: StoredClaim, expected: Fence?) async throws -> SaveOutcome
+swift.method RebuildReason.hash(into:): func hash(into hasher: inout Hasher)
+swift.method SQLiteClaimStore.fence(): func fence() async throws -> Fence?
+swift.method SQLiteClaimStore.load(): func load() async throws -> StoredClaim?
+swift.method SQLiteClaimStore.save(_:expected:): func save(_ record: StoredClaim, expected: Fence?) async throws -> SaveOutcome
+swift.method SessionCellHost.Phase.hash(into:): func hash(into hasher: inout Hasher)
+swift.method SessionCellHost.accountChanged(): nonisolated func accountChanged()
+swift.method SessionCellHost.assertIsolated(_:file:line:): @backDeployed(before: macOS 14.0, iOS 17.0, watchOS 10.0, tvOS 17.0) nonisolated func assertIsolated(_ message: @autoclosure () -> String = String(), file: StaticString = #fileID, line: UInt = #line)
+swift.method SessionCellHost.assumeIsolated(_:file:line:): nonisolated func assumeIsolated<T>(_ operation: (isolated Self) throws -> T, file: StaticString = #fileID, line: UInt = #line) rethrows -> T where T : Sendable
+swift.method SessionCellHost.close(): nonisolated func close()
+swift.method SessionCellHost.command(_:json:): nonisolated func command(_ name: String, json: String) async throws
+swift.method SessionCellHost.deliver(_:): nonisolated func deliver(_ frame: String)
+swift.method SessionCellHost.leave(): func leave() async throws
+swift.method SessionCellHost.linkDown(): nonisolated func linkDown()
+swift.method SessionCellHost.linkUp(): nonisolated func linkUp()
+swift.method SessionCellHost.on(_:): nonisolated func on(_ listener: @escaping @Sendable (CellHostEvent) -> Void) -> ListenerToken
+swift.method SessionCellHost.preconditionIsolated(_:file:line:): @backDeployed(before: macOS 14.0, iOS 17.0, watchOS 10.0, tvOS 17.0) nonisolated func preconditionIsolated(_ message: @autoclosure () -> String = String(), file: StaticString = #fileID, line: UInt = #line)
+swift.method SessionCellHost.submit(_:json:): nonisolated func submit(_ name: String, json: String) -> CellCommand
+swift.method SessionCellHost.withSerialExecutor(_:): nonisolated func withSerialExecutor<T, E>(_ operation: (any SerialExecutor) throws(E) -> T) throws(E) -> T where E : Error, T : ~Copyable
+swift.method SessionCellHost.withSerialExecutor(_:): nonisolated func withSerialExecutor<T, E>(_ operation: nonisolated(nonsending) (any SerialExecutor) async throws(E) -> T) async throws(E) -> T where E : Error, T : ~Copyable
+swift.method StreamCell.deliver(_:): func deliver(_ frame: String)
+swift.method StreamCell.linkDown(): func linkDown()
+swift.method StreamCell.linkUp(): func linkUp()
+swift.method SystemClock.monoMs(): func monoMs() -> Int64
+swift.method SystemClock.schedule(after:_:): func schedule(after ms: Int64, _ run: @escaping @Sendable () -> Void) -> HostTimer
+swift.method SystemClock.wallMs(): func wallMs() -> Int64
+swift.property CellEvent.name: var name: String { get }
+swift.property CellHostError.Code.hashValue: var hashValue: Int { get }
+swift.property CellHostError.code: let code: Code
+swift.property CellHostError.description: var description: String { get }
+swift.property CellHostError.localizedDescription: var localizedDescription: String { get }
+swift.property CellHostError.message: let message: String
+swift.property CellHostEvent.PersistPhase.hashValue: var hashValue: Int { get }
+swift.property CellHostOptions.carrier: var carrier: any CellCarrier
+swift.property CellHostOptions.cell: var cell: String
+swift.property CellHostOptions.clock: var clock: any HostClock
+swift.property CellHostOptions.delegationMs: var delegationMs: Int64
+swift.property CellHostOptions.fenceCheckMisses: var fenceCheckMisses: Int
+swift.property CellHostOptions.maxCommands: var maxCommands: Int
+swift.property CellHostOptions.namespace: var namespace: String
+swift.property CellHostOptions.persistAttempts: var persistAttempts: Int
+swift.property CellHostOptions.persistRetryMs: var persistRetryMs: Int64
+swift.property CellHostOptions.persistTimeoutMs: var persistTimeoutMs: Int64
+swift.property CellHostOptions.policy: var policy: String?
+swift.property CellHostOptions.random: var random: @Sendable (Int) -> Data
+swift.property CellHostOptions.state: var state: @Sendable () -> Data?
+swift.property CellHostOptions.store: var store: any ClaimStore
+swift.property CellSession.host: let host: SessionCellHost
+swift.property CellSession.state: var state: CellState { get }
+swift.property CellState.canWrite: var canWrite: Bool
+swift.property CellState.claim: var claim: Claim?
+swift.property CellState.entitled: var entitled: Bool
+swift.property CellState.gated: var gated: Bool
+swift.property CellState.holder: var holder: String?
+swift.property CellState.isHolder: var isHolder: Bool
+swift.property CellState.joined: var joined: Bool
+swift.property CellState.seq: var seq: Int64
+swift.property CellState.state: var state: Data?
+swift.property Claim.holder: let holder: String
+swift.property Claim.rank: let rank: Int
+swift.property Claim.term: let term: Int64
+swift.property Claim.via: let via: String?
+swift.property ClaimStoreError.localizedDescription: var localizedDescription: String { get }
+swift.property ColophonHostAccount.account: var account: String { get }
+swift.property ColophonHostAccount.member: var member: String { get }
+swift.property FailReason.hashValue: var hashValue: Int { get }
+swift.property Fence.description: var description: String { get }
+swift.property Fence.generation: let generation: Int64
+swift.property Fence.seq: let seq: Int64
+swift.property HomeStreamHost.cursor: var cursor: String? { get }
+swift.property HomeStreamHost.home: nonisolated let home: String
+swift.property HomeStreamHost.live: var live: Bool { get }
+swift.property HomeStreamHost.polling: var polling: Bool { get }
+swift.property HomeStreamHost.status: var status: StreamStatus? { get }
+swift.property HostError.localizedDescription: var localizedDescription: String { get }
+swift.property KeptInput.hashValue: var hashValue: Int { get }
+swift.property RebuildReason.hashValue: var hashValue: Int { get }
+swift.property SQLiteClaimStore.name: let name: String
+swift.property SessionCellHost.Phase.hashValue: var hashValue: Int { get }
+swift.property SessionCellHost.Stats.calls: var calls: Int
+swift.property SessionCellHost.Stats.drops: var drops: Int
+swift.property SessionCellHost.Stats.held: var held: Int
+swift.property SessionCellHost.Stats.persisted: var persisted: Int
+swift.property SessionCellHost.Stats.queued: var queued: Int
+swift.property SessionCellHost.Stats.rebuilt: var rebuilt: Int
+swift.property SessionCellHost.Stats.stale: var stale: Int
+swift.property SessionCellHost.cell: nonisolated let cell: String
+swift.property SessionCellHost.me: nonisolated let me: String
+swift.property SessionCellHost.namespace: nonisolated let namespace: String
+swift.property SessionCellHost.snapshot: nonisolated var snapshot: CellState? { get }
+swift.property SessionCellHost.state: var state: Phase { get }
+swift.property SessionCellHost.stats: var stats: SessionCellHost.Stats { get }
+swift.property SessionCellHost.storedClaim: nonisolated var storedClaim: String? { get }
+swift.property SessionCellHost.writePending: var writePending: Bool { get }
+swift.property SocketHandlers.closed: let closed: @Sendable (UInt32?) -> Void
+swift.property SocketHandlers.message: let message: @Sendable (String) -> Void
+swift.property SocketHandlers.open: let open: @Sendable () -> Void
+swift.property SocketHandlers.refused: let refused: @Sendable (HttpAnswer) -> Void
+swift.property StoredClaim.claim: let claim: String?
+swift.property StoredClaim.fence: let fence: Fence
+swift.property StreamCell.cell: var cell: String { get }
+swift.property StreamCell.namespace: var namespace: String { get }
+swift.property URLSessionSocketFactory.allowingLoopback: let allowingLoopback: Bool
+swift.property URLSessionSocketFactory.factory: var factory: SocketFactory { get }
+swift.property URLSessionSocketFactory.maximumMessageSize: let maximumMessageSize: Int
+swift.protocol CellCarrier: protocol CellCarrier : Sendable
+swift.protocol ClaimStore: protocol ClaimStore : Sendable
+swift.protocol HostClock: protocol HostClock : Sendable
+swift.protocol HostSocket: protocol HostSocket : Sendable
+swift.protocol StreamCell: protocol StreamCell : AnyObject, Sendable
+swift.struct CellCommand: struct CellCommand
+swift.struct CellHostError: struct CellHostError
+swift.struct CellHostOptions: struct CellHostOptions
+swift.struct CellState: struct CellState
+swift.struct Claim: struct Claim
+swift.struct ColophonHostAccount: struct ColophonHostAccount
+swift.struct Fence: struct Fence
+swift.struct HostTimer: struct HostTimer
+swift.struct ListenerToken: struct ListenerToken
+swift.struct SessionCellHost.Stats: struct Stats
+swift.struct SocketHandlers: struct SocketHandlers
+swift.struct StoredClaim: struct StoredClaim
+swift.struct SystemClock: struct SystemClock
+swift.struct URLSessionSocketFactory: struct URLSessionSocketFactory
+swift.type.method Base64.decode(_:): static func decode(_ text: String) -> Data?
+swift.type.method Base64.encode(_:): static func encode(_ data: Data) -> String
+swift.type.method Base64.url(_:): static func url(_ data: Data) -> String
+swift.type.method CellSession.join(_:): static func join(_ options: CellHostOptions) async throws -> CellSession
+swift.type.method CellSession.randomID(): static func randomID() -> Data
+swift.type.method SessionCellHost.open(_:listener:): static func open(_ options: CellHostOptions, listener: (@Sendable (CellHostEvent) -> Void)? = nil) async throws -> SessionCellHost
+swift.type.method SessionFrames.cell(ofFrame:): static func cell(ofFrame frame: String) -> (namespace: String, cell: String)?
+swift.type.method SessionFrames.frameText(ofMessage:): static func frameText(ofMessage message: String) -> String?
+swift.type.property Fence.maximum: static let maximum: Int64
+swift.type.property SQLiteClaimStore.schema: static let schema: String
+swift.typealias SocketFactory: typealias SocketFactory = @Sendable (_ url: String, _ handlers: SocketHandlers) throws -> any HostSocket

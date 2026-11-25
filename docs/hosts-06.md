@@ -280,7 +280,7 @@ for Apple platforms, on the generated `HomeStream` and `SessionEndpoint` of `Col
 
 | Type | What it is |
 | --- | --- |
-| `ColophonHostAccount` | The account a host acts for: `ColophonHostAccount(session:)` from a ready `ColophonSession` (on the main actor). It is opaque: the engine, the member key and the exchange (the session's own `syncNow`) stay inside the hosts, which reach them only from their serial queues. The session reaches the hosts through SPI (`@_spi(Hosts)`), never its public API. |
+| `ColophonHostAccount` | The account a host acts for: `ColophonHostAccount(session:)` from a ready `ColophonSession` (on the main actor). It is opaque: the engine, the member key and the exchange (the session's own `syncNow`) stay inside the hosts, which reach them only from their serial queues. The session hands them to the hosts with `package` access (`SessionHostAccess`, `hostAccess`): only targets of this SwiftPM package can name it, never an app, which depends on the products. |
 | `HomeStreamHost` | An actor, one per home. `init(account:home:transport:socket:clock:configure:cursor:saveCursor:client:)`; `start()`, `stop()`, `retryNow()`, `historyChanged()` and `on(_:)` are `nonisolated` and may be called from anywhere, listeners included; `status`, `polling`, `cursor`, `live`, `attach(_:)`, `detach(_:)`, `sendSession(_:)`, `onPass(_:)`. |
 | `SessionCellHost` | An actor, one member of one cell: `SessionCellHost.open(_:listener:)` with `CellHostOptions` (the same options as §1). `submit(_:json:)` admits a command synchronously and returns a `CellCommand` whose `value()` waits for it; `command(_:json:)` does both. `deliver`, `linkUp`, `linkDown`, `accountChanged`, `close` are `nonisolated`; `leave()`, `state`, `writePending`, `stats`; `snapshot` (a `CellState` value) and `storedClaim` are readable without entering the actor. |
 | `CellSession` | The typed API: `CellSession.join(_:)`; `state` (`CellState`: `joined`, `holder`, `isHolder`, `gated`, `claim`, `state`, `seq`, `entitled`, `canWrite`), `subscribe(_:)`, `events(_:)` (`CellEvent`, bytes decoded); `take`, `ask`, `pass(to:snapshot:)`, `decline`, `release`, `publish`, `submit`, `presence`, `ping`, `leave`, `close`. |
@@ -302,8 +302,18 @@ that ran it. Socket callbacks arrive on one serial delegate queue and reach the 
 
 **What is not public.** Nothing public hands out the engine, a raw signer, the endpoint, the stream client or an
 account view, or lets a caller act on them outside a host's queue: the account behind `ColophonHostAccount`, the
-endpoint and an injected client are internal. `swift/Tests/ColophonHostsTests/ColophonHosts.public-api` pins every
-public declaration of the module, and a test fails on any change to it or on a public declaration naming those types.
+endpoint and an injected client are internal, and the session's access for the hosts is `package`, not public and
+not SPI (SPI is opt-in visibility, not access control). The modules ship as source in this one package (the
+XCFramework carries only the Rust library), so `package` access is enforced for every app and crosses no boundary
+a legitimate consumer needs. Checked from the compiler's view: `scripts/check-swift-hosts-api.py` reads the symbol
+graphs `swift package dump-symbol-graph` emits (public and SPI symbols, extension blocks included) and fails on any
+SPI symbol in `ColophonHosts` or `ColophonSession`, on any public symbol, relationship or signature of
+`ColophonHosts` that names the engine, an endpoint, the stream client, an account view or the host access, and on any
+change from the pinned surface (`swift/Tests/ColophonHostsTests/ColophonHosts.public-api`, generated from that graph).
+And from outside: `swift/HostsClient` depends on the package as an app does, opens a cell host from a session with
+the public API (its test runs), and each snippet in `swift/HostsClient/Refused` (the session's host access, with or
+without an SPI import; the account, signer or endpoint behind a host; handing a host a stream client) must fail to
+compile with an error naming what it reached for.
 
 **History.** The head is read for `historyChanged` one read at a time (a request during a read runs one more after
 it), and a sequence below the greatest one already given to `on_history` is discarded, whether it came from a read
@@ -355,15 +365,21 @@ CREATE TABLE colophon_claims (name TEXT PRIMARY KEY NOT NULL,
   and write transaction, so one added later is found at the next read or save. Every write is read back
   inside its transaction and must equal what was written before it commits; anything unexpected rolls back.
   The table is `STRICT` and range-checked, and every read checks each column's type and range. A file that
-  is not a database cannot be opened.
+  is not a database cannot be opened. SQLite's own tables (`sqlite_stat1` after `ANALYZE`, `sqlite_sequence`)
+  are allowed: no statement can create a table under the `sqlite_` prefix, and a table carries no behaviour.
+  The scan of `sqlite_schema` runs in every transaction rather than comparing `PRAGMA schema_version`: the
+  scan reads two or three rows, and it checks what the schema is rather than only that it has not changed.
 - **Settings are read back.** SQLite accepts an unknown or ignored pragma silently, so each connection sets
   the busy timeout (its result checked) and `journal_mode`, `synchronous`, `fullfsync`,
   `checkpoint_fullfsync` and `trusted_schema = OFF`, then reads every one back (and the busy timeout) and
   refuses to open unless each reports the value required. A client that cannot take the write lock within
   the busy timeout fails its save (a failed attempt to the host), and writes nothing.
-- **File protection.** On iOS, iPadOS, visionOS, tvOS and watchOS the database and its WAL and index files
-  are created with `completeUntilFirstUserAuthentication` (`SQLITE_OPEN_FILEPROTECTION_...`): readable while
-  the device is locked after its first unlock. A device playing in the background with its screen locked
+- **File protection.** On iOS, iPadOS, visionOS, tvOS and watchOS the database, `-wal` and `-shm` files get
+  `completeUntilFirstUserAuthentication`: readable while the device is locked after its first unlock. The
+  open flag asks SQLite for it, and the store also sets the class itself on each file as it appears (the
+  database at open, the `-wal` and `-shm` files after the first write) and reads it back before reporting
+  success; a file that already has another class, stricter or none, is moved to it. On macOS nothing is set
+  (a file's protection attribute there is not a data-protection class an app relies on). A device playing in the background with its screen locked
   must keep checking its fence every beat; under `complete` protection those reads would fail and the cell
   would fail closed (`store`) after three beats. A store whose reads fail does exactly that (tested by
   injecting the failure).
@@ -411,13 +427,14 @@ the relay's home module (or takes them from `COLOPHON_FFI_LIB`, `COLOPHON_CONFOR
 - `ColophonHostsTests` (`swift/Tests/ColophonHostsTests`), on macOS with the real `HomeStream` and real
   endpoints of a local account: `StreamHostTests` (the matrix of `stream-host.test.ts`, the socket
   factory refusing anything but `wss` or an allowed loopback `ws`, and a pass completing with an older head after
-  a newer read, discarded), `PublicAPITests` (the pinned public surface), `CellHostTests` (that of
+  a newer read, discarded), `CellHostTests` (that of
   `cell-host.test.ts`, every test also checking that no cell ever had two saves in flight),
   `ClaimFenceTests` (two clients of one storage opening in all six interleavings, a rebuild racing an
   open in all three, a superseded holder stopping within one beat, fences out of range, and the SQLite
   store: its compare-and-set across connections, eight clients of one file racing from one fence twice,
   two hosts on two connections opening at once, a restart from what it stored, failing closed on a foreign
-  table, trigger, view, index or file before open and on a trigger added after it, every setting read back
+  table, trigger, view, index or file before open and on a trigger added after it (while `ANALYZE`'s own
+  table is accepted), every setting read back
   on both connections, a write that fails before its commit rolling back, a save that cannot take the write
   lock failing at the busy timeout, and a cell whose reads start failing failing closed with `store`),
   `FramesTests` (the adversarial matrix of `frames.test.ts`), `ShippingSurfaceTests` (the 9 `offset.json`
@@ -442,5 +459,6 @@ whether a beat happened to reach it in that window.
 Not run: iOS, visionOS or a simulator (only a macOS slice is built), a real network, or a home other
 than the reference relay. Not verified for the SQLite store: clients in separate processes (the tests use
 several connections in one process, which take the same file locks), durability across a crash or power
-loss (it rests on SQLite's documented WAL and `F_FULLFSYNC` behaviour, not on a test), and reads on a
-locked device.
+loss (it rests on SQLite's documented WAL and `F_FULLFSYNC` behaviour, not on a test), reads on a
+locked device, and the protection class set and read back on a device: that code is compiled only for the device
+platforms, which the macOS suites do not run.

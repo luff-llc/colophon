@@ -43,10 +43,9 @@ public final class SQLiteClaimStore: ClaimStore {
     /// Opens (creating it if needed) the store for `name` in the database at `path`, a file used for claims only.
     /// `busyTimeout` bounds how long a save waits for another client's write.
     ///
-    /// On iOS, iPadOS, visionOS, tvOS and watchOS the database and its WAL and index files are created with
-    /// `completeUntilFirstUserAuthentication` protection: readable while the device is locked after its first unlock,
-    /// so that a device playing in the background with its screen locked can still read and write its claim (a
-    /// `complete` class would make every fence check fail while locked, and the cell would fail closed).
+    /// On iOS, iPadOS, visionOS, tvOS and watchOS the database and its `-wal` and `-shm` files get
+    /// `completeUntilFirstUserAuthentication` protection, set and read back as each one appears
+    /// (`ClaimFileProtection`).
     public init(path: URL, name: String, busyTimeout: Duration = .seconds(5)) async throws {
         self.name = name
         let ms = Int32(clamping: busyTimeout.components.seconds * 1000 + busyTimeout.components.attoseconds / 1_000_000_000_000_000)
@@ -85,10 +84,15 @@ actor SQLiteConnection {
     private let connection: Connection
     private var readsFail = false
     private var failBeforeCommit = false
+    private let path: String
+    /// Whether the database, `-wal` and `-shm` files all have the protection class (checked until they do).
+    private var protected = false
 
     /// Every object the database may hold, as `sqlite_schema` lists them (`type`, `name`, `tbl_name`, `sql`), sorted:
-    /// the table and the index SQLite makes for its primary key. Anything else (a trigger, a view, another table or
-    /// index) could change what a write does or what a read sees, and the store refuses the database.
+    /// the table and the index SQLite makes for its primary key. Besides these only SQLite's own tables (named
+    /// `sqlite_`, which no statement can create: `sqlite_stat1` after `ANALYZE`, `sqlite_sequence`) may appear; they
+    /// carry no behaviour. Anything else (a trigger, a view, another table or index) could change what a write does or
+    /// what a read sees, and the store refuses the database.
     static let expectedSchema: [[String?]] = [
         ["index", "sqlite_autoindex_colophon_claims_1", "colophon_claims", nil],
         ["table", "colophon_claims", "colophon_claims", SQLiteClaimStore.schema],
@@ -96,6 +100,7 @@ actor SQLiteConnection {
 
     init(path: String, busyTimeoutMs: Int32, label: String) throws {
         queue = DispatchSerialQueue(label: label, qos: .userInitiated)
+        self.path = path
         var handle: OpaquePointer?
         var flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_NOMUTEX | SQLITE_OPEN_EXRESCODE
         #if !os(macOS)
@@ -112,6 +117,12 @@ actor SQLiteConnection {
             throw error
         }
         connection = Connection(handle)
+    }
+
+    /// Sets and verifies the protection class on the files that exist, until all three have it.
+    private func protect() throws {
+        guard !protected else { return }
+        protected = try ClaimFileProtection.ensure([path, path + "-wal", path + "-shm"]).count == 3
     }
 
     /// Sets every setting the store's guarantees rest on, and reads each one back: SQLite accepts an unknown or
@@ -154,6 +165,7 @@ actor SQLiteConnection {
             Self.rollback(db)
             throw error
         }
+        try protect()
     }
     /// Fails unless the database holds exactly the store's table and its key's index.
     func checkSchema() throws { try Self.checkSchema(try handle()) }
@@ -203,11 +215,13 @@ actor SQLiteConnection {
             if failBeforeCommit { throw ClaimStoreError.storage("the claim write failed before its commit (injected)") }
             // The commit point: it returns only after the WAL is synced (synchronous = FULL, fullfsync).
             try Self.exec(db, "COMMIT")
-            return .stored
         } catch {
             Self.rollback(db)
             throw error
         }
+        // The first write creates the -wal and -shm files: they get the protection class before success is reported.
+        try protect()
+        return .stored
     }
 
     // MARK: Statements
@@ -256,7 +270,8 @@ actor SQLiteConnection {
         }
     }
     private static func checkSchema(_ db: OpaquePointer) throws {
-        guard try objects(db) == expectedSchema else {
+        let own = try objects(db).filter { !($0[0] == "table" && ($0[1] ?? "").hasPrefix("sqlite_") && $0[1] == $0[2]) }
+        guard own == expectedSchema else {
             throw ClaimStoreError.unreadable("the claim database holds something other than the claim table")
         }
     }
