@@ -226,3 +226,24 @@ steps = [
   "publish v0.5.5: exit 0",
   "open a pull request merging release/0.5 into main: exit 0",
 ]
+
+[[entry]]
+id = "2026-11-25T20:01:53Z/push-tag/195d5a431c/73b5aa1a"
+at = "2026-11-25T20:01:53Z"
+by = "Xinchen Liu"
+action = "push-tag"
+product = "colophon"
+ref = "v0.5.6"
+commit = "195d5a431cc0f8be21ec86c92fb6eddfe74a4302"
+tree = "334eea8d668f9353e7d7abb954c1c614f8fa3192"
+result = "ok"
+prev = "903ebc7f087b395b67dc0b5fa938c592daa774c041f7608df5734ba247f71099"
+receipt = "73b5aa1aabd1b4ab26b524b58212a750"
+command = [
+  "publish v0.5.6: git -c core.hooksPath=/dev/null -c core.fsmonitor=false -c protocol.ext.allow=never push --atomic --force-with-lease=refs/tags/v0.5.6: https://github.com/luff-llc/colophon.git refs/tags/v0.5.6",
+]
+steps = [
+  "tag 195d5a431c as v0.5.6: exit 0",
+  "publish v0.5.6: exit 0",
+  "open a pull request merging release/0.5 into main: exit 0",
+]
