@@ -94,7 +94,7 @@ sealed class CellHostEvent {
 }
 
 class CellHostOptions(
-    val account: HostAccount,
+    val access: HostAccess,
     val carrier: CellCarrier,
     val namespace: String,
     val cell: String,
@@ -147,8 +147,8 @@ class CellHostError(val code: Code, message: String) : Exception(message) {
 class SessionCellHost private constructor(options: CellHostOptions) : StreamCell {
     override val namespace: String = options.namespace
     override val cell: String = options.cell
-    val me: String = options.account.member
-    private var account: HostAccount = options.account
+    val me: String = options.access.member
+    private var account: HostAccount = options.access.host
     private val carrier = options.carrier
     private var store: ClaimStore = options.store
     private val policy: String = options.policy ?: sessionDefaultPolicy()
@@ -254,7 +254,7 @@ class SessionCellHost private constructor(options: CellHostOptions) : StreamCell
      * listener, which runs on the host's context; its read-only calls are safe from other threads, but the endpoint may
      * be replaced or freed by the next job.
      */
-    val current: SessionEndpoint? get() = endpoint
+    internal val current: SessionEndpoint? get() = endpoint
     /** Whether a `Persist` write is in progress. */
     val writePending: Boolean get() = writing != null
 
@@ -435,11 +435,14 @@ class SessionCellHost private constructor(options: CellHostOptions) : StreamCell
         scope.launch {
             try {
                 var failures = 0
-                fun failed(error: Throwable): Boolean {
+                suspend fun failed(error: Throwable): Boolean {
                     failures++
                     emit(CellHostEvent.Persist(PersistPhase.FAILED, ack, error))
                     if (failures < persistAttempts) return false
-                    enqueue { writing = null; fail(FailReason.STORE, error) }
+                    // Out of attempts: one more look at the held fence, so that a replacement that reserved meanwhile
+                    // is reported as what it is.
+                    val reason = if (heldByAnother()) FailReason.SUPERSEDED else FailReason.STORE
+                    enqueue { writing = null; fail(reason, error) }
                     return true
                 }
                 while (true) {
@@ -576,6 +579,14 @@ class SessionCellHost private constructor(options: CellHostOptions) : StreamCell
                 if (r.first != Outcome.Fired && !beat.done.await()) return@launch
             }
         }
+    }
+    /** Whether the store, read once within the write deadline, holds another generation's fence. */
+    private suspend fun heldByAnother(): Boolean {
+        val deadline = Wait(persistTimeoutMs)
+        val read = scope.async { try { store.fence() } catch (e: CancellationException) { throw e } catch (_: Exception) { null } }
+        val f = select { read.onAwait { it }; deadline.done.onAwait { null } }
+        deadline.cancel()
+        return f != null && f.generation != generation && !mine(f)
     }
     /** Whether `f` is a fence this instance saved (the one it last saw held, or one of its current generation's). */
     private fun mine(f: Fence?): Boolean {

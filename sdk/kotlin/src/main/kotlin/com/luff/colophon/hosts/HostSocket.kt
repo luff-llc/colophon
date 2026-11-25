@@ -22,8 +22,12 @@ interface SocketHandlers {
 
 /** An open (or opening) socket. Thread-safe: sends from several threads are carried whole, one after another. */
 interface HostSocket {
-    /** Sends one text message. Throws when it cannot be sent now (the caller treats that as loss). */
-    fun send(text: String)
+    /**
+     * Sends one text message. Throws when it cannot be sent now (the caller treats that as loss, and `done` is not
+     * called). Otherwise `done` is called exactly once, from any thread: true when the message was handed to the
+     * connection, false when it was not (the connection failed or closed first).
+     */
+    fun send(text: String, done: (Boolean) -> Unit)
     /**
      * Closes with `code` (an implementation may substitute 1000 for a code its client cannot send). Reports nothing
      * afterwards. Closing a socket that is still opening abandons the upgrade and drops the connection if it completes.

@@ -87,7 +87,10 @@ class ManualClock(private val loop: ManualLoop) : HostClock {
 class FakeSocket(val url: String, val handlers: SocketHandlers) : HostSocket {
     val sent = ArrayList<String>()
     var closedWith: Int? = null
-    override fun send(text: String) { sent.add(text) }
+    /** While set, sends are not completed: the test completes them through [completions]. */
+    var holdSends = false
+    val completions = ArrayList<(Boolean) -> Unit>()
+    override fun send(text: String, done: (Boolean) -> Unit) { sent.add(text); if (holdSends) completions.add(done) else done(true) }
     override fun close(code: Int) { closedWith = code }
 }
 /** Records every socket the host opens; the test drives them. */

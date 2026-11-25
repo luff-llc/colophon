@@ -44,8 +44,8 @@ class StreamHostTest {
             override suspend fun signRaw(body: ByteArray) = ByteArray(64)
         }
         val cursors = ArrayList<String?>()
-        val host = HomeStreamHost(StreamHostOptions(account, "h", socket ?: sockets.factory, transport, clock, saveCursor = { cursors.add(it) },
-            client = HomeStream("h", base, streamDefaultConfig(), cursor), dispatcher = loop.dispatcher))
+        val host = HomeStreamHost.withClient(StreamHostOptions(HostAccess.of(account), "h", socket ?: sockets.factory, transport, clock, saveCursor = { cursors.add(it) },
+            dispatcher = loop.dispatcher), HomeStream("h", base, streamDefaultConfig(), cursor))
         val events = ArrayList<StreamHostEvent>()
         init { host.on { events.add(it) } }
         val frames = FrameNumbers()
@@ -312,6 +312,58 @@ class StreamHostTest {
         r.sockets.last.handlers.closed(1011); r.settle()
         assertEquals(listOf("up", "down"), log)
         assertFalse(r.host.sendSession(frame))
+        r.host.stop(); r.settle()
+    }
+
+    @Test fun sessionFramesAreBoundedAndEachEndsCarriedOrLostExactlyOnce() {
+        val r = Rig()
+        r.host.start(); r.live()
+        val frame = { n: Int -> """{"account":"${"a".repeat(64)}","cell":"now-playing","namespace":"listening.podcasts","n":$n}""" }
+        r.sockets.last.holdSends = true
+        var lost = 0
+        // Taken until MAX_PENDING_FRAMES are outstanding; the excess is refused at once.
+        val taken = (1..100).count { r.host.sendSession(frame(it)) { lost++ } }
+        assertEquals(HomeStreamHost.MAX_PENDING_FRAMES, taken)
+        r.settle()
+        val socket = r.sockets.last
+        assertEquals(taken, socket.completions.size)
+        assertFalse(r.host.sendSession(frame(101)) { lost++ }, "still full while the socket has not completed them")
+        // Half are handed to the connection, half fail after they were queued (the connection dropped).
+        socket.completions.take(32).forEach { it(true) }
+        socket.completions.drop(32).forEach { it(false) }
+        assertEquals(32, lost)
+        // A completion reported twice counts once.
+        socket.completions.forEach { it(false) }
+        assertEquals(32, lost)
+        assertTrue(r.host.sendSession(frame(102)) { lost++ }, "room again once they settled")
+        r.settle()
+        // A frame taken while the published status still said live, and found not live on the host's context (the
+        // close was queued first), is lost, once.
+        socket.handlers.closed(1011)
+        assertTrue(r.host.sendSession(frame(103)) { lost++ })
+        r.settle()
+        assertEquals(33, lost)
+        // The one the socket still holds ends when the socket reports it.
+        socket.completions.last()(false)
+        assertEquals(34, lost)
+        r.host.stop(); r.settle()
+    }
+
+    @Test fun aHistoryOlderThanTheLastAppliedIsNeverGivenToTheCore() {
+        val r = Rig()
+        r.host.start(); r.live()
+        r.sockets.last.handlers.closed(1008); r.settle()
+        assertEquals(StreamBlockedKind.ACCESS_ENDED, r.host.status.blocked)
+        r.host.historyChanged(); r.settle()
+        val requests = r.transport.requests.size
+        // The engine reports an older head than the stream last saw (a read that completed late): not applied.
+        r.seq = 4uL
+        r.host.historyChanged(); r.settle()
+        assertEquals(requests, r.transport.requests.size, "a backwards history does not unblock the stream")
+        assertEquals(StreamStatusKind.BLOCKED, r.host.status.kind)
+        r.seq = 6uL
+        r.host.historyChanged(); r.settle()
+        assertEquals(requests + 1, r.transport.requests.size)
         r.host.stop(); r.settle()
     }
 

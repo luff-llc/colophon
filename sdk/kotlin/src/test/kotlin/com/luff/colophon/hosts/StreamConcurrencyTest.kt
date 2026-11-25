@@ -46,7 +46,7 @@ class StreamConcurrencyTest {
             val opened = CountDownLatch(1)
             val socket = SocketFactory { _, h ->
                 handlers = h; opened.countDown()
-                object : HostSocket { override fun send(text: String) { sent.add(text) }; override fun close(code: Int) {} }
+                object : HostSocket { override fun send(text: String, done: (Boolean) -> Unit) { sent.add(text); done(true) }; override fun close(code: Int) {} }
             }
             val engine = object : AccountEngine(NoHandle) { override fun headSeq(): ULong = 5uL }
             val account = object : HostAccount {
@@ -56,7 +56,7 @@ class StreamConcurrencyTest {
                 override suspend fun exchange() {}
                 override suspend fun signRaw(body: ByteArray) = ByteArray(64)
             }
-            val host = HomeStreamHost(StreamHostOptions(account, "h", socket, TicketTransport(), SystemHostClock, client = client, dispatcher = dispatcher))
+            val host = HomeStreamHost.withClient(StreamHostOptions(HostAccess.of(account), "h", socket, TicketTransport(), SystemHostClock, dispatcher = dispatcher), client)
             host.start()
             opened.await()
             val numbers = FrameNumbers()
@@ -67,13 +67,13 @@ class StreamConcurrencyTest {
             // Eight cells send 300 frames each, all at once, while the home keeps sending frames of its own.
             val senders = 8; val each = 300
             val start = CountDownLatch(1)
-            val accepted = AtomicInteger()
+            val accepted = AtomicInteger(); val refused = AtomicInteger()
             val cells = (0 until senders).map { k ->
                 Thread {
                     start.await()
                     repeat(each) { i ->
                         val frame = """{"account":"${"a".repeat(64)}","cell":"now-playing","namespace":"listening.podcasts","n":${k * 10_000 + i + 1}}"""
-                        if (host.sendSession(frame)) accepted.incrementAndGet()
+                        if (host.sendSession(frame)) accepted.incrementAndGet() else refused.incrementAndGet()
                     }
                 }.apply { start() }
             }
@@ -84,12 +84,15 @@ class StreamConcurrencyTest {
             while (carried() < accepted.get()) { check(System.currentTimeMillis() < end + 20_000) { "frames were not carried" }; Thread.sleep(2) }
 
             assertEquals(setOf("stream-host-$round"), client.threads.toSet(), "every client call ran on the stream host's own thread")
-            assertEquals(senders * each, accepted.get())
-            // Each cell's frames are carried once, in the order it gave them.
+            // Bounded: what was not refused at once was carried; nothing was dropped silently.
+            assertEquals(senders * each, accepted.get() + refused.get())
+            assertTrue(accepted.get() >= HomeStreamHost.MAX_PENDING_FRAMES)
+            // Each cell's carried frames are carried once, in the order it gave them.
             val bySender = synchronized(sent) { sent.toList() }.filter { it.startsWith("{\"type\":\"session\"") }
                 .map { (Regex("\"n\":(\\d+)").find(it)!!.groupValues[1].toInt() - 1).let { n -> n / 10_000 to n % 10_000 } }
                 .groupBy({ it.first }, { it.second })
-            for (k in 0 until senders) assertEquals((0 until each).toList(), bySender[k], "sender $k")
+            assertEquals(accepted.get(), bySender.values.sumOf { it.size })
+            for ((k, carriedOf) in bySender) assertEquals(carriedOf.sorted().distinct(), carriedOf, "sender $k")
             assertTrue(host.live)
             host.stop()
             Thread.sleep(20)

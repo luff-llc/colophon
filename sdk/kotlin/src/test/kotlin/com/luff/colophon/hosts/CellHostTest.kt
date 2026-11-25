@@ -77,7 +77,7 @@ class CellHostTest {
         val stores = mapOf("a" to TestStore(clock = clock), "b" to TestStore(clock = clock))
         val logs = mapOf("a" to ArrayList<CellHostEvent>(), "b" to ArrayList())
         fun options(device: Device, which: String, store: ClaimStore = stores.getValue(which), carrierView: CellCarrier = carrier.view()) =
-            CellHostOptions(com.luff.colophon.hosts.accountOf(device.session), carrierView, NS, CELL, store, clock = clock, dispatcher = loop.dispatcher)
+            CellHostOptions(HostAccess.of(device.session), carrierView, NS, CELL, store, clock = clock, dispatcher = loop.dispatcher)
         val a: SessionCellHost = loop.run { SessionCellHost.open(extraA(options(first, "a"))) { logs.getValue("a").add(it) } }
         val b: SessionCellHost = loop.run { SessionCellHost.open(options(second, "b")) { logs.getValue("b").add(it) } }
         val la get() = logs.getValue("a")
@@ -256,9 +256,9 @@ class CellHostTest {
     @Test fun aDelegationThatCannotBeSignedFailsOpenAndLeavesNothingAttached() {
         val loop = ManualLoop()
         val carrier = LoopCarrier(loop)
-        val real = accountOf(first.session)
+        val real = HostAccess.accountOf(first.session)
         val account = object : HostAccount by real { override suspend fun signRaw(body: ByteArray): ByteArray = throw IllegalStateException("the key is unavailable") }
-        val failed = runCatching { loop.run { SessionCellHost.open(CellHostOptions(account, carrier.view(), NS, CELL, TestStore(), clock = ManualClock(loop), dispatcher = loop.dispatcher)) } }
+        val failed = runCatching { loop.run { SessionCellHost.open(CellHostOptions(HostAccess.of(account), carrier.view(), NS, CELL, TestStore(), clock = ManualClock(loop), dispatcher = loop.dispatcher)) } }
         assertTrue(failed.isFailure)
         loop.settle()
         assertEquals(0, carrier.cells.size)
@@ -266,7 +266,7 @@ class CellHostTest {
 
     @Test fun aRebuildThatFailsLeavesTheCellFailed() {
         val r = Pair2()
-        val real = accountOf(first.session)
+        val real = HostAccess.accountOf(first.session)
         r.a.replaceForTests(account = object : HostAccount by real { override suspend fun signRaw(body: ByteArray): ByteArray = throw IllegalStateException("the key is unavailable") })
         r.clock.jump(r.clock.mono - 1_000)
         val held = r.a.command("presence", cmd("command" to "presence", "payload" to b64("{}")))
@@ -280,7 +280,7 @@ class CellHostTest {
     }
 
     @Test fun aStoreThatKeepsFailingFailsTheCell() {
-        val r = Pair2 { CellHostOptions(it.account, it.carrier, NS, CELL, it.store, clock = it.clock, dispatcher = it.dispatcher, persistAttempts = 3) }
+        val r = Pair2 { CellHostOptions(it.access, it.carrier, NS, CELL, it.store, clock = it.clock, dispatcher = it.dispatcher, persistAttempts = 3) }
         r.sa.failures = 1_000
         r.await(r.a.command("take", cmd("command" to "take", "state" to null)))
         val waiting = r.a.command("publish", cmd("command" to "publish", "id" to "AAAAAAAAAAAAAAAAAAAAAA", "payload" to b64("x")))
@@ -295,7 +295,7 @@ class CellHostTest {
     }
 
     @Test fun commandAdmissionIsBoundedAndKeepsOrder() {
-        val r = Pair2 { CellHostOptions(it.account, it.carrier, NS, CELL, it.store, clock = it.clock, dispatcher = it.dispatcher, maxCommands = 2) }
+        val r = Pair2 { CellHostOptions(it.access, it.carrier, NS, CELL, it.store, clock = it.clock, dispatcher = it.dispatcher, maxCommands = 2) }
         r.sa.hold = true
         r.await(r.a.command("take", cmd("command" to "take", "state" to null)))
         val one = r.a.command("publish", cmd("command" to "publish", "id" to "AAAAAAAAAAAAAAAAAAAAAA", "payload" to b64("1")))
@@ -314,7 +314,7 @@ class CellHostTest {
         third.session.restore()
         approveByScan(third.session, first.session)
         third.session.refresh(); second.session.refresh()
-        val thirdHost = r.loop.run { SessionCellHost.open(CellHostOptions(accountOf(third.session), r.carrier.view(), NS, CELL, TestStore(), clock = r.clock, dispatcher = r.loop.dispatcher)) }
+        val thirdHost = r.loop.run { SessionCellHost.open(CellHostOptions(HostAccess.of(third.session), r.carrier.view(), NS, CELL, TestStore(), clock = r.clock, dispatcher = r.loop.dispatcher)) }
         r.settle()
         r.carrier.paused = true
         r.await(thirdHost.command("presence", cmd("command" to "presence", "payload" to b64("""{"label":"Old phone"}"""))))
@@ -377,7 +377,7 @@ class CellHostTest {
     }
 
     @Test fun aWriteThatNeverSettlesCountsAsFailedAtItsDeadline() {
-        val r = Pair2 { CellHostOptions(it.account, it.carrier, NS, CELL, it.store, clock = it.clock, dispatcher = it.dispatcher, persistAttempts = 3, persistTimeoutMs = 1_000) }
+        val r = Pair2 { CellHostOptions(it.access, it.carrier, NS, CELL, it.store, clock = it.clock, dispatcher = it.dispatcher, persistAttempts = 3, persistTimeoutMs = 1_000) }
         r.a.replaceForTests(store = object : ClaimStore by r.sa {
             override suspend fun save(record: StoredClaim, expected: Fence?): SaveResult = CompletableDeferred<SaveResult>().await()
         })
@@ -393,7 +393,7 @@ class CellHostTest {
     }
 
     @Test fun oneSaveAtATimeAnOverdueAttemptIsWaitedForALateSuccessIsSavedAgain() {
-        val r = Pair2 { CellHostOptions(it.account, it.carrier, NS, CELL, it.store, clock = it.clock, dispatcher = it.dispatcher, persistTimeoutMs = 1_000) }
+        val r = Pair2 { CellHostOptions(it.access, it.carrier, NS, CELL, it.store, clock = it.clock, dispatcher = it.dispatcher, persistTimeoutMs = 1_000) }
         val store = r.sa
         val before = store.writes.size
         store.hang = 1
@@ -415,7 +415,7 @@ class CellHostTest {
     }
 
     @Test fun aStoreThatAnswersStaleAndCannotBeReadUsesUpTheAttemptsAndFailsClosed() {
-        val r = Pair2 { CellHostOptions(it.account, it.carrier, NS, CELL, it.store, clock = it.clock, dispatcher = it.dispatcher, persistAttempts = 3) }
+        val r = Pair2 { CellHostOptions(it.access, it.carrier, NS, CELL, it.store, clock = it.clock, dispatcher = it.dispatcher, persistAttempts = 3) }
         // Every save is stale, `load` fails, and `fence` keeps answering the fence the host holds (so the beat check
         // finds nothing wrong): the host cannot tell whose fence is held.
         var saves = 0
@@ -441,7 +441,7 @@ class CellHostTest {
     }
 
     @Test fun aStoreThatAnswersStaleWhileHoldingTheHostsOwnFenceCannotLoopForever() {
-        val r = Pair2 { CellHostOptions(it.account, it.carrier, NS, CELL, it.store, clock = it.clock, dispatcher = it.dispatcher, persistAttempts = 4) }
+        val r = Pair2 { CellHostOptions(it.access, it.carrier, NS, CELL, it.store, clock = it.clock, dispatcher = it.dispatcher, persistAttempts = 4) }
         // Stale, yet the record held is the host's own fence: each is adopted, and each is charged.
         var saves = 0
         r.a.replaceForTests(store = object : ClaimStore by r.sa {
@@ -454,10 +454,24 @@ class CellHostTest {
         r.close()
     }
 
+    @Test fun whenTheAttemptsRunOutWhileAnotherGenerationHoldsTheFenceItIsSuperseded() {
+        val r = Pair2 { CellHostOptions(it.access, it.carrier, NS, CELL, it.store, clock = it.clock, dispatcher = it.dispatcher, persistAttempts = 2) }
+        // Stale saves adopted as the host's own (its load still shows its reservation), while the fence, read last,
+        // already belongs to a replacement that reserved a later generation.
+        r.a.replaceForTests(store = object : ClaimStore by r.sa {
+            override suspend fun save(record: StoredClaim, expected: Fence?): SaveResult = SaveResult.STALE
+            override suspend fun fence(): Fence = Fence(1_000, 0)
+        })
+        r.await(r.a.command("take", cmd("command" to "take", "state" to null)))
+        r.settle()
+        assertEquals(FailReason.SUPERSEDED, r.la.filterIsInstance<CellHostEvent.Failed>().single().reason)
+        r.close()
+    }
+
     @Test fun anOldInstancesSaveThatSettlesLateIsRefusedAcrossAReplacement() {
         val loop = ManualLoop(); val clock = ManualClock(loop); val carrier = LoopCarrier(loop)
         val store = TestStore(clock = clock)
-        fun options() = CellHostOptions(accountOf(first.session), carrier.view(), NS, CELL, store, clock = clock, dispatcher = loop.dispatcher, persistTimeoutMs = 1_000)
+        fun options() = CellHostOptions(HostAccess.of(first.session), carrier.view(), NS, CELL, store, clock = clock, dispatcher = loop.dispatcher, persistTimeoutMs = 1_000)
         val old = loop.run { SessionCellHost.open(options()) }
         store.hang = 1
         loop.run { old.command("take", cmd("command" to "take", "state" to null)).await() }
@@ -478,7 +492,7 @@ class CellHostTest {
     @Test fun anInstanceWhoseReservationIsRefusedDoesNotOpen() {
         val loop = ManualLoop(); val carrier = LoopCarrier(loop)
         val store = object : ClaimStore by TestStore() { override suspend fun save(record: StoredClaim, expected: Fence?) = SaveResult.STALE }
-        val failed = runCatching { loop.run { SessionCellHost.open(CellHostOptions(accountOf(first.session), carrier.view(), NS, CELL, store, clock = ManualClock(loop), dispatcher = loop.dispatcher)) } }
+        val failed = runCatching { loop.run { SessionCellHost.open(CellHostOptions(HostAccess.of(first.session), carrier.view(), NS, CELL, store, clock = ManualClock(loop), dispatcher = loop.dispatcher)) } }
         assertEquals(CellHostError.Code.SUPERSEDED, (failed.exceptionOrNull() as? CellHostError)?.code)
         assertEquals(0, carrier.cells.size)
     }
@@ -487,7 +501,7 @@ class CellHostTest {
         for (ending in listOf("close", "fail")) {
             val loop = ManualLoop(); val clock = ManualClock(loop)
             val store = TestStore(clock = clock)
-            val host = loop.run { SessionCellHost.open(CellHostOptions(accountOf(first.session), LoopCarrier(loop).view(), NS, CELL, store, clock = clock, dispatcher = loop.dispatcher,
+            val host = loop.run { SessionCellHost.open(CellHostOptions(HostAccess.of(first.session), LoopCarrier(loop).view(), NS, CELL, store, clock = clock, dispatcher = loop.dispatcher,
                 persistAttempts = 2, persistTimeoutMs = 1_000)) }
             store.failures = 1; store.hang = 1
             loop.run { host.command("take", cmd("command" to "take", "state" to null)).await() }
@@ -536,7 +550,7 @@ class CellHostTest {
 
     @Test fun cellSessionPublishesTypedState() {
         val loop = ManualLoop(); val clock = ManualClock(loop); val carrier = LoopCarrier(loop)
-        val cell = loop.run { CellSession.join(CellHostOptions(accountOf(first.session), carrier.view(), NS, CELL, TestStore(clock = clock), clock = clock, dispatcher = loop.dispatcher)) }
+        val cell = loop.run { CellSession.join(CellHostOptions(HostAccess.of(first.session), carrier.view(), NS, CELL, TestStore(clock = clock), clock = clock, dispatcher = loop.dispatcher)) }
         loop.settle(20)
         val events = ArrayList<CellEvent>()
         cell.events { events.add(it) }

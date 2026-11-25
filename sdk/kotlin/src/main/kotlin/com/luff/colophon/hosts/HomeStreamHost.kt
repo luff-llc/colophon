@@ -22,6 +22,8 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 
 /** A session cell as the stream carries it ([SessionCellHost] implements it). Every call only enqueues. */
 interface StreamCell {
@@ -52,7 +54,7 @@ sealed class StreamHostEvent {
 }
 
 class StreamHostOptions(
-    val account: HostAccount,
+    val access: HostAccess,
     /** The home's member ID. */
     val home: String,
     /** Opens the WebSocket (`JdkWebSocketFactory` on the JVM; on Android, see docs/hosts-06.md §6). */
@@ -66,8 +68,6 @@ class StreamHostOptions(
     val cursor: String? = null,
     /** Persists each `Cursor` event next to the exchange checkpoint (null: forget the saved one). */
     val saveCursor: (suspend (String?) -> Unit)? = null,
-    /** The client, when the host does not make it from the engine (tests: `HomeStream(home, base, config, cursor)`). */
-    val client: HomeStream? = null,
     /** The serial context the host runs on; it must run one task at a time. Default: one lane of `Dispatchers.Default`. */
     val dispatcher: CoroutineDispatcher? = null,
 )
@@ -82,9 +82,10 @@ class StreamHostOptions(
  * host's serial queue, so the client is driven one call at a time; listeners hear events between jobs, on that
  * context, and anything they call becomes a later job.
  */
-class HomeStreamHost(options: StreamHostOptions) {
+class HomeStreamHost private constructor(options: StreamHostOptions, client: HomeStream?) {
+    constructor(options: StreamHostOptions) : this(options, null)
     val home: String = options.home
-    private val account = options.account
+    private val account = options.access.host
     private val transport = options.transport
     private val openSocket = options.socket
     private val clock = options.clock
@@ -92,7 +93,7 @@ class HomeStreamHost(options: StreamHostOptions) {
     private val dispatcher = options.dispatcher ?: serialDispatcher()
     private val serial = SerialQueue(dispatcher) {}
     private val scope = CoroutineScope(SupervisorJob() + dispatcher)
-    private val client: HomeStream = options.client ?: run {
+    private val client: HomeStream = client ?: run {
         val config = streamDefaultConfig().let { options.configure?.invoke(it) ?: it }
         account.engine().streamClient(options.home, config, options.cursor)
     }
@@ -169,7 +170,7 @@ class HomeStreamHost(options: StreamHostOptions) {
     /** The account's verified history moved outside a pass this host woke (the app's own poll): tell the core. */
     fun historyChanged() = job {
         if (stopped) return@job
-        try { client.onHistory(account.engine().headSeq()) } catch (_: Exception) {}
+        try { history(account.engine().headSeq()) } catch (_: Exception) {}
         pump()
     }
 
@@ -200,15 +201,26 @@ class HomeStreamHost(options: StreamHostOptions) {
      */
     fun sendSession(frame: String, lost: () -> Unit = {}): Boolean {
         if (!live) return false
-        job { if (!(isLive() && sendClient { client.sessionFrame(frame, null) })) lost() }
+        // Bounded: a frame counts from here until the socket says it was handed to the connection or lost.
+        if (pending.incrementAndGet() > MAX_PENDING_FRAMES) { pending.decrementAndGet(); return false }
+        val settled = AtomicBoolean(false)
+        val outcome = { carried: Boolean -> if (settled.compareAndSet(false, true)) { pending.decrementAndGet(); if (!carried) lost() } }
+        job {
+            val s = socket
+            val text = if (s != null && isLive()) try { client.sessionFrame(frame, null) } catch (_: Exception) { null } else null
+            if (s == null || text == null) { outcome(false); return@job }
+            try { s.send(text) { ok -> outcome(ok) } } catch (_: Exception) { outcome(false) }
+        }
         return true
     }
+    /** Session frames taken and not yet carried or lost (at most [MAX_PENDING_FRAMES]). */
+    private val pending = AtomicInteger()
     /** Live, judged on this host's context from the client itself. */
     private fun isLive(): Boolean = !stopped && socket != null && try { client.status().kind == StreamStatusKind.LIVE } catch (_: Exception) { false }
     private fun sendClient(build: () -> String): Boolean {
         val s = socket ?: return false
         val text = try { build() } catch (_: Exception) { return false }
-        return try { s.send(text); true } catch (_: Exception) { false }
+        return try { s.send(text) {}; true } catch (_: Exception) { false }
     }
 
     // The loop (serial context only)
@@ -299,13 +311,25 @@ class HomeStreamHost(options: StreamHostOptions) {
             job {
                 if (stopped) return@job
                 var seq: ULong? = null
-                try { seq = account.engine().headSeq(); client.onHistory(seq) } catch (e: Exception) { if (failure == null) failure = e }
+                try { seq = account.engine().headSeq(); history(seq) } catch (e: Exception) { if (failure == null) failure = e }
                 passing = false
                 emit(StreamHostEvent.Pass(seq, failure))
                 if (passAgain) { passAgain = false; runPass() }
                 pump()
             }
         }
+    }
+
+    /**
+     * Gives the core the verified head, never one below the last given: heads are read on this queue one at a time,
+     * and a lower one (a reopened engine, a read that raced a pass) would read to the core as a change.
+     */
+    private var lastHistory: ULong? = null
+    private fun history(seq: ULong) {
+        val last = lastHistory
+        if (last != null && seq < last) return
+        lastHistory = seq
+        client.onHistory(seq)
     }
 
     /** The core's events, in order. */
@@ -357,9 +381,13 @@ class HomeStreamHost(options: StreamHostOptions) {
         emit(StreamHostEvent.Status(status))
     }
 
-    private companion object {
-        fun key(namespace: String, cell: String) = "$namespace\n$cell"
-        fun earliest(a: Long?, b: Long?): Long? = if (a == null) b else if (b == null) a else minOf(a, b)
-        fun codeOf(e: Throwable): String = (e as? AccountException)?.code ?: e.javaClass.simpleName
+    companion object {
+        /** Tests: a host over a client made directly (`HomeStream(home, base, config, cursor)`), with no engine. */
+        internal fun withClient(options: StreamHostOptions, client: HomeStream) = HomeStreamHost(options, client)
+        /** The most session frames taken and not yet carried or lost; one more is refused at once (`Unsent(carrier)`). */
+        const val MAX_PENDING_FRAMES = 64
+        private fun key(namespace: String, cell: String) = "$namespace\n$cell"
+        private fun earliest(a: Long?, b: Long?): Long? = if (a == null) b else if (b == null) a else minOf(a, b)
+        private fun codeOf(e: Throwable): String = (e as? AccountException)?.code ?: e.javaClass.simpleName
     }
 }

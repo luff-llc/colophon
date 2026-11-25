@@ -32,7 +32,7 @@ class Network(private val relay: RelayHome) {
         val local = url.replaceFirst("wss://", "ws://").replace(relay.base.removePrefix("https://"), "127.0.0.1:${relay.port}/v1/libraries/home")
         if (!up) {
             Thread { handlers.closed(null) }.start()
-            return@SocketFactory object : HostSocket { override fun send(text: String) = throw IOException("offline"); override fun close(code: Int) {} }
+            return@SocketFactory object : HostSocket { override fun send(text: String, done: (Boolean) -> Unit) = throw IOException("offline"); override fun close(code: Int) {} }
         }
         val ended = AtomicBoolean(false)
         var entry: () -> Unit = {}
@@ -45,7 +45,7 @@ class Network(private val relay: RelayHome) {
         entry = { if (ended.compareAndSet(false, true)) { inner.close(1000); open.remove(entry); handlers.closed(null) } }
         open.add(entry)
         object : HostSocket {
-            override fun send(text: String) { if (!up) throw IOException("offline"); inner.send(text) }
+            override fun send(text: String, done: (Boolean) -> Unit) { if (!up) throw IOException("offline"); inner.send(text, done) }
             override fun close(code: Int) { ended.set(true); open.remove(entry); inner.close(code) }
         }
     }
@@ -70,11 +70,11 @@ class Member(val name: String, val device: Device, val relay: RelayHome) {
         val session = device.session
         val home = session.worker.requireEngine().run { it.exchangeHomes() }.first()
         val transport = transportOf(session, home.id) ?: error("the home has a transport")
-        stream = HomeStreamHost(StreamHostOptions(accountOf(session), home.id, network.sockets(), network.transport(transport)))
+        stream = HomeStreamHost(StreamHostOptions(HostAccess.of(session), home.id, network.sockets(), network.transport(transport)))
         stream.start()
     }
     fun join(policy: String? = null) = runBlocking {
-        cell = CellSession.join(CellHostOptions(accountOf(device.session), stream.carrier(), NS, CELL, store, policy, state = { appState }))
+        cell = CellSession.join(CellHostOptions(HostAccess.of(device.session), stream.carrier(), NS, CELL, store, policy, state = { appState }))
         cell.host.on { log.add(t() to it) }
         cell.events { events.add(t() to it) }
     }

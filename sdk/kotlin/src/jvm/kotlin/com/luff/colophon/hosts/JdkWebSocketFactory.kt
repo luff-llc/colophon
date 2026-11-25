@@ -79,10 +79,16 @@ class JdkWebSocketFactory(
         var tail: CompletableFuture<*> = opening
         val sendLock = Any()
         return object : HostSocket {
-            override fun send(text: String) {
+            override fun send(text: String, done: (Boolean) -> Unit) {
                 val ws = socket.get() ?: throw IllegalStateException("the socket is not open")
                 if (closed.get() || ended.get()) throw IllegalStateException("the socket is closed")
-                synchronized(sendLock) { tail = tail.handle { _, _ -> null }.thenCompose { ws.sendText(text, true) } }
+                // Each send's own completion reports its outcome, once: a send that fails after it was queued (the
+                // connection dropped, the socket was closed) reports false.
+                synchronized(sendLock) {
+                    val sent = tail.handle { _, _ -> null }.thenCompose { ws.sendText(text, true) }
+                    sent.whenComplete { _, error -> done(error == null) }
+                    tail = sent
+                }
             }
             override fun close(code: Int) {
                 if (!closed.compareAndSet(false, true)) return

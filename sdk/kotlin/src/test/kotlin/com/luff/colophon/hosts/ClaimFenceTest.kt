@@ -73,7 +73,7 @@ class ClaimFenceTest {
     }
 
     private fun open(loop: ManualLoop, clock: ManualClock, store: ClaimStore, log: MutableList<CellHostEvent>? = null): Deferred<SessionCellHost> =
-        loop.start { SessionCellHost.open(CellHostOptions(accountOf(device.session), nowhere(loop), NS, CELL, store, policy, clock, dispatcher = loop.dispatcher)) { log?.add(it) } }
+        loop.start { SessionCellHost.open(CellHostOptions(HostAccess.of(device.session), nowhere(loop), NS, CELL, store, policy, clock, dispatcher = loop.dispatcher)) { log?.add(it) } }
 
     /** The hosts still acting once every watch has had a beat to look. */
     private fun survivors(loop: ManualLoop, clock: ManualClock, hosts: List<SessionCellHost>): List<SessionCellHost> {
