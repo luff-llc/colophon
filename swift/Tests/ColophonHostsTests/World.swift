@@ -202,12 +202,12 @@ final class Network: Sendable {
 
     func startStream() async throws {
         let home = try #require(device.session.homes.first)
-        stream = try await HomeStreamHost(account: try device.account(), home: home.id, transport: network.transport(relay.transport),
+        stream = try await HomeStreamHost(account: try ColophonHostAccount(session: device.session), home: home.id, transport: network.transport(relay.transport),
                                           socket: network.sockets(relay))
         stream.start()
     }
     func join(policy: String? = nil) async throws {
-        var options = CellHostOptions(account: try device.account(), carrier: stream, namespace: listening, cell: nowPlaying, store: store)
+        var options = CellHostOptions(account: try ColophonHostAccount(session: device.session), carrier: stream, namespace: listening, cell: nowPlaying, store: store)
         options.policy = policy
         let state = appState
         options.state = { state.get() }

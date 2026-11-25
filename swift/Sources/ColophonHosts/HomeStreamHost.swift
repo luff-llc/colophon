@@ -81,6 +81,13 @@ public actor HomeStreamHost: CellCarrier {
     private var started = false
     private var passing = false
     private var passAgain = false
+    /// One read of the head at a time (`historyChanged`); a request during a read runs one more after it.
+    private var reading = false
+    private var readAgain = false
+    /// The greatest sequence given to `on_history`: a read that completes late with an older one is discarded.
+    private var lastHistory: UInt64?
+    /// Every sequence given to `on_history`, in order (tests).
+    private(set) var historyApplied: [UInt64] = []
     private var lastStatus: StreamStatusKind?
     private var outbox: [StreamHostEvent] = []
     private var work: [UUID: Task<Void, Never>] = [:]
@@ -89,7 +96,7 @@ public actor HomeStreamHost: CellCarrier {
     private nonisolated let inputs: AsyncStream<Input>.Continuation
 
     private enum Input: Sendable {
-        case start, stop, retryNow, history(UInt64?)
+        case start, stop, retryNow, historyChanged, history(UInt64?)
         case timer(UInt64)
         case minted(Data?, failure: String?)
         case ticket(HttpAnswer?)
@@ -106,10 +113,17 @@ public actor HomeStreamHost: CellCarrier {
     ///   - socket: opens the WebSocket (default `URLSessionSocketFactory`).
     ///   - configure: adjusts the documented configuration (`stream_default_config`) before the client is made.
     ///   - cursor: the resume cursor saved from an earlier `Cursor` event; `saveCursor` persists each new one.
-    ///   - client: the client, when the host does not make it from the engine (tests).
-    public init(account: any HostAccount, home: String, transport: any HomeTransport, socket: SocketFactory? = nil,
+    public init(account: ColophonHostAccount, home: String, transport: any HomeTransport, socket: SocketFactory? = nil,
                 clock: any HostClock = SystemClock(), configure: (@Sendable (inout StreamConfig) -> Void)? = nil, cursor: String? = nil,
-                saveCursor: (@Sendable (String?) async -> Void)? = nil, client: HomeStream? = nil) async throws {
+                saveCursor: (@Sendable (String?) async -> Void)? = nil) async throws {
+        try await self.init(source: account.source, home: home, transport: transport, socket: socket, clock: clock, configure: configure,
+                            cursor: cursor, saveCursor: saveCursor, client: nil)
+    }
+    /// The host over any account source, or over a client made directly (tests). The client is owned by the host from
+    /// here on: nothing else may call it.
+    init(source account: any HostAccount, home: String, transport: any HomeTransport, socket: SocketFactory? = nil,
+         clock: any HostClock = SystemClock(), configure: (@Sendable (inout StreamConfig) -> Void)? = nil, cursor: String? = nil,
+         saveCursor: (@Sendable (String?) async -> Void)? = nil, client: HomeStream? = nil) async throws {
         let made: HomeStream
         if let client {
             made = client
@@ -148,10 +162,7 @@ public actor HomeStreamHost: CellCarrier {
     /// Try again now: foreground entry, a network change or an explicit user action, never a timer (the core bounds it).
     public nonisolated func retryNow() { inputs.yield(.retryNow) }
     /// The account's verified history moved outside a pass this host woke (the app's own poll): tell the core.
-    public nonisolated func historyChanged() {
-        let account = account, inputs = inputs
-        Task { inputs.yield(.history(try? await account.engine().headSeq())) }
-    }
+    public nonisolated func historyChanged() { inputs.yield(.historyChanged) }
     /// Calls `listener` with every event, after the job that produced it. Listeners may call any of this host's
     /// `nonisolated` calls; each becomes a later job.
     public nonisolated func on(_ listener: @escaping @Sendable (StreamHostEvent) -> Void) -> ListenerToken {
@@ -221,7 +232,11 @@ public actor HomeStreamHost: CellCarrier {
             guard !started else { return }
             started = true
         case .retryNow: try? client?.retryNow()
-        case .history(let seq): if let seq { try? client?.onHistory(seq: seq) }
+        case .historyChanged: readHead()
+        case .history(let seq):
+            reading = false
+            if let seq { applyHistory(seq) }
+            if readAgain { readAgain = false; readHead() }
         case .timer(let token): guard timer.fired(token) else { return }
         case .minted(let call, let failure): minted(call, failure: failure)
         case .ticket(let answer): handle { try $0.onTicket(answer: answer, nowMs: now) }
@@ -229,7 +244,7 @@ public actor HomeStreamHost: CellCarrier {
             guard at == generation else { return }
             socketEvent(event)
         case .passed(let seq, let failure):
-            if let seq { try? client?.onHistory(seq: seq) }
+            if let seq { applyHistory(seq) }
             passing = false
             emit(.pass(seq: seq, error: failure))
             if passAgain { passAgain = false; runPass() }
@@ -323,6 +338,22 @@ public actor HomeStreamHost: CellCarrier {
         s?.close(code: code)
         allDown()
         handle { try $0.onClosed(code: code, nowMs: now) }
+    }
+
+    /// Reads the verified head for `historyChanged`, one read at a time.
+    private func readHead() {
+        if reading { readAgain = true; return }
+        reading = true
+        let account = account, inputs = inputs
+        track { inputs.yield(.history(try? await account.engine().headSeq())) }
+    }
+    /// Tells the core the history is at `seq`, unless a newer sequence was already given: reads and passes complete in
+    /// any order, and the history never goes back.
+    private func applyHistory(_ seq: UInt64) {
+        if let last = lastHistory, seq < last { return }
+        lastHistory = seq
+        historyApplied.append(seq)
+        try? client?.onHistory(seq: seq)
     }
 
     /// `Wake`: one ordinary exchange pass, then `on_history`. A wake during a pass runs one more after it.

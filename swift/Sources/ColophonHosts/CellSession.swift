@@ -1,5 +1,6 @@
 import Foundation
 import os
+import ColophonSession
 
 /// A claim (§S4): taken (`rank` 0) or passed (`rank` 1, with `via`).
 public struct Claim: Sendable, Hashable, Codable {
@@ -31,6 +32,17 @@ public struct CellState: Sendable, Equatable {
     public var entitled = false
     /// The member may hold and submit (`write` access).
     public var canWrite = false
+}
+
+extension CellState {
+    private struct ViewJSON: Decodable { let accepted: Claim?; let holder: String?; let seq: Int64; let state: String? }
+    /// The state an endpoint's read-only calls report.
+    init?(endpoint e: SessionEndpoint) {
+        guard let text = try? e.viewJson(), let view = try? JSONDecoder().decode(ViewJSON.self, from: Data(text.utf8)) else { return nil }
+        self.init(joined: (try? e.joined()) ?? false, holder: view.holder, isHolder: (try? e.isHolder()) ?? false, gated: (try? e.gated()) ?? false,
+                  claim: view.accepted, state: view.state.flatMap(Base64.decode), seq: view.seq,
+                  entitled: (try? e.entitled()) ?? false, canWrite: (try? e.canWrite()) ?? false)
+    }
 }
 
 /// The core's events (§S10), typed, with bytes decoded.
@@ -196,13 +208,8 @@ public final class CellSession: Sendable {
         default: break
         }
     }
-    private struct ViewJSON: Decodable { let accepted: Claim?; let holder: String?; let seq: Int64; let state: String? }
     private func refresh() {
-        guard let e = host.current, let text = try? e.viewJson(),
-              let view = try? JSONDecoder().decode(ViewJSON.self, from: Data(text.utf8)) else { return }
-        let next = CellState(joined: (try? e.joined()) ?? false, holder: view.holder, isHolder: (try? e.isHolder()) ?? false, gated: (try? e.gated()) ?? false,
-                             claim: view.accepted, state: view.state.flatMap(Base64.decode), seq: view.seq,
-                             entitled: (try? e.entitled()) ?? false, canWrite: (try? e.canWrite()) ?? false)
+        guard let next = host.snapshot else { return }
         let changed = current.withLock { s -> Bool in if s == next { return false }; s = next; return true }
         guard changed else { return }
         for listener in stateListeners.withLock({ Array($0.values) }) { listener(next) }

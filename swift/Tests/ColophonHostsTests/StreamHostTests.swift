@@ -22,7 +22,7 @@ import ColophonSession
         init(cursor: String? = nil) async throws {
             account = ScriptedAccount(clock: clock)
             let cursors = cursors
-            host = try await HomeStreamHost(account: account, home: "h", transport: transport, socket: sockets.factory, clock: clock,
+            host = try await HomeStreamHost(source: account, home: "h", transport: transport, socket: sockets.factory, clock: clock,
                                             saveCursor: { cursors.append($0) },
                                             client: try HomeStream(home: "h", base: StreamHostTests.base, config: streamDefaultConfig(), cursor: cursor))
             let events = events
@@ -325,6 +325,46 @@ import ColophonSession
         await gate.release()
         await settle()
         #expect(r.events.all.filter { if case .pass = $0 { true } else { false } }.count == 2)
+        r.host.stop()
+    }
+
+    @Test func historyNeverGoesBackAPassThatCompletesWithAnOlderHeadAfterANewerReadIsDiscarded() async throws {
+        let r = try await Rig()
+        let gate = Gate()
+        r.account.exchanging { await gate.enter() }
+        r.host.start()
+        try await r.live()
+        await r.clock.advance(250)
+        #expect(await gate.running == 1)
+        // The app's own poll moved the history to 9 while the pass is under way: applied.
+        r.account.head.set(9)
+        r.host.historyChanged()
+        await settle()
+        // The pass finishes and reads an older head (its read raced the newer one): discarded.
+        r.account.head.set(7)
+        await gate.release()
+        await settle()
+        #expect(r.events.all.contains { if case .pass(7, nil) = $0 { true } else { false } })
+        #expect(await r.host.historyApplied == [9])
+        // A newer one still goes through.
+        r.account.head.set(10)
+        r.host.historyChanged()
+        await settle()
+        #expect(await r.host.historyApplied == [9, 10])
+        r.host.stop()
+    }
+
+    @Test func historyReadsAreCoalescedOneAtATime() async throws {
+        let r = try await Rig()
+        r.host.start()
+        await settle()
+        let before = r.account.head.reads
+        for _ in 0..<20 { r.host.historyChanged() }
+        await settle()
+        let reads = r.account.head.reads - before
+        #expect(reads >= 1 && reads <= 2, "twenty requests in a row: one read, and one more after it (\(reads))")
+        let applied = await r.host.historyApplied
+        #expect(applied == applied.sorted(), "never backwards: \(applied)")
         r.host.stop()
     }
 

@@ -144,9 +144,11 @@ final class TicketTransport: HomeTransport {
 /// An engine that only knows its head (the stream host asks it after every pass).
 final class HeadEngine: AccountEngine {
     private let seq = OSAllocatedUnfairLock<UInt64>(initialState: 5)
+    private let readCount = OSAllocatedUnfairLock(initialState: 0)
     init() { super.init(noHandle: NoHandle()) }
     required init(unsafeFromHandle handle: UInt64) { fatalError("not used") }
-    override func headSeq() throws -> UInt64 { seq.withLock { $0 } }
+    override func headSeq() throws -> UInt64 { readCount.withLock { $0 += 1 }; return seq.withLock { $0 } }
+    var reads: Int { readCount.withLock { $0 } }
     func set(_ s: UInt64) { seq.withLock { $0 = s } }
 }
 

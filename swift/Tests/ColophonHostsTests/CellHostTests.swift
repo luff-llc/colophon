@@ -31,10 +31,10 @@ import ColophonSession
         let carrier = LoopCarrier()
         let stores = (a: TestStore(clock: clock), b: TestStore(clock: clock))
         let logs = (a: Log<CellHostEvent>(), b: Log<CellHostEvent>())
-        var oa = CellHostOptions(account: try first.account(), carrier: carrier.view(), namespace: listening, cell: nowPlaying, store: stores.a)
+        var oa = CellHostOptions(source: try first.account(), carrier: carrier.view(), namespace: listening, cell: nowPlaying, store: stores.a)
         oa.clock = clock
         configure(&oa)
-        var ob = CellHostOptions(account: try second.account(), carrier: carrier.view(), namespace: listening, cell: nowPlaying, store: stores.b)
+        var ob = CellHostOptions(source: try second.account(), carrier: carrier.view(), namespace: listening, cell: nowPlaying, store: stores.b)
         ob.clock = clock
         let a = try await SessionCellHost.open(oa) { logs.a.append($0) }
         let b = try await SessionCellHost.open(ob) { logs.b.append($0) }
@@ -208,7 +208,7 @@ import ColophonSession
     @Test func aDelegationThatCannotBeSignedFailsOpenAndNothingStaysAttached() async throws {
         let (first, _) = try await LocalAccount.pair()
         let carrier = LoopCarrier()
-        var options = CellHostOptions(account: FlakyKey(try first.account(), failing: true), carrier: carrier.view(), namespace: listening, cell: nowPlaying, store: TestStore())
+        var options = CellHostOptions(source: FlakyKey(try first.account(), failing: true), carrier: carrier.view(), namespace: listening, cell: nowPlaying, store: TestStore())
         options.clock = ManualClock()
         await #expect(throws: (any Error).self) { _ = try await SessionCellHost.open(options) }
         #expect(carrier.cellCount == 0)
@@ -217,7 +217,7 @@ import ColophonSession
     @Test func aRebuildThatFailsLeavesTheCellFailedHeldAndNewCommandsAreRefused() async throws {
         let (first, _) = try await LocalAccount.pair()
         let key = FlakyKey(try first.account())
-        let r = try await pair(ManualClock()) { $0.account = key }
+        let r = try await pair(ManualClock()) { $0.source = key }
         // The next delegation (the rebuild's) cannot be signed.
         key.failing.withLock { $0 = true }
         r.clock.jump(to: r.clock.mono - 1_000)
@@ -272,7 +272,7 @@ import ColophonSession
         let third = try await LocalAccount.third(r.first)
         defer { third.close() }
         await r.second.session.refresh()
-        var options = CellHostOptions(account: try third.account(), carrier: r.carrier.view(), namespace: listening, cell: nowPlaying, store: TestStore())
+        var options = CellHostOptions(source: try third.account(), carrier: r.carrier.view(), namespace: listening, cell: nowPlaying, store: TestStore())
         options.clock = r.clock
         let thirdHost = try await SessionCellHost.open(options)
         await settle()
@@ -392,7 +392,7 @@ import ColophonSession
         let clock = ManualClock()
         let carrier = LoopCarrier()
         let store = TestStore(clock: clock)
-        var options = CellHostOptions(account: try first.account(), carrier: carrier.view(), namespace: listening, cell: nowPlaying, store: store)
+        var options = CellHostOptions(source: try first.account(), carrier: carrier.view(), namespace: listening, cell: nowPlaying, store: store)
         options.clock = clock; options.persistTimeoutMs = 1_000
         let old = try await SessionCellHost.open(options)
         store.set { $0.hang = 1 }
@@ -417,7 +417,7 @@ import ColophonSession
     @Test func anInstanceWhoseFenceReservationIsRefusedDoesNotOpen() async throws {
         let (first, _) = try await LocalAccount.pair()
         let carrier = LoopCarrier()
-        var options = CellHostOptions(account: try first.account(), carrier: carrier.view(), namespace: listening, cell: nowPlaying, store: RefusingStore())
+        var options = CellHostOptions(source: try first.account(), carrier: carrier.view(), namespace: listening, cell: nowPlaying, store: RefusingStore())
         options.clock = ManualClock()
         var refused: CellHostError?
         do { _ = try await SessionCellHost.open(options) } catch { refused = error as? CellHostError }
@@ -429,7 +429,7 @@ import ColophonSession
         let (first, _) = try await LocalAccount.pair()
         let clock = ManualClock()
         let store = TestStore(clock: clock)
-        var options = CellHostOptions(account: try first.account(), carrier: LoopCarrier().view(), namespace: listening, cell: nowPlaying, store: store)
+        var options = CellHostOptions(source: try first.account(), carrier: LoopCarrier().view(), namespace: listening, cell: nowPlaying, store: store)
         options.clock = clock; options.persistAttempts = 2; options.persistTimeoutMs = 1_000
         let host = try await SessionCellHost.open(options)
         store.set { $0.failures = 1; $0.hang = 1 }

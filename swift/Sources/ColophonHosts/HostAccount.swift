@@ -1,9 +1,25 @@
 import Foundation
 @_spi(Hosts) import ColophonSession
 
+/// The account a host acts for, made from a ready `ColophonSession`. It is opaque: the engine, the member key and the
+/// session's exchange stay inside the hosts, which use them only from their own serial queues. Nothing in the hosts'
+/// public API returns the engine, a signer or an endpoint.
+public struct ColophonHostAccount: Sendable {
+    let source: any HostAccount
+    /// The host account of `session`, which must be ready (it knows its account and member).
+    @MainActor init(session: ColophonSession) throws { source = try SessionHostAccount(session: session) }
+    init(_ source: any HostAccount) { self.source = source }
+    /// The account (64 hex).
+    public var account: String { source.account }
+    /// This device's member ID.
+    public var member: String { source.member }
+    /// The transport the session was configured with for `home` (its ticket requests go there), if any.
+    public func transport(home: String) async -> (any HomeTransport)? { await (source as? SessionHostAccount)?.transport(home: home) }
+}
+
 /// What the 0.6 hosts need from the account: the member engine, the ticket call, an exchange pass, and the member key
-/// for one raw signature. `SessionHostAccount` provides it from a restored `ColophonSession`; anything else may implement it.
-public protocol HostAccount: Sendable {
+/// for one raw signature. Internal: `ColophonHostAccount` is the only way in from outside the module.
+protocol HostAccount: Sendable {
     /// The account (64 hex).
     var account: String { get }
     /// This device's member ID.
@@ -22,23 +38,22 @@ public protocol HostAccount: Sendable {
 
 /// The host account of a restored `ColophonSession`. The session keeps owning the engine, its lock and its exchange;
 /// this only reaches them. `exchange` is the session's own `syncNow`, so passes never overlap with its poll loop.
-public struct SessionHostAccount: HostAccount {
-    public let account: String
-    public let member: String
+struct SessionHostAccount: HostAccount {
+    let account: String
+    let member: String
     private let access: SessionHostAccess
 
     /// The host account of `session`, which must be ready (it knows its account and member).
-    @MainActor public init(session: ColophonSession) throws {
+    @MainActor init(session: ColophonSession) throws {
         guard let account = session.libraryID, let member = session.memberID else { throw HostError.notReady }
         self.account = account; self.member = member
         access = session.hostAccess
     }
-    public func engine() async throws -> AccountEngine { try await access.engine() }
-    public func streamCall(home: String) async throws -> Data { try await access.streamCall(home: home) }
-    public func exchange() async throws { try await access.exchange() }
-    public func signRaw(_ body: Data) async throws -> Data { try await access.signRaw(body) }
-    /// The transport `session` was configured with for `home` (its ticket requests go there), if any.
-    public func transport(home: String) async -> (any HomeTransport)? { await access.transport(home: home) }
+    func engine() async throws -> AccountEngine { try await access.engine() }
+    func streamCall(home: String) async throws -> Data { try await access.streamCall(home: home) }
+    func exchange() async throws { try await access.exchange() }
+    func signRaw(_ body: Data) async throws -> Data { try await access.signRaw(body) }
+    func transport(home: String) async -> (any HomeTransport)? { await access.transport(home: home) }
 }
 
 /// What a host refuses on its own (the core's refusals arrive as `ColophonError`).

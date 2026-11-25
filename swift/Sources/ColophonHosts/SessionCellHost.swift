@@ -58,7 +58,8 @@ public enum CellHostEvent: Sendable {
 
 /// How a cell host is made.
 public struct CellHostOptions: Sendable {
-    public var account: any HostAccount
+    /// The account the cell is joined for (internal: only an opaque `ColophonHostAccount` comes in from outside).
+    var source: any HostAccount
     public var carrier: any CellCarrier
     public var namespace: String
     public var cell: String
@@ -88,8 +89,11 @@ public struct CellHostOptions: Sendable {
         precondition(ok == errSecSuccess, "the system random number generator failed")
         return bytes
     }
-    public init(account: any HostAccount, carrier: any CellCarrier, namespace: String, cell: String, store: any ClaimStore) {
-        self.account = account; self.carrier = carrier; self.namespace = namespace; self.cell = cell; self.store = store
+    public init(account: ColophonHostAccount, carrier: any CellCarrier, namespace: String, cell: String, store: any ClaimStore) {
+        self.init(source: account.source, carrier: carrier, namespace: namespace, cell: cell, store: store)
+    }
+    init(source: any HostAccount, carrier: any CellCarrier, namespace: String, cell: String, store: any ClaimStore) {
+        self.source = source; self.carrier = carrier; self.namespace = namespace; self.cell = cell; self.store = store
     }
 }
 
@@ -206,8 +210,8 @@ public actor SessionCellHost: StreamCell {
     }
 
     private init(_ options: CellHostOptions) {
-        account = options.account; carrier = options.carrier; namespace = options.namespace; cell = options.cell
-        me = options.account.member; store = options.store
+        account = options.source; carrier = options.carrier; namespace = options.namespace; cell = options.cell
+        me = options.source.member; store = options.store
         policy = options.policy ?? ((try? sessionDefaultPolicy()) ?? "{}")
         clock = options.clock; stateOf = options.state
         delegationMs = min(max(options.delegationMs, 1), Self.day)
@@ -275,9 +279,12 @@ public actor SessionCellHost: StreamCell {
         return ListenerToken { [listeners] in listeners.withLock { $0[id] = nil } }
     }
 
-    /// The endpoint, for its read-only calls (`isHolder`, `gated`, `viewJson`, ...), or nil while it is being made again
-    /// (or after the host ended).
-    public nonisolated var current: SessionEndpoint? { visible.withLock { $0 } }
+    /// The endpoint (internal: only the host's queue may call it; tests and `CellSession` use its read-only calls), or
+    /// nil while it is being made again (or after the host ended).
+    nonisolated var current: SessionEndpoint? { visible.withLock { $0 } }
+    /// What this member sees of the cell now, as a value; nil while the endpoint is being made again or after the host
+    /// ended. Read without entering the host.
+    public nonisolated var snapshot: CellState? { current.flatMap(CellState.init(endpoint:)) }
     /// The claim the store last confirmed, as JSON.
     public nonisolated var storedClaim: String? { storedVisible.withLock { $0 } }
     /// Whether a `Persist` write is in progress.
