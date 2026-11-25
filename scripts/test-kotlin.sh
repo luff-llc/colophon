@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Builds what the Kotlin SDK's JVM tests need and runs them (sdk/kotlin): the release library, the generated
-# bindings (checked against the committed ones), the relay's home module, then every test, the 0.4 wrappers and the
-# 0.5 session, including the journeys against the real relay (Bun with the Rust home module). Without Bun or the
+# bindings (checked against the committed ones), the conformance library and its bindings, the relay's home module,
+# then every test: the 0.4 wrappers, the 0.5 session and the 0.6 hosts, including the journeys against the real relay
+# (Bun with the Rust home module) over real WebSockets. Without Bun or the
 # module the journeys fail; they never pass by skipping. Extra arguments go to Gradle (for example
 # `--tests 'com.luff.colophon.session.*'`).
 #
@@ -31,11 +32,29 @@ if ! cmp -s "$generated/com/luff/colophon/colophon_ffi.kt" sdk/kotlin/src/main/k
   echo "test-kotlin: sdk/kotlin's generated bindings are stale; run LANGUAGES=kotlin scripts/generate-bindings.sh" >&2
   exit 1
 fi
-rm -rf "$generated"
 echo "test-kotlin: generated bindings match the library"
+# The 0.6 hosts' conformance replay links the conformance crate's artifact (test-only: its bindings are in
+# sdk/kotlin/src/conformance, a test source; nothing shipped compiles or loads them).
+cargo build --locked -p colophon-conformance --release
+"$target/debug/uniffi-bindgen" generate --library "$target/release/libcolophon_conformance.dylib" --crate colophon_conformance \
+  --language kotlin --out-dir "$generated/conformance" --no-format >/dev/null
+if ! cmp -s "$generated/conformance/uniffi/colophon_conformance/colophon_conformance.kt" \
+    sdk/kotlin/src/conformance/kotlin/uniffi/colophon_conformance/colophon_conformance.kt; then
+  rm -rf "$generated"
+  echo "test-kotlin: sdk/kotlin's conformance bindings are stale; regenerate them as above" >&2
+  exit 1
+fi
+rm -rf "$generated"
+echo "test-kotlin: conformance bindings match the library"
 
 cargo build --locked --target wasm32-unknown-unknown --release -p colophon-home-wasm
 export COLOPHON_HOME_WASM="${COLOPHON_HOME_WASM:-$target/wasm32-unknown-unknown/release/colophon_home_wasm.wasm}"
+# Pin what this tree built: another checkout sharing the cargo target can replace those files during the run.
+pinned="$root/sdk/kotlin/build/native"
+mkdir -p "$pinned"
+cp "$target/release/libcolophon_ffi.dylib" "$target/release/libcolophon_conformance.dylib" "$pinned/"
+cp "$COLOPHON_HOME_WASM" "$pinned/colophon_home_wasm.wasm"
+export COLOPHON_NATIVE_DIR="$pinned" COLOPHON_HOME_WASM="$pinned/colophon_home_wasm.wasm"
 echo "test-kotlin: home module $(wc -c < "$COLOPHON_HOME_WASM" | tr -d ' ') bytes"
 
 # The tests' relays run with a data directory named colophon-kotlin-relay-<JVM pid>-...; remember any that were
