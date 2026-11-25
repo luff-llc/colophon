@@ -333,6 +333,6 @@ See [session contracts](session.md) for the shared lifecycle rules and
 
 ## The 0.6 hosts
 
-The 0.6 home stream and session cells for Kotlin (`com.luff.colophon.hosts`) are described in
-[hosts-06.md](hosts-06.md) §6. The Android library compiles them, but a durable claim store and a WebSocket transport
-for Android are not shipped yet (§6.4 there).
+The 0.6 home stream and session cells for Kotlin (`com.luff.colophon.hosts`) are JVM-only in this release and
+described in [hosts-06.md](hosts-06.md) §6. The Android library excludes them: they arrive on Android in a later change,
+with a durable claim store, a WebSocket transport and a clock that counts sleep, built and run on devices (§6.4 there).

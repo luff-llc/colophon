@@ -97,6 +97,12 @@ tasks.configureEach {
     }
 }
 
+// The 0.6 hosts (`com.luff.colophon.hosts`) are JVM-only in this release: they have not been built or run on Android,
+// so neither the library nor its sources jar carries them. Android support arrives with its durable claim store,
+// transport and clock, built and run on devices; that change removes these exclusions.
+tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach { exclude("com/luff/colophon/hosts/**") }
+tasks.withType<Jar>().configureEach { exclude("com/luff/colophon/hosts/**") }
+
 tasks.withType<Test>().configureEach {
     testLogging { events("passed", "skipped", "failed"); showStandardStreams = false }
 }

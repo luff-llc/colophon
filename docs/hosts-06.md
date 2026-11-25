@@ -4,7 +4,7 @@
 [bindings-05.md](bindings-05.md) §10 (`HomeStream`, `SessionEndpoint` and the engine's stream and
 session calls). This stage adds the host layer that drives that surface over a real WebSocket, in
 `js/src/hosts` (`@colophon/core/hosts`), and proves the flagship behaviour end to end. The Kotlin host
-(JVM) follows the same shape and is described in §6, with what Android still lacks; the Swift host follows it too.
+(JVM only, for now) follows the same shape and is described in §6; the Swift host follows it too.
 
 The rule is the one stage 1 states: the core decides, the host carries. The host owns the socket,
 the ticket request, the timers and the durable store. It adds no retry timing, cap or backoff of its
@@ -275,9 +275,9 @@ additions this stage makes (`streamCall`, `transportOf`).
 ## 6. Kotlin (JVM)
 
 `com.luff.colophon.hosts` in `sdk/kotlin` is the same host layer for Kotlin, over the generated `HomeStream` and
-`SessionEndpoint` of `colophon_ffi.kt`. It is plain Kotlin in `src/main`, which the Android library compiles too, so it
-uses nothing Android lacks; the one JVM-only piece (the `java.net.http` socket) is in `src/jvm`, which only the JVM
-module compiles. What Android still lacks is in §6.4. No dependency was added: the JVM module still has JNA and
+`SessionEndpoint` of `colophon_ffi.kt`, for the JVM only in this release: the Android library, which compiles the rest
+of `src/main`, excludes `com.luff.colophon.hosts` from its build and its sources jar (§6.4). The `java.net.http` socket
+is in `src/jvm`, which only the JVM module compiles. No dependency was added: the JVM module still has JNA and
 kotlinx-coroutines only.
 
 ### 6.1 The API
@@ -297,7 +297,10 @@ kotlinx-coroutines only.
 signer to themselves, so that nothing acts on them outside a host's serial context or out of order, and so that the
 member key is not offered as a general signer by mistake. Kotlin's `internal` compiles to public bytecode, so the
 members that carry those objects are also synthetic, which Java cannot call either; `ApiSurfaceTest` checks every
-member of every public class, mangled names included, and that Java code reaching for one does not compile. This
+member of every public class of the module, mangled names included, against a commented allow-list of the
+pre-existing API that carries such types on purpose (the generated bindings, the 0.5 `ColophonEngine` and key
+custody, the application's own key providers in its configuration), and that Java code reaching for one does not
+compile. This
 guards against misuse, not against a hostile embedder: the embedding application is the member's own and is trusted
 with its key, and reflection on the JVM can always reach a library's internals, which is outside what the SDK can
 prevent.
@@ -352,8 +355,9 @@ drops the connection when the upgrade completes.
 
 ### 6.4 Android: what is not shipped yet
 
-The common code above is in `src/main`, which the Android library compiles, so the hosts themselves exist there. Two
-things an Android app needs are not shipped yet:
+The Android library does not carry the hosts in this release: they have not been built or run on Android, so the
+module excludes the package. They arrive on Android in a later change, built and run on devices, together with what an
+Android app also needs and does not have yet:
 
 - **A WebSocket transport.** Android has neither `java.net.http` nor a WebSocket client in its SDK, and the stream (and
   with it every session frame) needs one: an HTTP long-poll fallback carries no session frames, so it would not give
@@ -376,8 +380,9 @@ and checks its committed test-only bindings (`sdk/kotlin/src/conformance`), buil
 files in `sdk/kotlin/build/native` (another checkout sharing the cargo target cannot replace them mid-run), and runs
 every Kotlin test. The 0.6 host tests are `com.luff.colophon.hosts.*`:
 
-- `ApiSurfaceTest` (3: no member reachable from Java exposes a core object, the account adapter or a signer; Java
-  reaching for the internal accessors does not compile; a Java application, `JavaHostUse`, opens a host),
+- `ApiSurfaceTest` (4: no member reachable from Java in the module exposes a core object, the account adapter or a
+  signer, outside the allow-list; Java reaching for the internal accessors does not compile; a Java application,
+  `JavaHostUse`, opens a host; the Android library excludes the hosts),
   `JdkSocketTest` (1: each send over the JDK socket ends exactly once when the peer drops the connection),
   `StreamHostTest` (17), `StreamConcurrencyTest` (1: eight threads sending 300 frames each while the home sends 500,
   five rounds; every client call is on the stream host's own thread and each sender's frames are carried once, in
@@ -399,4 +404,4 @@ every Kotlin test. The 0.6 host tests are `com.luff.colophon.hosts.*`:
   frame for `askTimeoutMs` after asking may take (§S5), so with a 500 ms write the asker sometimes, correctly, takes
   instead of being passed to.
 
-The host code was also typechecked against an Android `android.jar`; nothing was run on Android.
+Nothing was built or run on Android; the Android library excludes the hosts.
