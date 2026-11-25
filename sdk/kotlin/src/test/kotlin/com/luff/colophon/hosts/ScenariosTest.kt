@@ -12,8 +12,9 @@ import kotlin.test.assertTrue
 /**
  * The session rules that matter when devices come and go, end to end through the Kotlin hosts and a real home: a holder
  * restarted from what it stored, a holder that goes offline past the holder timeout and returns, a pass while both
- * stores are slow and frames keep arriving, and a member revoked mid-session (js/test06/scenarios.test.ts). A fast
- * policy (beat 400 ms, holder timeout 1.5 s, ask timeout 300 ms) keeps the waits short; the rules are the defaults'.
+ * stores are slow and frames keep arriving, and a member revoked mid-session (js/test06/scenarios.test.ts). What is
+ * real and what is not is in [World]. A fast policy (beat 400 ms, holder timeout 1.5 s, ask timeout 300 ms) keeps the
+ * waits short; the rules are the defaults'.
  */
 class ScenariosTest {
     private val holderFrames = setOf("state", "beat", "msg", "refuse", "pass", "decline")
@@ -130,7 +131,7 @@ class ScenariosTest {
         a.store.delayMs = 0; b.store.delayMs = 0
         Thread.sleep(300)
 
-        // 4. B revokes A mid-session (A holds the cell), by a real authority change on B's device, nothing injected.
+        // 4. B revokes A mid-session (A holds the cell), by a real authority change on B's device; no frame is forged.
         //    a. B holds the new head before the home does. A still sends over its socket; the home still carries the
         //       frame, and B's endpoint, under the new head, drops it on arrival, changing nothing.
         //    b. Once the home holds the revocation it ends A's stream: A's frames no longer leave the device.

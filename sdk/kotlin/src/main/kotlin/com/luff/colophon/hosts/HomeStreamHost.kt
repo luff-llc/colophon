@@ -96,7 +96,7 @@ class HomeStreamHost(options: StreamHostOptions) {
         val config = streamDefaultConfig().let { options.configure?.invoke(it) ?: it }
         account.engine().streamClient(options.home, config, options.cursor)
     }
-    private val timer = Deadline(clock, serial::job) { pump() }
+    private val timer = Deadline(clock, ::job) { pump() }
     private val listeners = CopyOnWriteArrayList<(StreamHostEvent) -> Unit>()
     private val cells = ConcurrentHashMap<String, StreamCell>()
     /** Cells the home acknowledged a subscription for on the current connection (serial context only). */
@@ -111,10 +111,25 @@ class HomeStreamHost(options: StreamHostOptions) {
     private var passing = false
     private var passAgain = false
     private var lastStatus: StreamStatusKind? = null
-    @Volatile private var lastStatusValue: StreamStatus = StreamStatus(StreamStatusKind.CONNECTING, null, null, null)
+    // What the client said at the end of the last job: read from any thread without touching the client.
+    @Volatile private var statusNow: StreamStatus = StreamStatus(StreamStatusKind.CONNECTING, null, null, null)
+    @Volatile private var pollingNow = true
+    @Volatile private var cursorNow: String? = options.cursor
+    @Volatile private var liveNow = false
+
+    /** One job on the host's queue; afterwards the client's status, polling and cursor are published for other threads. */
+    private fun job(body: () -> Unit) = serial.job { body(); publish() }
+    private fun publish() {
+        if (stopped) { liveNow = false; pollingNow = true; return }
+        try {
+            val st = client.status()
+            statusNow = st; pollingNow = client.polling(); cursorNow = client.cursor()
+            liveNow = st.kind == StreamStatusKind.LIVE && socket != null
+        } catch (_: Exception) { liveNow = false }
+    }
 
     /** Starts driving the stream. */
-    fun start() = serial.job { if (!started && !stopped) { started = true; pump() } }
+    fun start() = job { if (!started && !stopped) { started = true; pump() } }
 
     /** Stops: closes the socket (1000) at once, cancels the timer and the call in flight, and frees the client. */
     fun stop() {
@@ -124,9 +139,10 @@ class HomeStreamHost(options: StreamHostOptions) {
             stopped = true
             s = socket; socket = null
         }
+        liveNow = false; pollingNow = true
         try { s?.close(1000) } catch (_: Exception) {}
         scope.cancel()
-        serial.job {
+        job {
             timer.clear()
             generation++
             allDown()
@@ -140,18 +156,18 @@ class HomeStreamHost(options: StreamHostOptions) {
     fun onPass(listener: () -> Unit): () -> Unit = on { if (it is StreamHostEvent.Pass) listener() }
     private fun emit(event: StreamHostEvent) = serial.event { for (l in listeners) try { l(event) } catch (_: Exception) {} }
 
-    /** Where the stream stands. */
-    val status: StreamStatus get() = if (stopped) lastStatusValue else try { client.status().also { lastStatusValue = it } } catch (_: Exception) { lastStatusValue }
+    /** Where the stream stands (as of the host's last job; never calls the client from the caller's thread). */
+    val status: StreamStatus get() = statusNow
     /** Whether the app's ordinary poll timer should run (always, unless the stream is live). */
-    val polling: Boolean get() = if (stopped) true else try { client.polling() } catch (_: Exception) { true }
+    val polling: Boolean get() = pollingNow
     /** The resume cursor held now. */
-    val cursor: String? get() = try { client.cursor() } catch (_: Exception) { null }
-    val live: Boolean get() = !stopped && status.kind == StreamStatusKind.LIVE
+    val cursor: String? get() = cursorNow
+    val live: Boolean get() = !stopped && liveNow
 
     /** Try again now: foreground entry, a network change or an explicit user action, never a timer (the core bounds it). */
-    fun retryNow() = serial.job { if (!stopped) { client.retryNow(); pump() } }
+    fun retryNow() = job { if (!stopped) { client.retryNow(); pump() } }
     /** The account's verified history moved outside a pass this host woke (the app's own poll): tell the core. */
-    fun historyChanged() = serial.job {
+    fun historyChanged() = job {
         if (stopped) return@job
         try { client.onHistory(account.engine().headSeq()) } catch (_: Exception) {}
         pump()
@@ -163,26 +179,32 @@ class HomeStreamHost(options: StreamHostOptions) {
     fun attach(cell: StreamCell) {
         val k = key(cell.namespace, cell.cell)
         check(cells.putIfAbsent(k, cell) == null) { "a cell ${cell.namespace}/${cell.cell} is already attached" }
-        serial.job { if (live && cells[k] === cell) sendClient { client.subscribe(cell.namespace, cell.cell, null) } }
+        job { if (isLive() && cells[k] === cell) sendClient { client.subscribe(cell.namespace, cell.cell, null) } }
     }
     /** Stops carrying `cell` (unsubscribes when live). */
     fun detach(cell: StreamCell) {
         val k = key(cell.namespace, cell.cell)
         if (!cells.remove(k, cell)) return
-        serial.job {
+        job {
             if (subscribed.remove(k)) cell.linkDown()
-            if (live) sendClient { client.unsubscribe(cell.namespace, cell.cell, null) }
+            if (isLive()) sendClient { client.unsubscribe(cell.namespace, cell.cell, null) }
         }
     }
     /**
-     * Sends one sealed session frame (a `Send` effect's bytes as text), carried verbatim. False when the stream is not
-     * live or the frame was refused before sending: to the session that is loss, which its own rules repair. Callable
-     * from any thread (a cell's own context).
+     * Sends one sealed session frame (a `Send` effect's bytes as text), carried verbatim. Callable from any thread (a
+     * cell's own context): the frame takes its place on this host's queue, so the client is only ever called there,
+     * and frames are carried in the order they were given. False at once when the stream is not live (from the status
+     * the host published after its last job); `lost` is called (on this host's context) when a frame that was accepted
+     * could not be carried after all (the socket ended first, or the client refused it). To the session either is loss,
+     * which its own rules repair.
      */
-    fun sendSession(frame: String): Boolean {
+    fun sendSession(frame: String, lost: () -> Unit = {}): Boolean {
         if (!live) return false
-        return sendClient { client.sessionFrame(frame, null) }
+        job { if (!(isLive() && sendClient { client.sessionFrame(frame, null) })) lost() }
+        return true
     }
+    /** Live, judged on this host's context from the client itself. */
+    private fun isLive(): Boolean = !stopped && socket != null && try { client.status().kind == StreamStatusKind.LIVE } catch (_: Exception) { false }
     private fun sendClient(build: () -> String): Boolean {
         val s = socket ?: return false
         val text = try { build() } catch (_: Exception) { return false }
@@ -218,10 +240,10 @@ class HomeStreamHost(options: StreamHostOptions) {
     private fun mint() {
         scope.launch {
             val call = try { account.streamCall(home) } catch (e: CancellationException) { throw e } catch (e: Exception) {
-                serial.job { if (!stopped) { handle(client.ticketCallFailed(now())); emit(StreamHostEvent.TicketCallFailed(codeOf(e))); pump() } }
+                job { if (!stopped) { handle(client.ticketCallFailed(now())); emit(StreamHostEvent.TicketCallFailed(codeOf(e))); pump() } }
                 return@launch
             }
-            serial.job {
+            job {
                 if (stopped) return@job
                 val request = try { client.ticketRequest(call, now()) } catch (e: Exception) {
                     // The core refused to build the request (no ticket call outstanding): it is told the call failed.
@@ -230,7 +252,7 @@ class HomeStreamHost(options: StreamHostOptions) {
                 }
                 scope.launch {
                     val answer: HttpAnswer? = try { transport.send(request) } catch (e: CancellationException) { throw e } catch (_: Exception) { null }
-                    serial.job { if (!stopped) { handle(client.onTicket(answer, now())); pump() } }
+                    job { if (!stopped) { handle(client.onTicket(answer, now())); pump() } }
                 }
             }
         }
@@ -242,10 +264,10 @@ class HomeStreamHost(options: StreamHostOptions) {
         val current = { mine == generation && !stopped }
         val ended = { synchronized(lock) { socket = null }; generation++; allDown() }
         val handlers = object : SocketHandlers {
-            override fun open() = serial.job { if (current()) { client.onOpen(now()); pump() } }
-            override fun message(text: String) = serial.job { if (current()) { handle(client.onFrame(text, now())); pump() } }
-            override fun refused(answer: HttpAnswer) = serial.job { if (current()) { ended(); handle(client.onRefused(answer, now())); pump() } }
-            override fun closed(code: Int?) = serial.job { if (current()) { ended(); handle(client.onClosed(code?.toUInt(), now())); pump() } }
+            override fun open() = job { if (current()) { client.onOpen(now()); pump() } }
+            override fun message(text: String) = job { if (current()) { handle(client.onFrame(text, now())); pump() } }
+            override fun refused(answer: HttpAnswer) = job { if (current()) { ended(); handle(client.onRefused(answer, now())); pump() } }
+            override fun closed(code: Int?) = job { if (current()) { ended(); handle(client.onClosed(code?.toUInt(), now())); pump() } }
         }
         val s = try { openSocket.open(url, handlers) } catch (_: Exception) {
             // A socket that cannot even be made is a transport failure, reported as any other.
@@ -274,7 +296,7 @@ class HomeStreamHost(options: StreamHostOptions) {
         scope.launch {
             var failure: Throwable? = null
             try { account.exchange() } catch (e: CancellationException) { throw e } catch (e: Exception) { failure = e }
-            serial.job {
+            job {
                 if (stopped) return@job
                 var seq: ULong? = null
                 try { seq = account.engine().headSeq(); client.onHistory(seq) } catch (e: Exception) { if (failure == null) failure = e }
@@ -328,7 +350,7 @@ class HomeStreamHost(options: StreamHostOptions) {
     }
     private fun checkStatus() {
         if (stopped) return
-        val status = this.status
+        val status = client.status()
         if (status.kind == lastStatus) return
         lastStatus = status.kind
         if (status.kind != StreamStatusKind.LIVE) allDown()

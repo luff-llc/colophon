@@ -29,8 +29,12 @@ import java.util.concurrent.CopyOnWriteArrayList
 interface CellCarrier {
     fun attach(cell: StreamCell)
     fun detach(cell: StreamCell)
-    /** Sends one sealed frame verbatim; false when it could not be sent now (loss, to the session). Any thread. */
-    fun sendSession(frame: String): Boolean
+    /**
+     * Takes one sealed frame to carry verbatim, without touching the carrier's state from the caller's thread (a
+     * carrier queues it on its own context). False when it cannot take it now; `lost` is called (from any thread) when a
+     * frame it took could not be carried after all. Either is loss to the session, which its own rules repair.
+     */
+    fun sendSession(frame: String, lost: () -> Unit): Boolean
     /** Calls `listener` after every exchange pass the carrier ran (a [HomeStreamHost]'s `Wake`); null when it runs none. */
     fun onPass(listener: () -> Unit): (() -> Unit)? = null
 }
@@ -39,7 +43,7 @@ interface CellCarrier {
 fun HomeStreamHost.carrier(): CellCarrier = object : CellCarrier {
     override fun attach(cell: StreamCell) = this@carrier.attach(cell)
     override fun detach(cell: StreamCell) = this@carrier.detach(cell)
-    override fun sendSession(frame: String) = this@carrier.sendSession(frame)
+    override fun sendSession(frame: String, lost: () -> Unit) = this@carrier.sendSession(frame, lost)
     override fun onPass(listener: () -> Unit) = this@carrier.onPass(listener)
 }
 
@@ -57,7 +61,10 @@ sealed class CellHostEvent {
     data class Session(val name: String, val json: String, val fields: Map<String, Any?>) : CellHostEvent()
     /** A frame was handed to the carrier (`frame` is the sealed text, `kind` its plaintext kind). */
     data class Sent(val kind: String, val frame: String) : CellHostEvent()
-    /** A frame was not sent: the core could not seal it (`reason` its code), or the carrier was down (`carrier`). */
+    /**
+     * A frame was not sent: the core could not seal it (`reason` its code), the carrier could not take it
+     * (`carrier`), or the carrier took it and could not carry it after all (`carrierLost`, reported after its `Sent`).
+     */
     data class Unsent(val kind: String, val reason: String, val frame: String? = null) : CellHostEvent()
     /** A received frame was dropped (the §S3 code; `queueFull` when it could not be kept behind a write). */
     data class Drop(val reason: String, val helloTo: String? = null) : CellHostEvent()
@@ -168,7 +175,7 @@ class SessionCellHost private constructor(options: CellHostOptions) : StreamCell
     /** The last `persisted_json` whose durable write completed: what a new endpoint starts from. */
     @Volatile var storedClaim: String? = null; private set
     /** Completes when the write in progress has ended (stored, or given up); set before any store code runs. */
-    private var writing: CompletableDeferred<Unit>? = null
+    @Volatile private var writing: CompletableDeferred<Unit>? = null
     /** This instance's fencing generation and its save count within it. */
     private var generation = 1L
     private var seq = 0L
@@ -237,9 +244,16 @@ class SessionCellHost private constructor(options: CellHostOptions) : StreamCell
         }
     }
 
+    /** Runs `body` as a job on this host's context (the typed API reads the endpoint there). */
+    internal fun post(body: () -> Unit) = serial.event(body)
+
     fun on(listener: (CellHostEvent) -> Unit): () -> Unit { listeners.add(listener); return { listeners.remove(listener) } }
 
-    /** The endpoint's read-only state, or null while it is being made again (or after the host ended). Read it from a listener or the host's context. */
+    /**
+     * The endpoint's read-only state, or null while it is being made again (or after the host ended). Read it from a
+     * listener, which runs on the host's context; its read-only calls are safe from other threads, but the endpoint may
+     * be replaced or freed by the next job.
+     */
     val current: SessionEndpoint? get() = endpoint
     /** Whether a `Persist` write is in progress. */
     val writePending: Boolean get() = writing != null
@@ -247,6 +261,8 @@ class SessionCellHost private constructor(options: CellHostOptions) : StreamCell
     // The queue
 
     private fun enqueue(job: () -> Unit) { if (phase != Phase.CLOSED) serial.job(job) }
+    /** A report from another host's context: emitted as a job of this host's own. */
+    private fun enqueueReport(event: CellHostEvent) = enqueue { emit(event) }
     private fun emit(event: CellHostEvent) {
         serial.event { for (l in listeners) try { l(event) } catch (_: Exception) {} }
     }
@@ -372,7 +388,10 @@ class SessionCellHost private constructor(options: CellHostOptions) : StreamCell
                     val kind = effect.frameKind ?: ""
                     val frame = Frames.frameText(effect.bytes)
                     if (frame == null) { emit(CellHostEvent.Unsent(kind, "encoding")); continue }
-                    val sent = try { carrier.sendSession(frame) } catch (_: Exception) { false }
+                    // The reference loop's Send is fire and forget: the endpoint is never told. A frame the carrier
+                    // refuses now is `Unsent(carrier)`, as in the JavaScript host; one it took and then could not
+                    // carry is reported later as `Unsent(carrierLost)`.
+                    val sent = try { carrier.sendSession(frame) { enqueueReport(CellHostEvent.Unsent(kind, "carrierLost", frame)) } } catch (_: Exception) { false }
                     emit(if (sent) CellHostEvent.Sent(kind, frame) else CellHostEvent.Unsent(kind, "carrier", frame))
                 }
                 SessionEffectKind.EVENT -> {
@@ -450,10 +469,19 @@ class SessionCellHost private constructor(options: CellHostOptions) : StreamCell
                     }
                     if ((result as Outcome.Done).result == SaveResult.STALE) {
                         // Stale against this instance's own earlier save (one it could not see complete) is adopted and
-                        // saved again; anything else means another instance holds the cell.
-                        if (adopt()) continue
-                        enqueue { writing = null; fail(FailReason.SUPERSEDED) }
-                        return@launch
+                        // saved again; another instance's fence means it holds the cell. When the held fence cannot be
+                        // read, nothing is known: that is a failed attempt like any store failure, with the backoff,
+                        // and the bounded attempts end in fail(store). Every stale save is charged, adopted or not, so
+                        // a store that keeps answering stale cannot make the host save without bound.
+                        when (val adoption = adopt()) {
+                            Adoption.OURS -> { if (failed(CellHostError(CellHostError.Code.FAILED, "the store held this instance's own later fence"))) return@launch; continue }
+                            Adoption.THEIRS -> { enqueue { writing = null; fail(FailReason.SUPERSEDED) }; return@launch }
+                            is Adoption.Unknown -> {
+                                if (failed(adoption.error)) return@launch
+                                if (!Wait(persistRetryMs).done.await()) return@launch
+                                continue
+                            }
+                        }
                     }
                     if (late) continue
                     break
@@ -501,14 +529,20 @@ class SessionCellHost private constructor(options: CellHostOptions) : StreamCell
         } catch (e: CancellationException) { throw e } catch (e: Throwable) { Outcome.Err(e) }
     }
     /**
-     * Reads the held fence after a save this instance could not see complete. True when it is one of this instance's
-     * own (adopted as the fence to expect); false when another instance's.
+     * Reads the held fence after a save this instance could not see complete: one of this instance's own (adopted as
+     * the fence to expect), another instance's, or unknown when the read failed.
      */
-    private suspend fun adopt(): Boolean {
-        val now = try { store.load() } catch (e: CancellationException) { throw e } catch (_: Exception) { return true }
+    private sealed class Adoption {
+        data object OURS : Adoption()
+        data object THEIRS : Adoption()
+        /** The held fence could not be read. */
+        data class Unknown(val error: Throwable) : Adoption()
+    }
+    private suspend fun adopt(): Adoption {
+        val now = try { store.load() } catch (e: CancellationException) { throw e } catch (e: Exception) { return Adoption.Unknown(e) }
         val f = now?.fence
-        if (f != null && f.generation == generation && f.seq <= seq) { heldFence = f; return true }
-        return f == heldFence
+        if (f != null && f.generation == generation && f.seq <= seq) { heldFence = f; return Adoption.OURS }
+        return if (f == heldFence) Adoption.OURS else Adoption.THEIRS
     }
     /**
      * Checks, every beat, that the store still holds this instance's fence, by reading the fence alone. It is never

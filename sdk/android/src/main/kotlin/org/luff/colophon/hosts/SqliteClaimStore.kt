@@ -116,5 +116,11 @@ class SqliteClaimStore private constructor(private val db: SQLiteDatabase, priva
         SaveResult.STORED
     }
 
+    /** The journal and synchronous modes of this store's own connection (`synchronous` is per connection). */
+    internal fun modes(): Pair<String?, String?> {
+        fun read(pragma: String) = db.rawQuery(pragma, null).use { c -> if (c.moveToFirst()) c.getString(0) else null }
+        return read("PRAGMA journal_mode")?.lowercase() to read("PRAGMA synchronous")
+    }
+
     override fun close() = db.close()
 }

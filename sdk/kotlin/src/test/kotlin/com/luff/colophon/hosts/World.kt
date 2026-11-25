@@ -108,6 +108,11 @@ class Member(val name: String, val device: Device, val relay: RelayHome) {
  * port of its own choosing), an account with two members A and B entitled to write `listening.podcasts`, each with
  * its own `ColophonSession`, a [HomeStreamHost] over a real WebSocket and a `now-playing` cell. B holds the same owner
  * key as A (one person's two devices), so B can revoke A; the history is public, so a revoked A can still read it.
+ *
+ * Real: the relay and its home module, the JDK WebSocket over loopback, both sessions and engines, their passes, ticket
+ * calls, delegations and authority changes. Not real: [Network] (it rewrites the account's `https` name to loopback
+ * and can cut a member off), in-memory record media, [TestStore] (an in-memory claim store whose writes can be
+ * delayed) and the relay's test clock.
  */
 class World private constructor(val relay: RelayHome, val a: Member, val b: Member, private val ticking: Thread) {
     companion object {

@@ -23,7 +23,9 @@ import java.util.concurrent.atomic.AtomicInteger
 /**
  * The SQLite claim store on a device: independent clients of one file racing from one fence (exactly one stores per
  * round), the claim surviving a reopen, the journal and synchronous modes it insists on, and fail-closed reads of rows
- * and schemas it did not write. Needs a device or emulator (the platform's SQLite is not on the JVM).
+ * and schemas it did not write. Needs a device or emulator (the platform's SQLite is not on the JVM); not yet run.
+ * Not covered here: several processes, SQLITE_BUSY under contention, a corrupt file, a failed commit, durability
+ * across power loss, and the schema changing after open.
  */
 @RunWith(AndroidJUnit4::class)
 class SqliteClaimStoreTest {
@@ -73,7 +75,9 @@ class SqliteClaimStoreTest {
     }
 
     @Test fun theDatabaseIsInWalModeWithFullSynchronousCommits() {
-        SqliteClaimStore.open(file, "cell").close()
+        // `synchronous` belongs to a connection, so it is read through the store's own; 2 is FULL.
+        SqliteClaimStore.open(file, "cell").use { assertEquals("wal" to "2", it.modes()) }
+        // The journal mode is the file's: another connection sees it too.
         SQLiteDatabase.openDatabase(file.path, null, SQLiteDatabase.OPEN_READONLY).use { db ->
             db.rawQuery("PRAGMA journal_mode", null).use { it.moveToFirst(); assertEquals("wal", it.getString(0).lowercase()) }
         }

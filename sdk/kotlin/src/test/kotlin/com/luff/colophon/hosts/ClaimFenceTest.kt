@@ -31,7 +31,7 @@ class ClaimFenceTest {
     private fun nowhere(loop: ManualLoop) = object : CellCarrier {
         override fun attach(cell: StreamCell) { loop.dispatcher.dispatch(kotlin.coroutines.EmptyCoroutineContext, Runnable { cell.linkUp() }) }
         override fun detach(cell: StreamCell) {}
-        override fun sendSession(frame: String) = true
+        override fun sendSession(frame: String, lost: () -> Unit) = true
     }
 
     /**

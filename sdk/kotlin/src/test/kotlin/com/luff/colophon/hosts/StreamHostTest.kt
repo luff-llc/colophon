@@ -307,6 +307,7 @@ class StreamHostTest {
         r.settle()
         assertTrue(r.events.any { it is StreamHostEvent.Unrouted && it.reason == "noCell" })
         assertTrue(r.host.sendSession(frame))
+        r.settle()
         assertEquals("""{"type":"session","frame":$frame}""", r.sockets.last.sent.last())
         r.sockets.last.handlers.closed(1011); r.settle()
         assertEquals(listOf("up", "down"), log)

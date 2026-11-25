@@ -117,13 +117,15 @@ class CellSession private constructor(val host: SessionCellHost) {
 
         /** Joins the cell ([SessionCellHost.open]) and starts publishing its state. */
         suspend fun join(options: CellHostOptions): CellSession {
+            // The host's listener runs on its context; the events before the session existed are replayed there too,
+            // and the first state is read there, so the endpoint is only read on the host's context.
             var session: CellSession? = null
             val early = ArrayList<CellHostEvent>()
-            val lock = Any()
-            val host = SessionCellHost.open(options) { e -> synchronized(lock) { session?.hostEvent(e) ?: early.add(e) } }
+            val host = SessionCellHost.open(options) { e -> session?.hostEvent(e) ?: early.add(e) }
             val s = CellSession(host)
-            synchronized(lock) { for (e in early) s.hostEvent(e); session = s }
-            s.refresh()
+            val ready = CompletableDeferred<Unit>()
+            host.post { for (e in early) s.hostEvent(e); early.clear(); session = s; s.refresh(); ready.complete(Unit) }
+            ready.await()
             return s
         }
     }

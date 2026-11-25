@@ -8,7 +8,7 @@ import kotlin.test.assertTrue
  * The flagship behaviour of 0.6, end to end through the Kotlin hosts: two members of one account, each with its own
  * stream host over a real WebSocket (`java.net.http`) to a real home, hand a `now-playing` cell over. A plays and
  * publishes its anchor; B's "play" asks, A's application pauses and passes its stopped position, B continues from it,
- * and A, no longer holder, sends no holder frame (js/test06/handoff.test.ts).
+ * and A, no longer holder, sends no holder frame (js/test06/handoff.test.ts). What is real and what is not is in [World].
  */
 class HandoffTest {
     private val holderFrames = setOf("state", "beat", "msg", "refuse", "pass", "decline")

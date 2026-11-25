@@ -38,7 +38,7 @@ class LoopCarrier(private val loop: ManualLoop) {
         return object : CellCarrier {
             override fun attach(cell: StreamCell) { mine = cell; cells.add(cell); post { cell.linkUp() } }
             override fun detach(cell: StreamCell) { cells.remove(cell) }
-            override fun sendSession(frame: String): Boolean { send(mine, frame); return true }
+            override fun sendSession(frame: String, lost: () -> Unit): Boolean { send(mine, frame); return true }
         }
     }
     private fun post(run: () -> Unit) = loop.dispatcher.dispatch(kotlin.coroutines.EmptyCoroutineContext, Runnable { run() })
@@ -411,6 +411,46 @@ class CellHostTest {
         assertEquals(true, Json.obj(store.value!!)!!["released"])
         assertEquals(1, store.maxInflight)
         for (k in 1 until store.fences.size) assertTrue(store.fences[k] > store.fences[k - 1], "fences rise: ${store.fences}")
+        r.close()
+    }
+
+    @Test fun aStoreThatAnswersStaleAndCannotBeReadUsesUpTheAttemptsAndFailsClosed() {
+        val r = Pair2 { CellHostOptions(it.account, it.carrier, NS, CELL, it.store, clock = it.clock, dispatcher = it.dispatcher, persistAttempts = 3) }
+        // Every save is stale, `load` fails, and `fence` keeps answering the fence the host holds (so the beat check
+        // finds nothing wrong): the host cannot tell whose fence is held.
+        var saves = 0
+        r.a.replaceForTests(store = object : ClaimStore by r.sa {
+            override suspend fun load(): StoredClaim? = throw java.io.IOException("the disk is unreadable")
+            override suspend fun save(record: StoredClaim, expected: Fence?): SaveResult { saves++; return SaveResult.STALE }
+        })
+        r.await(r.a.command("take", cmd("command" to "take", "state" to null)))
+        r.settle()
+        assertEquals(1, saves, "no immediate second save: an unknown adoption waits for the retry")
+        r.clock.advance(249, 5)
+        assertEquals(1, saves)
+        r.clock.advance(1, 5)
+        assertEquals(2, saves)
+        r.clock.advance(250, 5)
+        assertEquals(3, saves)
+        assertTrue(r.la.any { it is CellHostEvent.Failed && it.reason == FailReason.STORE })
+        assertEquals(3, r.la.count { it is CellHostEvent.Persist && it.phase == PersistPhase.FAILED })
+        r.clock.advance(10_000, 5)
+        assertEquals(3, saves, "nothing more once failed")
+        assertFalse(r.la.any { it is CellHostEvent.Sent && it.kind == "take" })
+        r.close()
+    }
+
+    @Test fun aStoreThatAnswersStaleWhileHoldingTheHostsOwnFenceCannotLoopForever() {
+        val r = Pair2 { CellHostOptions(it.account, it.carrier, NS, CELL, it.store, clock = it.clock, dispatcher = it.dispatcher, persistAttempts = 4) }
+        // Stale, yet the record held is the host's own fence: each is adopted, and each is charged.
+        var saves = 0
+        r.a.replaceForTests(store = object : ClaimStore by r.sa {
+            override suspend fun save(record: StoredClaim, expected: Fence?): SaveResult { saves++; return SaveResult.STALE }
+        })
+        r.await(r.a.command("take", cmd("command" to "take", "state" to null)))
+        r.settle()
+        assertEquals(4, saves)
+        assertTrue(r.la.any { it is CellHostEvent.Failed && it.reason == FailReason.STORE })
         r.close()
     }
 
