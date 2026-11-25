@@ -264,6 +264,15 @@ data class HostDuties(
     val deadTransitions: List<DeadTransition> = listOf(),
     val removals: List<RemovalCard> = listOf(),
     val homeLabels: Map<String, String> = mapOf(),
+    /**
+     * The vault is retiring (spec §8.3): a removal took effect without a rotation. A host holding a remaining `control` or
+     * `recover` key that was current before the removal MUST rotate it (`ColophonSession.completeKeyChanges`).
+     */
+    val vaultRotationOwed: Boolean = false,
+    /** Namespaces whose latest epoch is older than the latest vault rotation (spec §8.3): a `rekey` is owed before new records. */
+    val rekeyOwed: List<String> = listOf(),
+    /** Remaining controllers with no slot in the current vault (spec §6.4): each must be used once more (`ColophonSession.restoreSlot`). */
+    val keysWithoutSlot: List<RemovalCard.Item> = listOf(),
     /** How often the session polls the homes: `recoveryDelay` / 6, or 15 s while something is pending. */
     val pollIntervalMs: Long = 600_000,
 )

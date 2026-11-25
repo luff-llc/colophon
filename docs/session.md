@@ -174,6 +174,56 @@ that holds its own verified revocation is `denied`, as before.
     (`appointHomes(homes, AdditionalController(passkey, "Passkey", listOf(CONTROL, RECOVER)))`) and answering
     `HomesAppointment.Done` or `HomesAppointment.Pending(transitions)`. Not in the JS session yet.
 
+## Removing and replacing keys (spec §8.3, §8.7)
+
+A person removes a lost passkey, or replaces the first one, through the session rather than a bare `keyring.remove` in
+`proposeTransition`: a removal of a key with a slot makes the vault **retiring** (spec §8.3), and while it retires no epoch can
+be introduced (grants and revocations stall) and the removed key can still read what is written. These calls rotate the vault,
+append the `rekey`, and are idempotent: what is done is read from the account, and a call after `.pending` or a crash signs
+nothing twice.
+
+* **`checkRemoval(_:replacingWith:roles:cosigners:)`** answers, before anything is signed, a `RemovalCheck`: a `refusal`
+  (`notAController`, `lastControlKey`, `noControlQuorum`, `noRecoveryQuorum`, `noOpenableSlot`, `replacementPresent`), the IDs
+  the transition removes, whether it rotates the vault at once, whether a replacement is one transition, and the spec §6.4
+  `warnings` with words a host shows before the person signs (one key from no control quorum, one key from no openable slot,
+  a single recovery unit, keys left without a slot, a vault that retires until rotated, keys the removed key added, this
+  device's owner key removed). Nothing is asked of any key.
+* **`removeController(_:cosigners:)`** removes a controller by **one** transition signed by the owner and `cosigners`. It
+  lists the `approve` or `sign` keys the removed key added by immediate entries (spec §8.4 removal follow-up). When the removed
+  key had a slot and every remaining passkey's credential is held here (the owner, the recovery kit, `cosigners`), the
+  transition carries a `vault` component with `previousVault` and a slot for every remaining controller, so the vault never
+  retires; otherwise the vault retires at activation and the call, made again then, writes the `vault` entry. After the
+  rotation it appends a `rekey` of every namespace whose latest epoch is older than the rotation. It answers
+  `KeyringChange.done`, or `.pending(transitions:)` while the transition waits out its delay or a duty is left; each pending
+  transition is submitted like `proposeTransition`. Removing the last control key, or leaving fewer control or recovery units
+  than the thresholds or no openable slot, is `invalidCommand` before anything is signed.
+* **`replaceController(_:with:label:roles:cosigners:)`** adds the new key with its possession proof (PRF in the same assertion
+  for a passkey, spec §7.2) and removes the old one, so there is never a moment with fewer ways in:
+  * **One transition** when this device keeps another current `control` or `recover` key with a slot it can open (a device
+    owner key, a recovery kit): `keyring.add` and `keyring.remove` together. At activation the vault retires and the call
+    writes the `vault` entry, which gives the new key its slot, then the `rekey`.
+  * **Staged** when the old key is the only key that could rotate the seed (the first passkey of an account whose owner is
+    that passkey). A transition cannot give a key it adds a slot of its own `vault` component (spec §8.3 drops it at
+    activation), and a `vault` entry must be signed by a key that was a controller before the removal, so one transition would
+    leave the vault retiring with nobody able to rotate it. The call adds the new key, builds its own slot once its activation
+    is final, then removes the old key with a rotation signed by both (a full set when they are every control key), then the
+    `rekey`. Without a home every step is recorded at once and the call answers `.done`.
+  * When the old key is this device's `ownerController`, configure the new key as the owner controller afterwards.
+* **`cosigners:`** on `addController` (as a transition), `appointHomes(_:adding:cosigners:)`, `proposeTransition`,
+  `removeController` and `replaceController`: other control or recover keys the person holds here sign the same transition
+  beside the owner. With every control key signing and at least two units it is a full set (spec §8.7): it can't be vetoed and
+  is due once the homes have receipted it, without the recovery delay.
+* **Duties after a removal** (`duties`): `vaultRotationOwed` (the vault is retiring: a removal another host made without a
+  rotation), `rekeyOwed` (namespaces owed a `rekey` after a rotation; writers must not seal new records under an older epoch
+  until it exists, spec §8.3), and `keysWithoutSlot` (remaining controllers with no slot in the current vault, spec §6.4).
+  `completeKeyChanges(cosigners:)` writes the `vault` entry (signed by the longest-standing held `control` or `recover` key, with
+  every slot this host can build and a slot for each held key that has none) and the `rekey`. A passkey owner is asked to
+  unlock, so an app calls it when the duties show something rather than on a timer. For each key in `keysWithoutSlot` the app
+  asks the person to use that key once more on a device that holds the vault: `restoreSlot(for:label:)` builds its own slot.
+* The Kotlin session has the same calls (`checkRemoval`, `removeController`, `replaceController`, `completeKeyChanges`,
+  `restoreSlot`, `cosigners` on the same calls), answering `KeyringChange.Done` or `KeyringChange.Pending(transitions)`. Not in
+  the JS session yet. Tests: `KeyringChangeTests` (Swift) and `KeyringChangeTest` (Kotlin).
+
 ## Refresh and the exchange with each home
 
 `refresh()` lists the medium and gives the engine the listing with versions (`advance`, `refresh`, `record_due`). The folder
