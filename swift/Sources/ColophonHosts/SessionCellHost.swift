@@ -167,6 +167,8 @@ public actor SessionCellHost: StreamCell {
     private var passToken: ListenerToken?
     private var outbox: [CellHostEvent] = []
     private var inJob = false
+    /// Commands a job settled: their callers resume after the job's events were reported.
+    private var settled: [(OneShot<Result<Void, CellCommandFailure>>, Result<Void, CellCommandFailure>)] = []
 
     /// Read without entering the actor: the endpoint (for its read-only calls), the stored claim, admitted commands,
     /// listeners, and whether the host has ended.
@@ -327,6 +329,8 @@ public actor SessionCellHost: StreamCell {
         await body(job)
         inJob = false
         flush()
+        let done = settled; settled.removeAll()
+        for (outcome, result) in done { outcome.resolve(result) }
     }
     private func body(_ job: Job) async {
         if case .close = job { await end(.closed, CellHostError(.closed, "the cell host is closed")); return }
@@ -401,9 +405,13 @@ public actor SessionCellHost: StreamCell {
             for event in events { for listener in current { listener(event) } }
         }
     }
+    /// Settles a command. Inside a job its caller resumes only after the job's events reached the listeners, so a caller
+    /// that awaited a command sees what the command did.
     private func settle(_ c: Held, _ result: Result<Void, any Error>) {
         gate.withLock { _ = $0.admitted.removeValue(forKey: c.id) }
-        c.outcome?.resolve(result.mapError { CellCommandFailure(error: $0) })
+        guard let outcome = c.outcome else { return }
+        let r = result.mapError { CellCommandFailure(error: $0) }
+        if inJob { settled.append((outcome, r)) } else { outcome.resolve(r) }
     }
 
     // MARK: Ending
@@ -421,7 +429,7 @@ public actor SessionCellHost: StreamCell {
         waits.removeAll()
         passToken?.cancel(); passToken = nil
         held.removeAll()
-        for c in pending { c.outcome?.resolve(.failure(CellCommandFailure(error: why))) }
+        for c in pending { settle(c, .failure(why)) }
         endpoint = nil
         if attached { attached = false; await carrier.detach(self) }
     }
