@@ -6,7 +6,7 @@ image. It is configured by environment variables alone, keeps everything under o
 start it makes the home's signing key and a provisioning token for you.
 
 For what a home is and does, read [`relay/README.md`](../../relay/README.md). This page covers
-running it in a container.
+running it in a container. To run it on a Mac without Docker, read [`macos.md`](macos.md).
 
 ## Build and run
 
