@@ -1,10 +1,10 @@
-# 0.6 hosts: the home stream and session cells (JavaScript)
+# 0.6 hosts: the home stream and session cells (JavaScript, Kotlin)
 
 **Status:** stage 2 of Colophon 0.6 for JavaScript. Stage 1 is the binding surface of
 [bindings-05.md](bindings-05.md) §10 (`HomeStream`, `SessionEndpoint` and the engine's stream and
 session calls). This stage adds the host layer that drives that surface over a real WebSocket, in
-`js/src/hosts` (`@colophon/core/hosts`), and proves the flagship behaviour end to end. The Swift and
-Kotlin hosts follow the same shape.
+`js/src/hosts` (`@colophon/core/hosts`), and proves the flagship behaviour end to end. The Kotlin host
+(JVM and Android) follows the same shape and is described in §6; the Swift host follows it too.
 
 The rule is the one stage 1 states: the core decides, the host carries. The host owns the socket,
 the ticket request, the timers and the durable store. It adds no retry timing, cap or backoff of its
@@ -271,3 +271,194 @@ additions this stage makes (`streamCall`, `transportOf`).
   `crypto.getRandomValues`, `performance.now` and timers, but the test06 suites were not run in
   headless Chrome), Node, a real network between the devices, or a home other than the reference
   relay.
+
+## 6. Kotlin (JVM and Android)
+
+`com.luff.colophon.hosts` in `sdk/kotlin` is the same host layer for Kotlin, over the generated `HomeStream` and
+`SessionEndpoint` of `colophon_ffi.kt`. It is plain Kotlin in `src/main`, which the Android library compiles too, so it
+uses nothing Android lacks; the one JVM-only piece (the `java.net.http` socket) is in `src/jvm`, which only the JVM
+module compiles. The Android pieces are in `sdk/android` (`org.luff.colophon.hosts`). No dependency was added: the JVM
+module still has JNA and kotlinx-coroutines only.
+
+### 6.1 The API
+
+| Object | What it is |
+| --- | --- |
+| `HostAccount`, `accountOf(session)`, `transportOf(session, home)` | As in §1: `account`, `member`, `engine()` (the `AccountEngine`, read again for every call), `suspend streamCall(home)`, `suspend exchange()` (the session's own `syncNow`), `suspend signRaw(body)`. Two session additions back it: `SessionWorker.streamCall` (the `colophon.home.stream` call, signed and judged like any call) and `transportOf`. |
+| `HomeStreamHost(StreamHostOptions)` | `start`, `stop`, `status`, `polling`, `cursor`, `live`, `retryNow`, `historyChanged`, `attach`/`detach`, `sendSession(frame)`, `on(listener)`, `onPass(listener)`; `carrier()` adapts it to `CellCarrier`. Options: account, home, `socket` (a `SocketFactory`, required), `transport` (default `HttpHomeTransport`), `clock`, `configure`, `cursor`, `saveCursor`, `client`, `dispatcher`. |
+| `SessionCellHost.open(CellHostOptions, listener)` | `command(name, json): Deferred<Unit>`, `deliver`, `linkUp`, `linkDown`, `accountChanged`, `leave`, `close`, `current`, `phase`, `storedClaim`, `writePending`, `stats`. Options as in §1 (`persistRetryMs`, `persistTimeoutMs`, `persistAttempts`, `fenceCheckMisses`, `maxCommands`, `delegationMs`, `random`, `state`), plus `dispatcher`. Events are the `CellHostEvent` sealed class; failures are `CellHostError` with a `Code`. |
+| `CellSession.join(options)` | `state: CellState` (`joined`, `holder`, `isHolder`, `gated`, `claim`, `state`, `seq`, `entitled`, `canWrite`), `subscribe`, `events` (`CellEvent`, bytes decoded); `take`, `ask`, `pass`, `decline`, `release`, `publish`, `submit`, `presence`, `ping` (each returns a `Deferred`), `leave`, `close`. Show the role as held only when `isHolder && !gated`. |
+| `ClaimStore`, `Fence`, `StoredClaim`, `SaveResult`, `compareAndSet`, `MemoryClaimStore` | §3's contract with `suspend` calls; a fence is two integers in 0..2^53 − 1. |
+| `SqliteClaimStore` (Android) | The durable store, §6.3. |
+| `Frames.sessionFrameText`, `frameCell`, `frameBytes`, `frameText` | §3's frame extraction, with the same adversarial matrix (`FramesTest`). |
+| `HostClock`, `SystemHostClock`, `AndroidHostClock` | Monotonic and wall milliseconds and a timer. On Android use `AndroidHostClock` (`elapsedRealtime`, which counts deep sleep). |
+| `SocketFactory`, `HostSocket`, `SocketHandlers`, `JdkWebSocketFactory` (JVM) | The transport, §6.4. |
+
+**One serial context per host.** Each host runs every job and every one of its coroutines on one serial dispatcher (by
+default its own lane of `Dispatchers.Default`; a test passes a dispatcher it drives). A job is ordinary,
+non-suspending code: it calls the endpoint and carries out the step, and nothing can run between two of its lines. The
+work that suspends (a store save, a signature, a ticket request, a pass) runs as a coroutine on the same context and
+comes back as a new job, so a suspension never lets another job interleave with endpoint state. Socket reports,
+timers and calls from other threads only enqueue. Listeners are called on the host's context, between jobs; whatever
+they call is a later job. A command is admitted (takes its place among frames, ticks and link changes) when `command`
+is called, from any thread, and its `Deferred` completes after the events of the step that ran it reached the
+listeners. A `ClaimStore` must not block its caller: the shipped SQLite store moves its I/O to `Dispatchers.IO`.
+
+Everything else is §2 and §3 as written: the same steps, effects in order, the acknowledgement only after the durable
+write, single-flight fenced saves with a write deadline and bounded attempts, the reservation on open and rebuild, the
+beat-by-beat fence check with three misses failing closed, the bounded command hold, `staleAccount`, `clockBackwards`,
+`wrongView`, a new session number, `gated`, and `ask` answered by `pass` between live devices.
+
+### 6.2 The JVM stores
+
+The JVM module ships `MemoryClaimStore` (one record behind a lock; the compare and the write are one step for every
+client sharing the object) and the `ClaimStore` interface. It ships no durable JVM store: the JDK has no embedded
+database, a file-and-lock or file-and-rename design does not meet §3a (a lock can be stolen; a commit can be visible
+before it is irrevocable), and a SQLite driver would be a new dependency. A desktop or server host supplies its own
+store over storage that gives a linearizable compare-and-set.
+
+### 6.3 The Android store
+
+`SqliteClaimStore` uses the platform's SQLite (`android.database.sqlite`): one database file in `noBackupFilesDir` (a
+restored backup would bring back an old fence), one table `claims (cell TEXT PRIMARY KEY, claim TEXT, generation
+INTEGER, seq INTEGER)`, one row per cell.
+
+- `save` is one `BEGIN IMMEDIATE` transaction (`beginTransactionNonExclusive`): the write lock is taken before the row is
+  read, the compare-and-set is applied, the row written, and the transaction committed. A stale save rolls back. Every
+  client of the file (another object, thread or process) is serialized by SQLite's lock, so the compare-and-set is
+  linearizable.
+- The file is opened with `journal_mode=WAL` and `synchronous=FULL`, and both are read back (anything else refuses to
+  open). With FULL in WAL mode the log is synced at each commit before the commit is published to other connections,
+  so a reader never sees a commit that a power failure could take back, and `STORED` is returned only after the commit
+  returned. Android's default for a database that sets nothing is WAL with `synchronous=NORMAL`, which can lose a
+  commit already seen: that is why the mode is set explicitly.
+- It fails closed: a schema other than its own table and primary-key index, a claim that is not text or null, a fence
+  half that is not an integer in range, is `ClaimStoreCorrupt` from `load`, `fence` and `save`.
+
+`SqliteClaimStoreTest` (an instrumented test in `sdk/android/src/androidTest`) races six clients of one file from one
+fence over 25 rounds (exactly one stores each time), checks a stale save writes nothing, a reopen, the journal mode,
+and fail-closed rows and schemas. It needs a device or an emulator.
+
+### 6.4 The transport
+
+The host owns the socket's lifecycle through `SocketFactory.open(url, handlers): HostSocket` (`send(text)`,
+`close(code)`) and `SocketHandlers` (`open`, `message`, `refused(answer)`, `closed(code?)`), reported from any thread.
+The host owns a socket before any listener hears of it, ignores reports from a socket it replaced, and `stop()` closes
+the current socket at once from any thread, including one whose upgrade is still outstanding.
+
+**JVM: `JdkWebSocketFactory`** (`java.net.http.WebSocket`, Java 11; the module targets 17). Fragments are joined and a
+message is bounded (64 KiB, the core's own bound). A refused upgrade is reported with its status and headers through
+`refused`; the JDK discards the refused answer's body, so a `403 {"result":"refused:revoked"}` reaches the core as a 403
+without a result, which backs off and mints again within the budget and the breaker rather than ending access at once
+(a revoked member still learns it from its next pass, and close 1008 still ends a live stream). A close code the JDK
+will not send from a client (1002) is sent as 1000 and the core is told its own code. Closing a socket still opening
+drops the connection when the upgrade completes.
+
+**Android has no `java.net.http` and no WebSocket client in the SDK.** The options:
+
+1. *An app-supplied `SocketFactory` over a client the app already has.* About thirty lines over OkHttp (below). It
+   costs the SDK nothing, but it is only available to an app that already ships a WebSocket-capable client.
+2. *A minimal RFC 6455 client in the SDK over `SSLSocket`.* Its whole scope: the client role only; `wss` only; the
+   HTTP/1.1 upgrade with a random `Sec-WebSocket-Key`, verification of `Sec-WebSocket-Accept`, `Upgrade` and
+   `Connection`, and reading a refusal's status line, headers and a bounded body (which `java.net.http` cannot give);
+   text messages out (masked, one frame each) and in (unmasked frames only, continuation frames joined, a message bound
+   of 20,480 bytes, the home's own message limit, enforced while reading); ping answered by pong; the close handshake
+   both ways with a deadline; no extensions, no compression, no subprotocols, binary messages dropped. The parts that
+   decide its safety: TLS through the platform's default `SSLSocketFactory` with explicit hostname verification (an
+   `SSLSocket` does not verify the host name by itself: set `SSLParameters.endpointIdentificationAlgorithm = "HTTPS"`
+   before the handshake, or check with `HttpsURLConnection.getDefaultHostnameVerifier()`), the platform's trust store
+   and network security configuration as `HttpsURLConnection` uses them, no trust-all path and no plain `ws` outside a
+   loopback testing option; connect, handshake and read timeouts; UTF-8 validated strictly; every length checked before
+   allocation. Size: about 500 to 700 lines and a test suite of similar size. Testing: the same five journeys against
+   the reference relay with both socket factories on the JVM (`SSLSocket` exists on both platforms, so the client is
+   JVM-testable, and `java.net.http` is the differential reference), a scripted loopback server for the edge cases
+   (fragmented and interleaved control frames, a masked server frame, a reserved bit or opcode, a length over the
+   bound, a 64-bit length, a bad accept key, a refused upgrade with and without a body, a close without a code, a close
+   during the upgrade, a peer that stops answering), and a TLS test with a wrong host name that must fail.
+3. *A dependency.* OkHttp 4 is about 0.8 MB and needs Okio (about 0.35 MB) and the Kotlin standard library, before
+   shrinking; it brings its own connection pool, and the SDK would then pin a version the app must align with. It
+   breaks the SDK's rule of no third-party networking dependency and any app's rule of no third-party dependencies.
+
+An app-supplied OkHttp adapter, as an example (not part of the SDK):
+
+```kotlin
+class OkHttpSocketFactory(private val client: OkHttpClient) : SocketFactory {
+    override fun open(url: String, handlers: SocketHandlers): HostSocket {
+        val ended = AtomicBoolean(false)
+        fun end(code: Int?) { if (ended.compareAndSet(false, true)) handlers.closed(code) }
+        val ws = client.newWebSocket(Request.Builder().url(url).build(), object : WebSocketListener() {
+            override fun onOpen(webSocket: WebSocket, response: Response) { if (!ended.get()) handlers.open() }
+            override fun onMessage(webSocket: WebSocket, text: String) { if (!ended.get()) handlers.message(text) }
+            override fun onClosing(webSocket: WebSocket, code: Int, reason: String) { webSocket.close(1000, null); end(code) }
+            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) = end(code)
+            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                if (response == null || response.code == 101) return end(null)
+                if (!ended.compareAndSet(false, true)) return
+                val body = runCatching { response.peekBody(65_536).bytes() }.getOrDefault(ByteArray(0))
+                val headers = response.headers.map { (n, v) -> Header(n, v) }
+                handlers.refused(HttpAnswer(response.code.toUInt(), headers, body))
+            }
+        })
+        return object : HostSocket {
+            override fun send(text: String) { check(ws.send(text)) { "not sent" } }
+            override fun close(code: Int) { ended.set(true); if (!ws.close(code, null)) ws.cancel() }
+        }
+    }
+}
+```
+
+Session frames need the stream: an HTTP long-poll fallback carries no session frames, so it would not provide handoff.
+
+### 6.5 Android: Doze, standby, a foreground service, and the network
+
+From the Android documentation ("Optimize for Doze and App Standby", "Power management restrictions"): in Doze (screen
+off, unplugged and, for deep Doze, stationary) the system suspends network access, ignores wake locks and defers
+alarms, jobs and syncs to maintenance windows that come less often over time; in App Standby an idle app's network is
+deferred (in the *rare* and *restricted* buckets it is disabled). The app-state table lists a process running a
+foreground service as having no network restriction, while the device-state table lists network as restricted while
+Doze is active; the documentation does not say which wins for a foreground service in Doze, and this was not measured
+on a device. A foreground service also keeps the app out of App Standby.
+
+What the host does, whatever the cause: a socket that stops (the network suspended, a NAT timeout, Doze) is reported
+by the client as closed, or found dead by the core's own ping after `pingMs` and idle close after `idleMs`; the stream
+host reports the close to the core, every attached cell gets `linkDown`, and the core backs off and reconnects through
+its own steps (a new ticket, the saved cursor), at which point the cells get `linkUp` on the subscription's ack. Timers
+cannot fire while the CPU is suspended; they fire late on wake and the core is given the true time
+(`AndroidHostClock` counts sleep), so a holder that slept past `holderTimeoutMs` is lapsed to the others and returns
+gated (§S6) rather than acting as holder at once.
+
+What an app must do:
+
+- Keep the playing device's process in a foreground service of type `mediaPlayback` while it holds `now-playing`: that
+  device is the one that must receive an `ask` and `pass`. Without it the process may be frozen or killed, and its
+  role lapses to the others after `holderTimeoutMs`, which is correct but is not a handoff.
+- Call `HomeStreamHost.retryNow()` on foreground entry and when `ConnectivityManager.NetworkCallback` reports a usable
+  network again, never from a timer (the core bounds it). There is nothing to call when the network drops: the
+  socket's close does it.
+- Use `AndroidHostClock` and `SqliteClaimStore`, and while `polling` is true keep the session's own poll.
+- Test with `adb shell dumpsys deviceidle force-idle` and `am set-inactive <package> true`, as the documentation
+  describes. These behaviours were not run on a device here.
+
+### 6.6 What was run
+
+`scripts/test-kotlin.sh` builds the release library, checks the committed bindings, builds the conformance library
+and checks its committed test-only bindings (`sdk/kotlin/src/conformance`), builds the home module, pins those three
+files in `sdk/kotlin/build/native` (another checkout sharing the cargo target cannot replace them mid-run), and runs
+every Kotlin test. The 0.6 host tests are `com.luff.colophon.hosts.*`:
+
+- `StreamHostTest` (15), `CellHostTest` (22), `ClaimFenceTest` (5: two clients opening in all six interleavings, a
+  rebuild racing an open in all three, eight threads racing the memory store from one fence over 20 rounds, a
+  superseded holder stopping within one beat, fences out of range), `FramesTest` (4), on the core's real objects with
+  a manual clock, a driven dispatcher and fake sockets, transports and stores, as the JavaScript tests do.
+- `ConformanceTest` (3): the 26 machine transcripts, the 9 `offset.json` cases and `wire/vectors.json` (frames,
+  scenario steps and negative frames), strict decoding, and that no shipped source names the conformance surface.
+- `HandoffTest` and `ScenariosTest`: the end-to-end proof of §4 through the Kotlin hosts over `java.net.http`
+  WebSockets to the reference relay, which binds a port of its own choosing (port 0) and whose standard error is kept
+  and shown when a test fails. All five journeys pass. In journey 4 each write takes 200 ms, below the fast policy's
+  `askTimeoutMs` (300 ms): a holder sends nothing while its write is outstanding, and an asker that hears no holder
+  frame for `askTimeoutMs` after asking may take (§S5), so with a 500 ms write the asker sometimes, correctly, takes
+  instead of being passed to.
+
+Not run: the Android library was not built (no Android SDK platform 35 was available) and no instrumented test was
+run, so `SqliteClaimStore` and `AndroidHostClock` are unrun on a device; the shipped Kotlin sources and those two
+files were typechecked against an API 34 `android.jar`. No device, emulator, Doze or standby behaviour was observed.
