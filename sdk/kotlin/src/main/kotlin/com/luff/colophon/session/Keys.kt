@@ -109,7 +109,7 @@ interface AsyncKeyProvider {
 class SessionKeyFailure(val detail: String, cause: Throwable? = null) : Exception(detail, cause)
 
 /** Wraps a provider so that its failures arrive as [SessionKeyFailure] (cancellation passes through). */
-internal class SessionKeys(val base: AsyncKeyProvider) : AsyncKeyProvider {
+internal class SessionKeys(@get:JvmSynthetic val base: AsyncKeyProvider) : AsyncKeyProvider {
     private inline fun <T> classify(body: () -> T): T = try { body() } catch (e: CancellationException) { throw e } catch (e: SessionKeyFailure) { throw e } catch (e: Exception) {
         throw SessionKeyFailure(e.message ?: e.javaClass.simpleName, e)
     }

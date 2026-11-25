@@ -19,7 +19,7 @@ import kotlin.test.assertTrue
 /**
  * Pins the module's surface as Java sees it: no member a Java caller can reach without reflection hands out or takes
  * the engine, a session endpoint, the stream client, an account view, the account adapter or a signer, except the
- * pre-existing API listed (with its reasons) in [allowedClasses] and [allowedMembers]. Kotlin `internal` compiles to
+ * generated bindings and the members listed, each with its reason, in [allowed]. Kotlin `internal` compiles to
  * public bytecode (mangled with `$`), so every member of every public class of the module is inspected, `$` names
  * included; only synthetic members, which javac does not let code call, are exempt. A Java snippet that reaches for
  * one of those members must not compile, and a Java application opens a host through the public API.
@@ -42,34 +42,45 @@ class ApiSurfaceTest {
     private fun inspected(): List<Class<*>> = allClasses()
 
     /**
-     * Pre-existing public API that carries these types on purpose, outside the 0.6 hosts, each with its reason. Anything
-     * else in the module that exposes them fails the test.
+     * The generated binding surface (`colophon_ffi.kt`, package `com.luff.colophon`): it defines `AccountEngine`,
+     * `HomeStream` and the rest, so its members name them by definition. One package entry; the hand-written classes of
+     * that package (the 0.4 wrappers) are not covered by it and are checked like any other.
      */
-    private val allowedClasses = mapOf(
-        // The generated binding surface (`colophon_ffi.kt`) and the 0.4 wrappers: it defines `AccountEngine`,
-        // `HomeStream` and the rest, so its members name them by definition.
-        "com.luff.colophon." to "the binding surface",
-        // The 0.5 session's engine on its own lane: `run` and `execute` take a function of the `AccountEngine` (run on
-        // that lane) and `open`/`openCreated` return the engine they open. Intended 0.5 API.
-        "com.luff.colophon.session.ColophonEngine" to "the 0.5 engine wrapper",
-        // An internal class: the only way to an instance from Java, `ColophonSession.worker`, is synthetic.
-        "com.luff.colophon.session.SessionWorker" to "internal, reached only through a synthetic accessor",
-        // Internal: made and used inside the session only.
-        "com.luff.colophon.session.SessionKeys" to "internal key classifier",
-        "com.luff.colophon.session.AccountCreator" to "internal account creation",
-        // The 0.5 key custody: it holds and answers with the application's own key providers.
-        "com.luff.colophon.session.KeyCustody" to "the 0.5 key custody",
-    )
-    /** Members of other public 0.5 classes that return the application's own key providers, given to the session by it. */
-    private val allowedMembers = setOf(
-        "com.luff.colophon.session.SessionConfiguration.getKeys", "com.luff.colophon.session.SessionConfiguration.getRecoveryKeys",
-        "com.luff.colophon.session.SessionConfiguration.getOwnerController", "com.luff.colophon.session.AdditionalController.getProvider",
-        "com.luff.colophon.session.KeysKt.asAsync",
-    )
-    private fun allowedClass(c: Class<*>): Boolean = allowedClasses.keys.any { k ->
-        if (k.endsWith(".")) c.packageName == k.removeSuffix(".") else c.name == k || c.name.startsWith("$k$")
+    private val generatedPackage = "com.luff.colophon"
+    private val handWritten: Set<String> by lazy {
+        val repo = File(System.getProperty("colophon.repo") ?: "../..").canonicalFile
+        val decl = Regex("^(?:public |internal |private )?(?:(?:data|sealed|abstract|open|enum|fun|value|annotation)\\s+)*(?:class|interface|object)\\s+(\\w+)", RegexOption.MULTILINE)
+        File(repo, "sdk/kotlin/src/main/kotlin/com/luff/colophon").listFiles()!!.filter { it.isFile && it.extension == "kt" && it.name != "colophon_ffi.kt" }
+            .flatMap { f -> decl.findAll(f.readText()).map { it.groupValues[1] } + (f.nameWithoutExtension + "Kt") }.toSet()
     }
-    private fun allowed(c: Class<*>, member: String): Boolean = allowedClass(c) || "${c.name}.$member" in allowedMembers
+    private fun generated(c: Class<*>): Boolean = c.packageName == generatedPackage && c.name.removePrefix("$generatedPackage.").substringBefore('$') !in handWritten
+
+    /**
+     * Each member outside the generated bindings that carries one of these types on purpose, as `class#member`, with its
+     * reason. Anything not listed fails.
+     */
+    private val allowed = mapOf(
+        // The 0.5 session's engine on its own lane (public 0.5 API): `run` and `execute` take a function of the
+        // `AccountEngine`, run on that lane; `open` and `openCreated` return the engine they open.
+        "com.luff.colophon.session.ColophonEngine#run" to "0.5 API: runs a call on the engine's lane",
+        "com.luff.colophon.session.ColophonEngine#execute" to "0.5 API: an action from begin to written",
+        "com.luff.colophon.session.ColophonEngine\$Companion#open" to "0.5 API: opens an engine",
+        "com.luff.colophon.session.ColophonEngine\$Companion#openCreated" to "0.5 API: opens a created engine",
+        // The 0.5 key custody (public 0.5 API): it holds the application's own key providers and answers the engine's
+        // signing steps with them.
+        "com.luff.colophon.session.KeyCustody#provider" to "0.5 API: the application's own provider for a key",
+        "com.luff.colophon.session.KeyCustody#getProviders" to "0.5 API: the application's own providers",
+        "com.luff.colophon.session.KeyCustody#merging" to "0.5 API: custody over more of the application's providers",
+        "com.luff.colophon.session.KeyCustody\$Companion#of" to "0.5 API: custody over the application's providers",
+        // The application's own key providers, given to the session by it and read back from its own configuration.
+        "com.luff.colophon.session.SessionConfiguration#getKeys" to "the application's member key provider",
+        "com.luff.colophon.session.SessionConfiguration#getRecoveryKeys" to "the application's recovery key provider",
+        "com.luff.colophon.session.SessionConfiguration#getOwnerController" to "the application's owner controller",
+        "com.luff.colophon.session.AdditionalController#getProvider" to "the application's controller key provider",
+        "com.luff.colophon.session.KeysKt#asAsync" to "0.5 API: adapts the application's own synchronous provider",
+    )
+    /** Kotlin mangles a member taking an inline value class (`open-tHZpf6s`); its source name is before the `-`. */
+    private fun allowed(c: Class<*>, member: String): Boolean = generated(c) || "${c.name}#${member.substringBefore('-')}" in allowed.keys
 
     private fun visible(modifiers: Int) = Modifier.isPublic(modifiers) || Modifier.isProtected(modifiers)
     private fun names(types: List<java.lang.reflect.Type>) = types.map { it.typeName }
@@ -96,10 +107,13 @@ class ApiSurfaceTest {
         val classes = inspected()
         assertTrue(classes.size >= 200, "the classes were found (${classes.size})")
         assertEquals(listOf(), classes.flatMap { c -> reachable(c).filterNot { allowed(c, it.substringAfterLast('.')) } })
+        // Every entry of the allow-list still names a member that exists: a stale entry is removed, not kept.
+        val used = classes.filterNot { generated(it) }.flatMap { c -> reachable(c).map { "${c.name}#${it.substringAfterLast('.').substringBefore('-')}" } }.toSet()
+        assertEquals(setOf(), allowed.keys - used)
     }
 
     /** The internal members that do carry such types: they exist, and they are synthetic. */
-    private fun hiddenMembers(): List<Pair<Class<*>, java.lang.reflect.Method>> = inspected().filter { !allowedClass(it) }.flatMap { c ->
+    private fun hiddenMembers(): List<Pair<Class<*>, java.lang.reflect.Method>> = inspected().filter { !generated(it) }.flatMap { c ->
         c.declaredMethods.filter { m ->
             m.isSynthetic && m.name.contains('$') && !m.name.startsWith("access$") && visible(m.modifiers) &&
                 m.name.all { ch -> Character.isJavaIdentifierPart(ch) } &&

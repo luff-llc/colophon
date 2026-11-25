@@ -488,11 +488,11 @@ kotlinx-coroutines only.
 signer to themselves, so that nothing acts on them outside a host's serial context or out of order, and so that the
 member key is not offered as a general signer by mistake. Kotlin's `internal` compiles to public bytecode, so the
 members that carry those objects are also synthetic, which Java cannot call either; `ApiSurfaceTest` checks every
-member of every public class of the module, mangled names included, against a commented allow-list of the
-pre-existing API that carries such types on purpose (the generated bindings, the 0.5 `ColophonEngine` and key
-custody, the application's own key providers in its configuration), and that Java code reaching for one does not
-compile. This
-guards against misuse, not against a hostile embedder: the embedding application is the member's own and is trusted
+member of every public class of the module, mangled names included. It exempts the generated bindings as one
+package entry and otherwise only named members, each with its reason (the 0.5 `ColophonEngine.run`, `execute`,
+`open` and `openCreated`, the 0.5 `KeyCustody`, and the application's own key providers read back from its
+configuration); a new member that carries such a type fails it, and so does a listed member that no longer exists.
+It also checks that Java code reaching for an internal accessor does not compile. This guards against misuse, not against a hostile embedder: the embedding application is the member's own and is trusted
 with its key, and reflection on the JVM can always reach a library's internals, which is outside what the SDK can
 prevent.
 

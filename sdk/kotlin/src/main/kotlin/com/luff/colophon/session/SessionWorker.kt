@@ -1311,14 +1311,14 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
     }
 
     // Test hooks
-    internal fun engineForTests(): ColophonEngine? = engine
+    @JvmSynthetic internal fun engineForTests(): ColophonEngine? = engine
     /** The longest one exchange with one home may take (tests shorten it). */
     internal var exchangeTimeMs: Long = HomeLimits.EXCHANGE_TIME_MS
 
     // Engine access for blobs
 
-    fun requireEngine(): ColophonEngine = engine ?: throw SessionError.NotReady()
-    fun requireCustody(): KeyCustody = memberCustody ?: throw SessionError.NotReady()
+    @JvmSynthetic fun requireEngine(): ColophonEngine = engine ?: throw SessionError.NotReady()
+    @JvmSynthetic fun requireCustody(): KeyCustody = memberCustody ?: throw SessionError.NotReady()
     suspend fun persistStores(stores: List<Store>) = persist(stores)
     suspend fun <T> inGate(body: suspend () -> T): T = gated(body)
     suspend fun currentSnapshot(): SessionSnapshot = gated { build() }
@@ -1428,7 +1428,7 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
 
 /** Drives `AccountCreation` through its stages with the host's key custody. */
 internal object AccountCreator {
-    suspend fun create(params: CreateParams, identity: AccountIdentity, custody: KeyCustody, nowMs: Long): Pair<AccountCreation, Created> {
+    @JvmSynthetic suspend fun create(params: CreateParams, identity: AccountIdentity, custody: KeyCustody, nowMs: Long): Pair<AccountCreation, Created> {
         val creation = withEntropy(96) { AccountCreation.begin(params, identity, nowMs, it) }
         try {
             val requests = creation.prfRequests()
