@@ -562,8 +562,15 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
   await ensureRealDir(path.resolve(dataDir));
   const unlock = await lockDataDir(dataDir);
   try {
+  // Directories a release renamed aside (`.released-<slot>.<hex>`) are removed; the names they
+  // were released from are kept, so a release that stopped between the rename and its row's
+  // removal is finished below, once the table is read, instead of reopening the slot empty.
+  const releasedNames = new Set();
   for (const name of await fsp.readdir(path.resolve(dataDir))) {
-    if (name.startsWith(RELEASED_PREFIX)) await fsp.rm(path.join(path.resolve(dataDir), name), { recursive: true, force: true });
+    if (!name.startsWith(RELEASED_PREFIX)) continue;
+    const m = /^(.+)\.[0-9a-f]{16}$/.exec(name.slice(RELEASED_PREFIX.length));
+    if (m) releasedNames.add(m[1]);
+    await fsp.rm(path.join(path.resolve(dataDir), name), { recursive: true, force: true });
   }
   let closing = false;
   const requests = new Set();
@@ -578,6 +585,10 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
   }
   const tableInUse = provisioning.enabled || kind === 'file';
   const table = tableInUse ? await ProvisionTable.load(path.resolve(dataDir), provisioning) : ProvisionTable.empty(path.resolve(dataDir));
+  for (const name of releasedNames) {
+    const present = await fsp.lstat(path.join(path.resolve(dataDir), name)).then(() => true, (error) => { if (error.code === 'ENOENT') return false; throw error; });
+    if (table.get(name) && !present && !Object.hasOwn(libraries ?? {}, name)) await table.write(name, null);
+  }
   let homeModule = null; let homeKey = null;
   if (Object.values(libraries ?? {}).some((e) => e && e.home) || provisioning.enabled || table.size > 0) {
     if (!home?.wasm || !home?.key) throw new Error('A home slot, and provisioning, need home.wasm (the module path) and home.key (a private P-256 JWK)');
@@ -735,15 +746,21 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
    * A late use of the released Slot fails closed (its locks refuse), never on a later slot's
    * directory. A crash between the directory and the row leaves the row: the slot is opened
    * fresh and released at the next start-up.
+   *
+   * `force` (the operator's delete, `DELETE /v1/operator/slots/<slot>`) releases a slot however
+   * claimed it is, appointed or suspended, by the same three steps. `done` resolves to whether
+   * the slot was removed.
    */
   const releases = new Map(); // slot name -> the promise of its release's end
-  async function startRelease(name, e) {
+  async function startRelease(name, e, { force = false } = {}) {
     if (releases.has(name)) return null;
     let s;
-    try { s = await slot(name); } catch (error) { if (error instanceof HttpError && error.status === 503) return null; throw error; }
+    // A slot that cannot be opened now (503), or whose release was interrupted after it left
+    // dispatch (404), is not released here; the door's sweep goes on with the others.
+    try { s = await slot(name); } catch (error) { if (error instanceof HttpError && (error.status === 503 || error.status === 404)) return null; throw error; }
     // A first look at the state as it stands, without waiting for the slot's lock (a slow request
     // may hold it): the decision is made again under that lock in step 3, before anything goes.
-    if (await claimed(s)) return null;
+    if (!force && await claimed(s)) return null;
     s.releasing = true;
     homeSlots.delete(name);
     for (const waiter of [...s.waiters]) waiter.wake();
@@ -755,18 +772,19 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
       s.closing = true;
       await s.chain;
       await reach(`release drained ${name}`);
-      const trash = await provisionLock(() => finishRelease(name, e, s));
+      const trash = await provisionLock(() => finishRelease(name, e, s, force));
       // The released directory was renamed aside under the lock; it is removed outside it.
       if (trash) await fsp.rm(trash, { recursive: true, force: true });
+      return trash !== null;
     })().finally(() => releases.delete(name));
     releases.set(name, done);
     return { done }; // wrapped: an async function returning the promise itself would wait for it
   }
-  async function finishRelease(name, e, s) {
+  async function finishRelease(name, e, s, force = false) {
     const same = table.get(name) === e && slots.get(name) === s && !s.released;
     const trash = path.join(path.resolve(dataDir), `${RELEASED_PREFIX}${name}.${randomBytes(8).toString('hex')}`);
     const removed = same && await s.home.lock(async () => {
-      if (await claimed(s)) return false;
+      if (!force && await claimed(s)) return false;
       const refuse = () => Promise.reject(new Error(`slot ${name} was released`));
       s.released = true;
       await s.home.replayLock(() => s.home.closeReplay());
@@ -1008,9 +1026,11 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
     if (admitOperator && url.pathname === '/v1/operator/slots') return operatorList(req, res, url);
     const m = /^\/v1\/operator\/slots\/([^/]+)(?:\/(suspend|resume))?$/.exec(url.pathname);
     if (!admitOperator || !m) { req.resume(); throw new HttpError(404, 'Not found'); }
-    const [, name, action] = m;
-    const allow = action ? 'POST' : 'GET';
-    if (req.method !== allow) { req.resume(); throw new HttpError(405, 'Method not allowed', { allow }); }
+    const [, name, sub] = m;
+    // GET reads the state; DELETE removes the slot; POST .../suspend and .../resume act on it.
+    const allow = sub ? 'POST' : 'GET, DELETE';
+    if (!allow.split(', ').includes(req.method)) { req.resume(); throw new HttpError(405, 'Method not allowed', { allow }); }
+    const action = sub ?? (req.method === 'DELETE' ? 'delete' : undefined);
     // For an operator's own tools, never a page: a page on an origin not listed is refused.
     if (req.headers.origin !== undefined && !origins.has(req.headers.origin)) { req.resume(); throw new HttpError(403, 'Requests from this origin are refused'); }
     req.resume(); // no body is read
@@ -1025,6 +1045,7 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
     if (action && (keys.length !== 1 || keys[0] !== 'generation' || !generation)) {
       throw new HttpError(400, `${action} needs ?generation=<the slot's generation>, from GET /v1/operator/slots/<slot>`);
     }
+    if (action === 'delete') return operatorDelete(res, name, generation);
     // A slot this home holds as a home slot, configured or provisioned; anything else is unknown.
     // Decided once no release of the name is under way (it may yet be abandoned).
     const held = async () => {
@@ -1037,7 +1058,13 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
       const state = await afterRelease(name, async () => {
         const s = await held();
         await s.home.reconcileSuspension();
-        return { slot: name, provisioned: table.get(name) !== undefined, suspended: s.home.suspended, generation: generationOf(name) };
+        // This home as the account's verified history names it: "unappointed" before the first
+        // upload, then "home", "revocationPending", "revoked" or "notHome" (the module's
+        // `status`); "unknown" when the history cannot be read now. An operator may act on an
+        // account's own removal of this home, which only its controllers can sign.
+        const st = s.home.status();
+        const standing = !st.appointed ? 'unappointed' : typeof st.standing === 'string' ? st.standing : 'unknown';
+        return { slot: name, provisioned: table.get(name) !== undefined, suspended: s.home.suspended, generation: generationOf(name), standing };
       });
       return send(res, 200, state);
     }
@@ -1051,6 +1078,67 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
     });
     res.writeHead(204);
     return res.end();
+  }
+
+  /**
+   * `DELETE /v1/operator/slots/<slot>?generation=<g>`: removes a provisioned slot, its data and its
+   * row, by the release path forced (an appointed slot is released too). Only a slot the door
+   * provisioned (a configured one is the operator's own: 409 `refused:configured`), at that
+   * generation (409 `refused:staleGeneration`), and already suspended, so a delete always follows a
+   * suspension the operator decided on (409 `refused:notSuspended`). 204 once the slot is gone; a
+   * name the home does not hold is 404 `refused:notProvisioned` (a delete already done). The name
+   * may be provisioned again afterwards, with a new generation. Private listener only (404 on a
+   * single public listener). A delete interrupted part way (the slot out of dispatch, its row or
+   * directory still there) is finished by a retry at the same generation. In-flight requests on
+   * the slot drain first; each is bounded by the server's request timeout, and new ones are
+   * refused once the release starts.
+   */
+  async function operatorDelete(res, name, generation) {
+    // Destructive: served on the private listener only, never on a single public listener.
+    if (!privateApi) throw new HttpError(404, 'Not found');
+    const started = await afterRelease(name, async () => {
+      if (!SLOT.test(name)) throw notProvisioned();
+      const e = table.get(name);
+      // A delete interrupted after the slot left dispatch (its directory or row not yet gone):
+      // a retry at the row's generation finishes it.
+      if (e && !homeSlots.has(name) && !configured.has(name)) {
+        if (generationOf(name) !== generation) throw new HttpError(409, 'The slot has another generation', {}, { result: 'refused:staleGeneration' });
+        // Under the provisioning lock, as every write of the table is.
+        const removed = await finishInterruptedDelete(name, e);
+        return { done: Promise.resolve(removed) };
+      }
+      if (!homeSlots.has(name)) throw notProvisioned();
+      if (!e || configured.has(name)) throw new HttpError(409, 'A configured slot is not deleted here', {}, { result: 'refused:configured' });
+      const s = await slot(name);
+      if (!s.home || s.releasing || s.released) throw notProvisioned();
+      if (generationOf(name) !== generation) throw new HttpError(409, 'The slot has another generation', {}, { result: 'refused:staleGeneration' });
+      await s.home.reconcileSuspension();
+      if (!s.home.suspended) throw new HttpError(409, 'Suspend the slot before deleting it', {}, { result: 'refused:notSuspended' });
+      return startRelease(name, e, { force: true });
+    });
+    const removed = started ? await started.done : false;
+    if (!removed) throw new HttpError(503, 'The slot could not be deleted now; try again', { 'retry-after': '60' }, { result: 'unavailable' });
+    await reach(`deleted ${name}`);
+    res.writeHead(204);
+    return res.end();
+  }
+
+  /** Finishes a delete that stopped after its slot left dispatch: its directory (if still there)
+   * is renamed aside and its row removed, under the provisioning lock (the caller's), then the
+   * directory is removed. Resolves true. */
+  async function finishInterruptedDelete(name, e) {
+    if (table.get(name) !== e) return false;
+    slots.delete(name); opening.delete(name);
+    const root = path.join(path.resolve(dataDir), name);
+    const trash = path.join(path.resolve(dataDir), `${RELEASED_PREFIX}${name}.${randomBytes(8).toString('hex')}`);
+    const st = await fsp.lstat(root).catch((error) => { if (error.code === 'ENOENT') return null; throw error; });
+    if (st && (!st.isDirectory() || st.isSymbolicLink())) throw new Error(`${root} is not the slot's directory`);
+    if (st) { await fsp.rename(root, trash); await syncDir(path.resolve(dataDir)); }
+    await table.write(name, null);
+    // The directory, renamed aside, is removed after the row (a crash leaves it for start-up).
+    if (st) await fsp.rm(trash, { recursive: true, force: true });
+    await reach(`released ${name}`);
+    return true;
   }
 
   /** The operator's gate for a request: method, origin, then the token and its share, as for

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.6 — 2026-11-25
+
+No format or reader-rule change. The spec stays Colophon 0.5, revision 18.
+
+- **Operator delete** (reference home, `relay/`): with gate `token`, `DELETE /v1/operator/slots/<slot>?generation=` removes a provisioned slot's data and its row through the release path, an appointed slot included, and answers 204. It requires the slot's current generation (409 `refused:staleGeneration`) and a suspension first (409 `refused:notSuspended`); a configured slot is refused (409 `refused:configured`), and a name not held answers 404 `refused:notProvisioned`. The name can then be provisioned again with a new generation.
+- **A home's standing**: `GET /v1/operator/slots/<slot>` also reports `standing`, this home as the account's verified history names it (`unappointed`, `home`, `revocationPending`, `revoked`, `notHome`, or `unknown`), so an operator can act on an account's own removal of the home.
+- **Swift session**: the due loop's update and the update after a sync pass that changed nothing are built only after the member has opened any epoch shares sealed to it, as a refresh does; with no engine open (locked, or discarded since the pass began) they reconcile, so a locked library is reported `.locked`, never `.noLibrary`.
+
 ## 0.5.5 — 2026-11-24
 
 No format or reader-rule change. The spec stays Colophon 0.5, revision 18.
