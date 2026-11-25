@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased (0.5.6)
+## 0.5.6 — 2026-11-25
 
 No format or reader-rule change. The spec stays Colophon 0.5, revision 18.
 

@@ -226,7 +226,7 @@ checksum = "1c133bc6a41be0d194c306b5506d15e6feeea7b1d6604bd3f8310dfb2ca96486"
 
 [[package]]
 name = "colophon-core"
-version = "0.5.5"
+version = "0.5.6"
 dependencies = [
  "aes-gcm",
  "base64",
@@ -240,7 +240,7 @@ dependencies = [
 
 [[package]]
 name = "colophon-ffi"
-version = "0.5.5"
+version = "0.5.6"
 dependencies = [
  "aes-gcm",
  "base64",
@@ -253,7 +253,7 @@ dependencies = [
 
 [[package]]
 name = "colophon-home-wasm"
-version = "0.5.5"
+version = "0.5.6"
 dependencies = [
  "aes-gcm",
  "base64",
@@ -267,7 +267,7 @@ dependencies = [
 
 [[package]]
 name = "colophon-wasm"
-version = "0.5.5"
+version = "0.5.6"
 dependencies = [
  "colophon-core",
  "serde_json",

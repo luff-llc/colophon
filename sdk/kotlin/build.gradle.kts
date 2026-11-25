@@ -1,6 +1,6 @@
 plugins { kotlin("jvm") version "2.2.21" }
 group = "com.luff"
-version = "0.5.5"
+version = "0.5.6"
 repositories { mavenCentral() }
 dependencies {
     implementation("net.java.dev.jna:jna:5.18.1")
