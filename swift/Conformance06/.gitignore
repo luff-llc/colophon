@@ -1,0 +1,5 @@
+# Built by scripts/test-swift-hosts.sh from crates/colophon-conformance; never committed.
+/Artifacts/
+/Generated/
+/.build/
+/.swiftpm/
