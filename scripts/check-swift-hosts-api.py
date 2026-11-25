@@ -10,6 +10,8 @@ Reads the symbol graphs `swift package dump-symbol-graph --minimum-access-level 
   the engine or the endpoint by name;
 - no symbol ColophonSession itself declares is SPI or is its host access (that is `package`, reachable only from this
   package's targets), and none of its own symbols returns the engine, an endpoint, the stream client or a view;
+- no public symbol of ColophonListeningKit (its `now-playing` session included) names the engine, an endpoint, the stream
+  client, a view, the host access or the cell host it runs (`SessionCellHost`);
 - the public surface of ColophonHosts is exactly the pinned one (swift/Tests/ColophonHostsTests/ColophonHosts.public-api;
   `--update` rewrites it from the graph).
 """
@@ -95,6 +97,19 @@ def main():
         if hit:
             problems.append(f"ColophonSession.{where} returns {sorted(hit)}: {declaration(s)}")
 
+    listening = sorted(graphs.glob("ColophonListeningKit*.symbols.json"))
+    if not listening:
+        problems.append(f"no symbol graph for ColophonListeningKit in {graphs}")
+    for path in listening:
+        for s in load(path)["symbols"]:
+            # Its own symbols only: the graph also carries what it re-exports (ColophonSession, ColophonKit).
+            if not s["identifier"]["precise"].startswith("s:20ColophonListeningKit"):
+                continue
+            where = ".".join(s["pathComponents"])
+            hit = types_named(s) & (FORBIDDEN_TYPES | {"SessionCellHost"})
+            if hit:
+                problems.append(f"ColophonListeningKit.{where} exposes {sorted(hit)}: {declaration(s)}")
+
     surface = sorted(set(surface))
     if update:
         pinned_path.write_text("\n".join(surface) + "\n")
@@ -108,7 +123,7 @@ def main():
     if problems:
         print("\n".join(problems))
         sys.exit(1)
-    print(f"public API: ColophonHosts {len(surface)} symbols, as pinned; no SPI; nothing exposes the engine, a signer, an endpoint, the stream client or a view")
+    print(f"public API: ColophonHosts {len(surface)} symbols, as pinned; no SPI; nothing exposes the engine, a signer, an endpoint, the stream client or a view; ColophonListeningKit exposes none of them nor its cell host")
 
 
 main()
