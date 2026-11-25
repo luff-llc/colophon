@@ -67,8 +67,9 @@ async function state(port, slot) {
   const r = await op(port, slot);
   const body = json(r);
   if (r.status !== 200) return body;
-  const { generation, ...rest } = body;
+  const { generation, standing, ...rest } = body;
   assert.match(generation, /^[0-9a-f]{32}$/, 'an opaque generation');
+  assert.equal(standing, 'unappointed', 'no history is uploaded here');
   return rest;
 }
 const generationOf = async (port, slot) => json(await op(port, slot)).generation;
@@ -196,7 +197,7 @@ describe('the operator API', { skip: ready ? false : `build the module first (${
     assert.equal((await ask(port, SLOT)).status, 200);
     assert.deepEqual(await state(port, SLOT), { slot: SLOT, provisioned: true, suspended: false });
     assert.deepEqual(await state(port, 'configured0'), { slot: 'configured0', provisioned: false, suspended: false }, 'a configured home slot is held, not provisioned');
-    const wrong = [[SLOT, undefined, 'POST', 'GET'], [SLOT, 'suspend', 'GET', 'POST'], [SLOT, 'resume', 'PUT', 'POST']];
+    const wrong = [[SLOT, undefined, 'POST', 'GET, DELETE'], [SLOT, 'suspend', 'GET', 'POST'], [SLOT, 'resume', 'PUT', 'POST']];
     for (const [name, action, method, allow] of wrong) {
       const r = await op(port, name, action, { method });
       assert.equal(r.status, 405);

@@ -2053,12 +2053,15 @@ actor SessionWorker {
     var homeIssues: [HomeIssue] { issues }
     var hasConfiguredHomes: Bool { !homeConfigurations.isEmpty }
 
-    /// Records transitions that came due (§8.7). A schedule calls it; refresh calls it too.
+    /// Records transitions that came due (§8.7). A schedule calls it; refresh calls it too. The snapshot is built only
+    /// after the member has opened any epoch shares sealed to it since (`unlockIfPossible`), as a refresh does: a
+    /// snapshot built before would describe an engine that cannot read what it holds.
     func recordDue() async throws -> SessionSnapshot {
         try await gated {
-            guard let engine else { return try await reconcile() }
+            guard let engine, !locked else { return try await reconcile() }
             try await advance(engine, to: nowMs)
             try await persistDueWrites(engine)
+            try await unlockIfPossible()
             return try await build()
         }
     }
@@ -2104,7 +2107,16 @@ actor SessionWorker {
     func requireCustody() throws -> KeyCustody { guard let memberCustody else { throw SessionError.notReady }; return memberCustody }
     func persistStores(_ stores: [Store]) async throws { try await persist(stores) }
     func inGate<T: Sendable>(_ body: () async throws -> T) async throws -> T { try await gated(body) }
-    func currentSnapshot() async throws -> SessionSnapshot { try await gated { try await build() } }
+    /// The snapshot as things stand, for a pass that changed nothing. With no engine open (locked, or discarded since the
+    /// pass began) it reconciles, which answers `.locked` or opens the engine, never `.noLibrary` for a library that is
+    /// there; with one, the member first opens any epoch shares sealed to it (`unlockIfPossible`), as a refresh does.
+    func currentSnapshot() async throws -> SessionSnapshot {
+        try await gated {
+            guard engine != nil, !locked else { return try await reconcile() }
+            try await unlockIfPossible()
+            return try await build()
+        }
+    }
 }
 
 struct SavedFile: Codable {
