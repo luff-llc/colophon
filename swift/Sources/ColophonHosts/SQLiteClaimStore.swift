@@ -17,15 +17,19 @@ import SQLite3
 /// (`synchronous = NORMAL` would make a commit visible before it is synced, and could lose the last commits on power
 /// loss; it is not used.) Checkpoints use `F_FULLFSYNC` too (`checkpoint_fullfsync`).
 ///
-/// **Failing closed.** The table is `STRICT`, its fence columns carry range checks, and every read checks each column's
-/// type and range: a row it cannot validate is an error from `load`, `fence` and `save`, never skipped. A database whose
-/// table has another definition, or that refuses WAL mode, cannot be opened.
+/// **Failing closed.** The database is the store's alone: it may hold exactly the claim table and its key's index, and
+/// any other schema object (a trigger, a view, another table or index), found when it opens or inside any read or write
+/// transaction, is an error. Every write is read back inside its transaction and must be exactly what was written, or
+/// it rolls back. The table is `STRICT` with range checks, and every read checks each column's type and range: a row it
+/// cannot validate is an error from `load`, `fence` and `save`, never skipped. Every setting above is read back on both
+/// connections when they open (SQLite ignores an unknown pragma silently); a connection that does not report it cannot
+/// be opened.
 ///
 /// Each instance is one client with two connections: one writes (every `save`), one reads (`load` and the per-beat
 /// `fence`), so a slow write does not delay a fence check. Several cells may share one database file under different
 /// `name`s.
 public final class SQLiteClaimStore: ClaimStore {
-    /// The table every claim store uses.
+    /// The table every claim store uses. The database holds nothing else: see `expectedSchema`.
     public static let schema = """
         CREATE TABLE colophon_claims (name TEXT PRIMARY KEY NOT NULL, \
         generation INTEGER NOT NULL CHECK (generation BETWEEN 0 AND 9007199254740991), \
@@ -36,8 +40,13 @@ public final class SQLiteClaimStore: ClaimStore {
     private let writer: SQLiteConnection
     private let reader: SQLiteConnection
 
-    /// Opens (creating it if needed) the store for `name` in the database at `path`. `busyTimeout` bounds how long a
-    /// save waits for another client's write.
+    /// Opens (creating it if needed) the store for `name` in the database at `path`, a file used for claims only.
+    /// `busyTimeout` bounds how long a save waits for another client's write.
+    ///
+    /// On iOS, iPadOS, visionOS, tvOS and watchOS the database and its WAL and index files are created with
+    /// `completeUntilFirstUserAuthentication` protection: readable while the device is locked after its first unlock,
+    /// so that a device playing in the background with its screen locked can still read and write its claim (a
+    /// `complete` class would make every fence check fail while locked, and the cell would fail closed).
     public init(path: URL, name: String, busyTimeout: Duration = .seconds(5)) async throws {
         self.name = name
         let ms = Int32(clamping: busyTimeout.components.seconds * 1000 + busyTimeout.components.attoseconds / 1_000_000_000_000_000)
@@ -51,6 +60,14 @@ public final class SQLiteClaimStore: ClaimStore {
     public func fence() async throws -> Fence? { try await reader.read(name)?.fence }
     public func save(_ record: StoredClaim, expected: Fence?) async throws -> SaveOutcome {
         try await writer.compareAndSet(name, record: record, expected: expected)
+    }
+
+    /// What each connection reports for the settings the store requires (tests).
+    func settings() async throws -> [[String: String]] { [try await writer.settings(), try await reader.settings()] }
+    /// Faults injected for tests: the reader's reads fail, or the writer fails after its write and before its commit.
+    func inject(readsFail: Bool = false, failBeforeCommit: Bool = false) async {
+        await reader.inject(readsFail: readsFail, failBeforeCommit: false)
+        await writer.inject(readsFail: false, failBeforeCommit: failBeforeCommit)
     }
 }
 
@@ -66,64 +83,104 @@ actor SQLiteConnection {
         deinit { sqlite3_close_v2(db) }
     }
     private let connection: Connection
+    private var readsFail = false
+    private var failBeforeCommit = false
+
+    /// Every object the database may hold, as `sqlite_schema` lists them (`type`, `name`, `tbl_name`, `sql`), sorted:
+    /// the table and the index SQLite makes for its primary key. Anything else (a trigger, a view, another table or
+    /// index) could change what a write does or what a read sees, and the store refuses the database.
+    static let expectedSchema: [[String?]] = [
+        ["index", "sqlite_autoindex_colophon_claims_1", "colophon_claims", nil],
+        ["table", "colophon_claims", "colophon_claims", SQLiteClaimStore.schema],
+    ]
 
     init(path: String, busyTimeoutMs: Int32, label: String) throws {
         queue = DispatchSerialQueue(label: label, qos: .userInitiated)
         var handle: OpaquePointer?
-        let flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_NOMUTEX | SQLITE_OPEN_EXRESCODE
+        var flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_NOMUTEX | SQLITE_OPEN_EXRESCODE
+        #if !os(macOS)
+        flags |= SQLITE_OPEN_FILEPROTECTION_COMPLETEUNTILFIRSTUSERAUTHENTICATION
+        #endif
         let rc = sqlite3_open_v2(path, &handle, flags, nil)
         guard rc == SQLITE_OK, let handle else {
             let message = handle.map { String(cString: sqlite3_errmsg($0)) } ?? "code \(rc)"
             if let handle { sqlite3_close_v2(handle) }
             throw ClaimStoreError.storage("the claim database could not be opened: \(message)")
         }
-        do {
-            sqlite3_busy_timeout(handle, busyTimeoutMs)
-            let mode = try Self.text(handle, "PRAGMA journal_mode = WAL")
-            guard mode?.lowercased() == "wal" else { throw ClaimStoreError.storage("the claim database refused WAL mode (\(mode ?? "none"))") }
-            try Self.exec(handle, "PRAGMA synchronous = FULL")
-            try Self.exec(handle, "PRAGMA fullfsync = ON")
-            try Self.exec(handle, "PRAGMA checkpoint_fullfsync = ON")
-            try Self.exec(handle, "PRAGMA trusted_schema = OFF")
-            guard try Self.text(handle, "PRAGMA synchronous") == "2" else { throw ClaimStoreError.storage("the claim database refused synchronous = FULL") }
-        } catch {
+        do { try Self.configure(handle, busyTimeoutMs: busyTimeoutMs) } catch {
             sqlite3_close_v2(handle)
             throw error
         }
         connection = Connection(handle)
     }
 
-    private func handle() throws -> OpaquePointer { connection.db }
+    /// Sets every setting the store's guarantees rest on, and reads each one back: SQLite accepts an unknown or
+    /// ignored pragma silently, so a setting is in force only when the connection reports it.
+    private static func configure(_ db: OpaquePointer, busyTimeoutMs: Int32) throws {
+        guard sqlite3_busy_timeout(db, busyTimeoutMs) == SQLITE_OK else { throw failure(db, "the claim database refused a busy timeout") }
+        let mode = try text(db, "PRAGMA journal_mode = WAL")
+        guard mode?.lowercased() == "wal" else { throw ClaimStoreError.storage("the claim database refused WAL mode (\(mode ?? "none"))") }
+        for setting in ["synchronous = FULL", "fullfsync = ON", "checkpoint_fullfsync = ON", "trusted_schema = OFF"] {
+            try exec(db, "PRAGMA " + setting)
+        }
+        let required: [(String, String)] = [("journal_mode", "wal"), ("synchronous", "2"), ("fullfsync", "1"), ("checkpoint_fullfsync", "1"),
+                                             ("trusted_schema", "0"), ("busy_timeout", String(busyTimeoutMs))]
+        for (pragma, value) in required {
+            let got = try text(db, "PRAGMA " + pragma)?.lowercased()
+            guard got == value else { throw ClaimStoreError.storage("the claim database reports \(pragma) = \(got ?? "nothing"), not \(value)") }
+        }
+    }
 
-    /// Creates the table if it does not exist, then checks its definition.
+    private func handle() throws -> OpaquePointer { connection.db }
+    func settings() throws -> [String: String] {
+        let db = try handle()
+        var out: [String: String] = [:]
+        for pragma in ["journal_mode", "synchronous", "fullfsync", "checkpoint_fullfsync", "trusted_schema", "busy_timeout"] {
+            out[pragma] = try Self.text(db, "PRAGMA " + pragma)
+        }
+        return out
+    }
+    func inject(readsFail: Bool, failBeforeCommit: Bool) { self.readsFail = readsFail; self.failBeforeCommit = failBeforeCommit }
+
+    /// Creates the table in an empty database, then checks that the database holds exactly what the store creates.
     func prepareSchema() throws {
         let db = try handle()
         try Self.exec(db, "BEGIN IMMEDIATE")
         do {
-            if try Self.definition(db) == nil { try Self.exec(db, SQLiteClaimStore.schema) }
+            if try Self.objects(db).isEmpty { try Self.exec(db, SQLiteClaimStore.schema) }
+            try Self.checkSchema(db)
             try Self.exec(db, "COMMIT")
         } catch {
             Self.rollback(db)
             throw error
         }
-        try checkSchema()
     }
-    /// Fails unless the table is exactly the one this store creates.
-    func checkSchema() throws {
-        guard try Self.definition(try handle()) == SQLiteClaimStore.schema else {
-            throw ClaimStoreError.unreadable("the claim table has another definition")
+    /// Fails unless the database holds exactly the store's table and its key's index.
+    func checkSchema() throws { try Self.checkSchema(try handle()) }
+
+    /// The held row, read in one transaction that first checks the schema.
+    func read(_ name: String) throws -> StoredClaim? {
+        if readsFail { throw ClaimStoreError.storage("the claim database could not be read (injected)") }
+        let db = try handle()
+        try Self.exec(db, "BEGIN")
+        do {
+            try Self.checkSchema(db)
+            let held = try Self.held(db, name)
+            try Self.exec(db, "COMMIT")
+            return held
+        } catch {
+            Self.rollback(db)
+            throw error
         }
     }
 
-    func read(_ name: String) throws -> StoredClaim? {
-        let db = try handle()
-        return try Self.held(db, name)
-    }
-
+    /// The compare-and-set: under the write lock (`BEGIN IMMEDIATE`), check the schema, read, compare, write, read the
+    /// row back and require it to be exactly what was written, then commit. Anything unexpected rolls back and throws.
     func compareAndSet(_ name: String, record: StoredClaim, expected: Fence?) throws -> SaveOutcome {
         let db = try handle()
         try Self.exec(db, "BEGIN IMMEDIATE")
         do {
+            try Self.checkSchema(db)
             let held = try Self.held(db, name)
             guard let next = ColophonHosts.compareAndSet(held: held, record: record, expected: expected) else {
                 try Self.exec(db, "ROLLBACK")
@@ -142,6 +199,8 @@ actor SQLiteConnection {
                 guard rc == SQLITE_DONE else { throw Self.failure(db, "the claim could not be written") }
                 guard sqlite3_changes(db) == 1 else { throw ClaimStoreError.storage("the claim write changed \(sqlite3_changes(db)) rows") }
             }
+            guard try Self.held(db, name) == next else { throw ClaimStoreError.storage("the claim read back is not the claim written") }
+            if failBeforeCommit { throw ClaimStoreError.storage("the claim write failed before its commit (injected)") }
             // The commit point: it returns only after the WAL is synced (synchronous = FULL, fullfsync).
             try Self.exec(db, "COMMIT")
             return .stored
@@ -184,8 +243,22 @@ actor SQLiteConnection {
             return sqlite3_column_text(statement, 0).map { String(cString: $0) }
         }
     }
-    private static func definition(_ db: OpaquePointer) throws -> String? {
-        try text(db, "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'colophon_claims'")
+    /// Every object in the database's schema, sorted.
+    private static func objects(_ db: OpaquePointer) throws -> [[String?]] {
+        try withStatement(db, "SELECT type, name, tbl_name, sql FROM sqlite_schema ORDER BY type, name") { statement in
+            var rows: [[String?]] = []
+            while true {
+                let rc = sqlite3_step(statement)
+                if rc == SQLITE_DONE { return rows }
+                guard rc == SQLITE_ROW else { throw failure(db, "the claim database's schema could not be read") }
+                rows.append((0..<4).map { c in sqlite3_column_text(statement, Int32(c)).map { String(cString: $0) } })
+            }
+        }
+    }
+    private static func checkSchema(_ db: OpaquePointer) throws {
+        guard try objects(db) == expectedSchema else {
+            throw ClaimStoreError.unreadable("the claim database holds something other than the claim table")
+        }
     }
     /// The row held for `name`, validated column by column.
     private static func held(_ db: OpaquePointer, _ name: String) throws -> StoredClaim? {

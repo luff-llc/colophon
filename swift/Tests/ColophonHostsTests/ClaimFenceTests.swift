@@ -25,7 +25,7 @@ import ColophonSession
     }
     func open(_ store: any ClaimStore, _ clock: ManualClock, log: Log<CellHostEvent>? = nil) async throws -> SessionCellHost {
         let (first, _) = try await LocalAccount.pair()
-        var options = CellHostOptions(account: try first.account(), carrier: Nowhere(), namespace: listening, cell: nowPlaying, store: store)
+        var options = CellHostOptions(source: try first.account(), carrier: Nowhere(), namespace: listening, cell: nowPlaying, store: store)
         options.clock = clock; options.policy = try Self.policy()
         return try await SessionCellHost.open(options) { log?.append($0) }
     }
@@ -229,6 +229,91 @@ import ColophonSession
         #expect(throws: (any Error).self) { try Self.exec(made, "INSERT INTO colophon_claims VALUES ('cell', 1, 0, x'00ff')") }
     }
 
+    @Test func everyDurabilitySettingIsReadBackOnBothConnections() async throws {
+        let path = Self.database()
+        defer { Self.remove(path) }
+        let store = try await SQLiteClaimStore(path: path, name: "cell", busyTimeout: .milliseconds(1_500))
+        for settings in try await store.settings() {
+            #expect(settings == ["journal_mode": "wal", "synchronous": "2", "fullfsync": "1", "checkpoint_fullfsync": "1", "trusted_schema": "0",
+                                 "busy_timeout": "1500"])
+        }
+    }
+
+    @Test func aSchemaObjectTheStoreDidNotMakeIsRefusedAtOpenAndAfter() async throws {
+        let f1 = try Fence(generation: 1, seq: 0), f2 = try Fence(generation: 1, seq: 1)
+        // Before open: a trigger, a view under the table's name, another table, another index.
+        let before = [
+            [SQLiteClaimStore.schema, "CREATE TRIGGER t AFTER INSERT ON colophon_claims BEGIN DELETE FROM colophon_claims; END"],
+            ["CREATE VIEW colophon_claims AS SELECT 'cell' AS name, 1 AS generation, 0 AS seq, NULL AS claim"],
+            [SQLiteClaimStore.schema, "CREATE TABLE other (x)"],
+            [SQLiteClaimStore.schema, "CREATE INDEX extra ON colophon_claims (seq)"],
+        ]
+        for statements in before {
+            let path = Self.database()
+            defer { Self.remove(path) }
+            for sql in statements { try Self.exec(path, sql) }
+            await #expect(throws: ClaimStoreError.self, "\(statements)") { _ = try await SQLiteClaimStore(path: path, name: "cell") }
+        }
+        // After open: a trigger that would delete or rewrite the row makes saves and reads fail, and the row stays.
+        for trigger in ["CREATE TRIGGER t AFTER UPDATE ON colophon_claims BEGIN DELETE FROM colophon_claims; END",
+                        "CREATE TRIGGER t AFTER UPDATE ON colophon_claims BEGIN UPDATE colophon_claims SET seq = 0; END"] {
+            let path = Self.database()
+            defer { Self.remove(path) }
+            let store = try await SQLiteClaimStore(path: path, name: "cell")
+            #expect(try await store.save(StoredClaim(claim: "a", fence: f1), expected: nil) == .stored)
+            try Self.exec(path, trigger)
+            await #expect(throws: ClaimStoreError.self) { _ = try await store.save(StoredClaim(claim: "b", fence: f2), expected: f1) }
+            await #expect(throws: ClaimStoreError.self) { _ = try await store.fence() }
+            try Self.exec(path, "DROP TRIGGER t")
+            #expect(try await store.load() == StoredClaim(claim: "a", fence: f1))
+        }
+    }
+
+    @Test func aWriteThatFailsBeforeItsCommitRollsBackAndTheNextSaveWorks() async throws {
+        let path = Self.database()
+        defer { Self.remove(path) }
+        let store = try await SQLiteClaimStore(path: path, name: "cell")
+        let f1 = try Fence(generation: 1, seq: 0), f2 = try Fence(generation: 1, seq: 1)
+        #expect(try await store.save(StoredClaim(claim: "a", fence: f1), expected: nil) == .stored)
+        await store.inject(failBeforeCommit: true)
+        await #expect(throws: ClaimStoreError.self) { _ = try await store.save(StoredClaim(claim: "b", fence: f2), expected: f1) }
+        let other = try await SQLiteClaimStore(path: path, name: "cell")
+        #expect(try await other.load() == StoredClaim(claim: "a", fence: f1), "nothing of the failed write is visible")
+        await store.inject()
+        #expect(try await store.save(StoredClaim(claim: "b", fence: f2), expected: f1) == .stored, "the connection is not left in a transaction")
+    }
+
+    @Test func aClientThatCannotTakeTheWriteLockFailsItsSaveAtTheBusyTimeout() async throws {
+        let path = Self.database()
+        defer { Self.remove(path) }
+        let store = try await SQLiteClaimStore(path: path, name: "cell", busyTimeout: .milliseconds(200))
+        let f1 = try Fence(generation: 1, seq: 0)
+        let holder = try RawDatabase(path)
+        try holder.exec("BEGIN IMMEDIATE")
+        let started = ContinuousClock.now
+        await #expect(throws: ClaimStoreError.self) { _ = try await store.save(StoredClaim(claim: "a", fence: f1), expected: nil) }
+        let waited = ContinuousClock.now - started
+        #expect(waited >= .milliseconds(150) && waited < .seconds(3), "\(waited)")
+        try holder.exec("COMMIT")
+        #expect(try await store.load() == nil, "a save that failed wrote nothing")
+        #expect(try await store.save(StoredClaim(claim: "a", fence: f1), expected: nil) == .stored)
+    }
+
+    @Test func aCellWhoseSQLiteReadsStartFailingFailsClosedWithReasonStore() async throws {
+        // As on a device whose database became unreadable (a protection class locked away, a failing disk).
+        let path = Self.database()
+        defer { Self.remove(path) }
+        let clock = ManualClock()
+        let store = try await SQLiteClaimStore(path: path, name: "cell")
+        let log = Log<CellHostEvent>()
+        let host = try await open(store, clock, log: log)
+        await store.inject(readsFail: true)
+        for _ in 0..<5 { await clock.advance(Self.beat) }
+        await eventually { log.all.contains { if case .failed(.store, _) = $0 { true } else { false } } }
+        #expect(await host.state == .failed)
+        host.close()
+    }
+
     struct SQLFailure: Error { let message: String }
     static func exec(_ url: URL, _ sql: String) throws {
         var db: OpaquePointer?
@@ -245,6 +330,20 @@ import ColophonSession
         defer { sqlite3_finalize(statement) }
         guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
         return sqlite3_column_text(statement, 0).map { String(cString: $0) }
+    }
+}
+
+/// A raw connection to a database file, for holding its write lock.
+final class RawDatabase {
+    let db: OpaquePointer
+    init(_ url: URL) throws {
+        var handle: OpaquePointer?
+        guard sqlite3_open(url.path, &handle) == SQLITE_OK, let handle else { throw ClaimFenceTests.SQLFailure(message: "open") }
+        db = handle
+    }
+    deinit { sqlite3_close(db) }
+    func exec(_ sql: String) throws {
+        guard sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK else { throw ClaimFenceTests.SQLFailure(message: String(cString: sqlite3_errmsg(db))) }
     }
 }
 
