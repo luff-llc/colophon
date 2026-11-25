@@ -242,7 +242,7 @@ account with two members A and B entitled to write `listening.podcasts`, each wi
    when A asks: B's `pass` is sent only after its write completes (about 502 ms), A's `ack` only
    after A's; frames and a tick arriving meanwhile are kept and run after, a command B issued during
    its write is held and run after it, and nothing is lost (`queueFull` never occurs).
-5. **Revocation mid-session**, with nothing injected. B revokes A by an authority change on its own
+5. **Revocation mid-session**, with no frame or authority change forged. B revokes A by an authority change on its own
    device (both devices hold the person's owner key) and installs the new head before the home has
    it. A, still on the old head, publishes over its socket; the home still carries the frame, and
    B's endpoint drops it on arrival (`delegation`), changing nothing. Once B's pass gives the home
@@ -306,7 +306,9 @@ listeners. A `ClaimStore` must not block its caller: the shipped SQLite store mo
 
 Everything else is §2 and §3 as written: the same steps, effects in order, the acknowledgement only after the durable
 write, single-flight fenced saves with a write deadline and bounded attempts, the reservation on open and rebuild, the
-beat-by-beat fence check with three misses failing closed, the bounded command hold, `staleAccount`, `clockBackwards`,
+beat-by-beat fence check with three misses failing closed (and a stale save whose held fence cannot be read is a
+failed attempt with the backoff; every stale save is charged, so a store that keeps answering stale ends in
+`fail(store)` rather than saving without bound), the bounded command hold, `staleAccount`, `clockBackwards`,
 `wrongView`, a new session number, `gated`, and `ask` answered by `pass` between live devices.
 
 ### 6.2 The JVM stores
@@ -336,13 +338,21 @@ INTEGER, seq INTEGER)`, one row per cell.
   half that is not an integer in range, is `ClaimStoreCorrupt` from `load`, `fence` and `save`.
 
 `SqliteClaimStoreTest` (an instrumented test in `sdk/android/src/androidTest`) races six clients of one file from one
-fence over 25 rounds (exactly one stores each time), checks a stale save writes nothing, a reopen, the journal mode,
-and fail-closed rows and schemas. It needs a device or an emulator.
+fence over 25 rounds (exactly one stores each time), checks a stale save writes nothing, a reopen, the journal and
+synchronous modes of the store's own connection, and fail-closed rows and schemas. It needs a device or an emulator
+and has not been run: the store's behaviour on Android is unverified until it runs on devices. Not covered even by
+that test: several processes on one file, `SQLITE_BUSY` under contention, a corrupt or truncated file, a commit that
+fails, durability across a power loss, and the schema changing after the store opened.
 
 ### 6.4 The transport
 
 The host owns the socket's lifecycle through `SocketFactory.open(url, handlers): HostSocket` (`send(text)`,
-`close(code)`) and `SocketHandlers` (`open`, `message`, `refused(answer)`, `closed(code?)`), reported from any thread.
+`close(code)`) and `SocketHandlers` (`open`, `message`, `refused(answer)`, `closed(code?)`), reported from any thread. The stream client is only ever called on the stream
+host's own queue: `status`, `polling`, `cursor` and `live` are what the host published after its last job, and a
+cell's `sendSession(frame, lost)` puts the frame on the stream host's queue (frames keep their order) and returns
+false at once when the stream is not live. A frame refused then is `Unsent(carrier)`, as in the JavaScript host; one
+taken and then not carried (the socket ended first) is reported afterwards as `Unsent(carrierLost)`. Either is loss
+the endpoint is never told of, as in the reference loop.
 The host owns a socket before any listener hears of it, ignores reports from a socket it replaced, and `stop()` closes
 the current socket at once from any thread, including one whose upgrade is still outstanding.
 
@@ -446,15 +456,22 @@ and checks its committed test-only bindings (`sdk/kotlin/src/conformance`), buil
 files in `sdk/kotlin/build/native` (another checkout sharing the cargo target cannot replace them mid-run), and runs
 every Kotlin test. The 0.6 host tests are `com.luff.colophon.hosts.*`:
 
-- `StreamHostTest` (15), `CellHostTest` (22), `ClaimFenceTest` (5: two clients opening in all six interleavings, a
+- `StreamHostTest` (15), `StreamConcurrencyTest` (1: eight threads sending 300 frames each while the home sends 500,
+  five rounds; every client call is on the stream host's own thread and each sender's frames are carried once, in
+  order), `CellHostTest` (24), `ClaimFenceTest` (5: two clients opening in all six interleavings, a
   rebuild racing an open in all three, eight threads racing the memory store from one fence over 20 rounds, a
   superseded holder stopping within one beat, fences out of range), `FramesTest` (4), on the core's real objects with
   a manual clock, a driven dispatcher and fake sockets, transports and stores, as the JavaScript tests do.
 - `ConformanceTest` (3): the 26 machine transcripts, the 9 `offset.json` cases and `wire/vectors.json` (frames,
   scenario steps and negative frames), strict decoding, and that no shipped source names the conformance surface.
-- `HandoffTest` and `ScenariosTest`: the end-to-end proof of §4 through the Kotlin hosts over `java.net.http`
-  WebSockets to the reference relay, which binds a port of its own choosing (port 0) and whose standard error is kept
-  and shown when a test fails. All five journeys pass. In journey 4 each write takes 200 ms, below the fast policy's
+- `HandoffTest` and `ScenariosTest`: the five journeys of §4 through the Kotlin hosts. Real: the reference relay
+  (`relay/server.js` on Bun with the Rust home module built from this tree, bound on a port of its own choosing, its
+  standard error kept and shown when a test fails), the JDK's WebSocket client over loopback, both members'
+  `ColophonSession`s and engines, their real exchange passes, ticket calls, delegations and revocation. Not real: a
+  wrapper that rewrites the account's `https` name to the loopback address and can cut a member's network (it closes
+  the sockets and fails requests), in-memory record media, `TestStore` (an in-memory claim store whose writes can be
+  delayed), the relay's test clock, and, in `ScenariosTest`, a shortened policy (beat 400 ms, holder timeout 1.5 s,
+  ask timeout 300 ms). All five journeys pass. In journey 4 each write takes 200 ms, below the fast policy's
   `askTimeoutMs` (300 ms): a holder sends nothing while its write is outstanding, and an asker that hears no holder
   frame for `askTimeoutMs` after asking may take (§S5), so with a 500 ms write the asker sometimes, correctly, takes
   instead of being passed to.
