@@ -115,6 +115,14 @@ session.state.collect { render(it.phase, it.notices) }                    // pen
   `notices.unseenActivations` and `acknowledgeActivation(seq)`, `notices.noHome`, `duties` (sole device,
   submissions, dead transitions, the removal follow-up with `removeFollowUp` / `keepFollowUp`). `duties` also exposes
   optional route-registration state for host extensions; routes are not a 0.5 requirement.
+* **Removing and replacing keys**: `checkRemoval(id, replacingWith, roles, cosigners)` (a `RemovalCheck` with a refusal and the
+  spec §6.4 warnings, before anything is signed), `removeController(id, cosigners)` (one transition, rotating the vault at once
+  when every remaining passkey is present), `replaceController(id, key, label, roles, cosigners)` (one transition, or staged when
+  the old key is the only one that can rotate the seed), `completeKeyChanges(cosigners)` (the `vault` entry while the vault is
+  retiring, then the `rekey`) and `restoreSlot(key, label)` for `duties.keysWithoutSlot`. `cosigners` on `addController`,
+  `appointHomes`, `proposeTransition` and these calls make a full set when every control key signs. They answer
+  `KeyringChange.Done` or `KeyringChange.Pending(transitions)`; call again with the same arguments. See
+  [session.md](session.md) "Removing and replacing keys".
 * **Lock** on `onStop` (`lock()`), `unlock()` on `onStart`. `shutdown()` locks the engine and stops the loops.
 * Background exchange polls every `duties.pollIntervalMs`; `requestSync()` wakes it, `stopSync()` stops it.
 

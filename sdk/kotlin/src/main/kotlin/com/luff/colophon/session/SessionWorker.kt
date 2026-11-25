@@ -98,12 +98,12 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
     /** Internal so a test can hold it: an operation queued behind it stays in flight exactly as long as the test says. */
     internal val gate = Mutex()
     private var memberKeys: AsyncKeyProvider = SessionKeys(configuration.keys)
-    @Volatile private var engine: ColophonEngine? = null
+    @Volatile internal var engine: ColophonEngine? = null
         set(value) { field = value; if (value == null) memberOpened = false }
     @Volatile private var memberCustody: KeyCustody? = null
     var accountId: String? = null; private set
     var memberId: String? = null; private set
-    private var journal = SessionJournal()
+    internal var journal = SessionJournal()
     private var journalLoaded = false
     private var locked = false
     private var revision = 0L
@@ -130,7 +130,7 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
      * uncancellable where it happens: a finish and the persistence of its stores (`ColophonEngine.execute` with
      * `persistOn`), an exchange answer and its stores, `record_due` and its stores, and the abort of a pass.
      */
-    private suspend fun <T> gated(body: suspend () -> T): T = withContext(lane) {
+    internal suspend fun <T> gated(body: suspend () -> T): T = withContext(lane) {
         gate.withLock {
             currentCoroutineContext().ensureActive()
             body()
@@ -141,13 +141,13 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
     // Storage
 
     fun storage(): RecordMedium = configuration.medium
-    private fun loadJournal() {
+    internal fun loadJournal() {
         if (journalLoaded) return
         journal = AtomicFile.read(journalFile, 8 * 1024 * 1024)?.let { SessionJournal.decode(it) } ?: SessionJournal()
         journalLoaded = true
     }
-    private fun saveJournal() = AtomicFile.write(journalFile, journal.encode())
-    private val nowMs: Long get() = configuration.now()
+    internal fun saveJournal() = AtomicFile.write(journalFile, journal.encode())
+    internal val nowMs: Long get() = configuration.now()
 
     /** Persists the stores of one finished step, all or none. If the disk refuses, the engine is ahead of the disk: discard it. */
     private suspend fun persist(stores: List<Store>, on: ColophonEngine? = null) {
@@ -159,9 +159,9 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
             throw e
         }
     }
-    private suspend fun persist(written: Written, on: ColophonEngine? = null) = persist(written.stores, on)
+    internal suspend fun persist(written: Written, on: ColophonEngine? = null) = persist(written.stores, on)
     /** Persists a finish's stores in the same uncancellable step as the finish (`ColophonEngine.execute`). */
-    private fun persistOn(on: ColophonEngine?): suspend (Written) -> Unit = { persist(it, on) }
+    internal fun persistOn(on: ColophonEngine?): suspend (Written) -> Unit = { persist(it, on) }
 
     // Opening
 
@@ -185,13 +185,13 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
     }
     /** Owner engines open right now (each lives for one owner operation), so `lock` can lock them too. */
     private val openOwners = HashSet<ColophonEngine>()
-    private fun <T : ColophonEngine?> tracked(owner: T): T { if (owner != null) synchronized(openOwners) { openOwners.add(owner) }; return owner }
-    private suspend fun release(owner: ColophonEngine) { owner.lock(); synchronized(openOwners) { openOwners.remove(owner) } }
+    internal fun <T : ColophonEngine?> tracked(owner: T): T { if (owner != null) synchronized(openOwners) { openOwners.add(owner) }; return owner }
+    internal suspend fun release(owner: ColophonEngine) { owner.lock(); synchronized(openOwners) { openOwners.remove(owner) } }
     suspend fun unlock(): SessionSnapshot = gated { locked = false; reconcile() }
 
-    private fun listed(entries: List<MediumEntry>) = entries.map { ListedPath(it.path, it.version) }
+    internal fun listed(entries: List<MediumEntry>) = entries.map { ListedPath(it.path, it.version) }
 
-    private suspend fun reconcile(): SessionSnapshot {
+    internal suspend fun reconcile(): SessionSnapshot {
         loadJournal()
         if (journal.left) return snapshot(SessionPhase.NoLibrary)
         if (locked) return snapshot(SessionPhase.Locked)
@@ -449,7 +449,12 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
             }
         }
         val delay = policy.recoveryDelay.toLong() / 6
+        val retiring = notices.notices.vaultRetiring
+        val controllerLabels = controllers.associate { it.id to it.label }
         return HostDuties(
+            vaultRotationOwed = retiring,
+            rekeyOwed = if (retiring) listOf() else rekeyOwed(engine) ?: listOf(),
+            keysWithoutSlot = notices.notices.controllersWithoutSlot.map { RemovalCard.Item(it, controllerLabels[it] ?: it.take(8)) },
             soleDevice = controllers.count { ControllerRole.CONTROL in it.roles && !it.suspended } <= 1,
             routes = routes, deadTransitions = dead, removals = removals,
             homeLabels = homes.associate { it.id to it.label },
@@ -474,10 +479,12 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
     }
 
     /** Signs a transition with the owner's keys, stores it, and keeps its change so a dead one can be signed again. */
-    suspend fun submitTransition(changeJson: String, rule: RuleKind = RuleKind.CONTROL): Pair<String, SessionSnapshot> = gated {
+    suspend fun submitTransition(changeJson: String, rule: RuleKind = RuleKind.CONTROL, cosigners: List<AsyncKeyProvider> = listOf()): Pair<String, SessionSnapshot> = gated {
         if (engine == null) reconcile()
-        val digest = withOwner { owner, custody, ownerId ->
-            val signers = signers(owner, ownerId, SignerNeed.CONTROL)
+        val cosignerIds = keyIds(cosigners)
+        val digest = withOwner { owner, ownerCustody, ownerId ->
+            val custody = merged(ownerCustody, cosigners)
+            val signers = signerSet(owner, ownerId, if (rule == RuleKind.RECOVERY) SignerNeed.RECOVERY else SignerNeed.CONTROL, cosignerIds)
             val written = owner.execute(custody, persistOn(owner)) { it.beginTransition(changeJson, signers, rule, ByteArray(0)) }
             objectDigest(written.stores, "transitions/") ?: ""
         }
@@ -651,7 +658,7 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
     // Owner operations
 
     /** Opens a controller engine for the owner, unlocks it by the owner's slot, runs `body`, locks it. */
-    private suspend fun <T> withOwner(body: suspend (ColophonEngine, KeyCustody, String) -> T): T {
+    internal suspend fun <T> withOwner(body: suspend (ColophonEngine, KeyCustody, String) -> T): T {
         val account = accountId ?: throw SessionError.NotReady()
         val custody = ownerCustody()
         val ownerId = KeyCustody.keyId(configuration.ownerController)
@@ -669,7 +676,7 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
             release(owner)
         }
     }
-    private suspend fun ownerCustody(): KeyCustody =
+    internal suspend fun ownerCustody(): KeyCustody =
         KeyCustody.of(listOfNotNull(SessionKeys(configuration.ownerController), configuration.recoveryKeys?.let { SessionKeys(it) }))
 
     /** Opens the controller's own slot with the owner's key (a PRF ceremony for a passkey, a silent ECDH for a device key). */
@@ -680,7 +687,7 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
         val inputs = owner.run { it.beginUnlockSlot(slot.index) }
         owner.finishUnlockSlot(slot.index, custody.answerUnlock(inputs))
     }
-    private suspend fun signers(owner: ColophonEngine, ownerId: String, need: SignerNeed): List<String> {
+    internal suspend fun signers(owner: ColophonEngine, ownerId: String, need: SignerNeed): List<String> {
         val chosen = owner.run { it.suggestSigners(listOf(ownerId), need) }
         return chosen.ifEmpty { listOf(ownerId) }
     }
@@ -716,7 +723,7 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
             }
             if (follow.controllers.isNotEmpty()) {
                 val signers = signers(owner, ownerId, SignerNeed.CONTROL)
-                owner.execute(custody, persistOn(owner)) { e -> withEntropy(32) { e.beginRemoveController(follow.controllers, listOf(), signers, RuleKind.CONTROL, false, it) } }
+                owner.execute(custody, persistOn(owner)) { it.beginRemoveController(follow.controllers, listOf(), signers, RuleKind.CONTROL, false, ByteArray(0)) }
             }
         }
         loadJournal()
@@ -738,11 +745,14 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
         reconcile()
     }
     /** Adds a controller key (a second device, a passkey, a security key); the new key signs its own possession proof. */
-    suspend fun addController(spec: ControllerSpec, mode: AddMode, possession: AsyncKeyProvider): SessionSnapshot = gated {
+    suspend fun addController(spec: ControllerSpec, mode: AddMode, possession: AsyncKeyProvider, cosigners: List<AsyncKeyProvider> = listOf()): SessionSnapshot = gated {
         if (engine == null) reconcile()
+        val cosignerIds = keyIds(cosigners)
         withOwner { owner, ownerCustody, ownerId ->
-            val custody = ownerCustody.merging(accountKeyId(spec.key.signing), SessionKeys(possession))
-            val signers = signers(owner, ownerId, SignerNeed.CONTROL)
+            val custody = merged(ownerCustody, cosigners).merging(accountKeyId(spec.key.signing), SessionKeys(possession))
+            // Cosigners sign a transition (so every control key can make it a full set, §8.7), not an immediate entry.
+            val signers = if (mode == AddMode.TRANSITION && cosignerIds.isNotEmpty()) signerSet(owner, ownerId, SignerNeed.CONTROL, cosignerIds)
+                else signers(owner, ownerId, SignerNeed.CONTROL)
             owner.execute(custody, persistOn(owner)) { it.beginAddController(spec, mode, signers, RuleKind.CONTROL, ByteArray(0)) }
         }
         reconcile()
@@ -780,6 +790,10 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
     internal enum class AppointStep { SIGNED, RECORDED, SLOTTED }
     /** Tests only: [appointHomes] throws right after this step, as if the process died there. */
     @Volatile internal var appointStopForTests: AppointStep? = null
+    /** Tests only: `removeController` / `replaceController` throw right after this step, as if the process died there. */
+    @Volatile internal var keyringStopForTests: KeyringStep? = null
+    /** The namespaces owed a `rekey`, for the authority head (seq, digest) they were computed at. */
+    internal var rekeyCache: Triple<ULong, String, List<String>?>? = null
     internal class AppointStopped : Exception("stopped for a test")
     private fun reached(step: AppointStep) { if (appointStopForTests == step) throw AppointStopped() }
 
@@ -798,7 +812,8 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
      * or does not name the configured endpoint, and a key already present (or pending) with another label or roles, are
      * refused (`InvalidCommand`) before anything is signed.
      */
-    suspend fun appointHomes(homes: List<HomeConfiguration>, adding: Pair<ControllerSpec, AsyncKeyProvider>?): Pair<HomesAppointment, SessionSnapshot> = gated {
+    suspend fun appointHomes(homes: List<HomeConfiguration>, adding: Pair<ControllerSpec, AsyncKeyProvider>?,
+                             cosigners: List<AsyncKeyProvider> = listOf()): Pair<HomesAppointment, SessionSnapshot> = gated {
         if (!homes.all { it.isAllowed }) throw SessionError.InsecureHome()
         if (engine == null) reconcile()
         val account = accountId ?: throw SessionError.NotReady()
@@ -807,7 +822,9 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
         var signedChange: Pair<String, String>? = null
         fun covers(endpoints: List<String>, configured: HomeConfiguration) = endpoints.any { it.trim('/') == configured.endpoint.trim('/') }
         fun isCurrent(configured: HomeConfiguration, current: List<Home>) = current.any { it.status == HomeStatus.HOME && covers(it.endpoints, configured) }
-        val outcome = withOwner<HomesAppointment> { owner, ownerCustody, ownerId ->
+        val cosignerIds = keyIds(cosigners)
+        val outcome = withOwner<HomesAppointment> { owner, heldCustody, ownerId ->
+            val ownerCustody = merged(heldCustody, cosigners)
             val custody = if (adding != null && addedId != null) ownerCustody.merging(addedId, SessionKeys(adding.second)) else ownerCustody
             // What the pending transitions of this owner already appoint (by endpoint) or add (by controller JSON).
             val mine = owner.run { it.pending() }.filter { it.by == ownerId }
@@ -857,7 +874,7 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
                     if (appoint.isNotEmpty()) change["homes"] = mapOf("appoint" to appoint)
                     if (add.isNotEmpty()) change["keyring"] = mapOf("add" to add)
                     val json = Json.write(change)
-                    val signers = signers(owner, ownerId, SignerNeed.CONTROL)
+                    val signers = signerSet(owner, ownerId, SignerNeed.CONTROL, cosignerIds)
                     val written = owner.execute(appointmentCustody, persistOn(owner)) { it.beginTransition(json, signers, RuleKind.CONTROL, ByteArray(0)) }
                     objectDigest(written.stores, "transitions/")?.let { inFlight.add(it); signedChange = it to json }
                     reached(AppointStep.SIGNED)
@@ -895,7 +912,7 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
         outcome to reconcile()
     }
     /** The `change` of a stored transition (its body's), or null. */
-    private fun pendingChange(digest: String): Map<*, *>? = try {
+    internal fun pendingChange(digest: String): Map<*, *>? = try {
         val envelope = Json.obj(String(storage().read("transitions/$digest.json"), Charsets.UTF_8))
         val body = Json.obj(String(Base64.getDecoder().decode(envelope?.get("body") as String), Charsets.UTF_8))
         body?.get("change") as? Map<*, *>

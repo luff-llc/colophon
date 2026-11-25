@@ -337,9 +337,14 @@ class ColophonSession(configuration: SessionConfiguration) : AutoCloseable {
     // Adding a device, pending changes
 
     /** Adds a controller key (a second device's owner key, a passkey, a security key). The owner confirms. */
-    suspend fun addController(key: AsyncKeyProvider, label: String, roles: List<ControllerRole> = listOf(ControllerRole.APPROVE), immediate: Boolean = true) = owner {
+    /**
+     * With `immediate = false` it is a transition: [cosigners] (other control keys the person holds here) sign it beside the
+     * owner, so that with every control key signing it is a full set (spec §8.7) and takes effect without the delay.
+     */
+    suspend fun addController(key: AsyncKeyProvider, label: String, roles: List<ControllerRole> = listOf(ControllerRole.APPROVE), immediate: Boolean = true,
+                              cosigners: List<AsyncKeyProvider> = listOf()) = owner {
         val d = key.keyDescriptor()
-        worker.addController(ControllerSpec(d, label, roles, d.form == SignForm.WEBAUTHN, null, listOf()), if (immediate) AddMode.IMMEDIATE else AddMode.TRANSITION, key)
+        worker.addController(ControllerSpec(d, label, roles, d.form == SignForm.WEBAUTHN, null, listOf()), if (immediate) AddMode.IMMEDIATE else AddMode.TRANSITION, key, cosigners)
     }
     /**
      * Appoints `homes` to an account that has none yet (one created with `createWithoutHome`), and with `adding` adds that
@@ -354,13 +359,14 @@ class ColophonSession(configuration: SessionConfiguration) : AutoCloseable {
      * names its endpoint; a request that names another account or not that endpoint, or a key already present with another
      * label or roles, is `InvalidCommand` before anything is signed.
      */
-    suspend fun appointHomes(homes: List<HomeConfiguration>, adding: AdditionalController? = null): HomesAppointment = facade {
+    suspend fun appointHomes(homes: List<HomeConfiguration>, adding: AdditionalController? = null,
+                             cosigners: List<AsyncKeyProvider> = listOf()): HomesAppointment = facade {
         restore()
         val added = adding?.let { a ->
             val d = a.provider.keyDescriptor()
             ControllerSpec(d, a.label, a.roles, d.form == SignForm.WEBAUTHN, null, listOf()) to a.provider
         }
-        val outcome = try { val (o, s) = worker.appointHomes(homes, added); apply(s); o }
+        val outcome = try { val (o, s) = worker.appointHomes(homes, added, cosigners); apply(s); o }
         catch (e: CancellationException) { throw e } catch (e: Exception) { handleCommandError(e); throw e }
         if (homes.isNotEmpty() && !homesConfigured) { homesConfigured = true; set { copy(syncState = HomeSyncState.Idle) } }
         startSyncLoop()
@@ -382,14 +388,77 @@ class ColophonSession(configuration: SessionConfiguration) : AutoCloseable {
         owner { worker.veto(transition) }
         submitUntilReceipted(transition, Submission.Kind.VETO)
     }
-    /** Proposes a change to the account (spec §8.7: homes, keyring, policy) signed with the owner's keys, and submits it. Returns its digest. */
-    suspend fun proposeTransition(changeJson: String): String = facade {
+    /**
+     * Proposes a change to the account (spec §8.7: homes, keyring, policy) signed with the owner's keys and [cosigners] (other
+     * control or recover keys the person holds here: with every control key signing, and at least two units, it is a full set,
+     * final without the delay), and submits it. Returns its digest. To remove or replace a controller use [removeController] or
+     * [replaceController], which also rotate the vault (a bare `keyring.remove` here leaves it retiring, spec §8.3).
+     */
+    suspend fun proposeTransition(changeJson: String, cosigners: List<AsyncKeyProvider> = listOf()): String = facade {
         restore()
-        val digest = try { val (d, s) = worker.submitTransition(changeJson); apply(s); d }
+        val digest = try { val (d, s) = worker.submitTransition(changeJson, cosigners = cosigners); apply(s); d }
         catch (e: CancellationException) { throw e } catch (e: Exception) { handleCommandError(e); throw e }
         submitUntilReceipted(digest, Submission.Kind.TRANSITION)
         digest
     }
+    // Removing and replacing keys (§8.3)
+
+    /**
+     * What removing controller `id` would do, before anything is signed: a refusal ([removeController] throws `InvalidCommand`
+     * for it), whether the vault rotates at once, and the spec §6.4 warnings a host MUST show first. With [replacingWith], what
+     * [replaceController] would do. Nothing is asked of any key.
+     */
+    suspend fun checkRemoval(id: String, replacingWith: AsyncKeyProvider? = null,
+                             roles: List<ControllerRole> = listOf(ControllerRole.CONTROL, ControllerRole.RECOVER),
+                             cosigners: List<AsyncKeyProvider> = listOf()): RemovalCheck = facade {
+        restore()
+        worker.checkRemoval(id, replacingWith, roles, cosigners)
+    }
+    /**
+     * Removes controller `id` (a lost passkey, say) by ONE transition (spec §8.7) signed by the owner and [cosigners], and
+     * submits it to every home like [proposeTransition]. It lists the `approve` or `sign` keys the removed key added (§8.4).
+     * When the removed key had a slot and every remaining passkey's credential is held here, the transition rotates the vault
+     * at once (§8.3); otherwise the vault retires when it activates and this call, made again then, writes the `vault` entry.
+     * After the rotation it appends the `rekey` of every namespace. [KeyringChange.Pending] while the transition waits out its
+     * delay (a full set does not wait) or a duty is left; call it again with the same arguments: it never signs twice.
+     */
+    suspend fun removeController(id: String, cosigners: List<AsyncKeyProvider> = listOf()): KeyringChange = facade {
+        restore()
+        val outcome = try { val (o, s) = worker.removeController(id, cosigners); apply(s); o }
+        catch (e: CancellationException) { throw e } catch (e: Exception) { handleCommandError(e); throw e }
+        if (outcome is KeyringChange.Pending) for (digest in outcome.transitions) submitUntilReceipted(digest, Submission.Kind.TRANSITION)
+        outcome
+    }
+    /**
+     * Replaces controller `id` (the first passkey, say) with [key]: the new key signs its possession proof with PRF in the same
+     * assertion (spec §7.2), so there is never a moment with fewer ways in. When this device keeps another key that can rotate
+     * the vault it is ONE transition adding the new key and removing the old one; otherwise (spec §8.3) it is staged: the new
+     * key is added, builds its own slot, then the old key is removed with a rotation signed by both. Answers like
+     * [removeController]. When `id` is this device's owner key, configure [key] as the owner controller afterwards.
+     */
+    suspend fun replaceController(id: String, key: AsyncKeyProvider, label: String,
+                                  roles: List<ControllerRole> = listOf(ControllerRole.CONTROL, ControllerRole.RECOVER),
+                                  cosigners: List<AsyncKeyProvider> = listOf()): KeyringChange = facade {
+        restore()
+        val d = key.keyDescriptor()
+        val spec = ControllerSpec(d, label, roles, d.form == SignForm.WEBAUTHN, null, listOf())
+        val outcome = try { val (o, s) = worker.replaceController(id, spec, key, cosigners); apply(s); o }
+        catch (e: CancellationException) { throw e } catch (e: Exception) { handleCommandError(e); throw e }
+        if (outcome is KeyringChange.Pending) for (digest in outcome.transitions) submitUntilReceipted(digest, Submission.Kind.TRANSITION)
+        outcome
+    }
+    /**
+     * Does what a removal left this host (`duties.vaultRotationOwed`, `duties.rekeyOwed`): the `vault` entry while the vault is
+     * retiring, then the `rekey`. A passkey owner is asked to unlock, so call it when the duties show something.
+     */
+    suspend fun completeKeyChanges(cosigners: List<AsyncKeyProvider> = listOf()): KeyringChange = facade {
+        restore()
+        try { val (o, s) = worker.completeKeyChanges(cosigners); apply(s); o }
+        catch (e: CancellationException) { throw e } catch (e: Exception) { handleCommandError(e); throw e }
+    }
+    /** "Use this key once more" (`duties.keysWithoutSlot`): gives [key], a current controller without a slot, its own slot. */
+    suspend fun restoreSlot(key: AsyncKeyProvider, label: String) = owner { worker.restoreSlot(key, label) }
+
     /** Signs a dead transition this device signed again and submits the new one. */
     suspend fun resign(transition: String): String = facade {
         restore()

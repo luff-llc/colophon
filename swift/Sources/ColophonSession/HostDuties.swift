@@ -91,6 +91,16 @@ public struct HostDuties: Equatable, Sendable {
     public var deadTransitions: [DeadTransition] = []
     /// Removals whose follow-up the person has not answered yet.
     public var removals: [RemovalFollowUp] = []
+    /// The vault is retiring (spec §8.3): a removal took effect without a rotation. A host holding a remaining `control` or
+    /// `recover` key that was current before the removal MUST rotate it (`ColophonSession.completeKeyChanges()`); until
+    /// then no epoch can be introduced and the removed key can read what is written.
+    public var vaultRotationOwed = false
+    /// Namespaces whose latest epoch is older than the latest vault rotation (spec §8.3): a `rekey` is owed before new
+    /// records are sealed (`ColophonSession.completeKeyChanges()`, which `removeController` and `replaceController` run).
+    public var rekeyOwed: [String] = []
+    /// Remaining controllers with no slot in the current vault (spec §6.4, §8.3): each needs to be used once more on a
+    /// device that holds the vault (`ColophonSession.restoreSlot(for:label:)`) before it can open the library alone.
+    public var keysWithoutSlot: [RemovalFollowUp.Item] = []
     /// Home labels by ID, for receipt times.
     public var homeLabels: [String: String] = [:]
     /// How often the session polls the homes now: `recoveryDelay` / 6, or 15 s while something is pending.

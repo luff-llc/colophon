@@ -81,7 +81,7 @@ actor SessionWorker {
     let configuration: SessionConfiguration
     private var memberKeys: any AsyncKeyProvider
     private var medium: (any RecordMedium)?
-    private var engine: ColophonEngine? { didSet { if engine == nil { memberOpened = false } } }
+    var engine: ColophonEngine? { didSet { if engine == nil { memberOpened = false } } }
     private var memberCustody: KeyCustody?
     /// The listing the engine last took (see `take(_:into:)`). Nil means the next reconcile refreshes in full.
     private var listingBaseline: ListingBaseline?
@@ -92,7 +92,7 @@ actor SessionWorker {
     private(set) var incrementalRefreshes = 0
     private(set) var accountID: String?
     private(set) var memberID: String?
-    private var journal = SessionJournalFile()
+    var journal = SessionJournalFile()
     private var journalLoaded = false
     private var locked = false
     /// A replacement of already accepted authority cannot be used for credential discovery in
@@ -224,7 +224,7 @@ actor SessionWorker {
     }
     func enter() async { if occupied { await withCheckedContinuation { waiters.append($0) } } else { occupied = true } }
     func exit() { if waiters.isEmpty { occupied = false } else { waiters.removeFirst().resume() } }
-    private func gated<T: Sendable>(_ body: () async throws -> T) async throws -> T {
+    func gated<T: Sendable>(_ body: () async throws -> T) async throws -> T {
         await enter(); defer { exit() }
         try Task.checkCancellation()
         return try await body()
@@ -237,15 +237,15 @@ actor SessionWorker {
         let resolved = try configuration.location.resolve(); medium = resolved; return resolved
     }
     func changes() throws -> AsyncStream<Void> { try storage().changes() }
-    private func loadJournal() throws {
+    func loadJournal() throws {
         guard !journalLoaded else { return }
         do { journal = try JSONDecoder().decode(SessionJournalFile.self, from: AtomicFile.read(journalURL, maximumBytes: 8 * 1024 * 1024)) }
         catch let error as CocoaError where error.code == .fileReadNoSuchFile || error.code == .fileNoSuchFile { journal = SessionJournalFile() }
         journalLoaded = true
     }
-    private func saveJournal() throws { try AtomicFile.write(JSONEncoder().encode(journal), to: journalURL) }
+    func saveJournal() throws { try AtomicFile.write(JSONEncoder().encode(journal), to: journalURL) }
     private var now: Date { configuration.now() }
-    private var nowMs: Int64 { Int64((now.timeIntervalSince1970 * 1000).rounded()) }
+    var nowMs: Int64 { Int64((now.timeIntervalSince1970 * 1000).rounded()) }
 
     /// Persists the stores of one finished step, all or none. If the disk refuses, the engine is ahead of
     /// the disk: discard it so the next operation reopens over what is really stored, then fail.
@@ -257,7 +257,7 @@ actor SessionWorker {
             throw error
         }
     }
-    private func persist(_ written: Written, on target: ColophonEngine? = nil) async throws {
+    func persist(_ written: Written, on target: ColophonEngine? = nil) async throws {
         if let engine = target ?? engine { observeAuthorityChanges(written.changes, from: engine) }
         try await persist(written.stores, on: target)
     }
@@ -337,9 +337,9 @@ actor SessionWorker {
     }
     func unlock() async throws -> SessionSnapshot { try await gated { locked = false; return try await reconcile() } }
 
-    private func listed(_ entries: [MediumEntry]) -> [ListedPath] { entries.map { ListedPath(path: $0.path, version: $0.version) } }
+    func listed(_ entries: [MediumEntry]) -> [ListedPath] { entries.map { ListedPath(path: $0.path, version: $0.version) } }
 
-    private func reconcile(listing given: [MediumEntry]? = nil) async throws -> SessionSnapshot {
+    func reconcile(listing given: [MediumEntry]? = nil) async throws -> SessionSnapshot {
         if let settled = try await reconcileEngine(listing: given) { return settled }
         return try await build()
     }
@@ -709,6 +709,10 @@ actor SessionWorker {
                     controllers: r.controllers.map { RemovalFollowUp.Item(id: $0, label: labels[$0] ?? String($0.prefix(8))) })
             }
         }
+        duties.vaultRotationOwed = notices.notices.vaultRetiring
+        if !notices.notices.vaultRetiring { duties.rekeyOwed = try await rekeyOwed(engine) ?? [] }
+        let labels = Dictionary(controllers.map { ($0.id, $0.label) }, uniquingKeysWith: { first, _ in first })
+        duties.keysWithoutSlot = notices.notices.controllersWithoutSlot.map { RemovalFollowUp.Item(id: $0, label: labels[$0] ?? String($0.prefix(8))) }
         let delay = Int64(policy.recoveryDelay) / 6
         duties.pollInterval = notices.pending.isEmpty ? .seconds(max(60, delay)) : .seconds(15)
         return duties
@@ -731,11 +735,13 @@ actor SessionWorker {
 
     /// Signs a transition with the owner's keys, stores it, and keeps its change so a dead one can be signed again.
     /// Returns its digest; the session then submits it to every home.
-    func submitTransition(_ changeJSON: String, rule: RuleKind = .control) async throws -> (String, SessionSnapshot) {
+    func submitTransition(_ changeJSON: String, rule: RuleKind = .control, cosigners: [any AsyncKeyProvider] = []) async throws -> (String, SessionSnapshot) {
         try await gated {
             if engine == nil { _ = try await reconcile() }
-            let digest = try await withOwner { owner, custody, ownerID -> String in
-                let signers = try await signers(owner, ownerID: ownerID, need: .control)
+            let cosignerIDs = try await keyIDs(cosigners)
+            let digest = try await withOwner { owner, ownerCustody, ownerID -> String in
+                let custody = try await merged(ownerCustody, cosigners)
+                let signers = try await signerSet(owner, primary: ownerID, need: rule == .recovery ? .recovery : .control, cosigners: cosignerIDs)
                 let written = try await owner.execute(custody: custody) { try $0.beginTransition(changeJson: changeJSON, signers: signers, rule: rule, entropy: Data()) }
                 try await persist(written, on: owner)
                 return Self.objectDigest(in: written.stores, prefix: "transitions/") ?? ""
@@ -1047,7 +1053,7 @@ actor SessionWorker {
                     let signers = try await signers(owner, ownerID: ownerID, need: .control)
                     let list = follow.controllers
                     let written = try await owner.execute(custody: custody) {
-                        engine in try withEntropy(32) { try engine.beginRemoveController(remove: list, keep: [], signers: signers, rule: .control, rotate: false, entropy: $0) }
+                        engine in try engine.beginRemoveController(remove: list, keep: [], signers: signers, rule: .control, rotate: false, entropy: Data())
                     }
                     try await persist(written, on: owner)
                 }
@@ -1078,13 +1084,18 @@ actor SessionWorker {
         }
     }
     /// Adds a controller key (a second device, a passkey, a security key) as an immediate `approve` controller.
-    func addController(_ spec: ControllerSpec, mode: AddMode, possession key: any AsyncKeyProvider) async throws -> SessionSnapshot {
+    func addController(_ spec: ControllerSpec, mode: AddMode, possession key: any AsyncKeyProvider, cosigners: [any AsyncKeyProvider] = []) async throws -> SessionSnapshot {
         try await gated {
             if engine == nil { _ = try await reconcile() }
+            let cosignerIDs = try await keyIDs(cosigners)
             try await withOwner { owner, ownerCustody, ownerID in
                 // The new key signs its own possession proof; it is held for this call only.
-                let custody = KeyCustody(providers: ownerCustody.providers.merging([try KeyCustody.keyID(of: spec): key]) { _, new in new })
-                let signers = try await signers(owner, ownerID: ownerID, need: .control)
+                let withCosigners = try await merged(ownerCustody, cosigners)
+                let custody = KeyCustody(providers: withCosigners.providers.merging([try KeyCustody.keyID(of: spec): key]) { _, new in new })
+                // Cosigners sign a transition (so every control key can make it a full set, §8.7), not an immediate entry.
+                let signers = mode == .transition && !cosignerIDs.isEmpty
+                    ? try await signerSet(owner, primary: ownerID, need: .control, cosigners: cosignerIDs)
+                    : try await signers(owner, ownerID: ownerID, need: .control)
                 let written = try await owner.execute(custody: custody) {
                     try $0.beginAddController(controller: spec, mode: mode, signers: signers, rule: .control, entropy: Data())
                 }
@@ -1132,9 +1143,13 @@ actor SessionWorker {
     enum AppointStep: Sendable { case signed, recorded, slotted }
     /// Tests only: `appointHomes` throws right after this step, as if the process died there.
     private var appointStopForTests: AppointStep?
+    /// Tests only: `removeController` / `replaceController` throw right after this step, as if the process died there.
+    var keyringStopForTests: KeyringStep?
+    /// The namespaces owed a `rekey`, for the authority head they were computed at (`rekeyOwed(head:digest:)`).
+    var rekeyCache: (head: UInt64, digest: String, owed: [String]?)?
     func setAppointStopForTests(_ step: AppointStep?) { appointStopForTests = step }
     struct AppointStopped: Error {}
-    private func reached(_ step: AppointStep) throws { if appointStopForTests == step { throw AppointStopped() } }
+    func reached(_ step: AppointStep) throws { if appointStopForTests == step { throw AppointStopped() } }
 
     /// Appoints `homes` (each one's request for this account, with its terms) and, with `adding`, adds that controller, in
     /// ONE transition signed by the owner under the control rule with the new key's possession proof (spec §8.7); records
@@ -1149,7 +1164,7 @@ actor SessionWorker {
     /// call after a crash between any two steps finishes the rest and never signs any of these twice. A home request that
     /// names another account or does not name the configured endpoint, and a key already present (or pending) with another
     /// label or roles, are refused (`invalidCommand`) before anything is signed.
-    func appointHomes(_ homes: [HomeConfiguration], adding: (spec: ControllerSpec, key: any AsyncKeyProvider)?) async throws -> (HomesAppointment, SessionSnapshot) {
+    func appointHomes(_ homes: [HomeConfiguration], adding: (spec: ControllerSpec, key: any AsyncKeyProvider)?, cosigners: [any AsyncKeyProvider] = []) async throws -> (HomesAppointment, SessionSnapshot) {
         try await gated {
             guard homes.allSatisfy(\.isAllowed) else { throw SessionError.insecureHome }
             if engine == nil { _ = try await reconcile() }
@@ -1157,8 +1172,9 @@ actor SessionWorker {
             let addedID = try adding.map { try KeyCustody.keyID(of: $0.spec) }
             let requested = try adding.map { try JSONSerialization.jsonObject(with: Data(try accountControllerJson(controller: $0.spec).utf8)) }
             var signedChange: (String, String)?
+            let cosignerIDs = try await keyIDs(cosigners)
             let outcome = try await withOwner { owner, ownerCustody, ownerID -> HomesAppointment in
-                var custody = ownerCustody
+                var custody = try await merged(ownerCustody, cosigners)
                 if let adding, let addedID { custody = KeyCustody(providers: custody.providers.merging([addedID: adding.key]) { _, new in new }) }
                 func covers(_ endpoints: [String], _ configured: HomeConfiguration) -> Bool {
                     endpoints.contains { Self.base($0) == Self.base(configured.endpoint.absoluteString) }
@@ -1215,7 +1231,7 @@ actor SessionWorker {
                     if !appoint.isEmpty { change["homes"] = ["appoint": appoint] }
                     if !add.isEmpty { change["keyring"] = ["add": add] }
                     guard let json = Self.canonicalJSON(change) else { throw SessionError.invalidCommand }
-                    let signers = try await signers(owner, ownerID: ownerID, need: .control)
+                    let signers = try await signerSet(owner, primary: ownerID, need: .control, cosigners: cosignerIDs)
                     let written = try await owner.execute(custody: custody) { try $0.beginTransition(changeJson: json, signers: signers, rule: .control, entropy: Data()) }
                     try await persist(written, on: owner)
                     if let digest = Self.objectDigest(in: written.stores, prefix: "transitions/") { inFlight.append(digest); signedChange = (digest, json) }
@@ -1271,7 +1287,7 @@ actor SessionWorker {
     }
 
     /// The `change` of a stored transition (its body's), or nil.
-    private func pendingChange(_ digest: String) -> [String: Any]? {
+    func pendingChange(_ digest: String) -> [String: Any]? {
         guard let bytes = try? storage().read("transitions/\(digest).json"),
               let envelope = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any],
               let body = (envelope["body"] as? String).flatMap({ Data(base64Encoded: $0) }),

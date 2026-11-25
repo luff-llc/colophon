@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.5.7 (unreleased)
+
+No format, reader-rule or version change. The spec stays Colophon 0.5, revision 18.
+
+- **Removing and replacing keys in the Swift and Kotlin sessions** (`ColophonSession`, spec §8.3, §8.7; [docs/session.md](docs/session.md)).
+  - `checkRemoval(_:replacingWith:roles:cosigners:)` (Kotlin `checkRemoval(id, replacingWith, roles, cosigners)`) answers a
+    `RemovalCheck` before anything is signed: a refusal (the last control key, too few control or recovery units for the
+    thresholds, no openable slot), whether the vault rotates at once, and the spec §6.4 warnings with words to show.
+  - `removeController(_:cosigners:)` removes a controller, and the `approve` or `sign` keys it added, by one transition. When the
+    removed key had a slot and every remaining passkey is present, the transition rotates the vault at once (a `vault`
+    component with `previousVault`); otherwise the vault retires at activation and the call writes the `vault` entry. Either
+    way it appends the `rekey` the rotation owes.
+  - `replaceController(_:with:label:roles:cosigners:)` adds the new key (possession proof with PRF in the same assertion) and
+    removes the old one: one transition when this device keeps another key that can rotate the vault, otherwise staged (add,
+    own slot, then removal with a rotation signed by both), because a transition's `vault` component cannot carry a slot for
+    a key the same transition adds (spec §8.3).
+  - Both answer `KeyringChange.done` or `.pending(transitions:)`, submit each pending transition like `proposeTransition`, and
+    are idempotent across `.pending` and crashes.
+  - `completeKeyChanges(cosigners:)` does what a removal left: the `vault` entry while the vault is retiring (a removal made
+    without a rotation), then the `rekey`. `restoreSlot(for:label:)` gives a remaining key without a slot its own slot.
+  - `HostDuties` gains `vaultRotationOwed`, `rekeyOwed` and `keysWithoutSlot`.
+  - `cosigners:` on `addController` (as a transition), `appointHomes`, `proposeTransition`, `removeController` and
+    `replaceController`: other control or recover keys held here sign the same transition, so with every control key it is a
+    full set and takes effect once receipted.
+- **Fix: `removeFollowUp` with controllers to remove** (Swift and Kotlin) passed 32 bytes of entropy to a removal without a
+  rotation, which the engine refuses ("this call takes no entropy"). It now passes none.
+
 ## 0.5.6 — 2026-11-25
 
 No format or reader-rule change. The spec stays Colophon 0.5, revision 18.

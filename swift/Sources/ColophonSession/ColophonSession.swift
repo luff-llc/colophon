@@ -433,11 +433,14 @@ import Observation
     // MARK: Adding a device, pending changes
 
     /// Adds a controller key (a second device's owner key, a passkey, a security key). The owner confirms.
-    public func addController(_ key: any AsyncKeyProvider, label: String, roles: [ControllerRole] = [.approve], immediate: Bool = true) async throws {
+    /// With `immediate: false` it is a transition: `cosigners` (other control keys the person holds here) sign it beside the
+    /// owner, so that with every control key signing it is a full set (spec §8.7) and takes effect without the delay.
+    public func addController(_ key: any AsyncKeyProvider, label: String, roles: [ControllerRole] = [.approve], immediate: Bool = true,
+                              cosigners: [any AsyncKeyProvider] = []) async throws {
         await restore()
         let descriptor = try await key.keyDescriptor()
         let spec = ControllerSpec(key: descriptor, label: label, roles: roles, verification: descriptor.form == .webauthn, holder: nil, audiences: [])
-        do { apply(try await worker.addController(spec, mode: immediate ? .immediate : .transition, possession: key)) } catch { handleCommandError(error); throw error }
+        do { apply(try await worker.addController(spec, mode: immediate ? .immediate : .transition, possession: key, cosigners: cosigners)) } catch { handleCommandError(error); throw error }
     }
     /// Appoints `homes` to an account that has none yet (one created with `createWithoutHome`), and with `adding` adds that
     /// controller (a passkey, say, with roles `[.control, .recover]`), in ONE transition (spec §8.7) the owner signs with the
@@ -450,8 +453,11 @@ import Observation
     /// adds the controller or appoints a home twice. A home's `request` is called only while no current or pending
     /// appointment names its endpoint; a request that names another account or not that endpoint, or a key already present
     /// with another label or roles, is `invalidCommand` before anything is signed.
+    ///
+    /// `cosigners` (other control keys the person holds here) sign the transition beside the owner (spec §8.7 full set).
     @discardableResult
-    public func appointHomes(_ homes: [HomeConfiguration], adding: (key: any AsyncKeyProvider, label: String, roles: [ControllerRole])? = nil) async throws -> HomesAppointment {
+    public func appointHomes(_ homes: [HomeConfiguration], adding: (key: any AsyncKeyProvider, label: String, roles: [ControllerRole])? = nil,
+                             cosigners: [any AsyncKeyProvider] = []) async throws -> HomesAppointment {
         await restore()
         var added: (spec: ControllerSpec, key: any AsyncKeyProvider)?
         if let adding {
@@ -459,7 +465,7 @@ import Observation
             added = (ControllerSpec(key: d, label: adding.label, roles: adding.roles, verification: d.form == .webauthn, holder: nil, audiences: []), adding.key)
         }
         let outcome: HomesAppointment
-        do { let (o, snapshot) = try await worker.appointHomes(homes, adding: added); outcome = o; apply(snapshot) }
+        do { let (o, snapshot) = try await worker.appointHomes(homes, adding: added, cosigners: cosigners); outcome = o; apply(snapshot) }
         catch { handleCommandError(error); throw error }
         if !homes.isEmpty, !homesConfigured { homesConfigured = true; syncState = .idle }
         startSyncLoop()
@@ -494,15 +500,81 @@ import Observation
         do { apply(try await worker.veto(transition)) } catch { handleCommandError(error); throw error }
         await submitUntilReceipted(transition, kind: .veto)
     }
-    /// Proposes a change to the account (spec §8.7: homes, keyring, policy), signed with the owner's keys, and submits it
-    /// to every current home, retrying until each has receipted it or 300 s have passed (`duties.submissions`).
-    @discardableResult public func proposeTransition(_ changeJSON: String) async throws -> String {
+    /// Proposes a change to the account (spec §8.7: homes, keyring, policy), signed with the owner's keys and `cosigners`
+    /// (other control or recover keys the person holds here: with every control key signing, and at least two units, it is
+    /// a full set, final without the delay), and submits it to every current home, retrying until each has receipted it or
+    /// 300 s have passed (`duties.submissions`). To remove or replace a controller use `removeController` or
+    /// `replaceController`, which also rotate the vault (a bare `keyring.remove` here leaves it retiring, spec §8.3).
+    @discardableResult public func proposeTransition(_ changeJSON: String, cosigners: [any AsyncKeyProvider] = []) async throws -> String {
         await restore()
         let digest: String
-        do { let (d, snapshot) = try await worker.submitTransition(changeJSON); digest = d; apply(snapshot) } catch { handleCommandError(error); throw error }
+        do { let (d, snapshot) = try await worker.submitTransition(changeJSON, cosigners: cosigners); digest = d; apply(snapshot) } catch { handleCommandError(error); throw error }
         await submitUntilReceipted(digest, kind: .transition)
         return digest
     }
+    // MARK: Removing and replacing keys (§8.3)
+
+    /// What removing controller `id` would do, before anything is signed: a refusal (`removeController` throws
+    /// `invalidCommand` for it), whether the vault rotates at once, and the spec §6.4 warnings a host MUST show first.
+    /// With `replacingWith`, what `replaceController(id, with:roles:)` would do. Nothing is asked of any key.
+    public func checkRemoval(_ id: String, replacingWith key: (any AsyncKeyProvider)? = nil, roles: [ControllerRole] = [.control, .recover],
+                             cosigners: [any AsyncKeyProvider] = []) async throws -> RemovalCheck {
+        await restore()
+        return try await worker.checkRemoval(id, replacingWith: key, roles: roles, cosigners: cosigners)
+    }
+    /// Removes controller `id` (a lost passkey, say) by ONE transition (spec §8.7) signed by the owner and `cosigners`, and
+    /// submits it to every home like `proposeTransition`. It lists the `approve` or `sign` keys the removed key added (§8.4).
+    /// When the removed key had a slot and every remaining passkey's credential is held here (the owner, the recovery kit,
+    /// `cosigners`), the transition rotates the vault at once (§8.3); otherwise the vault retires when it activates and this
+    /// call, made again then, writes the `vault` entry. After the rotation it appends the `rekey` of every namespace.
+    ///
+    /// `.pending(transitions:)` while the transition waits out its delay (with every control key among the signers and at
+    /// least two units it is a full set and does not wait), or while a duty is left (`duties`). Call it again with the same
+    /// arguments: it never signs twice. `invalidCommand` for a removal `checkRemoval` refuses.
+    @discardableResult
+    public func removeController(_ id: String, cosigners: [any AsyncKeyProvider] = []) async throws -> KeyringChange {
+        await restore()
+        let outcome: KeyringChange
+        do { let (o, snapshot) = try await worker.removeController(id, cosigners: cosigners); outcome = o; apply(snapshot) }
+        catch { handleCommandError(error); throw error }
+        if case .pending(let digests) = outcome { for digest in digests { await submitUntilReceipted(digest, kind: .transition) } }
+        return outcome
+    }
+    /// Replaces controller `id` (the first passkey, say) with `key`: the new key signs its possession proof, with PRF in the
+    /// same assertion for its slot (spec §7.2), so there is never a moment with fewer ways in. When this device keeps
+    /// another key that can rotate the vault, it is ONE transition adding the new key and removing the old one; otherwise
+    /// (the old key is the only such key, spec §8.3) it is staged: the new key is added, builds its own slot, and then the
+    /// old key is removed with a rotation signed by both. After activation the new key has its own slot and every namespace
+    /// is rekeyed. Answers like `removeController`; call it again with the same arguments after `.pending`. When `id` is
+    /// this device's owner key, configure `key` as the owner controller afterwards.
+    @discardableResult
+    public func replaceController(_ id: String, with key: any AsyncKeyProvider, label: String, roles: [ControllerRole] = [.control, .recover],
+                                  cosigners: [any AsyncKeyProvider] = []) async throws -> KeyringChange {
+        await restore()
+        let d = try await key.keyDescriptor()
+        let spec = ControllerSpec(key: d, label: label, roles: roles, verification: d.form == .webauthn, holder: nil, audiences: [])
+        let outcome: KeyringChange
+        do { let (o, snapshot) = try await worker.replaceController(id, with: spec, key: key, cosigners: cosigners); outcome = o; apply(snapshot) }
+        catch { handleCommandError(error); throw error }
+        if case .pending(let digests) = outcome { for digest in digests { await submitUntilReceipted(digest, kind: .transition) } }
+        return outcome
+    }
+    /// Does what a removal left this host (`duties.vaultRotationOwed`, `duties.rekeyOwed`): the `vault` entry while the
+    /// vault is retiring, signed by a key held here that was a controller before the removal, then the `rekey`. A passkey
+    /// owner is asked to unlock, so call it when the duties show something, not on a timer.
+    @discardableResult
+    public func completeKeyChanges(cosigners: [any AsyncKeyProvider] = []) async throws -> KeyringChange {
+        await restore()
+        do { let (o, snapshot) = try await worker.completeKeyChanges(cosigners: cosigners); apply(snapshot); return o }
+        catch { handleCommandError(error); throw error }
+    }
+    /// "Use this key once more" (`duties.keysWithoutSlot`): gives `key`, a current controller without a slot of its own, a
+    /// slot of the current vault, opened by a key this device holds. A passkey is asked once for its PRF.
+    public func restoreSlot(for key: any AsyncKeyProvider, label: String) async throws {
+        await restore()
+        do { apply(try await worker.restoreSlot(for: key, label: label)) } catch { handleCommandError(error); throw error }
+    }
+
     /// Signs a dead transition this device signed again (§17.5 quorum rule) and submits the new one.
     @discardableResult public func resign(_ transition: String) async throws -> String {
         await restore()
