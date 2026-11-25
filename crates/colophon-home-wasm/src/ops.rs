@@ -21,7 +21,7 @@ use colophon_core::v05::history::envelope::AuthEnvelope;
 use colophon_core::v05::history::home::{
     admit, admit_first_with, admit_pending_batch, admit_predecessor, admit_with, stage_predecessor, FirstUpload, HomeState, ReceiptToSign, Refusal,
 };
-use colophon_core::v05::history::{verify_history, Objects, Persisted, State, Stop};
+use colophon_core::v05::history::{verify_history, HomeStatus, Objects, Persisted, State, Stop};
 use colophon_core::v05::ids::{key_id, AccountId};
 use colophon_core::v05::records::{OperationHeader, RecordAuthority};
 use colophon_core::v05::replay::{
@@ -285,6 +285,23 @@ fn status(req: &Value) -> R<Value> {
     };
     let st = &v.state;
     let policy = &st.keyring().policy;
+    // This home as the account's verified history names it (operator behaviour: an operator may
+    // act on an account's own removal of its home, signed by its controllers and verified here):
+    // "home", "revocationPending" (revoked by an activation not final yet, still current, §8.7),
+    // "revoked", or "notHome".
+    let standing = match st
+        .members()
+        .iter()
+        .find(|m| m.request.member_id() == l.slot.home)
+    {
+        Some(m) if m.revoked_seq.is_some() => "revoked",
+        Some(m) => match m.home {
+            HomeStatus::Home => "home",
+            HomeStatus::RevocationPending(_) => "revocationPending",
+            HomeStatus::NotHome => "notHome",
+        },
+        None => "notHome",
+    };
     let peers: Vec<Value> = st
         .current_homes()
         .iter()
@@ -301,6 +318,7 @@ fn status(req: &Value) -> R<Value> {
         "headMaxAge": policy.head_max_age(),
         "headQuorum": policy.head_quorum(),
         "peers": peers,
+        "standing": standing,
         "fork": v.fork,
         "stopped": v.stopped,
     }))
