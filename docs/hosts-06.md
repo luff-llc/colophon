@@ -290,6 +290,10 @@ for Apple platforms, on the generated `HomeStream` and `SessionEndpoint` of `Col
 | `URLSessionSocketFactory`, `SocketFactory`, `HostSocket`, `SocketHandlers` | The socket behind a small interface; tests inject a fake. |
 | `HostClock`, `SystemClock` | Monotonic and wall milliseconds and a timer. `SystemClock` reads `CLOCK_MONOTONIC`, which keeps counting while the device sleeps, and sleeps on the continuous clock. |
 
+For a player, `ColophonListeningKit` builds the `listening.podcasts/now-playing` cell (§S12) on these hosts:
+`NowPlayingSession` (the anchor, its translation, handoff by ask and pass, and one pause event per loss of the role)
+over a `CellSession`, a `HomeStreamHost` and a `SQLiteClaimStore`. See [now-playing.md](now-playing.md).
+
 **One serial queue per host.** Each host is an actor whose inputs arrive through one ordered stream
 (`AsyncStream`) and run one at a time, in arrival order. A stream host's job never suspends. A cell
 host's job may suspend to read the engine (`HostAccount.engine()`), but the next job starts only when it
