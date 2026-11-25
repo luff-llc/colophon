@@ -5,7 +5,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rename, rm } from 'node:fs/promises';
 import http from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -161,5 +161,18 @@ describe('the operator delete', { skip: ready ? false : `build the module first 
     // Another name is provisioned as usual meanwhile and after.
     assert.equal((await ask(port, 'tslot00000b')).status, 200);
     assert.equal((await ask(port, SLOT)).status, 200, 'the name again');
+  });
+  test('a release stopped between renaming the directory aside and removing the row is finished at start-up', async () => {
+    const port = await fresh();
+    assert.equal((await ask(port, SLOT)).status, 200);
+    assert.equal((await suspend(port, SLOT)).status, 204);
+    await running.close(); running = null;
+    // As a crash right after the rename leaves it.
+    await rename(path.join(dir, SLOT), path.join(dir, `.released-${SLOT}.${'0'.repeat(16)}`));
+    running = await start({ privateListen: { host: '127.0.0.1', port: 0 } });
+    assert.deepEqual(json(await stateOf(running.privatePort, SLOT)), { result: 'refused:notProvisioned' }, 'never reopened empty');
+    const table = JSON.parse(await readFile(path.join(dir, 'provisioned.json'), 'utf8'));
+    assert.equal(table[SLOT], undefined, 'the row is gone');
+    assert.equal((await readdir(dir)).some((n) => n.startsWith('.released-')), false);
   });
 });

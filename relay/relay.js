@@ -513,8 +513,15 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
   await ensureRealDir(path.resolve(dataDir));
   const unlock = await lockDataDir(dataDir);
   try {
+  // Directories a release renamed aside (`.released-<slot>.<hex>`) are removed; the names they
+  // were released from are kept, so a release that stopped between the rename and its row's
+  // removal is finished below, once the table is read, instead of reopening the slot empty.
+  const releasedNames = new Set();
   for (const name of await fsp.readdir(path.resolve(dataDir))) {
-    if (name.startsWith(RELEASED_PREFIX)) await fsp.rm(path.join(path.resolve(dataDir), name), { recursive: true, force: true });
+    if (!name.startsWith(RELEASED_PREFIX)) continue;
+    const m = /^(.+)\.[0-9a-f]{16}$/.exec(name.slice(RELEASED_PREFIX.length));
+    if (m) releasedNames.add(m[1]);
+    await fsp.rm(path.join(path.resolve(dataDir), name), { recursive: true, force: true });
   }
   let closing = false;
   const requests = new Set();
@@ -529,6 +536,10 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
   }
   const tableInUse = provisioning.enabled || kind === 'file';
   const table = tableInUse ? await ProvisionTable.load(path.resolve(dataDir), provisioning) : ProvisionTable.empty(path.resolve(dataDir));
+  for (const name of releasedNames) {
+    const present = await fsp.lstat(path.join(path.resolve(dataDir), name)).then(() => true, (error) => { if (error.code === 'ENOENT') return false; throw error; });
+    if (table.get(name) && !present && !Object.hasOwn(libraries ?? {}, name)) await table.write(name, null);
+  }
   let homeModule = null; let homeKey = null;
   if (Object.values(libraries ?? {}).some((e) => e && e.home) || provisioning.enabled || table.size > 0) {
     if (!home?.wasm || !home?.key) throw new Error('A home slot, and provisioning, need home.wasm (the module path) and home.key (a private P-256 JWK)');
@@ -1020,7 +1031,9 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
       // a retry at the row's generation finishes it.
       if (e && !homeSlots.has(name) && !configured.has(name)) {
         if (generationOf(name) !== generation) throw new HttpError(409, 'The slot has another generation', {}, { result: 'refused:staleGeneration' });
-        return { done: finishInterruptedDelete(name, e) };
+        // Under the provisioning lock, as every write of the table is.
+        const removed = await finishInterruptedDelete(name, e);
+        return { done: Promise.resolve(removed) };
       }
       if (!homeSlots.has(name)) throw notProvisioned();
       if (!e || configured.has(name)) throw new HttpError(409, 'A configured slot is not deleted here', {}, { result: 'refused:configured' });
@@ -1046,10 +1059,12 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
     slots.delete(name); opening.delete(name);
     const root = path.join(path.resolve(dataDir), name);
     const trash = path.join(path.resolve(dataDir), `${RELEASED_PREFIX}${name}.${randomBytes(8).toString('hex')}`);
-    const present = await fsp.lstat(root).then((st) => st.isDirectory() && !st.isSymbolicLink(), () => false);
-    if (present) { await fsp.rename(root, trash); await syncDir(path.resolve(dataDir)); }
+    const st = await fsp.lstat(root).catch((error) => { if (error.code === 'ENOENT') return null; throw error; });
+    if (st && (!st.isDirectory() || st.isSymbolicLink())) throw new Error(`${root} is not the slot's directory`);
+    if (st) { await fsp.rename(root, trash); await syncDir(path.resolve(dataDir)); }
     await table.write(name, null);
-    if (present) await fsp.rm(trash, { recursive: true, force: true });
+    // The directory, renamed aside, is removed after the row (a crash leaves it for start-up).
+    if (st) await fsp.rm(trash, { recursive: true, force: true });
     await reach(`released ${name}`);
     return true;
   }
