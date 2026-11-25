@@ -28,7 +28,7 @@ interface HostClock {
 /**
  * The JVM's clocks: `System.nanoTime()` from the first use (monotonic) and `System.currentTimeMillis()`, with one
  * shared daemon timer thread. On Android, `System.nanoTime()` is `CLOCK_MONOTONIC`, which stops while the device
- * sleeps: use the Android SDK's `AndroidHostClock` (`elapsedRealtime`, which counts sleep) there.
+ * sleeps: an Android host needs a clock that counts sleep (`SystemClock.elapsedRealtime`).
  */
 object SystemHostClock : HostClock {
     private val origin = System.nanoTime()

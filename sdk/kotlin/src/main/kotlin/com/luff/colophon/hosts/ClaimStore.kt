@@ -61,7 +61,7 @@ fun compareAndSet(held: StoredClaim?, record: StoredClaim, expected: Fence?): St
  * A claim store in memory: every client that shares this object shares the record, and [save] compares and writes in
  * one step under the object's lock (tests, previews, a JVM process that keeps no claim across restarts).
  */
-class MemoryClaimStore(initial: StoredClaim? = null) : ClaimStore {
+class MemoryClaimStore @JvmOverloads constructor(initial: StoredClaim? = null) : ClaimStore {
     private val lock = Any()
     private var record: StoredClaim? = initial
     override suspend fun load(): StoredClaim? = synchronized(lock) { record }

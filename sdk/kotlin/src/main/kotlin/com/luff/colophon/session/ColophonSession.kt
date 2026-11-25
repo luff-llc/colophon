@@ -44,7 +44,7 @@ import kotlin.random.Random
  * The Kotlin twin of the Swift SDK's `ColophonSession`, with the same names where Kotlin allows.
  */
 class ColophonSession(configuration: SessionConfiguration) : AutoCloseable {
-    internal val worker = SessionWorker(configuration)
+    @get:JvmSynthetic internal val worker = SessionWorker(configuration)
     @Suppress("OPT_IN_USAGE")
     private val lane = Dispatchers.Default.limitedParallelism(1, "colophon-session-facade")
     private val scope = CoroutineScope(SupervisorJob() + lane)

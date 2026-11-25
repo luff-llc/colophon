@@ -14,6 +14,9 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.future.future
+import java.util.concurrent.CompletableFuture
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
@@ -93,7 +96,7 @@ sealed class CellHostEvent {
     data class Error(val code: String, val during: String) : CellHostEvent()
 }
 
-class CellHostOptions(
+class CellHostOptions @JvmOverloads constructor(
     val access: HostAccess,
     val carrier: CellCarrier,
     val namespace: String,
@@ -209,6 +212,11 @@ class SessionCellHost private constructor(options: CellHostOptions) : StreamCell
         /** Bytes of standard or URL-safe base64, padded or not. */
         fun unbase64(text: String): ByteArray = Base64.getDecoder().decode(text.replace('-', '+').replace('_', '/').let { it + "=".repeat((4 - it.length % 4) % 4) })
 
+        /** [open] for Java and other callers without coroutines: completes with the host, or with the error that closed it. */
+        @JvmStatic @JvmOverloads
+        fun openFuture(options: CellHostOptions, listener: ((CellHostEvent) -> Unit)? = null): CompletableFuture<SessionCellHost> =
+            CoroutineScope(Dispatchers.Default).future { open(options, listener) }
+
         /**
          * Starts a session for this member in the cell: loads the stored claim, reserves this instance's fence, makes
          * the endpoint, has the member key sign its delegation, attaches to the carrier and joins with the application's
@@ -254,7 +262,7 @@ class SessionCellHost private constructor(options: CellHostOptions) : StreamCell
      * listener, which runs on the host's context; its read-only calls are safe from other threads, but the endpoint may
      * be replaced or freed by the next job.
      */
-    internal val current: SessionEndpoint? get() = endpoint
+    @get:JvmSynthetic internal val current: SessionEndpoint? get() = endpoint
     /** Whether a `Persist` write is in progress. */
     val writePending: Boolean get() = writing != null
 
@@ -440,9 +448,14 @@ class SessionCellHost private constructor(options: CellHostOptions) : StreamCell
                     emit(CellHostEvent.Persist(PersistPhase.FAILED, ack, error))
                     if (failures < persistAttempts) return false
                     // Out of attempts: one more look at the held fence, so that a replacement that reserved meanwhile
-                    // is reported as what it is.
-                    val reason = if (heldByAnother()) FailReason.SUPERSEDED else FailReason.STORE
-                    enqueue { writing = null; fail(reason, error) }
+                    // is reported as what it is. The read's result is classified and the cell failed in one job, against
+                    // the instance's state as that job sees it.
+                    val held = finalFence()
+                    enqueue {
+                        writing = null
+                        val superseded = held != null && held.generation != generation && !mine(held)
+                        fail(if (superseded) FailReason.SUPERSEDED else FailReason.STORE, error)
+                    }
                     return true
                 }
                 while (true) {
@@ -580,13 +593,13 @@ class SessionCellHost private constructor(options: CellHostOptions) : StreamCell
             }
         }
     }
-    /** Whether the store, read once within the write deadline, holds another generation's fence. */
-    private suspend fun heldByAnother(): Boolean {
+    /** The held fence, read once within the write deadline; null when it could not be read in time. */
+    private suspend fun finalFence(): Fence? {
         val deadline = Wait(persistTimeoutMs)
         val read = scope.async { try { store.fence() } catch (e: CancellationException) { throw e } catch (_: Exception) { null } }
         val f = select { read.onAwait { it }; deadline.done.onAwait { null } }
         deadline.cancel()
-        return f != null && f.generation != generation && !mine(f)
+        return f
     }
     /** Whether `f` is a fence this instance saved (the one it last saw held, or one of its current generation's). */
     private fun mine(f: Fence?): Boolean {
@@ -752,7 +765,7 @@ class SessionCellHost private constructor(options: CellHostOptions) : StreamCell
     private fun stateValue(): String? = stateOf()?.let { base64(it) }
 
     /** Tests only: replaces the account or the store (a key that stops signing, a store that never answers). */
-    internal fun replaceForTests(account: HostAccount? = null, store: ClaimStore? = null) {
+    @JvmSynthetic internal fun replaceForTests(account: HostAccount? = null, store: ClaimStore? = null) {
         if (account != null) this.account = account
         if (store != null) this.store = store
     }

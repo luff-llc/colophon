@@ -53,7 +53,7 @@ sealed class StreamHostEvent {
     data class Unrouted(val reason: String) : StreamHostEvent()
 }
 
-class StreamHostOptions(
+class StreamHostOptions @JvmOverloads constructor(
     val access: HostAccess,
     /** The home's member ID. */
     val home: String,
@@ -383,7 +383,7 @@ class HomeStreamHost private constructor(options: StreamHostOptions, client: Hom
 
     companion object {
         /** Tests: a host over a client made directly (`HomeStream(home, base, config, cursor)`), with no engine. */
-        internal fun withClient(options: StreamHostOptions, client: HomeStream) = HomeStreamHost(options, client)
+        @JvmSynthetic internal fun withClient(options: StreamHostOptions, client: HomeStream) = HomeStreamHost(options, client)
         /** The most session frames taken and not yet carried or lost; one more is refused at once (`Unsent(carrier)`). */
         const val MAX_PENDING_FRAMES = 64
         private fun key(namespace: String, cell: String) = "$namespace\n$cell"
