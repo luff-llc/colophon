@@ -1275,6 +1275,27 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
         written.artifact ?: throw AccountException.Internal("internal", "a call returned no envelope")
     }
 
+    /**
+     * The `colophon.home.stream` call for `home` (0.6 stream §1.1), signed by this device's member key and judged by the
+     * core like any call, as the envelope's bytes: what `HomeStream.ticketRequest` takes. Judged at the session's clock.
+     */
+    suspend fun streamCall(home: String): ByteArray = gated {
+        if (engine == null) reconcile()
+        val engine = engine; val custody = memberCustody; val id = memberId
+        if (engine == null || custody == null || id == null) throw SessionError.NotReady()
+        val signing = custody.provider(id).publicKeys().signing
+        val at = nowMs
+        engine.run { it.advance(at) }
+        val written = engine.execute(custody) { e -> withEntropy(32) { e.streamBeginCall(home, signing, it) } }
+        written.artifact ?: throw AccountException.Internal("internal", "a call returned no envelope")
+    }
+
+    /** The configured transport of the home `home` (matched by its endpoints), if any: where its ticket requests go. */
+    suspend fun transportOf(home: String): HomeTransport? = onLane {
+        val engine = engine ?: return@onLane null
+        engine.run { it.exchangeHomes() }.firstOrNull { it.id == home }?.let { transportFor(it)?.transport }
+    }
+
     /** Records transitions that came due (§8.7). A schedule calls it; refresh calls it too. */
     suspend fun recordDue(): SessionSnapshot = gated {
         val engine = engine ?: return@gated reconcile()
@@ -1290,14 +1311,14 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
     }
 
     // Test hooks
-    internal fun engineForTests(): ColophonEngine? = engine
+    @JvmSynthetic internal fun engineForTests(): ColophonEngine? = engine
     /** The longest one exchange with one home may take (tests shorten it). */
     internal var exchangeTimeMs: Long = HomeLimits.EXCHANGE_TIME_MS
 
     // Engine access for blobs
 
-    fun requireEngine(): ColophonEngine = engine ?: throw SessionError.NotReady()
-    fun requireCustody(): KeyCustody = memberCustody ?: throw SessionError.NotReady()
+    @JvmSynthetic fun requireEngine(): ColophonEngine = engine ?: throw SessionError.NotReady()
+    @JvmSynthetic fun requireCustody(): KeyCustody = memberCustody ?: throw SessionError.NotReady()
     suspend fun persistStores(stores: List<Store>) = persist(stores)
     suspend fun <T> inGate(body: suspend () -> T): T = gated(body)
     suspend fun currentSnapshot(): SessionSnapshot = gated { build() }
@@ -1407,7 +1428,7 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
 
 /** Drives `AccountCreation` through its stages with the host's key custody. */
 internal object AccountCreator {
-    suspend fun create(params: CreateParams, identity: AccountIdentity, custody: KeyCustody, nowMs: Long): Pair<AccountCreation, Created> {
+    @JvmSynthetic suspend fun create(params: CreateParams, identity: AccountIdentity, custody: KeyCustody, nowMs: Long): Pair<AccountCreation, Created> {
         val creation = withEntropy(96) { AccountCreation.begin(params, identity, nowMs, it) }
         try {
             val requests = creation.prfRequests()

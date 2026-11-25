@@ -330,3 +330,9 @@ thread.
 
 See [session contracts](session.md) for the shared lifecycle rules and
 [native bindings](native-bindings.md) for the FFI surface.
+
+## The 0.6 hosts
+
+The 0.6 home stream and session cells for Kotlin (`com.luff.colophon.hosts`) are JVM-only in this release and
+described in [hosts-06.md](hosts-06.md) §7. The Android library excludes them: they arrive on Android in a later change,
+with a durable claim store, a WebSocket transport and a clock that counts sleep, built and run on devices (§7.4 there).
