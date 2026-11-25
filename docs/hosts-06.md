@@ -284,9 +284,9 @@ module still has JNA and kotlinx-coroutines only.
 
 | Object | What it is |
 | --- | --- |
-| `HostAccount`, `accountOf(session)`, `transportOf(session, home)` | As in §1: `account`, `member`, `engine()` (the `AccountEngine`, read again for every call), `suspend streamCall(home)`, `suspend exchange()` (the session's own `syncNow`), `suspend signRaw(body)`. Two session additions back it: `SessionWorker.streamCall` (the `colophon.home.stream` call, signed and judged like any call) and `transportOf`. |
-| `HomeStreamHost(StreamHostOptions)` | `start`, `stop`, `status`, `polling`, `cursor`, `live`, `retryNow`, `historyChanged`, `attach`/`detach`, `sendSession(frame)`, `on(listener)`, `onPass(listener)`; `carrier()` adapts it to `CellCarrier`. Options: account, home, `socket` (a `SocketFactory`, required), `transport` (default `HttpHomeTransport`), `clock`, `configure`, `cursor`, `saveCursor`, `client`, `dispatcher`. |
-| `SessionCellHost.open(CellHostOptions, listener)` | `command(name, json): Deferred<Unit>`, `deliver`, `linkUp`, `linkDown`, `accountChanged`, `leave`, `close`, `current`, `phase`, `storedClaim`, `writePending`, `stats`. Options as in §1 (`persistRetryMs`, `persistTimeoutMs`, `persistAttempts`, `fenceCheckMisses`, `maxCommands`, `delegationMs`, `random`, `state`), plus `dispatcher`. Events are the `CellHostEvent` sealed class; failures are `CellHostError` with a `Code`. |
+| `HostAccess.of(session)`, `transportOf(session, home)` | An opaque access to a restored `ColophonSession` (only `account` and `member` are readable). Inside, the hosts use what §1's `HostAccount` names (the engine, read again for every call; the ticket call; an exchange pass, the session's own `syncNow`; the member key's raw signature), all `internal`: no public declaration hands out the engine, an endpoint, the stream client, an account view or a signer (`ApiSurfaceTest` pins this), so an application cannot act on a core object off a host's context or use the member key as a signing oracle. Two session additions back it: `SessionWorker.streamCall` and `transportOf` (the application's own configured transport). |
+| `HomeStreamHost(StreamHostOptions)` | `start`, `stop`, `status`, `polling`, `cursor`, `live`, `retryNow`, `historyChanged`, `attach`/`detach`, `sendSession(frame, lost)`, `on(listener)`, `onPass(listener)`; `carrier()` adapts it to `CellCarrier`. Options: access, home, `socket` (a `SocketFactory`, required), `transport` (default `HttpHomeTransport`), `clock`, `configure`, `cursor`, `saveCursor`, `dispatcher`. |
+| `SessionCellHost.open(CellHostOptions, listener)` | `command(name, json): Deferred<Unit>`, `deliver`, `linkUp`, `linkDown`, `accountChanged`, `leave`, `close`, `phase`, `storedClaim`, `writePending`, `stats`. Options as in §1 (`persistRetryMs`, `persistTimeoutMs`, `persistAttempts`, `fenceCheckMisses`, `maxCommands`, `delegationMs`, `random`, `state`), plus `dispatcher`. Events are the `CellHostEvent` sealed class; failures are `CellHostError` with a `Code`. |
 | `CellSession.join(options)` | `state: CellState` (`joined`, `holder`, `isHolder`, `gated`, `claim`, `state`, `seq`, `entitled`, `canWrite`), `subscribe`, `events` (`CellEvent`, bytes decoded); `take`, `ask`, `pass`, `decline`, `release`, `publish`, `submit`, `presence`, `ping` (each returns a `Deferred`), `leave`, `close`. Show the role as held only when `isHolder && !gated`. |
 | `ClaimStore`, `Fence`, `StoredClaim`, `SaveResult`, `compareAndSet`, `MemoryClaimStore` | §3's contract with `suspend` calls; a fence is two integers in 0..2^53 − 1. |
 | `SqliteClaimStore` (Android) | The durable store, §6.3. |
@@ -325,33 +325,52 @@ store over storage that gives a linearizable compare-and-set.
 restored backup would bring back an old fence), one table `claims (cell TEXT PRIMARY KEY, claim TEXT, generation
 INTEGER, seq INTEGER)`, one row per cell.
 
-- `save` is one `BEGIN IMMEDIATE` transaction (`beginTransactionNonExclusive`): the write lock is taken before the row is
-  read, the compare-and-set is applied, the row written, and the transaction committed. A stale save rolls back. Every
+- Every operation (`load`, `fence`, `save`) is one `BEGIN IMMEDIATE` transaction, which Android runs on the
+  database's primary connection, and each first checks that connection and the database: `journal_mode` is WAL,
+  `synchronous` is FULL, a busy timeout is set (the store sets 5 s when the connection has none), `sqlite_master` holds
+  exactly the store's table and its primary-key index, and there is no temporary schema object. A foreign trigger,
+  view, index or table, added before or after the store opened, fails the operation, so nothing can rewrite or delete
+  the row behind a write that reports success.
+- `save` is one such transaction (`beginTransactionNonExclusive`): the write lock is taken before the row is
+  read, the compare-and-set is applied, the row written and read back (anything but the row written fails), and the
+  transaction committed. A stale save rolls back. Every
   client of the file (another object, thread or process) is serialized by SQLite's lock, so the compare-and-set is
   linearizable.
-- The file is opened with `journal_mode=WAL` and `synchronous=FULL`, and both are read back (anything else refuses to
-  open). With FULL in WAL mode the log is synced at each commit before the commit is published to other connections,
+- The file is opened with `journal_mode=WAL` and `synchronous=FULL` and both are read back in every transaction, as
+  above. With FULL in WAL mode the log is synced at each commit before the commit is published to other connections,
   so a reader never sees a commit that a power failure could take back, and `STORED` is returned only after the commit
   returned. Android's default for a database that sets nothing is WAL with `synchronous=NORMAL`, which can lose a
   commit already seen: that is why the mode is set explicitly.
-- It fails closed: a schema other than its own table and primary-key index, a claim that is not text or null, a fence
-  half that is not an integer in range, is `ClaimStoreCorrupt` from `load`, `fence` and `save`.
+- It fails closed: a schema or setting other than its own, a claim that is not text or null, a fence half that is not
+  an integer in range, is `ClaimStoreCorrupt` from `load`, `fence` and `save`.
+- **Locked devices and Direct Boot.** `noBackupFilesDir` is credential-encrypted storage: per the Android
+  documentation it is available only after the user has unlocked the device once since it started, and then stays
+  available while the screen is locked again until the next restart. So, unlike iOS file protection, a foreground
+  service playing with the screen locked can keep using the store; nothing needs to be set. Before the first unlock
+  after a restart the file cannot be opened: an app whose components are `directBootAware` must not open a cell host
+  until `UserManager.isUserUnlocked()` is true (or `ACTION_USER_UNLOCKED` arrives). Do not move the store to
+  device-encrypted storage (`createDeviceProtectedStorageContext`) to run earlier: the claim carries the cell's state,
+  which is private, and the documentation reserves device-encrypted storage for what must work during Direct Boot.
 
 `SqliteClaimStoreTest` (an instrumented test in `sdk/android/src/androidTest`) races six clients of one file from one
 fence over 25 rounds (exactly one stores each time), checks a stale save writes nothing, a reopen, the journal and
-synchronous modes of the store's own connection, and fail-closed rows and schemas. It needs a device or an emulator
+synchronous modes of the store's own connection, fail-closed rows and schemas, a foreign trigger, view, index or table
+refusing the open, and a trigger added after open failing the next read and write. It needs a device or an emulator
 and has not been run: the store's behaviour on Android is unverified until it runs on devices. Not covered even by
 that test: several processes on one file, `SQLITE_BUSY` under contention, a corrupt or truncated file, a commit that
-fails, durability across a power loss, and the schema changing after the store opened.
+fails, and durability across a power loss.
 
 ### 6.4 The transport
 
-The host owns the socket's lifecycle through `SocketFactory.open(url, handlers): HostSocket` (`send(text)`,
-`close(code)`) and `SocketHandlers` (`open`, `message`, `refused(answer)`, `closed(code?)`), reported from any thread. The stream client is only ever called on the stream
+The host owns the socket's lifecycle through `SocketFactory.open(url, handlers): HostSocket` (`send(text, done)`,
+`close(code)`; `done` reports, once, whether the message reached the connection) and `SocketHandlers` (`open`, `message`, `refused(answer)`, `closed(code?)`), reported from any thread. The stream client is only ever called on the stream
 host's own queue: `status`, `polling`, `cursor` and `live` are what the host published after its last job, and a
 cell's `sendSession(frame, lost)` puts the frame on the stream host's queue (frames keep their order) and returns
-false at once when the stream is not live. A frame refused then is `Unsent(carrier)`, as in the JavaScript host; one
-taken and then not carried (the socket ended first) is reported afterwards as `Unsent(carrierLost)`. Either is loss
+false at once when the stream is not live or `MAX_PENDING_FRAMES` (64) frames are already taken and not yet carried or
+lost. A frame refused then is `Unsent(carrier)`, as in the JavaScript host; one
+taken and then not carried (the socket ended first, or its send failed after it was queued) is reported afterwards as
+`Unsent(carrierLost)`: every frame taken ends exactly once, carried or lost. The core's verified head is given to the
+stream (`on_history`) one read at a time on the host's queue, and never below the last one given. Either is loss
 the endpoint is never told of, as in the reference loop.
 The host owns a socket before any listener hears of it, ignores reports from a socket it replaced, and `stop()` closes
 the current socket at once from any thread, including one whose upgrade is still outstanding.
@@ -410,7 +429,8 @@ class OkHttpSocketFactory(private val client: OkHttpClient) : SocketFactory {
             }
         })
         return object : HostSocket {
-            override fun send(text: String) { check(ws.send(text)) { "not sent" } }
+            // OkHttp reports only that it queued the message; a queued message lost to a later failure is not reported.
+            override fun send(text: String, done: (Boolean) -> Unit) { check(ws.send(text)) { "not sent" }; done(true) }
             override fun close(code: Int) { ended.set(true); if (!ws.close(code, null)) ws.cancel() }
         }
     }
@@ -456,9 +476,11 @@ and checks its committed test-only bindings (`sdk/kotlin/src/conformance`), buil
 files in `sdk/kotlin/build/native` (another checkout sharing the cargo target cannot replace them mid-run), and runs
 every Kotlin test. The 0.6 host tests are `com.luff.colophon.hosts.*`:
 
-- `StreamHostTest` (15), `StreamConcurrencyTest` (1: eight threads sending 300 frames each while the home sends 500,
+- `ApiSurfaceTest` (1: no public declaration of the package exposes a core object, the account adapter or a signer),
+  `JdkSocketTest` (1: each send over the JDK socket ends exactly once when the peer drops the connection),
+  `StreamHostTest` (17), `StreamConcurrencyTest` (1: eight threads sending 300 frames each while the home sends 500,
   five rounds; every client call is on the stream host's own thread and each sender's frames are carried once, in
-  order), `CellHostTest` (24), `ClaimFenceTest` (5: two clients opening in all six interleavings, a
+  order), `CellHostTest` (25), `ClaimFenceTest` (5: two clients opening in all six interleavings, a
   rebuild racing an open in all three, eight threads racing the memory store from one fence over 20 rounds, a
   superseded holder stopping within one beat, fences out of range), `FramesTest` (4), on the core's real objects with
   a manual clock, a driven dispatcher and fake sockets, transports and stores, as the JavaScript tests do.
