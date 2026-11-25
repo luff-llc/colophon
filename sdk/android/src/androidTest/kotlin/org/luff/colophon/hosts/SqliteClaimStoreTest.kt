@@ -24,8 +24,8 @@ import java.util.concurrent.atomic.AtomicInteger
  * The SQLite claim store on a device: independent clients of one file racing from one fence (exactly one stores per
  * round), the claim surviving a reopen, the journal and synchronous modes it insists on, and fail-closed reads of rows
  * and schemas it did not write. Needs a device or emulator (the platform's SQLite is not on the JVM); not yet run.
- * Not covered here: several processes, SQLITE_BUSY under contention, a corrupt file, a failed commit, durability
- * across power loss, and the schema changing after open.
+ * Not covered here: several processes, SQLITE_BUSY under contention, a corrupt file, a failed commit, and durability
+ * across power loss.
  */
 @RunWith(AndroidJUnit4::class)
 class SqliteClaimStoreTest {
@@ -97,5 +97,37 @@ class SqliteClaimStoreTest {
         }
         SQLiteDatabase.openDatabase(file.path, null, SQLiteDatabase.OPEN_READWRITE or SQLiteDatabase.NO_LOCALIZED_COLLATORS).use { it.execSQL("CREATE TABLE other (x)") }
         try { SqliteClaimStore.open(file, "cell"); fail("opened a database with another table") } catch (e: ClaimStoreCorrupt) { assertTrue(e.message!!.contains("other objects")) }
+    }
+
+    private fun raw(sql: String) = SQLiteDatabase.openDatabase(file.path, null, SQLiteDatabase.OPEN_READWRITE or SQLiteDatabase.NO_LOCALIZED_COLLATORS).use { it.execSQL(sql) }
+
+    @Test fun aForeignTriggerViewIndexOrTableRefusesTheOpen() {
+        val foreign = listOf(
+            "CREATE TRIGGER wipe AFTER INSERT ON claims BEGIN DELETE FROM claims; END",
+            "CREATE TRIGGER rewrite AFTER UPDATE ON claims BEGIN UPDATE claims SET generation = 0; END",
+            "CREATE VIEW peek AS SELECT * FROM claims",
+            "CREATE INDEX by_generation ON claims (generation)",
+            "CREATE TABLE extra (x)",
+        )
+        for (sql in foreign) {
+            SQLiteDatabase.deleteDatabase(file)
+            SqliteClaimStore.open(file, "cell").close()
+            raw(sql)
+            try { SqliteClaimStore.open(file, "cell").close(); fail("opened with: $sql") } catch (_: ClaimStoreCorrupt) {}
+        }
+    }
+
+    @Test fun aTriggerAddedAfterOpenFailsTheNextReadAndWrite() = runBlocking {
+        SqliteClaimStore.open(file, "cell").use { store ->
+            assertEquals(SaveResult.STORED, store.save(StoredClaim("a", Fence(1, 0)), null))
+            // Another connection adds a trigger that would delete the row behind every write.
+            raw("CREATE TRIGGER wipe AFTER UPDATE ON claims BEGIN DELETE FROM claims; END")
+            for (call in listOf<suspend () -> Unit>({ store.save(StoredClaim("b", Fence(1, 1)), Fence(1, 0)) }, { store.load() }, { store.fence() })) {
+                try { call(); fail("acted under a foreign trigger") } catch (_: ClaimStoreCorrupt) {}
+            }
+        }
+        // Nothing was written under it.
+        raw("DROP TRIGGER wipe")
+        SqliteClaimStore.open(file, "cell").use { assertEquals(StoredClaim("a", Fence(1, 0)), it.load()) }
     }
 }
