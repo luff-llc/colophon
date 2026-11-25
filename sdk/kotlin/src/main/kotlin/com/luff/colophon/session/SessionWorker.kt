@@ -1275,6 +1275,27 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
         written.artifact ?: throw AccountException.Internal("internal", "a call returned no envelope")
     }
 
+    /**
+     * The `colophon.home.stream` call for `home` (0.6 stream §1.1), signed by this device's member key and judged by the
+     * core like any call, as the envelope's bytes: what `HomeStream.ticketRequest` takes. Judged at the session's clock.
+     */
+    suspend fun streamCall(home: String): ByteArray = gated {
+        if (engine == null) reconcile()
+        val engine = engine; val custody = memberCustody; val id = memberId
+        if (engine == null || custody == null || id == null) throw SessionError.NotReady()
+        val signing = custody.provider(id).publicKeys().signing
+        val at = nowMs
+        engine.run { it.advance(at) }
+        val written = engine.execute(custody) { e -> withEntropy(32) { e.streamBeginCall(home, signing, it) } }
+        written.artifact ?: throw AccountException.Internal("internal", "a call returned no envelope")
+    }
+
+    /** The configured transport of the home `home` (matched by its endpoints), if any: where its ticket requests go. */
+    suspend fun transportOf(home: String): HomeTransport? = onLane {
+        val engine = engine ?: return@onLane null
+        engine.run { it.exchangeHomes() }.firstOrNull { it.id == home }?.let { transportFor(it)?.transport }
+    }
+
     /** Records transitions that came due (§8.7). A schedule calls it; refresh calls it too. */
     suspend fun recordDue(): SessionSnapshot = gated {
         val engine = engine ?: return@gated reconcile()
