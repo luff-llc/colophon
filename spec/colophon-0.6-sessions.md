@@ -1,6 +1,6 @@
 # Colophon 0.6: sessions
 
-**Status:** unfrozen draft, revision 17, 2026-11-23. Revision 2 adopted the findings of the
+**Status:** unfrozen draft, revision 18, 2026-11-26. Revision 2 adopted the findings of the
 reference machine (`docs/colophon-0.6-sessions-findings.md`, F1–F20); revision 3 added `via` to passed claims (F12, F21); revision 4 answers the first
 independent design review (R1–R9 in the findings document): evidence instead of hearsay,
 no silent loss of state, key bootstrap and freshness, bounded state; revision 5 adopts what
@@ -10,7 +10,9 @@ bridging), and the session rules above them assume that and are simpler for it. 
 what a bridge checks and how loss beyond the first hop is repaired (B1–B4); revision 9
 made the freshness exchange retry (B5). Revision 10 answers the third design review: it
 states the timing assumption that convergence needs, makes every frame a broadcast, and
-limits 0.6 conformance to the home carrier. Additive to `colophon-0.5.md`; nothing here changes a
+limits 0.6 conformance to the home carrier. Revision 18 makes §S12 normative for the anchor and presence
+bytes, the translation arithmetic and the holder's publishing, so that independent kits cannot disagree;
+it corrects §S12's example, which was not canonical. Additive to `colophon-0.5.md`; nothing here changes a
 0.5 object, verdict or path. A 0.5 host that ignores this document stays conformant with 0.5.
 
 The words MUST, SHOULD and MAY are used as in 0.5 §0. "0.5 §N" refers to `colophon-0.5.md`.
@@ -508,18 +510,68 @@ checked by the reference explorer and simulator.
 Policy: defaults (`fold` `latest`). The snapshot, and the payload of each `msg`, is the **anchor**:
 
 ```json
-{"episode":"<id>","show":"<id>","positionMs":1234567,"ratePermille":1250,"playing":true,"at":98765432}
+{"at":98765432,"episode":"<id>","playing":true,"positionMs":1234567,"ratePermille":1250,"show":"<id>"}
 ```
 
-`at` is the holder's clock (§S7) when `positionMs` was true. A member's projected position
-is `positionMs + floor(ratePermille × (now + offset − at) / 1000)` while `playing` (`offset` as in §S7, zero for
-the holder itself), else `positionMs`. The holder
-publishes an anchor on play, pause, seek, rate change and episode change, and at least every
-60 s while playing. Presence payload: `{"label":"Kitchen iPad","playing":false}`.
+**Anchor bytes.** An anchor is the canonical JSON (0.5 §2.1) of an object with exactly these six fields,
+all required: `at`, `positionMs` and `ratePermille` integer tokens (no fraction, no exponent) from 0 to
+2^53−1; `playing` a boolean; `episode` and `show` **text**. Text is 1–1,024 bytes of UTF-8 that is not
+only `White_Space` (U+0009–U+000D, U+0020, U+0085, U+00A0, U+1680, U+2000–U+200A, U+2028, U+2029,
+U+202F, U+205F, U+3000) and holds no control character (U+0000–U+001F, U+007F–U+009F). `positionMs` is
+milliseconds of the episode; `ratePermille` is the rate in thousandths (1,000 is normal speed, 0 does
+not move; a rate is never negative); `at` is the publisher's clock (§S7) when `positionMs` was true. An
+anchor is at most `maxPayload` bytes. A reader refuses any other bytes, including another key order,
+white space or an escape the canonical form does not use, and judges them in this order, the first
+failure being the verdict: more than `maxPayload` bytes (before parsing); not one JSON value in UTF-8,
+a lone surrogate escape or nesting beyond 64 (0.5 §2.3); a duplicate member name at any depth; not an
+object; an unknown field; a missing field; a field of the wrong type; an integer out of range; text that
+breaks the rule above; not canonical. Within one check fields are taken in canonical order. A member
+that receives an anchor it refuses keeps the state the core gives it but does not translate it.
 
-A device that plays audio for this account SHOULD hold this cell, and SHOULD keep its last
-anchor so that it can supply it when it joins or takes after a restart. A device that yields MUST
-pause. A device that passes MUST pause before sending `pass` and put its stopped position in
-the snapshot with `playing: false`; the new holder starts from that position exactly. A
-device that takes starts from its projected position. Only the holder writes passive
+**Translation.** With `offset` this member's offset to the publisher (§S7; zero when it is the
+publisher), `error` that offset's error bound, `sampleAge` the time on this member's clock since the
+sample the offset came from, and `limit` the longest projection (below), all in integer milliseconds:
+
+- `age = now + offset − at`, computed exactly after clamping `offset` to ±(2^53−1), then clamped to
+  ±(2^53−1). Negative `now`, `error`, `sampleAge` and `limit` count as 0.
+- A paused anchor projects to `positionMs`.
+- A playing anchor projects to `positionMs + floor(ratePermille × elapsed / 1000)`, where
+  `elapsed = min(max(age, 0), limit)`, the product formed exactly (it may exceed 2^53−1) and the sum
+  saturating at 2^53−1. Elapsed time below zero (an offset whose error exceeds the anchor's true age,
+  or a clock restarted by a reboot) counts as zero. The projection is **capped** when `age > limit`.
+- Its error bound is `ceil(ratePermille × (error + ceil(2 × sampleAge / 1999)) / 1000)`, formed
+  exactly and saturating at 2^53−1: §S7's bound plus the drift since the sample of two clocks each within
+  500 ppm of real time (§S0), measured on one of them, which is at most 2/1999 of the elapsed time.
+  A paused anchor's bound is 0. When the projection is capped, the bound covers the offset only.
+- `limit` is 60,000 + `holderTimeoutMs` unless the application chooses otherwise: a holder that is
+  playing and reachable publishes at least every 60 s and is heard within `holderTimeoutMs`.
+- A member that has measured no offset to the publisher does not project: it uses `positionMs`.
+
+`conformance/0.6-sessions/now-playing-anchor.json` gives cases for both, with the expected verdict or result.
+
+**Whose clock.** The publisher of an anchor is the holder that sent it as a `msg`. The state that comes
+with a `pass` (the snapshot, and the `state` at `seq` 0 of a passed claim) is on the clock of the passer
+(`next.via`). A member that takes supplies, with its `take` (§S5), its last known anchor **re-stamped** on
+its own clock: the projected position, the same `ratePermille` and `playing`, and `at` its own clock now;
+a new holder publishes an anchor on its own clock as soon as it holds. Any other state a member cannot
+attribute is treated as on the clock of the claim's holder.
+
+**Publishing.** The holder publishes an anchor on play, pause, seek, rate change and episode change, and
+while playing at least every 60 s, counted on its own clock including the delay of its timers. Each member
+sends its presence on joining, when it starts or stops playing as holder, when it first hears from a
+member, and at least every third of `presenceTimeoutMs`. Presence payload: the canonical JSON of exactly
+`{"label":…,"playing":…}`, `label` text as above and `playing` a boolean, read under the same rules:
+
+```json
+{"label":"Kitchen iPad","playing":false}
+```
+
+**The role.** A device that plays audio for this account SHOULD hold this cell, and SHOULD keep its last
+anchor so that it can supply it when it joins or takes after a restart. A device that yields MUST pause. A
+device that passes MUST pause before sending `pass`; it publishes its stopped position with
+`playing: false` as a final `msg` and puts the same anchor in the `pass` snapshot, and the new holder starts
+from that position exactly. A device that takes starts from its projected position. A device that becomes
+holder without its application having asked (a restarted holder retaking, or a pass that arrives after the
+application stopped waiting for it) starts no playback: it publishes its own anchor if the state is its own,
+and otherwise the state it received, paused at its projected position. Only the holder writes passive
 `episode.position` progress; deliberate seeks and every other record are unaffected.

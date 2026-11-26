@@ -89,8 +89,10 @@ reboot) counts as zero, since playback is never behind its anchor; and a playing
 playing and reachable; `capped` tells the app, which may prefer the anchor's own position.
 
 **The error bound.** §S7 bounds the offset by `ceil(rtt / 2)` of the sample it came from. The kit reports
-`errorBoundMs = ceil(ratePermille × (offsetError + ceil(sampleAge / 1000)) / 1000)`: that bound, plus 1 ms per
-second since the sample for two clocks each within 500 ppm of real time (§S0), scaled by the rate. It is how far
+`errorBoundMs = ceil(ratePermille × (offsetError + ceil(2 × sampleAge / 1999)) / 1000)`: that bound, plus the
+drift since the sample of two clocks each within 500 ppm of real time (§S0), measured on one of them (at most
+2/1999 of the elapsed time, about 1,000.5 ppm), scaled by the rate. When the projection is capped the bound covers
+the offset only. It is how far
 the result can be from the publisher's own projection at the same instant. The inputs are exposed: a
 `NowPlayingStart` carries the anchor as received, its publisher and the whole `NowPlayingProjection` (`ageMs`,
 `elapsedMs`, `capped`, `errorBoundMs`). When no offset to the publisher was ever measured, `projection` is nil and
@@ -119,12 +121,12 @@ integers (`--check` verifies the file is current).
 | `NowPlayingSession.open(session:stream:claimsDatabase:options:)` | Joins the cell (also `open(account:…)`). |
 | `state` (`NowPlayingState`, observable) | `availability`; `holder` (member ID, its presence label, whether it is this device); `isHolder`; `gated`; `holderLapsed`; `lastAnchor` (the holder's); `localAnchor` (this device's); `requesting`; `asks` (prompt); `writesPassiveProgress`. |
 | `update(episode:show:positionMs:ratePermille:playing:)` | Reports this device's playback on play, pause, seek, rate change and episode change, and after a stall. Stamped with this device's clock. The holder publishes it at once, and re-publishes while playing every `republishMs` (30 s; §S12 requires at most 60 s). Any other device only keeps it. Never blocked. |
-| `requestPlayback() async -> NowPlayingRequestOutcome` | The user pressed Play here. `play(start)`, `playLocally(reason, start)`, `declined(by:)` or `cancelled`. |
-| `cancelRequest()` | Stops waiting for the holder (§4.1). |
+| `requestPlayback() async -> NowPlayingRequestOutcome` | The user pressed Play here. `play(start)`, `playLocally(reason, start)`, `declined(by:)` or `cancelled`. Cancelling the calling task answers `cancelled` for that caller; after `requestTimeoutMs` it answers `playLocally(.noAnswer, …)`. |
+| `cancelRequest()` | Stops waiting for the holder: every waiting caller gets `cancelled` (§4.1). |
 | `pass(to:)`, `decline(_:)` | The `prompt` policy's answers. |
 | `onEvent` | `pause(reason)`, `askReceived(member)`, `passFailed(to:reason:)`, `otherState(anchor, from:)`, `availabilityChanged`. |
 | `handoffPolicy` | `automatic` (default), `prompt` or `never`; it may be changed at any time. |
-| `leave()`, `close()`, `retry()` | Release the role and leave; stop as a process that ends would; open again after a failure. |
+| `leave()`, `close()`, `retry()` | Release the role and leave; stop as a process that ends would; open again after a failure. Both `leave()` and `close()` first, synchronously and once, tell a holder to pause (`pause(.ended)`), abandon a pass under way, clear the role and answer every waiting request (`playLocally(.closed, …)`). |
 
 ### 4.1 What `requestPlayback()` does
 
@@ -139,14 +141,23 @@ integers (`--check` verifies the file is current).
   holder frame for `askTimeoutMs`). A holder that is live and answering is never displaced: between two live
   devices handoff is ask and pass. A pass that arrives wins; a decline answers `declined`.
 
+**Bounded.** A request never waits forever. Each caller can cancel its own task (it gets `cancelled`; other callers
+keep waiting). After `requestTimeoutMs` every waiting caller gets `playLocally(.noAnswer, …)`. The default is the
+cell policy's `holderTimeoutMs` + 2 × `askTimeoutMs` (18 s with the default policy): by then the core has done
+everything it does on its own (taken after the ask timed out with no holder frame, or after the holder lapsed, which
+takes at most `holderTimeoutMs`, with a resent ask in between), so what remains is a holder that is live and not
+answering, typically a person who has not decided under `prompt`. A cell that fails while a request waits answers
+`playLocally(.cellFailed(…), …)`.
+
 When this device becomes holder this way, the kit publishes `playing: true` at the start position before it returns
 `play(start)`; the app starts its engine there and calls `update` if the engine ends up elsewhere. If the stream
 goes down while waiting, the request answers `playLocally(.streamDown, …)` at once.
 
 An ask cannot be withdrawn: after `cancelRequest()` (or `playLocally` while waiting), a pass that still arrives
-makes this device holder without a request. It then publishes what this device is actually doing (its local
-anchor, re-stamped; or the passed anchor, paused), so no position is lost and nothing starts playing on its own. A
-restarted holder that retakes is handled the same way.
+makes this device holder without a request. Only the app starts playback, so the kit publishes the state it
+received, paused at its position (the passed stopped anchor, exactly), whatever this device was playing locally
+meanwhile; the app may then call `requestPlayback()` to play it. The one exception is a restarted holder that
+retakes with its own kept anchor, which it publishes as it is.
 
 ### 4.2 The holder's side
 
@@ -158,6 +169,10 @@ When another device asks:
   before any frame that hands over the role leaves the device (§S12: a device that passes MUST pause before sending
   `pass`). The stopped position is exact only as far as the last `update` is: report stalls and seeks.
 - `prompt`: `askReceived(member)` once per waiting asker; `pass(to:)` runs the same sequence, `decline(_:)` declines.
+  An asker that hears no holder frame for `askTimeoutMs` takes (§S5), and a holder sends one only every `beatMs`,
+  which is longer; so while an ask waits for the person, the holder re-publishes its anchor (re-stamped, the same
+  trajectory) every half `askTimeoutMs`, and the asker keeps asking. The asker's request deadline (§4.1) bounds the
+  wait.
 - `never`: every ask is declined.
 
 If the core refuses a pass that began (`passFailed`), this device still holds the role, paused at the position it
@@ -198,27 +213,17 @@ What [hosts-06.md](hosts-06.md) §6b established applies unchanged:
 - Anchors use `CLOCK_MONOTONIC`, which keeps counting while the device sleeps; after a reboot a stored anchor's `at`
   can be ahead of the clock, which the translation treats as age zero.
 
-## 7. Where §S12 leaves room, and what this kit chooses
+## 7. Where the rules come from
 
-- **Field rules.** §S12 shows the anchor but does not say which fields are optional, the range of each integer, or
-  what an ID may hold. The kit makes every field required (0.5 §2.3: optional fields are named), integers 0 to
-  2^53 − 1 (the 0.5 default), and IDs and labels follow the core's listening-ID rule.
-- **Canonical form.** §S12 does not say the anchor is canonical, and its example lists the fields in another order.
-  The kit writes canonical JSON and reads only canonical bytes, so the three kits cannot disagree on an anchor; a
-  peer that writes another key order is refused (`notCanonical`).
-- **Negative rate.** Not allowed (`ratePermille` is 0 to 2^53 − 1).
-- **Elapsed time below zero, and very old anchors.** The formula has no lower bound and no age limit. The kit clamps
-  elapsed time at zero and caps the projection (§3), and says so in the result.
-- **Unknown offset.** §S12 gives no rule for an anchor whose publisher's offset was never measured; the kit does
-  not project it (§3).
-- **Whose clock after a take.** §S12 says `at` is the holder's clock, but after a take the new holder's state is
-  the old holder's anchor, on the old holder's clock, until it publishes. The kit's take carries the anchor
-  re-stamped on the taker's clock (§S5 lets a take supply its state), and a new holder publishes at once; a passed
-  claim's first state is read as on the passer's clock.
-- **Pause before pass, and a final anchor.** The kit both pauses before the pass and publishes the stopped anchor
-  as an ordered message before the pass carries it as the snapshot.
-- **Presence cadence.** §S12 defines the payload, not when to send it; `presenceTimeoutMs` drops a silent member's
-  presence, so the kit re-sends it (§2).
+Sessions §S12 (revision 18) is normative for everything in §2 and §3 and for the publishing rules this kit follows:
+the closed, required fields and their ranges, the text rule, canonical bytes (and refusing any others, in the order
+of §2), no negative rate, the clamps, the cap and saturation, the drift bound, no projection without a measured
+offset, whose clock an anchor is on after a pass or a take, re-stamping, the final stopped publish before a pass,
+what a holder that did not ask does, and the presence and republish cadence. Revision 17's example was not
+canonical; revision 18 corrects it. What remains this kit's own choice: the default `limit` may be changed
+(`maximumProjectionMs`), the request deadline (§4.1), and `republishMs` (30 s) and `pingMs` (30 s) within the
+spec's bounds. The housekeeping timer is armed for the earliest of the presence, republish and ping deadlines, so a
+large `presenceTimeoutMs` cannot delay a republish.
 
 ## 8. What was run
 
@@ -226,7 +231,8 @@ What [hosts-06.md](hosts-06.md) §6b established applies unchanged:
 home module):
 
 - `NowPlayingAnchorTests`: every case of `conformance/0.6-sessions/now-playing-anchor.json` (8 encodings,
-  2 presence encodings, 65 decode verdicts of which 9 are valid, 23 translations) and the re-stamp and pause
+  2 presence encodings, 65 decode verdicts of which 9 are valid, 36 translations, including drift extremes, negative and signed 64-bit
+  extreme inputs, and a capped projection with its bound) and the re-stamp and pause
   helpers. The file is written by `scripts/generate-now-playing-vectors.py`, an independent implementation of
   §2 and §3 in Python with exact integers (`--check` verifies it is current).
 - `NowPlayingSessionTests`, over real endpoints of two members, an in-memory carrier and a manual clock (the
@@ -234,8 +240,13 @@ home module):
   prompt, decline (no take after the ask times out) and a later pass; never; a lapsed holder taken over from its
   last anchor, projected exactly, and an anchor beyond the limit capped; a restarted holder gated then retaking
   with its kept anchor; a restarted holder that was taken over yielding and told to pause once; both devices
-  pressing Play at once (one holder, the other paused once); a seek and rate change before the ask in the final
-  anchor, and one after the pass never published; the pause once per loss across three handoffs; the stream down
+  pressing Play at once (one holder, the other paused once); a seek and rate change racing the ask at nine
+  interleavings (B always starts from exactly the anchor A stopped at, A publishes nothing after its final anchor,
+  one pause); a pass the core refuses (`passFailed`, still holding, paused); the pause once per loss across three
+  handoffs; closing and leaving while holding, while an ask waits and while requesting (one `pause(.ended)`, every
+  caller answered); a cancelled caller task, before and while waiting; the request deadline, default and
+  configured; a cell failing during a request; a pass after a cancelled request (paused at the passed position
+  although the app was playing something else); a member without the namespace (`notEntitled`); the stream down
   (handoff unavailable, local playback going on, nobody told to pause); a cell whose store fails (one pause,
   `playLocally`); a second instance superseding the first; a cell that cannot be joined.
 - `NowPlayingEndToEndTests`: two members over a real home (`relay/server.js` on Bun with the home module) and
@@ -246,8 +257,9 @@ home module):
   time, so B starts 7–15 ms behind where A would have been had it kept playing at 1.25×; while following, B's
   projection of A's position was 0–1 ms from A's own, within the 2 ms bound it reported.
 - `swift/HostsClient` compiles a player's setup from the public API only, and `scripts/check-swift-hosts-api.py`
-  checks that no public symbol of `ColophonListeningKit` names the engine, an endpoint, the stream client, an
-  account view, the host access or the cell host.
+  checks that no symbol `ColophonListeningKit` declares is SPI or names or relates to the engine, an endpoint, the
+  stream client, an account view, the host access or the cell host, and that its now-playing surface is exactly the
+  pinned one (`swift/Tests/ColophonHostsTests/ColophonListeningKit-NowPlaying.public-api`).
 
 ## 9. Not verified
 
