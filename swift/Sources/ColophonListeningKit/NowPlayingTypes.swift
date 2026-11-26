@@ -20,8 +20,15 @@ public struct NowPlayingOptions: Sendable {
     public var restoredAnchor: NowPlayingAnchor?
     /// How far a playing anchor is projected at most (default `NowPlayingAnchor.defaultMaximumProjectionMs`).
     public var maximumProjectionMs: Int64?
-    /// How often the holder re-publishes its anchor while playing. §S12 requires at least every 60 s.
+    /// How often the holder re-publishes its anchor while playing. §S12 requires at least every 60 s: values are kept
+    /// within 1 … 59 s.
     public var republishMs: Int64 = 30_000
+    /// How long `requestPlayback()` waits for the holder before it answers `playLocally(.noAnswer, …)`. The default
+    /// (nil) is the cell policy's `holderTimeoutMs` + 2 × `askTimeoutMs` (18 s with the default policy): every outcome
+    /// the core decides on its own (a pass, a decline, a take after the ask timed out or after the holder lapsed) has
+    /// happened by then, so what is left is a holder that is live but not answering (a person who has not decided
+    /// under `prompt`).
+    public var requestTimeoutMs: Int64?
     /// How often this device measures its clock offset to a holder it follows.
     public var pingMs: Int64 = 30_000
     /// The cell policy as JSON (internal: every member of the cell uses the same one; the default policy otherwise).
@@ -58,6 +65,8 @@ public enum NowPlayingUnavailable: Sendable, Hashable {
     case cellFailed(String)
     /// The app closed the session.
     case closed
+    /// The holder did not answer within `requestTimeoutMs`.
+    case noAnswer
 }
 
 public enum NowPlayingAvailability: Sendable, Hashable {
@@ -123,7 +132,7 @@ public enum NowPlayingRequestOutcome: Sendable, Hashable {
     case playLocally(NowPlayingUnavailable, NowPlayingStart?)
     /// The holder declined.
     case declined(by: NowPlayingMember)
-    /// `cancelRequest()` was called.
+    /// `cancelRequest()` was called, or the calling task was cancelled.
     case cancelled
 }
 
@@ -137,6 +146,8 @@ public enum NowPlayingPauseReason: Sendable, Hashable {
     case superseded
     /// The cell failed (its store kept failing, or its endpoint could not be rebuilt).
     case failed(String)
+    /// The app closed or left the session while this device held the role.
+    case ended
 }
 
 /// What the app must act on. Delivered on the main actor, in order, through `NowPlayingSession.onEvent`.

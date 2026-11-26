@@ -19,12 +19,17 @@ import ColophonSession
         var events: [NowPlayingEvent] = []
         /// For each `pause`, whether the cell host had sent a `pass` frame by then.
         var passSentAtPause: [Bool] = []
+        /// This device's anchor when each `pause` arrived, and how many `msg` frames it had sent by then.
+        var anchorAtPause: [NowPlayingAnchor?] = []
         init(_ name: String, _ session: NowPlayingSession, store: any ClaimStore, log: Log<CellHostEvent>) {
             self.name = name; self.session = session; self.store = store; self.log = log
             session.onEvent = { [weak self] event in
                 guard let self else { return }
                 self.events.append(event)
-                if case .pause = event { self.passSentAtPause.append(self.sent("pass") > 0) }
+                if case .pause = event {
+                    self.passSentAtPause.append(self.sent("pass") > 0)
+                    self.anchorAtPause.append(self.session.state.localAnchor)
+                }
             }
         }
         var id: String { session.member }
@@ -39,16 +44,36 @@ import ColophonSession
         let first: Device
         let second: Device
     }
+    /// Two members of an account of these tests' own: other suites move the shared pair's authority head while they
+    /// run (approving a third member), which would make these members drop each other's frames mid-test.
+    @MainActor enum Pair {
+        static var made: (Device, Device)?
+        static func get() async throws -> (Device, Device) {
+            if let made { return made }
+            let first = Device()
+            await first.session.create()
+            try #require(first.session.phase == .ready)
+            let second = Device(medium: first.medium)
+            await second.session.restore()
+            try await approveByScan(joining: second.session, approving: first.session)
+            await second.session.refresh()
+            try #require(second.session.phase == .ready)
+            made = (first, second)
+            return (first, second)
+        }
+    }
     func world() async throws -> World {
-        let (first, second) = try await LocalAccount.pair()
+        let (first, second) = try await Pair.get()
         return World(clock: ManualClock(), carrier: LoopCarrier(), first: first, second: second)
     }
     func player(_ w: World, _ device: Device, _ name: String, label: String, policy: NowPlayingHandoffPolicy = .automatic,
-                store: (any ClaimStore)? = nil, restored: NowPlayingAnchor? = nil, live: Bool = true) async throws -> Player {
+                store: (any ClaimStore)? = nil, restored: NowPlayingAnchor? = nil, live: Bool = true,
+                configure: (inout NowPlayingOptions) -> Void = { _ in }) async throws -> Player {
         let account = try device.account()
         let store = store ?? MemoryClaimStore()
         var options = NowPlayingOptions(label: label, handoffPolicy: policy, restoredAnchor: restored)
         options.cellPolicy = try fastPolicy()
+        configure(&options)
         let log = Log<CellHostEvent>()
         let carrier = w.carrier
         let session = await NowPlayingSession.open(member: account.member, clock: w.clock, streamLive: live, options: options) {
@@ -109,7 +134,8 @@ import ColophonSession
         await eventually("A is asked") { a.events.contains { if case .askReceived(let m) = $0 { m.id == b.id } else { false } } }
         #expect(a.session.state.asks.map(\.id) == [b.id] && b.session.state.requesting)
         a.session.decline(b.id)
-        guard case .declined(let by) = await first.value else { Issue.record("B was not declined"); return }
+        let o = await first.value
+        guard case .declined(let by) = o else { Issue.record("B was not declined: \(o); A heard \(a.events); A's host \(a.log.all.map(shape).suffix(30)); B's host \(b.log.all.map(shape).suffix(30))"); return }
         #expect(by.id == a.id && by.label == "Kitchen iPad")
         #expect(a.holds && a.pauses.isEmpty && a.session.state.asks.isEmpty)
         // The asker does not take after a decline, even once its ask has timed out.
@@ -240,26 +266,53 @@ import ColophonSession
         await close(a, b)
     }
 
-    @Test func aSeekOrRateChangeBeforeTheAskIsInTheFinalAnchorAndOneAfterThePassIsNotPublished() async throws {
+    /// The user seeks and changes the rate on A at every point around B's request: before it is admitted, while the
+    /// ask is in flight, while the pass is being written, after it. Whatever the interleaving, B starts from exactly the
+    /// anchor A stopped at when it was told to pause, A publishes nothing after its final anchor, and A pauses once.
+    @Test(arguments: [0, 1, 2, 3, 5, 8, 13, 50, 200])
+    func aSeekOrRateChangeRacingTheAskNeverSplitsThePosition(_ yields: Int) async throws {
         let w = try await world()
         let a = try await player(w, w.first, "A", label: "Kitchen iPad"), b = try await player(w, w.second, "B", label: "Car")
         try await play(a, from: 1_000)
         await eventually { b.session.state.holder?.id == a.id }
         await w.clock.advance(500)
-        // The user seeks on A and changes the rate in the same instant B's user presses Play: A's calls come first.
+        let before = a.sent("msg")
         let asking = request(b)
-        try a.session.update(episode: "ep-1", show: "show-1", positionMs: 300_000, ratePermille: 1_500, playing: true)
+        let seeking = Task { @MainActor in
+            for _ in 0..<yields { await Task.yield() }
+            try? a.session.update(episode: "ep-1", show: "show-1", positionMs: 300_000, ratePermille: 1_500, playing: true)
+        }
+        await seeking.value
         guard case .play(let start?) = await asking.value else { Issue.record("B did not get the pass"); return }
-        #expect(start.positionMs == 300_000 && start.anchor.ratePermille == 1_500)
-        // After the pass, A's seek is kept locally and never published: A is not "still playing here".
-        let msgs = a.sent("msg")
-        try a.session.update(episode: "ep-1", show: "show-1", positionMs: 400_000, ratePermille: 1_000, playing: true)
         await settle()
         await w.clock.advance(1_000)
-        #expect(a.sent("msg") == msgs && !a.holds && a.session.state.localAnchor?.positionMs == 400_000)
-        #expect(b.session.state.lastAnchor?.positionMs == 300_000)
-        #expect(a.pauses.count == 1)
+        let stopped = try #require(a.anchorAtPause.first ?? nil)
+        #expect(a.pauses.count == 1 && !a.holds && b.holds)
+        #expect(start.positionMs == stopped.positionMs && start.anchor.ratePermille == stopped.ratePermille && !stopped.playing)
+        let seekFirst = stopped.positionMs == 300_000
+        #expect(seekFirst || stopped.positionMs == 1_500, "the stopped position is the seek or the projection, never a mix")
+        // A's messages: the seek if it came first, then exactly one final anchor; nothing after the pause.
+        #expect(a.sent("msg") == before + (seekFirst ? 2 : 1))
+        #expect(b.session.state.lastAnchor?.positionMs == stopped.positionMs)
         await close(a, b)
+    }
+
+    @Test func aPassTheCoreRefusesLeavesTheHolderPausedAndHoldingAndSaysSo() async throws {
+        let w = try await world()
+        let a = try await player(w, w.first, "A", label: "Kitchen iPad", policy: .prompt), b = try await player(w, w.second, "B", label: "Car")
+        try await play(a, from: 10_000)
+        await eventually { b.session.state.holder?.id == a.id }
+        let asking = request(b)
+        await eventually("A is asked") { a.session.state.asks.map(\.id) == [b.id] }
+        // B leaves before A answers: its ask is gone from A's core, which refuses the pass.
+        await b.session.leave()
+        _ = await asking.value
+        await settle()
+        #expect(a.session.pass(to: b.id))
+        await eventually("A hears the refusal") { a.events.contains { if case .passFailed = $0 { true } else { false } } }
+        #expect(a.pauses.count == 1 && a.holds)
+        #expect(a.session.state.localAnchor?.playing == false && a.session.state.localAnchor?.positionMs == 10_000)
+        await close(a)
     }
 
     @Test func thePauseIsReportedOncePerLossOfTheRole() async throws {
@@ -276,6 +329,185 @@ import ColophonSession
         #expect(a.pauses.count == 2 && b.pauses.count == 1)
         #expect(a.pauses.allSatisfy { if case .passed = $0 { true } else { false } })
         await close(a, b)
+    }
+
+    // MARK: Closing, leaving, cancelling and deadlines
+
+    @Test func closingWhileHoldingPausesOnceAndNoLongerReportsTheRole() async throws {
+        let w = try await world()
+        let a = try await player(w, w.first, "A", label: "Kitchen iPad"), b = try await player(w, w.second, "B", label: "Car")
+        try await play(a, from: 0)
+        a.session.close()
+        #expect(a.pauses == [.ended] && !a.session.state.isHolder && a.session.state.availability == .unavailable(.closed))
+        a.session.close()
+        await w.clock.advance(1_000)
+        #expect(a.pauses.count == 1)
+        await close(b)
+    }
+
+    @Test func leavingWhileHoldingPausesOnceAndReleasesTheCell() async throws {
+        let w = try await world()
+        let a = try await player(w, w.first, "A", label: "Kitchen iPad"), b = try await player(w, w.second, "B", label: "Car")
+        try await play(a, from: 0)
+        await eventually { b.session.state.holder?.id == a.id }
+        await a.session.leave()
+        #expect(a.pauses == [.ended] && !a.session.state.isHolder)
+        await eventually("B's core sees nobody holding", seconds: 2) { b.session.hostForTests?.snapshot?.holder == nil }
+        await eventually("B sees nobody holding", seconds: 2) { b.session.state.holder == nil }
+        await w.clock.advance(1_000)
+        #expect(a.pauses.count == 1)
+        await close(b)
+    }
+
+    @Test func closingWhileAnAskIsWaitingPausesOnceAndClearsTheAsk() async throws {
+        let w = try await world()
+        let a = try await player(w, w.first, "A", label: "Kitchen iPad", policy: .prompt), b = try await player(w, w.second, "B", label: "Car")
+        try await play(a, from: 0)
+        await eventually { b.session.state.holder?.id == a.id }
+        let asking = request(b)
+        await eventually { a.session.state.asks.map(\.id) == [b.id] }
+        a.session.close()
+        #expect(a.pauses == [.ended] && a.session.state.asks.isEmpty && !a.session.pass(to: b.id))
+        // B's request ends too: A lapses, and B takes.
+        await w.clock.advance(2_000)
+        guard case .play = await asking.value else { Issue.record("B did not take"); return }
+        #expect(a.pauses.count == 1)
+        await close(b)
+    }
+
+    @Test func closingWhileRequestingAnswersEveryWaitingCaller() async throws {
+        let w = try await world()
+        let a = try await player(w, w.first, "A", label: "Kitchen iPad", policy: .prompt), b = try await player(w, w.second, "B", label: "Car")
+        try await play(a, from: 0)
+        await eventually { b.session.state.holder?.id == a.id }
+        let first = request(b), second = request(b)
+        await eventually { a.session.state.asks.map(\.id) == [b.id] }
+        b.session.close()
+        for r in [first, second] { guard case .playLocally(.closed, _) = await r.value else { Issue.record("a caller still waits"); return } }
+        #expect(b.pauses.isEmpty && !b.session.state.requesting)
+        await close(a)
+    }
+
+    @Test func cancellingTheCallersTaskAnswersCancelledForThatCallerOnly() async throws {
+        let w = try await world()
+        let a = try await player(w, w.first, "A", label: "Kitchen iPad", policy: .prompt), b = try await player(w, w.second, "B", label: "Car")
+        try await play(a, from: 0)
+        await eventually { b.session.state.holder?.id == a.id }
+        let first = request(b), second = request(b)
+        await eventually { a.session.state.asks.map(\.id) == [b.id] && b.session.state.requesting }
+        first.cancel()
+        guard case .cancelled = await first.value else { Issue.record("the cancelled caller was not answered"); return }
+        #expect(b.session.state.requesting)
+        // A task cancelled before it asks is answered at once.
+        let early = Task { @MainActor in
+            withUnsafeCurrentTask { $0?.cancel() }
+            return await b.session.requestPlayback()
+        }
+        guard case .cancelled = await early.value else { Issue.record("an already cancelled caller waited"); return }
+        #expect(a.session.pass(to: b.id))
+        guard case .play = await second.value else { Issue.record("the other caller did not get the pass"); return }
+        await close(a, b)
+    }
+
+    @Test func aHolderThatNeverAnswersEndsTheRequestAtItsDeadline() async throws {
+        let w = try await world()
+        let a = try await player(w, w.first, "A", label: "Kitchen iPad", policy: .prompt), b = try await player(w, w.second, "B", label: "Car")
+        try await play(a, from: 0)
+        await eventually { b.session.state.holder?.id == a.id }
+        let asking = request(b)
+        await eventually { a.session.state.asks.map(\.id) == [b.id] }
+        // The fast policy: holderTimeoutMs 1,500 + 2 × askTimeoutMs 300 = 2,100 ms.
+        await w.clock.advance(2_000)
+        #expect(b.session.state.requesting)
+        await w.clock.advance(200)
+        guard case .playLocally(.noAnswer, let start?) = await asking.value else { Issue.record("B still waits"); return }
+        #expect(start.anchor.episode == "ep-1" && a.holds && !b.holds && a.pauses.isEmpty)
+        await close(a, b)
+    }
+
+    @Test func theDeadlineIsConfigurable() async throws {
+        let w = try await world()
+        let a = try await player(w, w.first, "A", label: "Kitchen iPad", policy: .prompt)
+        let b = try await player(w, w.second, "B", label: "Car") { $0.requestTimeoutMs = 500 }
+        try await play(a, from: 0)
+        await eventually { b.session.state.holder?.id == a.id }
+        let asking = request(b)
+        await eventually { a.session.state.asks.map(\.id) == [b.id] }
+        await w.clock.advance(600)
+        let o = await asking.value; guard case .playLocally(.noAnswer, _) = o else { Issue.record("B: \(o)"); return }
+        await close(a, b)
+    }
+
+    @Test func aCellThatFailsDuringARequestAnswersPlayLocally() async throws {
+        let w = try await world()
+        let store = TestStore(clock: w.clock)
+        let a = try await player(w, w.first, "A", label: "Kitchen iPad", policy: .prompt)
+        let b = try await player(w, w.second, "B", label: "Car", store: store)
+        try await play(a, from: 0)
+        await eventually { b.session.state.holder?.id == a.id }
+        let asking = request(b)
+        await eventually { a.session.state.asks.map(\.id) == [b.id] }
+        store.set { $0.fenceFailures = 100 }
+        await w.clock.advance(400 * 4)
+        guard case .playLocally(.cellFailed("store"), _) = await asking.value else { Issue.record("B still waits"); return }
+        #expect(b.pauses.isEmpty)
+        await close(a, b)
+    }
+
+    @Test func aPassAfterTheRequestWasCancelledLeavesThisDevicePausedAtThePassedPosition() async throws {
+        let w = try await world()
+        let a = try await player(w, w.first, "A", label: "Kitchen iPad", policy: .prompt), b = try await player(w, w.second, "B", label: "Car")
+        try await play(a, from: 20_000)
+        await eventually { b.session.state.holder?.id == a.id }
+        let asking = request(b)
+        await eventually { a.session.state.asks.map(\.id) == [b.id] }
+        b.session.cancelRequest()
+        guard case .cancelled = await asking.value else { Issue.record("not cancelled"); return }
+        // B's user plays something else locally meanwhile.
+        try b.session.update(episode: "ep-9", show: "show-1", positionMs: 5, playing: true)
+        await w.clock.advance(100)
+        #expect(a.session.pass(to: b.id))
+        await eventually("B holds") { b.holds }
+        let mine = try #require(b.session.state.localAnchor)
+        #expect(mine.episode == "ep-1" && mine.positionMs == 20_100 && !mine.playing)
+        await eventually { a.session.state.lastAnchor == mine }
+        await close(a, b)
+    }
+
+    /// A member approved with `grant` (narrowed terms) on an account of its own, which declares `listening.podcasts` and
+    /// `notes`. Its own account, so that the shared pair's authority head does not move under the other tests.
+    func member(grant: GrantOptions) async throws -> (owner: Device, member: Device) {
+        let owner = Device(namespaces: [listening, "notes"])
+        await owner.session.create()
+        try #require(owner.session.phase == .ready)
+        let device = Device(medium: owner.medium, namespaces: [listening, "notes"])
+        await device.session.restore()
+        let scanned = try await owner.session.scanRequest(try await device.session.exportRequest())
+        try await owner.session.approve(scanned.request, pairing: scanned.pairing, grant: grant)
+        await device.session.refresh()
+        try #require(device.session.phase == .ready)
+        return (owner, device)
+    }
+
+    @Test func aMemberThatMayOnlyReadFollowsButPlaysLocally() async throws {
+        let w = try await world()
+        let (owner, reader) = try await member(grant: .narrowing(access: [.read]))
+        defer { owner.close(); reader.close() }
+        let r = try await player(w, reader, "R", label: "Reader")
+        #expect(r.session.state.availability == .unavailable(.readOnly))
+        guard case .playLocally(.readOnly, _) = await r.session.requestPlayback() else { Issue.record("blocked"); return }
+        #expect(!r.holds && r.pauses.isEmpty)
+        await close(r)
+    }
+
+    @Test func aMemberWithoutTheNamespaceIsNotEntitledAndPlaysLocally() async throws {
+        let w = try await world()
+        let (owner, outsider) = try await member(grant: .narrowing(namespaces: ["notes"]))
+        defer { owner.close(); outsider.close() }
+        let o = try await player(w, outsider, "O", label: "Outsider")
+        #expect(o.session.state.availability == .unavailable(.notEntitled))
+        guard case .playLocally(.notEntitled, _) = await o.session.requestPlayback() else { Issue.record("blocked"); return }
+        await close(o)
     }
 
     // MARK: Fail-safe

@@ -170,6 +170,11 @@ public actor SessionCellHost: StreamCell {
     private var attached = false
     private var passToken: ListenerToken?
     private var outbox: [CellHostEvent] = []
+    /// `leave` ran: close once the write in progress (the released claim) has completed and its step (the `bye`) has
+    /// been carried out.
+    private var closeAfterWrite = false
+    /// Resolved when the host ends (closed or failed).
+    private nonisolated let ended = OneShot<Void>()
     private var inJob = false
     /// Commands a job settled: their callers resume after the job's events were reported.
     private var settled: [(OneShot<Result<Void, CellCommandFailure>>, Result<Void, CellCommandFailure>)] = []
@@ -200,7 +205,7 @@ public actor SessionCellHost: StreamCell {
     private enum Waited: Sendable { case fired, cancelled }
     private enum SaveResult: Sendable { case stored, stale, failed(String) }
     private enum Job: Sendable {
-        case command(Held), frame(String), linkUp, linkDown, accountChanged, close
+        case command(Held), frame(String), linkUp, linkDown, accountChanged, close, closeWhenWritten
         case tick(UInt64), renew(UInt64)
         case stored(ack: UInt64, endpoint: ObjectIdentifier)
         case writeEnded(fail: FailReason?, error: String?)
@@ -321,9 +326,12 @@ public actor SessionCellHost: StreamCell {
         jobs.yield(.close)
     }
     /// Ends this member's part: `leave` (a holder releases the role), then closes, which drops the endpoint and its key.
+    /// A holder's release is persisted before its `bye` is sent (sessions §S5), so the host closes only once that write
+    /// has completed and the `bye` has gone to the carrier; it returns when the host has ended.
     public func leave() async throws {
-        defer { close() }
-        try await command("leave", json: Self.json(["command": "leave"]))
+        do { try await command("leave", json: Self.json(["command": "leave"])) } catch { close(); throw error }
+        jobs.yield(.closeWhenWritten)
+        await ended.wait()
     }
 
     // MARK: The queue
@@ -334,6 +342,7 @@ public actor SessionCellHost: StreamCell {
     private func perform(_ job: Job) async {
         inJob = true
         await body(job)
+        if closeAfterWrite, writing == nil, phase != .closed, phase != .failed { await end(.closed, CellHostError(.closed, "the cell host is closed")) }
         inJob = false
         flush()
         let done = settled; settled.removeAll()
@@ -396,6 +405,7 @@ public actor SessionCellHost: StreamCell {
             do { try e.finishDelegation(body: body, signature: signature, clock: clockNow()); armRenewal(expires) }
             catch { emit(.error(code: codeOf(error), during: "delegation")) }
         case .fail(let reason, let error): await fail(reason, error: error)
+        case .closeWhenWritten: closeAfterWrite = true
         case .close: return
         }
     }
@@ -439,6 +449,7 @@ public actor SessionCellHost: StreamCell {
         for c in pending { settle(c, .failure(why)) }
         endpoint = nil
         if attached { attached = false; await carrier.detach(self) }
+        ended.resolve(())
     }
     private func fail(_ reason: FailReason, error: String? = nil) async {
         guard phase != .closed, phase != .failed else { return }

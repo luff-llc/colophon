@@ -39,7 +39,7 @@ import ColophonHosts
     /// This device's member ID.
     public nonisolated let member: String
 
-    private enum Input: Sendable { case cell(CellEvent), failed(FailReason), cellState, stream(Bool), tick, commandFailed(String, String) }
+    private enum Input: Sendable { case cell(CellEvent), failed(FailReason), cellState, stream(Bool), tick, requestDeadline, commandFailed(String, String) }
 
     @ObservationIgnored private let options: NowPlayingOptions
     @ObservationIgnored private let clock: any HostClock
@@ -58,7 +58,10 @@ import ColophonHosts
     @ObservationIgnored private var passingTo: String?
     @ObservationIgnored private var streamLive: Bool
     @ObservationIgnored private var failure: NowPlayingUnavailable?
-    @ObservationIgnored private var waiting: [CheckedContinuation<NowPlayingRequestOutcome, Never>] = []
+    /// Callers of `requestPlayback()` waiting for the holder, by request. A continuation is resumed only by taking it out
+    /// of this table, on the main actor, so none is resumed twice or left behind.
+    @ObservationIgnored private var waiting: [UUID: CheckedContinuation<NowPlayingRequestOutcome, Never>] = [:]
+    @ObservationIgnored private var requestDeadline: HostTimer?
     /// The state supplied with this device's pending take (a re-stamped anchor on this device's clock).
     @ObservationIgnored private var takeState: Data?
     /// The member whose clock `state.lastAnchor` is on.
@@ -71,6 +74,7 @@ import ColophonHosts
     @ObservationIgnored private var lastPublished: Int64 = .min / 2
     @ObservationIgnored private var lastPresence: Int64 = .min / 2
     @ObservationIgnored private var holderTimeoutMs: Int64 = 15_000
+    @ObservationIgnored private var askTimeoutMs: Int64 = 1_500
     @ObservationIgnored private var presenceTimeoutMs: Int64 = 15_000
 
     // MARK: Opening
@@ -179,7 +183,9 @@ import ColophonHosts
             sendPresence()
             arm()
         } catch {
-            failure = .couldNotJoin(String(describing: error))
+            // A member with no `records` entry for the namespace cannot join the cell at all.
+            if let e = ColophonError.wrap(error) as? ColophonError, e.code == "denied:notGranted" { failure = .notEntitled }
+            else { failure = .couldNotJoin(String(describing: error)) }
         }
         refresh()
     }
@@ -193,6 +199,7 @@ import ColophonHosts
         guard let p = try? JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any] else { return }
         if let v = (p["holderTimeoutMs"] as? NSNumber)?.int64Value, v > 0 { holderTimeoutMs = v }
         if let v = (p["presenceTimeoutMs"] as? NSNumber)?.int64Value, v > 0 { presenceTimeoutMs = v }
+        if let v = (p["askTimeoutMs"] as? NSNumber)?.int64Value, v > 0 { askTimeoutMs = v }
     }
 
     /// Opens the cell again after it failed or could not be joined (from the last stored claim: the restart rules apply).
@@ -202,22 +209,31 @@ import ColophonHosts
         failure = nil
         await join()
     }
-    /// Gives the role up (a holder releases it, so nobody holds) and leaves the session.
+    /// Gives the role up (a holder releases it, so nobody holds) and leaves the session. A holder is told to pause
+    /// first, and every waiting request answers, before anything is sent.
     public func leave() async {
-        guard let cell else { close(); return }
-        holdsRole = false
+        guard let cell, !closed else { close(); return }
+        end()
         try? await cell.leave()
         close()
     }
-    /// Stops at once, as a process that ends would: the stored claim is what the next start begins from.
+    /// Stops at once, as a process that ends would: the stored claim is what the next start begins from. A holder is
+    /// told to pause (`pause(.ended)`) and every waiting request answers `playLocally(.closed, …)` before the cell goes.
     public func close() {
         guard !closed else { return }
+        end()
         closed = true
-        resolve(.playLocally(.closed, nil))
         dropCell()
         streamToken?.cancel(); streamToken = nil
         inputs.finish()
         refresh()
+    }
+    /// What closing and leaving share, run synchronously and once: the role ends here (one pause), a pass under way is
+    /// abandoned, and waiting requests answer.
+    private func end() {
+        passingTo = nil
+        loseRole(.ended)
+        resolve(.playLocally(.closed, best(.local)))
     }
     private func dropCell() {
         timer?.cancel(); timer = nil
@@ -253,7 +269,7 @@ import ColophonHosts
             startPlaying(start)
             return .play(start)
         }
-        if !waiting.isEmpty { return await withCheckedContinuation { waiting.append($0) } }
+        if !waiting.isEmpty { return await wait() }
         // The state a take starts from: the last anchor known, re-stamped on this clock (§S5 lets the take carry it).
         let restamped = best(.local).map { s -> NowPlayingAnchor in
             (try? NowPlayingAnchor(episode: s.anchor.episode, show: s.anchor.show, positionMs: s.positionMs, ratePermille: s.anchor.ratePermille,
@@ -269,14 +285,44 @@ import ColophonHosts
             send("ask", [:])
             send("take", take)
         }
+        armRequestDeadline()
         refresh()
-        return await withCheckedContinuation { waiting.append($0); state.requesting = true }
+        return await wait()
+    }
+
+    /// How long a request waits for the holder before it answers `playLocally(.noAnswer, …)`.
+    private var requestTimeoutMs: Int64 { max(1, options.requestTimeoutMs ?? (holderTimeoutMs + 2 * askTimeoutMs)) }
+
+    /// Waits for the request's outcome. Cancelling the calling task answers `cancelled` for this caller alone.
+    private func wait() async -> NowPlayingRequestOutcome {
+        let id = UUID()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { (c: CheckedContinuation<NowPlayingRequestOutcome, Never>) in
+                waiting[id] = c
+                state.requesting = true
+                // Cancelled before it was registered: the handler below found nothing to resume.
+                if Task.isCancelled { finish(id, .cancelled) }
+            }
+        } onCancel: {
+            Task { @MainActor [weak self] in self?.finish(id, .cancelled) }
+        }
+    }
+    /// Resumes one waiting caller, if it is still waiting.
+    private func finish(_ id: UUID, _ outcome: NowPlayingRequestOutcome) {
+        guard let c = waiting.removeValue(forKey: id) else { return }
+        if waiting.isEmpty { requestDeadline?.cancel(); requestDeadline = nil; state.requesting = false }
+        c.resume(returning: outcome)
+        refresh()
+    }
+    private func armRequestDeadline() {
+        requestDeadline?.cancel()
+        let inputs = inputs
+        requestDeadline = clock.schedule(after: requestTimeoutMs) { inputs.yield(.requestDeadline) }
     }
 
     /// Stops waiting for the holder. The ask cannot be withdrawn: if the holder passes anyway, this device becomes holder
     /// paused at the passed position (it publishes it, so no position is lost).
     public func cancelRequest() {
-        takeState = nil
         resolve(.cancelled)
     }
 
@@ -310,6 +356,8 @@ import ColophonHosts
             if !live, !waiting.isEmpty { resolve(.playLocally(.streamDown, best(.local))) }
             if live { sendPresence() }
         case .tick: tick()
+        case .requestDeadline:
+            if !waiting.isEmpty { resolve(.playLocally(.noAnswer, best(.local))) }
         case .commandFailed(let name, let reason):
             if name == "pass", let to = passingTo { passRefused(to: to, reason: reason) }
             if name == "ask" || name == "take", !waiting.isEmpty { resolve(.playLocally(.cellFailed(reason), best(.local))) }
@@ -335,9 +383,11 @@ import ColophonHosts
                 startPlaying(start)
                 resolve(.play(start))
             } else {
-                // Not asked for here (a restarted holder retaking, a pass after `cancelRequest`): publish what this device
-                // is actually doing, so the cell's state is true.
-                if let mine = local.withLock({ $0 }) {
+                // Not asked for here (a restarted holder retaking, a pass or take after the request was cancelled or
+                // timed out). Only the app starts playback: publish the cell's state paused at its position, unless it is
+                // this device's own anchor (a restarted holder retaking with what it kept), which stays as it is.
+                let mine = local.withLock { $0 }
+                if let anchor, let mine, anchor == mine {
                     publish(mine.restamped(nowMs: clock.monoMs(), maximumProjectionMs: maximumProjectionMs))
                 } else if let anchor {
                     let s = makeStart(of: anchor, publisher: publisher, source: .local)
@@ -345,6 +395,9 @@ import ColophonHosts
                                                           ratePermille: anchor.ratePermille, playing: false, at: clock.monoMs()) {
                         setLocal(paused); publish(paused)
                     }
+                } else if let mine {
+                    let paused = mine.paused(nowMs: clock.monoMs(), maximumProjectionMs: maximumProjectionMs)
+                    setLocal(paused); publish(paused)
                 }
             }
         case .yielded(let to):
@@ -365,6 +418,9 @@ import ColophonHosts
                 guard !state.asks.contains(where: { $0.id == from }) else { return }
                 let asker = memberValue(from)
                 state.asks.append(asker)
+                // An asker that hears no holder frame for askTimeoutMs takes (§S5): while a person decides, the holder
+                // keeps re-publishing its anchor (every half askTimeoutMs, `arm`) so that the asker waits and asks again.
+                holdAsker()
                 emit(.askReceived(asker))
             }
         case .declined(let from):
@@ -488,9 +544,10 @@ import ColophonHosts
     }
     private func resolve(_ outcome: NowPlayingRequestOutcome) {
         let all = waiting
-        waiting = []
+        waiting = [:]
+        requestDeadline?.cancel(); requestDeadline = nil
         state.requesting = false
-        for c in all { c.resume(returning: outcome) }
+        for c in all.values { c.resume(returning: outcome) }
     }
     private func setLocal(_ anchor: NowPlayingAnchor) {
         local.withLock { $0 = anchor }
@@ -502,17 +559,20 @@ import ColophonHosts
         lastPublished = clock.monoMs()
         state.lastAnchor = anchor
         lastAnchorClock = member
+        arm()
     }
     private func sendPresence() {
         guard cell != nil, failure == nil, let p = try? NowPlayingPresence(label: options.label, playing: holdsRole && state.localAnchor?.playing == true)
         else { return }
         send("presence", ["payload": Base64.encode(p.encoded)])
         lastPresence = clock.monoMs()
+        arm()
     }
     private func ping(_ to: String) {
         guard cell != nil, failure == nil else { return }
         send("ping", ["to": to])
         lastPing[to] = clock.monoMs()
+        arm()
     }
     /// Admits one command to the cell host now, so commands keep the order of the calls that made them.
     private func send(_ name: String, _ fields: [String: Any]) {
@@ -527,21 +587,37 @@ import ColophonHosts
         }
     }
 
-    /// Housekeeping every third of `presenceTimeoutMs` (at least 1 s): presence before it expires, the anchor while
-    /// playing at least every `republishMs`, and the clock offset to the holder every `pingMs`.
+    /// The longest a playing holder goes between anchors: `republishMs`, kept within §S12's 60 s.
+    private var republishMs: Int64 { min(max(options.republishMs, 1_000), 59_000) }
+    private var presenceMs: Int64 { max(1_000, presenceTimeoutMs / 3) }
+    /// Housekeeping, armed for the earliest of three deadlines: presence before it expires (every third of
+    /// `presenceTimeoutMs`, at least 1 s), the anchor while playing (`republishMs`), and the clock offset to a holder
+    /// this device follows (`pingMs`).
     private func arm() {
-        timer?.cancel()
+        timer?.cancel(); timer = nil
+        guard cell != nil, failure == nil, !closed else { return }
+        let now = clock.monoMs()
+        var due = lastPresence + presenceMs
+        if holdsRole, passingTo == nil, local.withLock({ $0?.playing }) == true { due = min(due, lastPublished + republishMs) }
+        if let h = cell?.state.holder, h != member { due = min(due, (lastPing[h] ?? now) + max(1_000, options.pingMs)) }
+        if holdsRole, !state.asks.isEmpty { due = min(due, lastPublished + max(1, askTimeoutMs / 2)) }
         let inputs = inputs
-        timer = clock.schedule(after: max(1_000, presenceTimeoutMs / 3)) { inputs.yield(.tick) }
+        timer = clock.schedule(after: max(0, due - now)) { inputs.yield(.tick) }
+    }
+    /// While an ask waits for the app's answer: a holder frame now (the anchor, re-stamped), so the asker keeps waiting.
+    private func holdAsker() {
+        guard holdsRole, passingTo == nil, let anchor = local.withLock({ $0 }) ?? state.lastAnchor else { return }
+        publish(anchor.restamped(nowMs: clock.monoMs(), maximumProjectionMs: maximumProjectionMs))
     }
     private func tick() {
         guard cell != nil, failure == nil else { return }
         let now = clock.monoMs()
-        sendPresence()
-        if holdsRole, passingTo == nil, let mine = local.withLock({ $0 }), mine.playing, now - lastPublished >= options.republishMs {
+        if !state.asks.isEmpty, now - lastPublished >= max(1, askTimeoutMs / 2) { holdAsker() }
+        if now - lastPresence >= presenceMs { sendPresence() }
+        if holdsRole, passingTo == nil, let mine = local.withLock({ $0 }), mine.playing, now - lastPublished >= republishMs {
             publish(mine.restamped(nowMs: now, maximumProjectionMs: maximumProjectionMs))
         }
-        if let h = cell?.state.holder, h != member, now - (lastPing[h] ?? .min / 2) >= options.pingMs { ping(h) }
+        if let h = cell?.state.holder, h != member, now - (lastPing[h] ?? .min / 2) >= max(1_000, options.pingMs) { ping(h) }
         arm()
     }
 
