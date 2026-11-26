@@ -1,33 +1,41 @@
 # Colophon 0.6 device admission: attempts, promotion and passkey-authorised adding
 
-**Status:** design draft, 2026-11-26, for review. Proposed for Colophon 0.6. It changes no 0.5
-object, verdict, path or wire format. It adds an SDK layer (admission attempts and account
-generations) to the Swift, Kotlin and JavaScript sessions. §4.8 proposes two optional
-clarifications to the 0.5 text. Neither is needed for the design to work.
+**Status:** design draft, revision 2, 2026-11-26, for review. Proposed for Colophon 0.6. It
+changes no 0.5 wire object, verifier verdict, home route or path. It adds an SDK layer (admission
+attempts and account generations) to the Swift, Kotlin and JavaScript sessions, and it makes
+**two normative changes to the 0.5 host and core rules** (§4.9). Revision 2 follows a security
+design review. Its changes are listed in Appendix B.
 
-**Goal.** Any device can add another device to an account if a controller passkey of the account
-signs the approval. The newly added device can also register a passkey of its own. This removes
-two failures. A person no longer depends on one device or one passkey to get back in. A passkey
-can be added or rotated from any device the person holds, without sharing storage with a live
-account.
+**Goal.** Any device can add another device if a controller passkey of the account signs the
+approval. The new device can then register a passkey of its own. This removes two failures. A
+person no longer depends on one device or one passkey to get back in. A passkey can be added or
+rotated from any device, without that device sharing storage with a live account.
 
 **Conclusions in brief.**
 
-1. Adding a device with a passkey signature can already be expressed in 0.5 history. It is an
-   ordinary `grant` (§9.2), signed under the single rule (§8.4) by a WebAuthn controller holding
-   `approve`, after a confirmed pairing (§9.1). The 0.5.7 calls produce exactly this entry. Adding
-   a new passkey on the added device is an ordinary immediate `keyring` entry (§8.4, §17.3).
-   **No protocol change is required.**
-2. The defect is in the SDK, not the protocol. In 0.5.7 a join or recovery attempt creates its
-   member keys and writes its files in whatever storage and key names the app configured, and
-   those are the live account's. No layer can tell attempt state from live state, so any cleanup
-   is a guess. The fix: give each attempt its own **generation** of device-local state, and make
-   a durable pointer the only thing that marks a generation as live. Promotion then means
-   atomically replacing the pointer, and nothing is renamed. This works the same on every
-   platform, including Android Keystore, where aliases cannot be renamed.
-3. #115 should be split. Its live-session parts (removal, completing key changes, `restoreSlot`,
-   cosigners, the entropy fix) can go forward unchanged. Its second-passkey and replacement paths
-   should be reworked on top of attempts (§7).
+1. **No new wire object, and no verifier or home change.** The approval is an ordinary `grant`
+   (§9.2), signed under the single rule (§8.4) by a WebAuthn controller holding `approve`, after
+   a confirmed pairing (§9.1). The new device's passkey is an ordinary immediate `keyring` entry.
+   That entry needs `addThreshold` units holding `control` (§8.4), so the signing passkey must
+   hold `control`.
+2. **Two host and core rules are needed.** §9.1 does not yet authorise a device to approve its
+   own stored request, which 0.5.7 does in code. And a confirmed pairing has no expiry, so an
+   approval can arrive after the joining device has given up. The core must expire confirmed
+   pairings, and approver hosts must drop approvals they could not deliver in time (§3.9, §4.9).
+   Neither rule affects verification, the wire format or homes.
+3. **The defect is in the SDK.** In 0.5.7 an attempt writes into the live account's storage and
+   creates keys under the live account's names (§1). The fix:
+   - each attempt gets its own **generation** of device-local state;
+   - every name a generation uses is **derived** from the root and the generation ID, never read
+     from metadata;
+   - an **authenticated, transactional admission store** names the live generation, and its
+     **epoch** fences every process;
+   - promotion is one transaction, made only after the new generation has been reopened and
+     exercised;
+   - deletion acts only on a generation that the store's immutable manifest, re-read inside the
+     transaction, shows is not live and was never admitted.
+4. **Split the pending key-change work (#115)** (§7). Its pre-admission passkey parts move onto
+   attempts. Its live removal and rotation parts are rebased and audited separately.
 
 ---
 
@@ -35,145 +43,128 @@ account.
 
 ### 1.1 What 0.5.7 provides (verified in code)
 
-- `ColophonJoin.readHistoryWithPasskey` (Kotlin
-  `sdk/kotlin/src/main/kotlin/com/luff/colophon/session/ColophonJoin.kt`; Swift
-  `swift/Sources/ColophonSession/ColophonJoin.swift`) reads and verifies the history with
-  `colophon.history.read` calls signed by a passkey, as spec §13.4 "A device with a passkey"
-  allows. It stores nothing.
-- `ColophonJoin.approveOwnJoinWithPasskey(passkey, ownerKeyId, open)` does the following:
-  1. calls `request()`, which creates this device's signed request through `OwnRequest.ensure`
-     and writes it to `requests/<member ID>.json` in `configuration.medium`. On first use it also
-     creates the member key, `configuration.keys`;
-  2. reads the history with the passkey;
-  3. writes the history files and the request into the same `configuration.medium`
-     (`ColophonJoin.store`);
-  4. calls the app's `open` closure to build a session whose owner controller is the passkey;
-  5. checks that the session's store holds exactly the verified history;
-  6. calls `ColophonSession.approveOwnRequest`, which scans the device's own request envelope
-     (the §9.1 scan path) and signs a `grant` through `SessionWorker.approve`, opening the
-     passkey's own slot by PRF in `withOwner`/`unlockOwner`;
-  7. syncs up to `ATTEMPTS` times, and throws `unavailable` with the grant stored if the home
-     does not confirm it.
-- `ColophonJoin.recoverWithPasskey` is `recovery(...)` (seq 1, the account ID as head) followed
-  by `approveOwnJoinWithPasskey`.
-- The JavaScript session (`js/src/session/`) has no join-at-head or passkey-join surface. No
-  file there calls `verify_at_head` or `verify_with_passkey`.
+- `ColophonJoin.readHistoryWithPasskey`, in Kotlin
+  `sdk/kotlin/src/main/kotlin/com/luff/colophon/session/ColophonJoin.kt` and Swift
+  `swift/Sources/ColophonSession/ColophonJoin.swift`, reads and verifies the history with
+  `colophon.history.read` calls signed by a passkey (§13.4 "A device with a passkey"). It stores
+  nothing.
+- `ColophonJoin.approveOwnJoinWithPasskey(passkey, ownerKeyId, open)` runs these steps:
+  1. `request()`: `OwnRequest.ensure` writes `requests/<member ID>.json` to `configuration.medium`,
+     and the first use of `configuration.keys` creates the member key;
+  2. it reads the history with the passkey;
+  3. `ColophonJoin.store` writes the history and the request into the same medium;
+  4. the app's `open` builds a session whose owner controller is the passkey;
+  5. it checks that the store holds exactly the verified history;
+  6. `ColophonSession.approveOwnRequest` scans the device's own stored request envelope, opens the
+     passkey's own slot by PRF (`SessionWorker.withOwner`, `unlockOwner`) and signs a `grant`
+     (`SessionWorker.approve`);
+  7. it syncs up to `ATTEMPTS` times, then throws `unavailable` with the grant stored.
+- `recoverWithPasskey` is `recovery(...)` (seq 1, the account ID as head) followed by the same
+  steps.
+- The JavaScript session (`js/src/session/`) has no join-at-head or passkey-join surface.
+  Nothing there calls `verify_at_head` or `verify_with_passkey`.
 
-### 1.2 What an attempt creates, and where it lives
+### 1.2 What an attempt creates, and where
 
 | State | Created by | Where (0.5.7) | Shared with a live account of the same app? |
 | --- | --- | --- | --- |
-| Member signing and agreement keys | first use of `configuration.keys` | Android: Keystore aliases `<prefix>.signing` and `<prefix>.agreement` (`KeystoreKeys.materialize`), where the app picks `<prefix>` and `openOrCreate` creates the keys when they are missing. Apple: one Keychain item `service`/`account` (`KeychainKeys`, default account `"member"`), created on first use when absent. Browser: `WebCryptoKeyStore` record by `id`. | Yes, whenever the app passes its usual key configuration. Nothing in the SDK names keys per attempt. |
-| Own request | `OwnRequest.ensure` | `requests/<member ID>.json` in `configuration.medium` | Same medium. `ensure` regenerates the request when the file is missing, so a lost file silently yields new bytes. |
-| Authority history | `ColophonJoin.store` | `authority/<seq>.json` in `configuration.medium` | Same medium |
-| Session journal, saved state, pairing ledger | the session opened by `open` | `configuration.privateDirectory` (`session.json`, `saved-<account>.bin`, `pairing-ledger.*`) | Same directory |
-| Device key that seals saved state | `DeviceSecretStore.key(account)` (also in `withOwner`) | keyed **by account ID** only: Android a file per account under one directory, wrapped by one Keystore alias (`KeystoreDeviceSecrets`); Apple a Keychain item whose `account` is the account ID (`KeychainDeviceSecrets`); browser `salt:<account>` (`WebCryptoDeviceSecrets`). Swift `CheckpointCache` is also keyed by library ID. | Always, for an attempt on an account already present on the device |
-| The passkey descriptor that the app persists so it can rebuild `PasskeyController` | the app, inside `open` | the app's settings | The app's own state |
+| Member signing and agreement keys | first use of `configuration.keys` | Android: Keystore `<prefix>.signing` and `.agreement`, with the prefix chosen by the app; `KeystoreKeys.materialize` creates a missing pair. Apple: one Keychain item (`KeychainKeys`, default account `"member"`), which `withKey` creates when absent. Browser: a `WebCryptoKeyStore` record. | Yes, with the app's usual key configuration |
+| Own request | `OwnRequest.ensure` | `requests/<member ID>.json` in the medium; regenerated when missing | Same medium |
+| Authority history | `ColophonJoin.store` | `authority/<seq>.json` in the medium | Same medium |
+| Journal, saved state, pairing ledger | the session `open` returns | `configuration.privateDirectory` | Same directory |
+| Device key that seals saved state | `DeviceSecretStore.key(account)`, also in `withOwner` | keyed **by account ID only** (`KeystoreDeviceSecrets`, `KeychainDeviceSecrets`, `WebCryptoDeviceSecrets` `salt:<account>`); Swift `CheckpointCache` by library ID | Always, for an attempt on an account already present |
+| Passkey descriptor used to rebuild the session | the app, inside `open` | the app's settings | The app's own state |
 | A signed grant | `approveOwnRequest` | the medium, then the home | Live authority once published |
 
 `ColophonSession.leave()` only sets `journal.left` (`SessionWorker.leave`), and the SDK has no
-call that removes an account. Every deletion is therefore written by the app, against paths and
-aliases the app shares between attempts and live accounts.
+call that removes an account. Every deletion is therefore the app's, against paths and aliases
+that attempts and live accounts share. The JVM `AtomicFile` helper (`PrivateState.kt`) falls back
+to a non-atomic move when `ATOMIC_MOVE` is unsupported, and it ignores a failed directory sync.
 
 ### 1.3 Failure sequences found in practice
 
-An app built join approval and recovery on these calls, and two security reviews of its rollback
-logic found the same class of fault each time. In general terms:
+An app built join approval and recovery on these calls. Two security reviews of its rollback
+logic found one class of fault each time:
 
-- **F1. Missing metadata reads as "no account".** The app decided whether the device held an
-  account from its own settings file. When that file was missing or unreadable, defaults said
-  "no account", even though the record folder and Keystore aliases of a live account were
-  intact. A recovery attempt started, the person dismissed the passkey prompt, and rollback
-  deleted the record folder and every key alias. Those were the live account's. A local-only
-  account would have been lost for good.
-- **F2. A screen-owned task cancelled mid-approval.** The provisional session was published as
-  soon as it opened. The session restored to "waiting for approval" before the passkey signed
-  the grant, the interface replaced the screen, and the cancelled coroutine triggered rollback.
-  A person who paused at the final prompt with the correct passkey hit this.
-- **F3. Process death between steps.** Member keys and the signed request exist before the first
-  passkey prompt. If the process died there, a request was left behind that conflicted with a
-  later attempt on another account (`JoinError.OtherRequest`). If it died at the final prompt,
-  the app had already saved the verified descriptor and slot, and the next launch reopened an
-  unadmitted account on a screen that could not retry.
-- **F4. Committed grant, failed confirmation.** The grant reached the home, the connection then
-  dropped during the confirmation read, and the transport error bypassed the `unavailable` path.
-  Rollback deleted the member keys of a member the history now admits, and a retry made a new
-  member identity.
-- **F5. Recovery over a pending join.** Starting a recovery deleted the request and keys of a
-  pending code-path join before the passkey was checked, because both used the same aliases and
-  folder. An approval already issued for that member became unusable.
-- **F6. Approving the wrong request.** A queued self-approval read whichever request was stored
-  when it ran. A concurrent replacement of the pending join could make it approve another
-  account's request if one passkey controlled both. When the request file was missing,
-  `OwnRequest.ensure` produced new request bytes that nobody had seen.
-- **F7. A marker cannot prove ownership.** The fix added a durable "attempt in progress" marker
-  and treated it at restore as permission to undo. If deleting the marker failed after
-  admission, and the settings later became unreadable, restore deleted an admitted account. The
-  marker said that an attempt had existed, not which files and keys belonged to it.
-- **F8. Expiry deleted by census.** Expiring a pending join deleted "every key alias and the
-  whole account folder", because a join and a live account have identical aliases and folders.
-  The guard being written for it has to prove by inventory that nothing but the join's artefacts
-  exists: settings present and parseable, no file outside `requests/`, `session/` and the device
-  keys, no alias outside the join's set, and an unreadable store counted as "keys present". It
-  also had to run before a lookup that could itself trigger the deletion.
+- **F1. Missing metadata reads as "no account".** The app's settings file was missing, so its
+  defaults said "no account" while the live record folder and key aliases survived. A recovery
+  started, the person dismissed the prompt, and rollback deleted the live folder and aliases.
+- **F2. A screen-owned task cancelled mid-approval.** The provisional session was published
+  before the grant was signed. The interface replaced the screen, and the cancelled task rolled
+  back.
+- **F3. Process death between steps.** Keys and the request exist before the first prompt. Dying
+  there left a request that conflicted with a later attempt. Dying at the last prompt left a
+  saved descriptor, and the next launch reopened an unadmitted account on a screen that could
+  not retry.
+- **F4. A committed grant, then a failed confirmation.** The grant reached the home, the
+  confirmation read failed in transport, and rollback deleted the keys of a member the history
+  now admits.
+- **F5. Recovery over a pending join.** A recovery deleted a pending join's keys and request
+  (same aliases, same folder) before it checked the passkey.
+- **F6. Approving the wrong request.** A queued self-approval approved whatever request was
+  stored when it ran, and `ensure` silently made new request bytes when the file was missing.
+- **F7. A marker cannot prove ownership.** An "attempt in progress" marker outlived admission.
+  When the settings later became unreadable, restore treated the marker as permission and deleted
+  an admitted account.
+- **F8. Expiry deleted by census.** Expiring a pending join deleted every alias and the whole
+  folder, because a join and a live account look identical. The guard had to prove by inventory
+  that nothing else existed, and it had to run before a lookup that could itself delete.
+- **F9. Late approval.** Another device can still hold a confirmed pairing, or an unpublished
+  approval, after the joining device has given up and deleted its keys. When that grant arrives,
+  it admits a member whose keys no longer exist.
 
-### 1.4 Why the app could not fix it from outside the SDK
+### 1.4 Why an app cannot fix it from outside the SDK
 
-- The SDK writes into the app's live storage (`configuration.medium`, `privateDirectory`) and
-  creates keys under the app's live names on first use. An app can only avoid the collision by
-  building a parallel configuration with other paths and aliases, then moving it into place
-  itself. Android Keystore cannot rename an alias, so "moving it into place" means the app
-  re-points its own settings at the attempt's alias. That is the app inventing generations
-  without the SDK's help.
-- Some collisions cannot be avoided from outside. The device-secret store, `withOwner`'s use of
-  it and Swift's `CheckpointCache` are keyed by account ID alone, so an attempt on an account
-  already present shares that state whatever paths the app picks.
-- Whether a grant exists is known only to the engine. `approveOwnRequest` writes the grant
-  before reconciling, so a storage or lifecycle failure can hide a committed grant from the
-  snapshot the app checks (F4).
-- Each app repeats the same hazardous logic (inventories, markers, non-cancellable sections) on
-  each platform, and gets it wrong in the same way.
-
-The lesson: an attempt that has not been admitted must live in storage and key names scoped to
-that attempt, must be promoted atomically on admission, and must be owned by the SDK, so that no
-app ever writes destructive cleanup.
+- The SDK writes into the configured live storage and creates keys under live names on first
+  use.
+- Keystore aliases cannot be renamed, so an app that stages an attempt elsewhere has to build its
+  own generations and pointer.
+- Device-secret and checkpoint caches are keyed by account ID, so an attempt on an account
+  already present collides with the live account whatever paths the app chooses.
+- Only the engine knows whether a grant exists, and it writes the grant before it reconciles.
+- Each app re-implements the same deletion logic on each platform, with the same mistakes.
 
 ---
 
 ## 2. Requirements
 
-- **R1. Disjoint state.** No path, Keychain item, Keystore alias, IndexedDB record or
-  device-secret entry that an attempt creates is ever shared with a live account, another
-  attempt or a pending join. This holds even when all of them are for the same account.
-- **R2. Abandoning cannot touch live state.** Abandoning, failing, expiring or crashing an
-  attempt leaves the live generation byte-identical: files, key aliases and their public points,
-  device-secret entries and the pointer.
-- **R3. Deletion by ownership, never by inference.** The SDK deletes only what a durable record
-  lists as owned by a non-live generation, after re-reading the pointer under a lock. Missing or
-  unreadable metadata never permits a deletion. An unreadable pointer stops every deletion.
-- **R4. Atomic promotion.** Promotion has a single commit point: one atomic replacement of a
-  small file, or one database transaction. Where keys cannot be renamed, they are never renamed.
-  Before the commit point the old generation is live. After it the new one is. Every step after
-  the commit is idempotent and rolls forward.
-- **R5. Durable, resumable attempts.** An attempt survives process death in every state. Caller
-  cancellation never triggers cleanup. An attempt that has signed a grant is never discarded
-  without the person's action (F4).
-- **R6. Several attempts at once.** Attempts for different accounts, and several for one account,
-  can coexist. Passkey ceremonies and promotions are serialised per account root.
-- **R7. An attempt over a live account.** A re-join or recovery over an existing install creates
-  a new generation and a new member (§3.3 forbids reusing member points). The old generation is
-  retired only by the SDK, after the new one is ready (§3.7).
-- **R8. Bound inputs.** An attempt binds its account, home, invite checkpoint `(seq, head)` when
-  there is one, member key and the exact request bytes at creation. Nothing regenerates the
-  request later (F6). Approving acts on an attempt handle, never on "whatever is stored".
-- **R9. No destructive API for apps.** Apps never call a delete. The only discard call takes an
-  attempt and can reach only that attempt's generation. No call takes a path or alias.
-- **R10. Listing and expiry.** Apps can list attempts with their state and age. The SDK expires
-  attempts that never signed anything, after a bounded time.
-- **R11. Rollback safety.** An attempt for an account that is already live is promoted only if
-  its verified history is not behind the live generation's verified high-water mark (§5).
-- **R12. Parity.** The same states, layout rules and calls in Swift, Kotlin (JVM and Android) and
-  TypeScript (browser and Node).
+- **R1. Disjoint, derived names.** Every path, Keychain item, Keystore alias, IndexedDB record and
+  device-secret entry of a generation is a pure function of the root and the generation ID. No
+  name is ever read from metadata. Generation IDs match `^[0-9a-f]{32}$`. Creating a generation
+  fails if any of its derived names already exists.
+- **R2. Abandoning cannot touch live state.** After any abandoned, failed, expired or crashed
+  attempt, the live generation's fingerprint (§6.1) is byte-identical.
+- **R3. Deletion by authenticated ownership.** The SDK deletes only a generation that meets all
+  of these:
+  - its immutable manifest exists, authenticates under the root key and is re-read in the
+    deleting transaction;
+  - it is not live and never was;
+  - its own contents show no admission (§3.8).
+
+  Missing, unreadable or unauthenticated metadata never permits a deletion.
+- **R4. Durable, validated promotion.** Promotion is one transaction in a store that is durable
+  when it reports success. Before that transaction, the new generation is reopened from storage
+  and must sign with its member key, open its device secret and decrypt its own epoch shares. A
+  backend without atomic, durable commits is refused.
+- **R5. Post-commit repair.** If the live generation is unusable after promotion, the previous
+  generation is kept. There is no automatic switch back, and never a switch to a generation whose
+  member is revoked in the latest verified history.
+- **R6. Durable attempts; non-cancellable signing.** Cancellation never causes cleanup. Signing a
+  grant and recording `granted` form one non-cancellable unit. A signed grant is never discarded
+  without the person's action.
+- **R7. Fencing.** Every mutation of admission state is a versioned compare-and-set. Every process
+  using a generation holds a lease checked against the store's epoch. A stale process cannot
+  promote, delete or sign.
+- **R8. Late approval is bounded and reconciled.** Approvals are signed within a bounded time of
+  pairing. A joining device keeps a disclosed request's keys until the request is reconciled.
+- **R9. Bound inputs.** An attempt binds its account, home, invite checkpoint `(seq, head)`,
+  member key and exact request bytes at creation. Nothing regenerates them.
+- **R10. No destructive API for apps.** No call takes a path, an alias or a generation to delete.
+  Discarding takes an attempt handle. App-provided legacy locations are never deleted.
+- **R11. Rollback safety.** An attempt for an account already live on this device is promoted only
+  if its verified history is not behind the live generation's persisted high-water mark (§17.2).
+- **R12. Several attempts at once, and attempts over live accounts.**
+- **R13. Parity:** Swift, Kotlin (JVM and Android), and TypeScript (browser and Node).
 
 ---
 
@@ -181,244 +172,307 @@ app ever writes destructive cleanup.
 
 ### 3.1 Terms
 
-- **Account root.** A directory (or IndexedDB database) plus a key namespace, which the app gives
-  the SDK once. The SDK owns everything under it.
-- **Generation.** One complete set of device-local state for one account on this device: records
-  medium, private directory, member keys, device secret, checkpoint. It is identified by a
-  random 128-bit ID in lowercase hex. Every name a generation uses contains its ID.
-- **Pointer.** The one durable record, per account root, that names the live generation of each
-  account. Nothing else makes a generation live.
-- **Attempt.** A generation that is not yet named by the pointer, together with its attempt
-  record. A pending code-path join, a passkey self-approval and a recovery are all attempts.
+- **Account root.** A directory, or an IndexedDB database, and a key namespace that the app gives
+  the SDK. The SDK owns everything under it.
+- **Generation.** One complete set of device-local state for one account: records medium, private
+  directory, member keys, device secret and checkpoints. Its ID is 128 random bits in hex.
+- **Admission store.** A transactional store under the root holding manifests, attempts, the
+  pointer, leases and withdrawn requests (§3.4).
+- **Live generation.** The generation that the store's `pointer` row names for an account.
+- **Attempt.** A generation that is not live, together with its attempt row.
 
-### 3.2 The attempt record and its lifecycle
+### 3.2 The admission store and the root key
 
-`attempts/<gen>/attempt.json` is written atomically (sibling, sync, rename, directory sync), as
-`AtomicFile` does in both SDKs:
+The store must meet the contract the hosts' claim stores meet (`docs/hosts-06.md` §3a):
 
-```json
-{"format":1,"generation":"<32 hex>","account":"<64 hex>","kind":"join|recovery|selfApproval",
- "home":"https://…","checkpoint":{"seq":12,"head":"<digest>"},"created":"…","expires":"…",
- "owns":{"paths":["generations/<gen>/"],"keys":["<ns>.g.<gen>.member.signing","<ns>.g.<gen>.member.agreement"],
-         "deviceSecret":"<account>.<gen>"},
- "member":"<member ID>","request":"<SHA-256 of the request envelope>",
- "state":"…","grant":{"seq":40,"digest":"…"},"owner":{"keyId":"…","descriptor":{…}},
- "passkeys":[{"keyId":"…","state":"registered|added|slotted"}]}
+- compare-and-set, linearizable across every process and extension of the root;
+- success reported only once the commit is durable;
+- no commit visible before it is irrevocable;
+- anything it does not recognise fails closed.
+
+The claim-store work rejected file-and-lock designs, because a stealable lock and a commit
+visible before it is irrevocable were both unsafe. They are rejected here for the same reasons.
+
+| Platform | Store | Root key (MACs every row) | Created | If lost |
+| --- | --- | --- | --- | --- |
+| Apple | SQLite, the system library, with WAL and `synchronous=FULL`, in the app container or an App Group (as `SQLiteClaimStore`) | 32 random bytes in a Keychain generic-password item: `ThisDeviceOnly`, `AfterFirstUnlock`, not synchronisable, in the access group extensions share | at bootstrap by `SecItemAdd`; a duplicate means read it | §3.11 "Root key lost" |
+| Android | platform SQLite (`android.database.sqlite`) with WAL, in `noBackupFilesDir` | Android Keystore HMAC-SHA256 key: non-exportable, no user authentication, StrongBox first then the TEE | at bootstrap; there is no software fallback | same |
+| JVM | a host-supplied `AdmissionStore` meeting the contract (the JDK has no embedded SQLite) | host-supplied `RootKey` | host | same |
+| Browser | IndexedDB through `AtomicPrivateStore.update`, one `readwrite` transaction (as `privateClaimStore`) | a non-extractable HMAC `CryptoKey` in IndexedDB, as `WebCryptoDeviceSecrets` keeps its master key | at bootstrap with `add`; a `ConstraintError` means read it | same |
+| Node | a host-supplied `AdmissionStore`, or `node:sqlite` where the runtime has it; `FilePrivateStore` is refused, as `privateClaimStore` refuses it | host-supplied | host | same |
+
+Each row is MACed as `HMAC(rootKey, table ‖ primary key ‖ version ‖ canonical row bytes)`. A
+row that fails its MAC or cannot be parsed is **damaged**. Every operation on its account then
+fails with `storageDamaged`, and nothing is deleted. What the MAC does and does not protect is in
+§5.
+
+### 3.3 Derived names
+
+Given the root `R` (its canonical, link-free path or database name), the app namespace `N` and the
+generation ID `g`:
+
+```text
+records        R/generations/g/records/
+private        R/generations/g/session/
+trash          R/trash/g/
+member keys    Keychain service N, account "g.<g>.member"   |  Keystore "<N>.g.<g>.member.signing" and ".agreement"
+                                                            |  WebCryptoKeyStore id "<g>/member"
+device secret  "<account>.<g>"   (KeychainDeviceSecrets account, KeystoreDeviceSecrets file, WebCrypto salt name)
+records (web)  IndexedDBMedium "<R>.<g>"
 ```
 
-`owns` is written **before** anything it lists is created (write-ahead). A crash between writing
-the record and creating a key leaves a listed key that does not exist. Discarding it is then a
-no-op. No key or path can exist that no record lists.
+`N` matches `^[A-Za-z0-9._-]{1,40}$`, which keeps Keystore aliases under 80 characters. Every
+file operation resolves `R` once, opens each component without following links (`O_NOFOLLOW`;
+`LinkOption.NOFOLLOW_LINKS` on the JVM), and refuses any symbolic link, linked directory or
+unexpected kind of entry. A tree is deleted by descending without following links. No metadata
+row holds a path, alias or item name.
+
+### 3.4 Rows
+
+| Row | Key | Fields | Mutability |
+| --- | --- | --- | --- |
+| `root` | – | format, created, store ID (random) | written once, at bootstrap |
+| `manifest` | `g` | account, origin (`join`, `recovery`, `selfApproval`, `legacy`), created, member ID | **immutable** after insert, except that the member ID is set once; kept until the generation's deletion completes (D7) |
+| `attempt` | `g` | state (§3.5), version, home, checkpoint, request digest, disclosed-at, grant `(seq, digest)`, signer key ID, passkeys added, expires | versioned compare-and-set |
+| `pointer` | account | live `g`, previous `[g]`, **epoch** (raised by every promotion, retirement and repair), high-water `(seq, digest)` | versioned compare-and-set |
+| `lease` | (`g`, holder) | epoch seen, expires | renewed by its holder; an expired lease is ignored |
+| `withdrawn` | (account, member ID) | request digest, disclosed-at, withdrawn-at, keys deleted, reconciled (`granted`, `revoked`, `none`) | versioned; outlives the generation |
+
+### 3.5 Attempt lifecycle
 
 | State | Meaning | Leaves by |
 | --- | --- | --- |
-| `created` | record written, nothing else yet | keys made, then `requested` |
-| `requested` | member keys exist, request signed and stored in the generation | code path: `waiting`; passkey: `reading` |
-| `waiting` | code-path join waiting for another device's grant | grant seen, then `granted`; expiry, then `expired` |
-| `reading` | passkey history read and verification under way, nothing signed | verified, then `verified`; failure, then `requested`, still retryable |
-| `verified` | history verified and stored in the generation; signer recorded | grant signed, then `granted` |
-| `granted` | a grant naming this member from its exact request is in the generation's verified history (signed here or received) | home confirms, then `admitted`; displaced (§8.6), then `verified` to sign again |
-| `admitted` | the home serves a fresh head over a history holding the grant (§3.4 P0) | promotion commit, then `promoted` |
-| `promoted` | the pointer names this generation; the record is kept only until post-commit steps finish | record removed |
-| `superseded` | another attempt for the same account was promoted first | person's choice: revoke its member (§3.7), then `discarding` |
-| `expired` | past `expires` and never signed a grant | `discarding` (automatic) |
-| `discarding` | tombstone: deletion of `owns` in progress | record removed |
+| `created` | rows written; no key exists | keys made, then `requested` |
+| `requested` | member keys exist; the request is signed and stored in the generation | code path: `disclosed` on the first show, send or scan; passkey path: `reading` |
+| `disclosed` | another device may hold the request or a confirmed pairing for it | a grant seen: `granted`; abandoned: `withdrawn`, never directly `discarding` |
+| `reading` | passkey history read under way; nothing signed | `verified`; on failure, `requested` |
+| `verified` | history verified and stored; signer recorded | one non-cancellable unit (sign, store, record), then `granted` |
+| `granted` | a grant of this member from its exact request is in the generation's verified history | P0 (§3.7): `admitted`; displaced (§8.6): `verified` |
+| `admitted` | P0 holds | the promotion transaction removes the row; the manifest stays |
+| `superseded` | another generation was promoted for this account | the person revokes the member (§3.10), then `discarding`; or keeps it |
+| `withdrawn` | a disclosed request was abandoned; its keys are kept until reconciled (§3.9) | reconciled, then `discarding` |
+| `awaitingActivation` | a recovery transition is pending (W11) | final: `verified`; vetoed: `requested` |
+| `discarding` | tombstone: deletion under way (§3.8) | rows removed |
 
-Two rules close F2, F3 and F4:
+Automatic expiry applies only to `created`, `requested` and `reading`: attempts that were never
+disclosed and never signed. Every transition is a compare-and-set on `attempt.version`, made
+under the epoch the caller holds.
 
-- **Cancellation is not failure.** Cancelling a caller's task leaves the attempt in its last
-  durable state. Only `abandon()` or expiry moves an attempt to `discarding`, and expiry applies
-  only to attempts that never reached `granted`.
-- **Signed means kept.** From `granted` on, a grant for the attempt's member may be live
-  authority. The SDK never discards such an attempt automatically. An abandon of a `granted`,
-  `admitted` or `superseded` attempt first offers to revoke its member (one passkey signature),
-  and keeps the generation if the person declines.
+### 3.6 Leases and fencing
 
-### 3.3 Layout and names per platform
+- A process (the app, an extension, a background task) that opens a session on a generation takes
+  a lease, recording the epoch. It renews the lease while open; a lease lasts 60 s.
+- Before each durable step, the session reads the epoch, which is one indexed read. The durable
+  steps are signing an authority entry or record, a medium batch commit, and a saved-state write.
+  If the epoch has moved and its generation is no longer live, the session stops with
+  `superseded` and writes nothing more.
+- A write already past its check when the epoch moves lands in the now-previous generation. That
+  generation is not deleted while any lease on it is unexpired, nor until its outbox is flushed
+  or found unflushable (§3.10). Such a write is lost only if its process stayed suspended past
+  the lease and the write was never published. It is reported, never silent.
+- Promotion and deletion are single store transactions that compare the pointer and attempt
+  versions. There is no lock for another process to steal.
 
-```text
-<root>/pointer                       the live generation per account (atomic replace)
-<root>/lock                          advisory lock: flock / FileChannel.lock / Web Lock
-<root>/generations/<gen>/records/    the generation's RecordMedium (FolderMedium or FileMedium)
-<root>/generations/<gen>/session/    journal, saved-<account>.bin, checkpoints
-<root>/attempts/<gen>/attempt.json   present while <gen> is an attempt or is being discarded
-<root>/accounts/<account>/ledger/    pairing-failure ledger (outlives generations; §3.6)
-```
+### 3.7 Promotion
 
-A generation's directory sits under `generations/` from birth. Promotion moves nothing on disk.
+**P0, admitted.** All of these must hold:
 
-`pointer` is canonical JSON with a SHA-256 of its own body:
-`{"format":1,"accounts":{"<account>":{"live":"<gen>","previous":["<gen>"]}},"digest":"…"}`. A
-pointer that fails to parse or match its digest is **unreadable**. The SDK then opens nothing
-destructively, refuses promotion and discard, and reports `storageDamaged`.
+- the generation's own store verifies, from seq 1, a history holding a current grant of its member
+  from its exact request;
+- durable home state confirms the grant: fresh heads covering it from the homes Q4 settles, read
+  with the member's own key (the `fetchHistory` acceptance);
+- if a generation is already live for the account, the attempt's verified tip is not behind
+  `pointer.high-water`, or promotion fails with `refused:rollback`.
 
-| Platform | Files | Member keys | Device secret | Promotion means |
-| --- | --- | --- | --- | --- |
-| Apple (iOS, macOS, visionOS) | app container or App Group (extensions must see the pointer); excluded from backup | Keychain generic password, `service` = app namespace, `account` = `g.<gen>.member` (Secure Enclave handles, as `KeychainKeys` stores today), `ThisDeviceOnly`, not synchronisable | `KeychainDeviceSecrets` item `account` = `<account>.<gen>` | replace `pointer` by `rename(2)` within one volume |
-| Android | `noBackupFilesDir/colophon/<root>/` | Keystore aliases `<ns>.g.<gen>.member.signing` and `.agreement` (fits `KeystoreKeys`' `[A-Za-z0-9._-]`, under 80 characters) | `KeystoreDeviceSecrets` file `<account>.<gen>`, wrapped by the existing alias | replace `pointer` (`Files.move` with `ATOMIC_MOVE`, then directory sync, as `AtomicFile` does) |
-| JVM | as Android, plain directory | as configured by the host (software keys in tests) | as configured | as Android |
-| Browser | IndexedDB `colophon-root-<root>`, stores `pointer`, `attempts`; records medium `IndexedDBMedium` named `<root>.<gen>` | `WebCryptoKeyStore` record id `<gen>/member` | `WebCryptoDeviceSecrets` salt `salt:<account>.<gen>` | one `readwrite` transaction on `pointer` |
-| Node | as Apple, `FileMedium` / `FilePrivateStore` | host-provided | host-provided | `fs.renameSync` of `pointer` |
+An account with no home cannot be promoted by an attempt. It joins through its shared folder, as
+0.5 provides.
 
-**Android, in detail.** Keystore aliases cannot be renamed, and Keystore deletions are not
-transactional with the file system. So an alias is never asked to change meaning. A generation's
-aliases are created once, carry the generation ID, and are deleted only when that generation is
-discarded or retired. The pointer, a file, decides which aliases are live. A missing alias in
-the live generation is reported as `keysLost`, never re-created, and never treated as "no
-account". The live generation's aliases are opened with an open-only call, because
-`KeystoreKeys.openOrCreate` creates any pair it does not find. Today an app has to guard this by
-hand: a census of aliases and files, settings that must be readable, and an unreadable store
-counted as holding every alias. Under this design those checks become structural. A deletion
-names one generation's aliases from its own record, and it is refused when the pointer names
-that generation or cannot be read.
-
-**Apple, in detail.** `SecItemUpdate` could rename a Keychain item atomically, but that is not
-needed and not used. As on Android, the pointer chooses. The live generation's items are opened
-with an open-only call, because `KeychainKeys.withKey` creates an identity when its item is
-absent. A backup restored to a new device brings the files back without the `ThisDeviceOnly`
-items. The SDK reports `keysLost`, and the person recovers into a new generation. Nothing is
-deleted.
-
-**Shared media.** When the app's records medium is shared between devices (an iCloud or shared
-folder location, `StorageLocation.iCloud` or `.folder`), only device-private state is
-generation-scoped. The attempt stages its history and request in a private generation medium.
-After the commit point, it writes them to the shared medium with the write-if-absent and
-same-bytes check that `ColophonJoin.store` already uses. The SDK never deletes from a shared
-medium. An abandoned attempt's request, if it was ever written there, stays as an immutable
-unused file.
-
-### 3.4 Promotion
-
-**Precondition P0 (admitted).** The attempt's generation verifies, from seq 1, a history holding
-a current grant of its member from its exact request. Either the home served a fresh head over
-that history, read with the member's own key (the `fetchHistory` acceptance, `account_verify_at_head`), or the account has no
-home. When the pointer already names a live generation for this account, the attempt's verified
-`(seq, digest)` must also not be behind the live generation's persisted high-water mark (§17.2),
-or promotion is refused `refused:rollback`.
-
-All steps run under the root lock. Each step after C is idempotent.
+**Durability capability.** Each backend reports `atomicCommit` and `durableSync` for the store and
+the media. If either is missing, promotion is refused (`unsupported`). The SDK's file helpers never
+fall back from `ATOMIC_MOVE`, and they fail on a failed directory sync.
 
 | Step | Action |
 | --- | --- |
-| P1 | Take the lock. Re-read `pointer` and `attempt.json`; both must be readable. The attempt must be `admitted`. |
-| P2 | Close any session open on the attempt's generation. Flush the generation's medium (complete any committed batch). |
-| P3 | Write the new pointer to a sibling: `live` = the attempt's generation, the old live generation appended to `previous`. Sync it. |
-| **C** | **Rename it over `pointer`, then sync the directory. This is the commit point.** Browser: the transaction commits. |
-| P4 | Set the attempt record to `promoted`. |
-| P5 | Shared medium only: copy the generation's request and history into it, write-if-absent. |
-| P6 | Mark every other attempt for this account `superseded`. |
-| P7 | Remove `attempt.json`. Release the lock. Open the session on the new generation. |
+| V1 | Close the attempt's own sessions. Complete committed medium batches. Sync the generation's tree. |
+| V2 | Open a fresh engine on the generation from storage alone, with the member identity. Verify the history again: `ok`, and the grant current. |
+| V3 | Open the member keys by derived name with an **open-only** call. Sign a fresh challenge and verify it against the member signing point in the grant. ECDH with the agreement key, and open one epoch share sealed to it when the grant has `records`. |
+| V4 | Open the device secret. Save and reload sealed state (§17.2) once. |
+| V5 | Shared medium only (iCloud or shared-folder locations): write the generation's request and history there with write-if-absent and a same-bytes check (as `ColophonJoin.store`), then sync. These files are immutable and belong to this member, so writing them before the commit is safe. |
+| **C** | **One store transaction:** compare the pointer and attempt versions; set `pointer.live = g`; append the old live generation to `previous`; raise `epoch` by 1; set `high-water`; remove the attempt row; mark the account's other attempts `superseded`. It reports success only when durable. |
+| P1 | Open the session on the new generation under the new epoch. |
+
+If anything in V1 to V5 fails, nothing changes and the attempt stays `admitted`.
+
+If P1 fails after C (a key lost after the commit, for example), the account enters **repair**.
+The previous generation is kept whatever its retention, and the SDK reports `repairNeeded` with
+three choices:
+
+- retry the validation;
+- start a recovery into a new attempt;
+- switch back to the previous generation. This is offered only when its member is current in the
+  latest verified history any of this account's generations holds, and only by the person's
+  choice. Switching back is itself a promotion, through V1 to V4.
 
 **Crash table.**
 
-| Crash after | On next open | Which state wins |
+| Crash during | On next open | Which state wins |
 | --- | --- | --- |
-| P1, P2 | attempt is `admitted`; pointer unchanged | old live (if any). The SDK resumes promotion at the next `open` without asking again, because the person already chose it. |
-| P3 (sibling written, not renamed) | stray sibling removed; attempt `admitted` | old live; promotion resumes |
-| C before the directory sync | the pointer shows old or new | whichever the file system kept. Both are consistent: old means resume, new means continue at P4. |
-| C, P4, P5, P6 | pointer names the attempt's generation | new. The record is `admitted` or `promoted`; P4–P7 roll forward. |
-| P7 | done | new |
+| V1–V5 | attempt `admitted`, pointer unchanged | the old live generation. Promotion resumes on `attempt.promote()`. Any shared-medium files are immutable copies. |
+| C | the transaction committed or it did not (SQLite and IndexedDB guarantee one or the other) | old if not committed, new if committed |
+| P1 | the pointer names the new generation | new; P1 retried, then repair |
 
-The Android and browser rows are the same. On Android the commit point is still a file rename,
-and Keystore is not touched during promotion.
+### 3.8 Deletion: discard and retirement
 
-### 3.5 Discard, expiry and retirement: the only deletions
-
-The SDK deletes through one routine, `discard(gen)`:
+`discard(g)` is the only deletion routine. Its targets are derived (§3.3), never read.
 
 | Step | Action | Crash after it |
 | --- | --- | --- |
-| D1 | Take the lock. Re-read `pointer`. Refuse if it is unreadable, or if `gen` is `live` or in `previous` while retention applies (§3.7). | nothing changed |
-| D2 | Write the record state `discarding` (tombstone). | the sweeper resumes at D3 |
-| D3 | Delete each key in `owns.keys`, by exact name. A missing key is a no-op. | resumes at D3 |
-| D4 | Delete the `owns.deviceSecret` entry. | resumes at D4 |
-| D5 | Rename `generations/<gen>` to `trash/<gen>`, then delete it recursively. | the sweeper empties `trash/` |
-| D6 | Remove `attempt.json`. | done |
+| D1 | In one transaction: the `manifest` and `attempt` rows of `g` authenticate; `g` is neither `pointer.live` nor in `previous` (except for retirement, §3.10); no unexpired lease on `g`; its state is eligible (§3.5). Set it to `discarding`, version + 1. | nothing deleted; resumes |
+| D2 | **Content check.** Open `g`'s medium read-only. If it holds a grant of the manifest's member, stop with `storageDamaged`, unless this is a retirement or a `superseded` or `withdrawn` attempt whose reconciliation is recorded. A store rolled back to an older copy therefore cannot get an admitted generation deleted (§5). | resumes at D2 |
+| D3 | Delete the derived member keys (a missing one is a no-op). | resumes |
+| D4 | Delete the derived device-secret entry. | resumes |
+| D5 | Rename `generations/g` to `trash/g` (refused if that exists), then delete it without following links. | the sweeper finishes `trash/g` only for a `g` whose manifest says `discarding` |
+| D6 | Browser: delete `IndexedDBMedium` `<R>.<g>`. | resumes |
+| D7 | In one transaction, remove the `attempt` row and then the `manifest` row. | done |
 
-The **sweeper** runs at `open`. It finishes `discarding` tombstones, empties `trash/`, and expires
-attempts past `expires` that never reached `granted`. It never deletes anything that is not
-listed in a record or under `trash/`. An alias or directory that no record lists is reported by
-`diagnostics()` and left alone (R3, F7).
+The sweeper runs at `open`. It finishes `discarding` generations, expires eligible attempts, and
+empties `trash/<g>` only for a `g` whose manifest says `discarding`. A directory, alias or item it
+finds without a manifest is reported by `diagnostics()` and left alone.
 
-### 3.6 Concurrency
+### 3.9 Late approval
 
-- One root lock serialises promotion, discard and the sweeper. Across processes this is `flock`
-  in Swift, `FileChannel.lock` behind a JVM-wide monitor in Kotlin, and a Web Lock in browsers,
-  as the pairing ledger already does.
-- At most one passkey ceremony per root at a time. A second one is refused `busy`. Attempts in
-  other states proceed.
-- By default at most four live attempts per account root (open question Q8).
-- The pairing-failure ledger (§7.3's five failed sessions an hour) lives under
-  `accounts/<account>/ledger/`, outside every generation. Discarding an attempt cannot reset the
-  budget. Today the ledger is in `privateDirectory`, so a fresh directory per attempt would reset
-  it.
+**What 0.5 allows today.**
 
-### 3.7 An attempt over a live account
+- A request (§9.1) has `created` but no expiry, and its field set is closed (§2.3). A new field
+  would make it `malformed` for every 0.5 reader.
+- A confirmed pairing has no expiry after confirmation. The ten-minute timeout covers the reveal
+  (`docs/bindings-05.md`, `pairing:timeout`). That the token lives only in memory and does not
+  survive the process is inferred.
+- A grant can be signed and stored, then published days later (§17.5 "Submitting").
+- A home serves no withdrawal, and a non-member cannot sign one.
+- Any `approve` controller can revoke a member (§9.5, single rule).
 
-A re-join or recovery on a device that already has a live generation for the account (keys lost
-to a lock-screen change, a revoked member, a damaged store):
+**Design.**
 
-1. The attempt gets a new generation and a new member key. The live generation is untouched and
-   keeps working if it still can.
-2. On promotion, the old generation goes into `pointer.previous`.
-3. The old generation is **retired** (`discard`) only when the new generation is `Ready` at a
-   fresh head, and either the old generation has no unpublished writes, or its member key cannot
-   sign, or a retention window has passed (Q3). Until then the old generation stays readable, for
-   export.
-4. If the old member is still current in the history, the SDK offers to revoke it with `kept`
-   covering everything (§9.5). The revoke is signed by the controller that approved the new
-   member (`approve`, single rule). This follows the §17.5 removal follow-up pattern. Declining
-   leaves a current member whose keys this device deletes at retirement. That is harmless, but it
-   is shown.
+1. **Bound when an approval is signed** (core rule, normative, §4.9). The core refuses to finish a
+   grant, or a `grant` component, that consumes a confirmed pairing more than 600 s after its
+   confirmation (on the scan path, after the scan). The pairing is never persisted.
+2. **Bound when an approval is delivered** (host rule, normative, §4.9). A host whose signed grant
+   no home has accepted 24 hours after its `issued` does not publish it. It discards the grant,
+   which as an unpublished local entry no home holds, and tells the person.
+3. **The joining device keeps disclosed keys.** Abandoning a `disclosed` attempt makes it
+   `withdrawn`. Its records and private files are deleted. Its member keys and its `withdrawn` row
+   are kept.
+   - The device reconciles in the background with the member key, without a passkey prompt: it
+     reads the history at the home with `colophon.history.read`, which the home answers
+     `refused:revoked` until a grant names the key (§13.4).
+   - If a grant appears, the person is told and offered "open it" (the attempt is revived as
+     `granted`) or "remove it" (one controller signature revokes the member).
+   - After 24 hours plus 600 s from the last disclosure with no grant, both bounds have passed for
+     honest approvers. The keys are then deleted, and the row is kept with `keys deleted`.
+4. **Later orphans are detected.** Any later generation of the account on this device checks the
+   `withdrawn` rows against every history it verifies. A grant of a withdrawn member, which only a
+   non-conforming approver can produce, is shown with a one-tap revoke.
 
-An existing install from 0.5.x is adopted as a generation named `legacy`. Its pointer entry
-records the app's configured medium, private directory and key configuration. The SDK never
-deletes a `legacy` generation's app-provided locations by itself (Q11).
+**Verdict.** Two normative host and core rules fix this. No verifier, wire or home change is
+needed. An expiry that every verifier enforces would be a verifier rule: 0.5 and 0.6 readers would
+disagree unless the rule were gated by a layout raise (§8.2). It also gains nothing against a key
+holder, who could grant any key anyway. It is not proposed.
 
-### 3.8 API sketch
+### 3.10 An attempt over a live account, and retirement
+
+A re-join or recovery on a device that already has a live generation for the account (lost keys,
+a revoked member, a damaged store) gets a new generation and a new member, because §3.3 forbids
+reusing member points. The old generation keeps running until C. From then the epoch fences it
+(§3.6), and it moves to `previous`. It is **retired** with `discard` when all of these hold:
+
+- the new generation is `Ready` at a fresh head;
+- the old generation holds no lease;
+- its outbox is empty, its member key cannot sign, or the retention period has passed (Q1);
+- it is not needed for repair (§3.7).
+
+Until then it can be **exported** read-only (`exportRetained`). If its member is still current,
+the SDK offers to revoke it, with `kept` covering everything (§9.5), signed by the controller that
+approved the new member. It never revokes silently.
+
+### 3.11 Migration and bootstrap
+
+| Store | Root key | Meaning | Action |
+| --- | --- | --- | --- |
+| absent | absent | never migrated | bootstrap when the app asks |
+| absent | present, or a store with no `root` row | interrupted bootstrap, or a lost store | `storageDamaged`; nothing deleted; `repair()` |
+| present, rows authenticate | present | normal | – |
+| present, a row fails its MAC | present | damaged | `storageDamaged` for that account |
+| present | absent or unusable | root key lost | see "Root key lost" below |
+
+**Bootstrapping a 0.5.x install.** `ColophonAccounts.adoptLegacy(configuration)` adopts it, since
+only the app can say a configuration is a live account. It is one store transaction that creates
+three rows:
+
+- `root`;
+- a `manifest` with origin `legacy` and the member ID read from the journal or request;
+- a `pointer` naming that manifest.
+
+A `legacy` generation's locations are the app's own. The SDK records a fingerprint of them, and it
+**never deletes, moves or writes outside them**. If the root key exists but the transaction did not
+commit, the next `adoptLegacy` runs again.
+
+**Upgrading with a 0.5.7 attempt in flight.** The SDK cannot see attempts the app built itself.
+The app adopts only the configuration it holds as live, and a grant that its earlier flow stored
+there is picked up by the legacy session's ordinary reconciliation. Staging directories the app
+built stay the app's.
+
+**Root key lost** (Keystore wiped, a restore to another device, a cleared site key). No row
+authenticates, so nothing is deleted or promoted. `repair()` lists the generations found under the
+derived names. For each it verifies the history held there and checks the member key against a
+current member. The person then picks the live generation, and the SDK writes a new root key and
+store, with a fresh `manifest` for each generation found. Generations not picked are kept until the
+person discards them.
+
+### 3.12 API sketch
 
 All three languages expose the same types. Names follow each language's conventions.
 
 **Kotlin**
 
 ```kotlin
-class ColophonAccounts(root: AccountRoot)            // AccountRoot: directory, key namespace, key and secret factories
-    suspend fun live(account: String): GenerationInfo?
-    suspend fun open(account: String, template: SessionTemplate): ColophonSession   // the live generation
+class ColophonAccounts(root: AccountRoot)       // directory, namespace, AdmissionStore, RootKey, key and secret factories
+    suspend fun adoptLegacy(configuration: SessionConfiguration)
+    suspend fun open(account: String, template: SessionTemplate): ColophonSession
     suspend fun attempts(account: String? = null): List<AttemptInfo>
     suspend fun beginJoin(invite: JoinTarget, template: SessionTemplate): AdmissionAttempt
     suspend fun beginRecovery(target: RecoveryTarget, template: SessionTemplate): AdmissionAttempt
     suspend fun attempt(id: String): AdmissionAttempt?
-    fun diagnostics(): RootDiagnostics                  // unowned names, damaged pointer; read-only
+    suspend fun repair(): RepairReport                  // deletes nothing without the person's choice
+    suspend fun exportRetained(generation: String, into: RecordMedium)
+    fun diagnostics(): RootDiagnostics
 
-class AdmissionAttempt                                  // a handle; every call re-reads the durable record
+class AdmissionAttempt
     val id: String; val account: String; val kind: AttemptKind
     val state: StateFlow<AttemptState>
-    suspend fun request(): ByteArray                    // the bound bytes, never regenerated
-    suspend fun joinPairing(): AccountPairing           // code path to another device
+    suspend fun request(): ByteArray                    // the bound bytes; marks the attempt disclosed
+    suspend fun joinPairing(): AccountPairing           // marks it disclosed
     suspend fun approveWithPasskey(passkey: PasskeyAuthenticator, ownerKeyId: String? = null): AttemptState
     suspend fun addPasskey(registrar: PasskeyRegistrar, label: String): AttemptState   // §4.6
-    suspend fun promote(): ColophonSession              // P0–P7
-    suspend fun abandon(revokeIfGranted: PasskeyAuthenticator? = null)
+    suspend fun promote(): ColophonSession
+    suspend fun abandon()                               // discarding, or withdrawn when disclosed
+    suspend fun revokeMember(passkey: PasskeyAuthenticator)   // superseded, or withdrawn and granted
 
-// On any live session (§4.2): approve another device's request with a passkey that is not this session's owner.
 suspend fun ColophonSession.approve(request: AccessRequest, pairing: AccountPairing, passkey: PasskeyAuthenticator, ownerKeyId: String? = null)
 ```
-
-`SessionTemplate` holds what `SessionConfiguration` holds today, except storage, keys and device
-secrets, which the root supplies per generation: member label and kind, namespaces, access,
-services, homes and the clock.
 
 **Swift**
 
 ```swift
 public actor ColophonAccounts {
     public init(root: AccountRoot)
-    public func live(_ account: String) async throws -> GenerationInfo?
+    public func adoptLegacy(_ configuration: SessionConfiguration) async throws
     @MainActor public func open(_ account: String, template: SessionTemplate) async throws -> ColophonSession
     public func attempts(for account: String? = nil) async throws -> [AttemptInfo]
     public func beginJoin(_ invite: JoinTarget, template: SessionTemplate) async throws -> AdmissionAttempt
     public func beginRecovery(_ target: RecoveryTarget, template: SessionTemplate) async throws -> AdmissionAttempt
+    public func repair() async throws -> RepairReport
+    public func exportRetained(_ generation: String, into medium: any RecordMedium) async throws
 }
 public actor AdmissionAttempt {
     public nonisolated let id: String
@@ -428,7 +482,8 @@ public actor AdmissionAttempt {
     public func approve(with passkey: any PasskeyAuthenticator, ownerKeyID: String? = nil) async throws -> AttemptState
     public func addPasskey(_ registrar: any PasskeyRegistrar, label: String) async throws -> AttemptState
     @MainActor public func promote() async throws -> ColophonSession
-    public func abandon(revokingWith passkey: (any PasskeyAuthenticator)? = nil) async throws
+    public func abandon() async throws
+    public func revokeMember(with passkey: any PasskeyAuthenticator) async throws
 }
 extension ColophonSession {
     public func approve(_ request: AccessRequest, pairing: AccountPairing, with passkey: any PasskeyAuthenticator, ownerKeyID: String? = nil) async throws
@@ -439,12 +494,14 @@ extension ColophonSession {
 
 ```ts
 class ColophonAccounts {
-  static open(root: AccountRoot): Promise<ColophonAccounts>;
-  live(account: string): Promise<GenerationInfo | undefined>;
+  static open(root: AccountRoot): Promise<ColophonAccounts>;   // root.store: IndexedDB, or host-supplied in Node
+  adoptLegacy(configuration: SessionConfiguration): Promise<void>;
   open(account: string, template: SessionTemplate): Promise<ColophonSession>;
   attempts(account?: string): Promise<AttemptInfo[]>;
   beginJoin(invite: JoinTarget, template: SessionTemplate): Promise<AdmissionAttempt>;
   beginRecovery(target: RecoveryTarget, template: SessionTemplate): Promise<AdmissionAttempt>;
+  repair(): Promise<RepairReport>;
+  exportRetained(generation: string, into: RecordMedium): Promise<void>;
 }
 interface AdmissionAttempt {
   readonly id: string; readonly account: string; readonly kind: AttemptKind;
@@ -453,240 +510,284 @@ interface AdmissionAttempt {
   approveWithPasskey(passkey: PasskeyAuthenticator, ownerKeyId?: string): Promise<AttemptState>;
   addPasskey(registrar: PasskeyRegistrar, label: string): Promise<AttemptState>;
   promote(): Promise<ColophonSession>;
-  abandon(options?: { revokeWith?: PasskeyAuthenticator }): Promise<void>;
+  abandon(): Promise<void>;
+  revokeMember(passkey: PasskeyAuthenticator): Promise<void>;
 }
 ```
 
-No call takes a path, an alias or a generation ID to delete.
+`SessionTemplate` is today's `SessionConfiguration` without storage, keys and device secrets,
+which the root supplies per generation.
 
-### 3.9 How the 0.5.7 calls map
+### 3.13 What happens to the 0.5.7 calls
+
+The aim is that apps never clean up. Unsafe forms are therefore removed in 0.6, not kept as
+deprecated wrappers.
 
 | 0.5.7 call | 0.6 |
 | --- | --- |
-| `ColophonJoin.readHistoryWithPasskey` | Unchanged and pure (stores nothing). Used inside `approveWithPasskey`. |
-| `ColophonJoin(configuration, …).request()`, `fetchHistory()` | Kept, source-compatible, over the given configuration. `AdmissionAttempt.request()` and the attempt's waiting loop replace them for new code. |
-| `approveOwnJoinWithPasskey(passkey, ownerKeyId, open)` | Kept, source-compatible, deprecated. With a configuration that a `ColophonAccounts` attempt produced, it becomes a thin wrapper over `approveWithPasskey` then `promote`, and the `open` closure is called only to build the template. With an app-built configuration it behaves as in 0.5.7, and its documentation states the shared-storage hazard. |
-| `recoverWithPasskey` | Same treatment: `beginRecovery`, `approveWithPasskey`, `promote`. |
-| `ColophonSession.approveOwnRequest(expected)` | Unchanged; called by the attempt with `expected` set to the bound request (R8). |
-| `ColophonSession.leave()` / `rejoin(keys)` | `leave` unchanged (non-destructive). `rejoin` becomes `beginJoin` for the same account, a new generation, as §3.3 requires a new member anyway. |
-| `SessionConfiguration` | Unchanged. `ColophonAccounts` builds one per generation. |
-| JavaScript | No 0.5.7 passkey join exists. The attempt API and a port of `ColophonJoin` are added natively. |
+| `ColophonJoin.readHistoryWithPasskey` | Kept. It is pure and stores nothing. |
+| `ColophonJoin(configuration, …)`: `request()`, `fetchHistory()` | **Removed** from the public surface. They write to the configured live storage and create live keys (F5, F6). Use `beginJoin`. |
+| `approveOwnJoinWithPasskey`, `recoverWithPasskey` | **Removed** as calls that take a configuration. They exist only on attempts. A final 0.5.x release marks them deprecated and states the hazard. |
+| `ColophonSession.approveOwnRequest(expected)` | Internal; the attempt passes the bound request. |
+| `leave()` / `rejoin(keys)` | `leave` is unchanged (it deletes nothing). `rejoin` is replaced by `beginJoin`. |
+| `SessionConfiguration` | Unchanged, for `adoptLegacy` and apps that do not use attempts. |
+| JavaScript | Attempts and a port of the passkey read are added. |
 
-Behaviour that changes for wrapped calls: failure never deletes anything, an
-`unavailable` after a signed grant leaves the attempt `granted` and resumable, and caller
-cancellation does not roll back.
+### 3.14 How each failure sequence is prevented
+
+| Sequence | Prevented by |
+| --- | --- |
+| F1 | Liveness comes from the authenticated `pointer`, never from app settings. Names are derived. Deletion is refused for the live generation and for any generation whose contents show admission (D1, D2). |
+| F2 | Cancellation is never cleanup. Sign, store and record `granted` is one non-cancellable unit. Nothing is shown as the account before C. |
+| F3 | Every state is durable and listed by `attempts()`. An unadmitted generation is never live. |
+| F4 | `granted` is persisted with the entry before publishing. Signed attempts are never discarded automatically. P0 waits for durable home state. |
+| F5 | A pending join is its own generation, unreachable by other attempts' names. |
+| F6 | Approval takes an attempt handle with bound request bytes. Nothing regenerates a request. |
+| F7 | No marker grants deletion. Deletion needs an authenticated manifest, a never-live check in one transaction, and the content check. |
+| F8 | Expiry discards the derived names of one non-live generation. No inventory is needed. |
+| F9 | The pairing and delivery bounds (§3.9 items 1 and 2), retained disclosed keys (item 3) and orphan detection (item 4). Until the §4.9 rules ship, it is fixed only for grants signed on this device. |
 
 ---
 
 ## 4. Adding another device with a controller passkey
 
-### 4.1 What "the library's first passkey" is in protocol terms
+### 4.1 What "the library's first passkey" is
 
-0.5 has no notion of a "first" passkey. Verified:
+0.5 has no notion of a first passkey. The reference sessions create the genesis owner controller
+with roles `approve`, `control` and `recover`, with `verification: true` for a passkey, and with a
+`prf` slot. See Swift `SessionWorker.swift`, the genesis `ControllerSpec(… roles: [.approve,
+.control, .recover], verification: isPasskey …)`; Kotlin mirrors it. Its authority is exactly that
+of its roles (§6.1, §8.4).
 
-- The reference sessions create a genesis keyring whose owner controller is the person's passkey,
-  with roles `approve`, `control` and `recover`, `verification: true` for a passkey, and a `prf`
-  slot (Swift `SessionWorker.swift`, the genesis `ControllerSpec(… roles: [.approve, .control,
-  .recover], verification: isPasskey …)`; Kotlin mirrors it). §18's reference setup gives
-  passkeys `approve` and `control`.
-- The protocol gives that controller exactly the authority of its roles (§6.1, §8.4). "First"
-  appears only as the display "first-seen seq" (§6.1, §17.5).
+This design therefore selects "the passkey" by capability, never by seq:
 
-So in this design, "the first passkey" means **any current WebAuthn controller that holds
-`approve` (or `control` where `memberRule` is `control`) and has a slot of its own**. Usually that
-is the genesis passkey. The SDK selects by those properties, never by seq. The 0.5.7 self-approval
-already checks the same properties (`signerController.roles`, `ownSlot`).
+- **to approve:** a current, non-suspended WebAuthn controller with `approve` (or `control` when
+  `memberRule` is `control`) and a slot of its own;
+- **to add a passkey at once:** the same, and it must hold `control`.
 
-### 4.2 Flow A: a device that already holds the account adds a new device
+### 4.2 Flow A: a device that holds the account adds a new device
 
-Device A is a current member, for example a tablet. Device B is new. The passkey is available on
-A: synced to A's platform, or reached by a cross-device (hybrid) ceremony from a phone.
+Device A is a current member, and device B is new. The passkey is available on A, synced there or
+reached by a cross-device (hybrid) ceremony.
 
-1. **B** calls `beginJoin` with A's invite. Its attempt makes member keys and a request in its own
-   generation, then shows the pairing QR or commitment (§7.3, §9.1).
-2. **A** pairs with B's request. The person compares the six-digit code, or A scans B's request
-   envelope. A's core issues the confirmed pairing for B's exact `member.signing`.
-3. **A** calls `session.approve(request, pairing, passkey)`. A opens a controller engine over its
-   own store with the passkey as signer, as `withOwner` does today, but with the passkey given per
-   call. It unlocks the passkey's own `prf` slot with one assertion that evaluates PRF. It then
-   prepares the `grant` (terms covered by the request, `shares` sealing every historical epoch of
-   each granted namespace to B's agreement key, §9.2), and the passkey signs it with UV in a
-   second assertion.
-4. **A** publishes the grant to the primary home, then every home (§17.5).
-5. **B**'s attempt reads the history with its member key, sees the grant (`granted`, then
-   `admitted` at a fresh head), and promotes.
-
-No step needs A to be a controller. A only hosts the ceremony.
+1. B calls `beginJoin`. The attempt becomes `disclosed` when the request or its commitment is
+   shown.
+2. A and B pair on B's member signing key (§7.3, §9.1), and A's core issues the confirmed pairing.
+3. A calls `session.approve(request, pairing, passkey)`. A controller engine opens over A's store
+   with the passkey as signer, as `withOwner` does, but the passkey is given per call.
+   - One assertion with PRF opens the passkey's slot.
+   - The core prepares the `grant`: terms covered by the request, and `shares` sealing every
+     historical epoch of each granted namespace to B's agreement key (§9.2).
+   - A second assertion, with UV, signs it within 600 s of the pairing (§3.9).
+4. A publishes the grant to the primary home, then to every home (§17.5).
+5. B's attempt sees the grant (`granted`), waits for P0 (`admitted`), and promotes.
 
 ### 4.3 Flow B: the new device approves itself
 
-This is the 0.5.7 behaviour, now on an attempt. B holds the passkey, or reaches it by a hybrid
-ceremony. `approveWithPasskey` does the following:
+`approveWithPasskey` on B runs these steps:
 
-1. reads the history with the passkey (§13.4), and records the signer in the attempt;
-2. stores the history in the attempt's generation (`verified`);
-3. scans its own bound request envelope to get the confirmed pairing (the scan path, §9.1);
-4. opens the passkey's slot, signs the grant (`granted`) and syncs;
-5. waits for the home to confirm (`admitted`), then the app calls `promote()`.
+1. read the history with the passkey (§13.4);
+2. store it (`verified`);
+3. take the confirmed pairing from its own bound request envelope, as §4.9 authorises;
+4. open the passkey's slot;
+5. sign and record `granted`, as one non-cancellable unit;
+6. sync, wait for P0, and promote.
 
-### 4.4 Who signs what, what the home sees, what history records
+### 4.4 Who signs what, and what the home and history see
 
 | Step | Signed by | Sent to the home | Recorded |
 | --- | --- | --- | --- |
-| History read (flow B only) | passkey, `colophon.history.read` calls, one per 64-entry page (§12.2) | `GET /authority` pages | nothing (calls are replay-checked, §12.4) |
-| Request | B's member key, `raw` | nothing until the grant | embedded in the grant |
-| Slot unlock | passkey PRF (UV per §7.2) | nothing | nothing |
-| Grant | passkey, `webauthn`, from an authority origin (§4.3); UV because `verification: true` | `POST /authority` | `grant` at seq n: `by` = passkey key ID, `request`, `terms`, `shares` |
-| Member's reads | B's member key, `colophon.history.read` / `colophon.home.read` | ordinary calls | nothing |
+| History read (flow B) | passkey, one `colophon.history.read` call per 64-entry page | `GET /authority` | nothing; replay-checked (§12.4) |
+| Request | B's member key, `raw` | nothing | embedded in the grant |
+| Slot unlock | passkey PRF | nothing | nothing |
+| Grant | passkey, from an authority origin (§4.3), UV because `verification: true` | `POST /authority` | `grant`: `by` is the passkey key ID; `request`, `terms`, `shares` |
 
-The home sees an ordinary immediate entry charged to the passkey's rate budget (`policy.rate`,
-64 entries a day by default). It learns nothing it does not learn from any approval.
+The home sees an ordinary immediate entry, charged to the passkey's rate (`policy.rate`).
 
-### 4.5 Rules, roles and thresholds
+### 4.5 Rules, exactly
 
-- `memberRule` `single` (the person default): the **single rule**, exactly one signer holding
-  `approve` (§8.4). UV is required because the reference passkey has `verification: true`
-  (§4.3 step 3, §8.4 "UV").
-- `memberRule` `control` (the company default): the **control rule**, at least `threshold`
-  control units. A grant then needs the other holders' signatures, which this flow collects as
-  `cosignatures` from other devices. This needs the cosigner plumbing from #115.
-- `recover`-only passkeys cannot sign a grant. 0.5.7 already refuses them (`refused:outOfScope`)
-  before storing or signing anything. Recovery with them is a pending transition, outside this
-  flow (§7, W11).
-- `import` is never granted this way (§9.3 needs the control rule and a `device` or `app`
-  member).
-- The pairing is required on both flows. The core refuses a grant without a confirmed pairing
-  (§9.1, §17.1), so flow A cannot approve a member ID typed in or relayed.
+| Change | Rule (0.5) | Immediate? |
+| --- | --- | --- |
+| Grant, `memberRule` `single` | single rule: exactly one signer holding `approve` (§8.4); UV when the controller has `verification` (§4.3 step 3, §8.4 "UV") | yes |
+| Grant, `memberRule` `control` | control rule: at least `threshold` `control` units, with UV (§8.4) | yes; cosignatures come from other devices |
+| Add an `approve` passkey with its slot | immediate `keyring` entry: `addThreshold` units holding `control`, with UV, plus the new key's possession proof in `additions`; at most four controllers per entry (§8.4) | yes. An `approve`-only signer cannot make it. |
+| Add `control` to that passkey | pending transition under the control rule (§8.4). Recovery-set consent is needed only if it also raises `threshold` or touches `recover` (§8.4 "Recovery-set consent"). | Only as a **full set (b)** (§8.7): at least two signer units; meets the control rule; **every current `control` controller** signed, including any it removes; every current `recover` controller signed if consent is needed. Possession proofs never count. Otherwise it is due after `recoveryDelay`. |
+| Replace control controllers through recovery | recovery rule: every signer holds `recover`, at least `recoverThreshold` units; may remove any controllers and add replacements with `approve` and `control`, never `recover` (§8.4, first transition row) | Only as a **full set (a)**: at least two units and every current `recover` controller (§8.7). Otherwise pending, vetoable and subject to escalation. |
+| `import` | control rule; a `device` or `app` member (§9.3) | never through this flow |
+
+A `recover`-only passkey cannot sign a grant. 0.5.7 refuses it, with `refused:outOfScope`, before
+it stores or signs anything.
 
 ### 4.6 Adding a new passkey on the added device
 
-After admission, or as the last step before promotion while the passkey is still at hand, B
-registers a passkey P2 of its own platform (UV required, attestation none, `authorityOrigins`
-set; §17.3 step 1).
+B registers a passkey P2 on its platform, with UV, attestation none and `authorityOrigins` set
+(§17.3 step 1).
 
-1. **Immediate `approve`, with a slot.** B prepares one `keyring` entry that adds P2 with roles
-   `["approve"]` and a `prf` slot for P2 in the same entry. The existing control passkey P1 signs
-   it (`addThreshold` control units, UV, §8.4). P2 signs the possession proof in `additions`,
-   with PRF evaluated in the same assertion (§7.2 "Building a PRF route"). P1's slot was opened in
-   the same attempt, so B holds the seed for this session and builds P2's slot without the §7.4
-   transfer. This entry is immediate.
-2. **`control` later.** Giving P2 `control` is a pending transition under the control rule (§8.4),
-   due after `recoveryDelay` (72 hours by default). It is immediate only as a full set, with at
-   least two signing units (§8.7), so a person whose only control key is P1 waits out the delay.
-   The SDK proposes it right away, records it as `passkeys[].state` in the attempt (or, after
-   promotion, in the session journal), and shows it as pending (§17.5).
-3. **On a device admitted by code path** (flow A, where B never opened P1's slot), B gets the seed
-   by §7.4 from A during the same pairing, or adds P2 by transition and builds its slot with a
-   self-slot `keyring` entry once final (§17.3 step 2).
+1. **Add P2 at once as `approve`, with a slot.** This needs the approving passkey P1 to hold
+   `control`, and B to hold the seed in this session. In flow B the seed comes from P1's slot, opened
+   on B. In flow A it comes from a §7.4 transfer (§4.7). One `keyring` entry adds P2 with
+   `["approve"]` and a `prf` slot built from P2's possession assertion with PRF (§7.2 "Building a
+   PRF route"). P1 signs it.
+2. **Give P2 `control`.** This follows §4.5. With P1 as the only control unit, it waits out
+   `recoveryDelay`. If the account has a second control key, such as a device owner key, both
+   signing make a full set, and it is immediate. The SDK proposes it, records it, and shows it as
+   pending (§17.5).
+3. **Mind the planter rule.** Keys P1 added by immediate entries can be removed together with P1.
+   This happens when a later transition removes P1 while the vault is retiring, and P2 was added
+   after that transition's anchor (§8.3 "Keys the removed key planted go too"), unless `keep`
+   names P2 (recovery rule). Hosts list such keys for removal by default (§8.4 "Removal
+   follow-up", §17.5). They also list the devices P1 admitted, for revocation (§17.5). So before P1
+   is retired, the SDK makes sure that:
+   - P2 holds `control`, activated and final;
+   - the person keeps P2 and the devices P1 admitted out of the follow-up.
+4. **A passkey that was never added.** If P2 was registered but never added, it stays in the
+   person's credential manager. The attempt lists it as `registered`, and the host retries with the
+   same credential. Credential managers offer no programmatic delete.
 
-If P2 is registered but the entry fails, P2 exists only in the person's credential manager. It is
-listed in the attempt as `registered` so the host can show "a passkey was created but not added",
-and retry with the same credential. Credential managers offer no programmatic delete, so it is
-never "cleaned up".
+### 4.7 Moving the seed in flow A
 
-### 4.7 When the first passkey is lost or has been replaced
+The admission pairing binds B's member signing key. §7.4 instead seals the seed to a fresh
+ephemeral agreement key `E`, under a label that carries that pairing's nonces. The admission
+pairing cannot be reused for this: its key is a member signing key, and §3.3 forbids using a point
+for more than one principal or usage.
 
-- **Replaced** (by #115's `replaceController`, or by any transition that removed P1 and added P2):
-  P1 is no longer current. Its history reads are answered `refused:revoked` (§13.4), and the SDK
-  selects P2 by the rule in §4.1. Nothing in this design refers to P1 by identity.
-- **Lost, with another approving controller**: any current passkey or device owner key with
-  `approve` and its own slot can run flow A or flow B. Then remove P1 (#115 `removeController`,
-  pending, with the vault retiring and rotating, §8.3).
-- **Lost, with only recovery keys left**: a recovery transition (§8.4 recovery rule, pending
-  unless it is a full set). The device proposing it holds an attempt in a new state,
-  `awaitingActivation`, that is durable for the whole delay. When the activation is final, the
-  attempt's new controller signs its own grant and the attempt promotes. This is the main reason
-  for R5. It is staged as W11.
-- **Lost, with nothing else**: the account cannot be recovered. The §6.4 warnings already cover
-  this, and the new-passkey step in §4.6 exists to keep it from happening.
+Flow A therefore runs a **second pairing** (§7.3, with `E` the transfer key) while A's session
+still holds the seed it opened from P1's slot. B opens the seed, checks the vault, builds P2's slot
+and erases `E`. The other option is to ask for P1 once more, on B. Extending §7.4 so that one
+pairing binds both keys is not proposed.
 
-### 4.8 Does this need a spec change?
+### 4.8 When the first passkey is lost or replaced
 
-**No.** The grant (§9.2), the single and control rules (§8.4), the self-scan pairing (§9.1, as
-§13.4 already anticipates "to approve its own request"), the immediate `keyring` with a slot and
-possession proof (§8.4), and the pending `control` addition (§8.4, §8.7) are all 0.5 rules. The
-reference already produces and verifies them. Two optional clarifications would make the 0.5.7
-behaviour explicit for other implementers:
+- **Replaced:** a transition removed P1 and added or promoted P2. P1's history reads are then
+  answered `refused:revoked` (§13.4), and §4.1 selects P2.
+- **Lost, with another approving controller:** run flow A or flow B with that controller, then
+  remove P1 by transition. The vault retires and rotates (§8.3). Apply §4.6 item 3.
+- **Lost, with only recovery keys:** a recovery transition (§4.5). The proposing device's attempt
+  waits durably in `awaitingActivation` (W11).
+- **Lost, with nothing else:** the account cannot be recovered. The §6.4 warnings and §4.6 exist to
+  prevent this.
+
+### 4.9 Spec changes
+
+These change no wire object and no verifier verdict. They are normative changes to host and core
+rules, proposed for the 0.5 revision that 0.6 references.
 
 ```diff
  ### 9.1 Membership request
  …
- the call consumes a **confirmed pairing**: an opaque token the core issues once when §7.3 completes
- (the code confirmed; or, on the scan path, exactly one payload: the canonical request envelope
- scanned from the requester's screen, whose `member.signing` is the key), bound to this account and
- to the exact `member.signing` of the request, and spent by that one approval.
-+A device approving its **own** request with a controller key it holds (§13.4) obtains the
-+confirmed pairing from its own stored request envelope, as the scan path does; no other device
-+takes part, so §7.3's failure limit does not apply to it. A host MUST bind that envelope when the
-+request is made and MUST NOT make a new request in its place before the approval.
+ to the exact `member.signing` of the request, and spent by that one approval. No interface approves a
+ member from a member ID, a prefix of one or any other code.
++**Approving one's own request.** A device that holds a controller key permitted to approve
++(§8.4) MAY approve its own request without a second device. The confirmed pairing is then issued
++from the request envelope the device stored when it made the request, as if scanned from its own
++screen; the host MUST bind that envelope at creation and MUST NOT make another request for the same
++member before the approval. No other party takes part, so §7.3's failure limit does not apply.
++**Expiry.** A confirmed pairing expires 600 seconds after it is confirmed (on the scan path, after
++the scan) and is never persisted; the core refuses to finish a `grant`, or a `grant` component,
++that consumes an expired one.
 ```
 
 ```diff
- ### 17.3 Adding a key
+ ### 17.5 Notices
  …
- 3. An existing control key signs the transition that adds it with `control`. …
-+
-+**Adding a passkey on a device a passkey just admitted.** A device whose grant was signed by a
-+controller passkey that opened its own slot in the same session MAY add a new passkey of its own
-+platform as `approve` at once: one `keyring` entry that adds it with its slot, signed by that
-+passkey, with the new key's possession proof and PRF from one assertion (§7.2). `control` follows
-+by an ordinary transition.
+ - **Submitting.** Hosts MUST submit every transition, veto and `suspend` to every current home
+   directly, and retry until each has receipted it or 300 s have passed; and publish entries to the
+   primary home and then every home.
++- **Late approvals.** A host holding a signed `grant` that no home has accepted 24 hours after its
++  `issued` MUST NOT publish it; it discards it and tells the person the device was not added.
++  A joining host keeps the keys of a request it has shown or paired until 24 hours and 600 s after
++  it last did, or until it has seen a grant of it, and offers to revoke a grant of a request it
++  withdrew.
 ```
 
 ---
 
 ## 5. Security analysis
 
-**A stolen, unlocked device.** The thief holds the member key and whatever the local
-authenticator unlocks. If the passkey is on the device and the device unlock satisfies UV, the
-thief can sign grants, which are immediate under `memberRule` `single`, and add an `approve`
-passkey. That is 0.5's existing exposure for any device holding a passkey, and this design
-neither widens nor narrows it. Flow A adds one requirement: a confirmed pairing with the new
-device. `control` additions still wait out the delay and can be vetoed. Recommendation: the SDK
-shows every new grant and every immediate `keyring` entry on the person's other devices at their
-next sync, alongside the §17.5 activations. Today §17.5 requires only activations.
+**A stolen, unlocked device.** If the passkey is on the device and the device unlock satisfies
+UV, the thief can sign grants, which are immediate under `single`. With a `control` passkey, they
+can also add an `approve` passkey. That is 0.5's existing exposure for any device holding such a
+passkey. Flow A additionally needs a confirmed pairing within 600 s. `control` additions stay
+pending and can be vetoed, unless the thief holds every control unit. Other devices should be
+notified of new grants and immediate `keyring` entries (Q5).
 
-**A malicious or buggy app layer.** Through the SDK it cannot delete live state: no call takes a
-path or alias, and `discard` refuses the live generation after re-reading the pointer under the
-lock. It cannot make the SDK approve the wrong request: approval takes an attempt handle whose
-request bytes are bound (R8), and the pairing token binds the key (§9.1). It can still call the
-platform's own delete APIs directly, which is out of the SDK's reach. It can show the person a
-misleading label, which the pairing code and §17.5 display limit.
+**A buggy app or tampered files.** No SDK call takes a deletion target, targets are derived, and
+links are refused. A record therefore cannot steer deletion onto live names, or onto anything
+outside one generation's derived set. MACed rows cannot be forged by anything that writes files
+without being able to use the root key: a backup restore, corruption, an app editing files
+directly, another SDK version.
 
-**A crash at each step.** Covered by the state table (§3.2) and the crash tables (§3.4, §3.5). In
-every row the live generation is unchanged before C and is the attempt's after C. Signed grants
-are never lost to a crash, because `granted` is persisted with the entry before the publish.
+**Limit.** Code running with the app's full privileges can use the root key, the Keystore and
+the Keychain itself, and can delete live keys without going through the SDK. The MAC does not
+defend against it, and the design does not claim that it does.
 
-**A replayed or stale attempt.** History-read and member calls carry `created`, a call window and
-a replay ID (§12.3, §12.4), so a recorded call is refused. An attempt past `expires` that never
-signed is discarded. A stale invite checkpoint is caught by `account_verify_at_head`
-(`refused:fork`, `refused:rollback`). An attempt verified against an older history than the live
-generation's high-water mark is refused promotion (R11). An attempt for account X cannot be
-promoted into account Y, because the pointer entry is keyed by the account ID the attempt
-verified.
+**Store rollback or redirection.** An older genuine copy of the store has valid MACs. It could
+name an older generation as live, or show a now-live generation as an attempt that may expire.
+What limits this:
 
-**A hostile home.** It can withhold the grant (the attempt stays `granted`, durable and
-retryable), serve a cut-short history in which a removed passkey is still current (the known
-§13.4 limit: a grant signed there is a fork other readers refuse, and R11 catches it on a device
-that holds a newer state), refuse every call, and learn the account ID, the controller key ID and
-timing. It cannot forge a grant, read the vault, or make the SDK delete anything. At
-`headQuorum` above 1, the SDK should verify the other homes' heads before signing (§13.4 SHOULD,
-not yet done by the SDKs; W4).
+- D2's content check refuses to delete any generation whose medium holds a grant of its member;
+- R11 refuses promotion behind the high-water mark;
+- on Apple, the epoch is mirrored in a Keychain item beside the root key, so a file-only restore
+  shows as `storageDamaged`.
 
-**What UV guarantees.** That the authenticator verified its user (biometric or PIN) for this
-assertion over SHA-256 of the exact body (§4.3 step 1). It does not show the person what is being
-approved, because authenticators display only the relying party. The host must show the request's
-label, kind, custody and terms, and the pairing code, before the ceremony.
+On Android, the JVM, browsers and Node, the epoch shares storage with the store, so a full
+rollback by privileged code is not detected. The content check still protects admitted
+generations.
 
-**Phishing and the relying party.** Every origin a browser allows for the `rp` can obtain that
-passkey's signatures and PRF outputs (§3.2), so it can read `prf` slots. `authorityOrigins`
-limits which origins' signatures count for authority entries, including grants and `keyring`
-entries. It does not limit vault access. Native apps are bound by platform origin: Android
-`apk-key-hash`, which `PasskeyController` adds to `origins`; Apple apps through associated
-domains. A cross-device ceremony is bound to proximity by the platform. Recommendations: register
-passkeys with `authorityOrigins` set (§17.3), offer `combined` slots for people who want no single
-web origin able to open the vault (§7.2), and never run a non-production build against a
-production `rp` (§3.2).
+**A crash at each step.** Covered by §3.5, §3.7 and §3.8. Before C the live generation is
+unchanged. After C the new one is live and has already been validated, and the previous one is
+kept for repair.
+
+**Stale processes and extensions.** An old epoch cannot promote or delete, because both are
+compare-and-set operations. Once the session has checked the epoch, it cannot sign (§3.6). What
+remains is a write that passed its check from a process suspended past its lease. It lands in the
+retained previous generation, and it is lost only if never published.
+
+**A replayed or stale attempt.**
+
+- Calls carry `created`, a window and a replay ID (§12.3, §12.4).
+- Invite checkpoints are checked (`refused:fork`, `refused:rollback`).
+- R11 refuses an attempt that is behind the live generation.
+- Attempt transitions are versioned, so a replayed transition fails its compare.
+- Pointer rows are keyed by the account the attempt verified.
+
+**A hostile home.** It can withhold a grant (the attempt stays `granted`), refuse calls, and learn
+the account ID, the controller key ID and timing. As 0.5 states (§13.4, known limit), a hostile
+sole home can show a **first verifier** (a device with no earlier state) a valid stale fork in
+which a removed passkey is still current. A grant signed there is a fork that other readers
+refuse. Mitigations:
+
+- an invite's checkpoint;
+- R11, on a device that holds newer state;
+- at `headQuorum` above 1, checking the other homes' heads, which §13.4 says a device SHOULD do and
+  the SDKs do not yet (W4).
+
+With one home and no earlier state, nothing detects it. A home cannot forge a grant, read the
+vault, or cause any deletion.
+
+**What pairing authenticates.** It shows that both screens hold the same account ID and the same
+key `E`. It does not establish:
+
+- the account's identity to the person: the host shows the account fingerprint, and the account
+  label is the account's own text;
+- the truth of the requester's `label`, `kind` and `custody`, which the requester asserts itself;
+- the approver's intent: the host shows the terms before the ceremony;
+- the passkey's relying party: the operating system shows it, and the core checks it against the
+  descriptor.
+
+**What UV guarantees.** The authenticator verified its user for an assertion over SHA-256 of the
+exact body (§4.3 step 1). It shows only the relying party, so the host must show what is being
+approved.
+
+**Phishing and the relying party.** Every origin allowed for the `rp` can obtain the passkey's
+signatures and PRF outputs, and so can read its `prf` slots (§3.2). `authorityOrigins` limits who
+can sign grants and `keyring` entries; it does not limit vault access. Native apps are bound by
+platform origin (`android:apk-key-hash`, which `PasskeyController` adds to `origins`; associated
+domains on Apple). Hybrid ceremonies require proximity. Hosts should:
+
+- set `authorityOrigins` (§17.3);
+- offer `combined` slots (§7.2);
+- never run non-production builds against a production `rp` (§3.2).
 
 ---
 
@@ -694,68 +795,115 @@ production `rp` (§3.2).
 
 ### 6.1 Invariant
 
-For every injected fault, take a **fingerprint** of the live generation before and after: the
-pointer bytes; every file under its records and session directories, by path and SHA-256; the
-set of its key names with their public points; and its device-secret entry, present or absent.
-After any abandoned, failed, expired or crashed attempt that did not reach C, the fingerprints are
-byte-identical. After C, the new generation is live and the old one is unchanged until
-retirement.
+A generation's **fingerprint** is:
+
+- its `pointer` and `manifest` rows;
+- every file under its records and session trees, by path and SHA-256;
+- its derived key names, with their public points;
+- its device-secret entry, present or absent;
+- the store epoch.
+
+The live generation's fingerprint must be byte-identical after any abandoned, failed, expired or
+crashed attempt that did not reach C, and after every attack in §6.3. After C, the previous
+generation's fingerprint must stay unchanged until it is retired.
 
 ### 6.2 Failure-injection matrix
 
-Each step gets a hook, `AttemptHooks.before(step)`, following the existing `FolderMedium`
-step hooks (Kotlin `FolderMedium` test hook, Node `FileMediumOptions.onStep`). At each hook, every
-fault in the columns is injected, in each language (Swift, Kotlin JVM, Kotlin Android
-instrumented, TypeScript in Node and in a browser).
+Hooks follow the existing step hooks (Kotlin `FolderMedium`'s test hook, Node
+`FileMediumOptions.onStep`). The matrix runs in Swift, Kotlin on the JVM, Kotlin as an Android
+instrumented test, and TypeScript in Node and in a browser.
 
-| Step | throw | process kill (child-process kill as in `js/test05/kill-child.ts`; Android `Process.killProcess` in an instrumented test) | caller cancellation | storage full or read-only | key store failure | network drop after the server committed |
+| Step | throw | process kill (as `js/test05/kill-child.ts`; `Process.killProcess` instrumented) | cancellation | storage full or read-only | key store failure | network drop after server commit |
 | --- | --- | --- | --- | --- | --- | --- |
-| record written (`created`) | ✓ | ✓ | ✓ | ✓ | – | – |
-| keys created | ✓ | ✓ | ✓ | – | ✓ (StrongBox refusal, Secure Enclave unavailable) | – |
-| request stored (`requested`) | ✓ | ✓ | ✓ | ✓ | – | – |
-| each history page / head read | ✓ | ✓ | ✓ | – | ✓ (passkey cancelled, wrong credential) | ✓ |
-| history stored (`verified`) | ✓ | ✓ | ✓ | ✓ | – | – |
-| slot unlock (PRF) | ✓ | ✓ | ✓ | – | ✓ (no PRF) | – |
-| grant signed and stored (`granted`) | ✓ | ✓ | ✓ | ✓ | ✓ | – |
-| grant publish | ✓ | ✓ | ✓ | – | – | ✓ (the case F4 describes) |
-| home confirmation (`admitted`) | ✓ | ✓ | ✓ | – | – | ✓ |
-| P1–P7 | ✓ | ✓ | ✓ | ✓ | – | – |
-| D1–D6 and the sweeper | ✓ | ✓ | ✓ | ✓ | ✓ (delete refused) | – |
-| §4.6 keyring entry and P2 possession | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| manifest and attempt rows | ✓ | ✓ | ✓ | ✓ | – | – |
+| keys created | ✓ | ✓ | ✓ | – | ✓ | – |
+| request stored, disclosed | ✓ | ✓ | ✓ | ✓ | – | – |
+| each history page and head | ✓ | ✓ | ✓ | – | ✓ | ✓ |
+| `verified` | ✓ | ✓ | ✓ | ✓ | – | – |
+| slot unlock | ✓ | ✓ | ✓ | – | ✓ | – |
+| sign, store, `granted` | ✓ | ✓ | ✓ (must not interrupt) | ✓ | ✓ | – |
+| grant publish | ✓ | ✓ | ✓ | – | – | ✓ |
+| P0 confirmation | ✓ | ✓ | ✓ | – | – | ✓ |
+| V1–V5, C, P1 | ✓ | ✓ | ✓ | ✓ | ✓ | – |
+| D1–D7, sweeper | ✓ | ✓ | ✓ | ✓ | ✓ | – |
+| withdrawn reconciliation | ✓ | ✓ | ✓ | – | – | ✓ |
+| §4.6 entry, P2 possession, §4.7 transfer | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 
-### 6.3 Scenario tests
+### 6.3 Attacks and boundaries
 
-- Every F1–F8 sequence from §1.3 as a regression test. Examples: an unreadable app settings file
-  plus a dismissed prompt; cancellation at the final prompt; a grant committed and then a dropped
-  confirmation; recovery started over a pending join; the request file deleted between display
-  and approval; a stale attempt record next to an admitted generation; an expired join next to a
-  live account.
-- An unreadable or digest-mismatched pointer: no deletion, no promotion, `storageDamaged`.
-- Two attempts for one account, both admitted: the first promotes, the second becomes
-  `superseded`, and the revoke offer signs one `revoke`.
-- Recovery over a live install, with and without unpublished writes in the old generation.
-  Retirement waits as §3.7 says.
-- R11: a home that serves an older fresh-signed history to an attempt over a live account
-  (`refused:rollback`).
-- Flow A against the reference relay with a software WebAuthn passkey (as the 0.5.7 tests do),
-  then flow B, then §4.6 with P2's `control` transition pending and activated after a simulated
-  delay.
-- Migration: a 0.5.7 layout adopted as `legacy`, opened, used, then superseded by a recovery.
-  `legacy` paths are never deleted.
+**Regressions.** F1 to F9, one test each.
+
+**Malicious metadata.** Each case below must be refused and delete nothing:
+
+- a row of valid shape without a valid MAC;
+- a MACed row replayed from an older store;
+- an attempt row carrying the live generation's ID;
+- a non-hex generation ID.
+
+**Forced collisions.** A repeating random source, and directories, aliases or items already
+present under derived names. Creation is refused.
+
+**Links.** Symbolic and hard links at `R`, `generations/`, `trash/` and inside a generation,
+pointing into the live generation. They are refused, and the live fingerprint is unchanged.
+
+**Store rollback and deletion.**
+
+- An older store restored while a newer generation is live.
+- The store deleted with the root key present.
+- The root key deleted with the store present.
+
+The states in §3.11 hold, and so does the D2 check.
+
+**Unsupported durability.** No atomic move, or a directory sync that fails. Promotion is refused.
+
+**Key loss after C.** Keys deleted between C and P1. The account enters repair, the previous
+generation is kept, and there is no switch back to a revoked member.
+
+**Stale writers.** A second process and an app extension each hold leases on the previous
+generation and write after C. Signing is refused after the epoch check. A write that slipped
+through is retained and reported.
+
+**Late approval.**
+
+- Sign at 599 s, and at 601 s, which is refused.
+- Publish at 23 h, and at 25 h, which is dropped.
+- A withdrawn request granted, then resolved by "open" and by "revoke".
+- An orphan found by a later generation.
+
+**Migration.**
+
+- `adoptLegacy` killed mid-transaction.
+- A legacy generation superseded, and never deleted.
+- An upgrade that finds a grant left in the legacy medium.
+
+**Shared medium.** A failure at V5, then a retry. The shared medium never loses a file.
+
+**Trash and legacy boundaries.** `trash/<g>` without a `discarding` manifest is left alone. A legacy
+fingerprint mismatch blocks every write outside its locations.
+
+**Flows.**
+
+- Flows A and B against the reference relay with a software WebAuthn passkey.
+- §4.6 with `control` pending, then activated.
+- A full set made with a second control key.
+- The planter rule, after a later removal of P1.
 
 ### 6.4 Conformance vectors
 
-There is no new history format, so no new required vectors. Add positive vectors under
-`conformance/0.5/rules/` for the exact entries these flows produce, if they are not already
-covered:
+There is no new history format. Add positive and negative vectors under `conformance/0.5/rules/`,
+unless they are already covered:
 
-1. A `grant` by a WebAuthn controller from a platform authority origin.
-2. A `grant` under `memberRule` `control` with `cosignatures`.
-3. An immediate `keyring` that adds an `approve` passkey with its `prf` slot and possession proof.
-4. The same with a possession proof from an origin outside `authorityOrigins` (`badSignature`).
+- a `grant` by a WebAuthn controller from a platform authority origin;
+- a `grant` under `memberRule` `control` with `cosignatures`;
+- an immediate `keyring` adding an `approve` passkey with its `prf` slot and possession proof;
+- the same entry signed by an `approve`-only controller, which is refused;
+- a possession proof from outside `authorityOrigins` (`badSignature`);
+- a `control` addition with two control units, a full set (b);
+- the same with one control unit, which is pending.
 
-The attempt record and pointer are local SDK formats. Each SDK checks them with golden-file
-tests, and they share one JSON schema in `docs/` so that diagnostics are consistent.
+The §4.9 rules are tested in core unit tests (pairing expiry) and in the session tests (the
+delivery bound). The admission store rows are an SDK format. They get golden tests, and the three
+SDKs share one JSON schema for them.
 
 ---
 
@@ -765,96 +913,131 @@ Sizes: S is up to 2 days, M up to a week, L up to two weeks, per language unless
 
 | # | Work | Size | Depends on |
 | --- | --- | --- | --- |
-| W1 | Account root, pointer, lock, generation layout; `legacy` adoption | M (each of Swift, Kotlin, TS) | – |
-| W2 | Generation-scoped key and secret factories with open-only semantics (Keychain, Keystore, WebCrypto); device secrets and checkpoints keyed per generation; ledger moved to account scope | M | W1 |
-| W3 | Attempt record, state machine, `discard`, sweeper, `diagnostics` | M | W1, W2 |
-| W4 | Join and recovery on attempts; `approveWithPasskey`; 0.5.7 wrappers; other homes' heads at `headQuorum` above 1 | M | W3 |
-| W5 | Promotion, supersession, retirement, revoke offer | M | W3 |
-| W6 | `ColophonSession.approve(…, passkey)` (flow A) | S | – (any time) |
-| W7 | `addPasskey` (§4.6) on attempts and sessions | M | W4, #115 part (a) |
-| W8 | Failure-injection harness and the §6 matrix | L (all languages) | W3–W5 |
-| W9 | JS port of `ColophonJoin` (join at head, passkey read) | M | – |
-| W10 | Optional spec clarifications (§4.8), guide text | S | – |
-| W11 | Recovery-transition attempts (`awaitingActivation`) | M | W5, #115 |
+| W1 | `AdmissionStore` contract and stores (Swift SQLite, Android SQLite, IndexedDB; host-supplied on the JVM and Node), root key per platform, MACs, epoch | L | – |
+| W2 | Derived names; link-refusing file helpers with a durability capability; open-only key and secret factories; ledger at account scope | M | W1 |
+| W3 | Attempt state machine, leases and fencing, `discard`, sweeper, `diagnostics` | M | W1, W2 |
+| W4 | Join and recovery on attempts; `approveWithPasskey`; other homes' heads at `headQuorum` above 1; removal of the unsafe 0.5.7 forms | M | W3 |
+| W5 | Promotion with V1 to V5, repair, supersession, retirement, export, revoke offers | M | W3 |
+| W6 | `ColophonSession.approve(…, passkey)` (flow A) | S | – |
+| W7 | Late approval: the core pairing expiry (Rust and every binding), the delivery bound, withdrawn reconciliation | M | the core part: none; the rest: W3 |
+| W8 | `addPasskey` (§4.6), and the second pairing for the seed transfer (§4.7) | M | W4, W12 |
+| W9 | Failure injection and the §6 attacks | L (all languages) | W3–W7 |
+| W10 | JS port of the passkey read and join at head | M | – |
+| W11 | Recovery-transition attempts (`awaitingActivation`) | M | W5, W12 |
+| W12 | The key-change work from #115, rebased and audited (below) | M | – |
+| W13 | §4.9 spec text, guide, migration notes | S | – |
 
-**Order.** W6 and W9 first: they are independent and unblock flow A everywhere. Then W1 to W3,
-W4 and W5 with W8 alongside, then W7, then W11. **Everything here ships without a protocol
-change.** W10 is editorial.
+**Order.**
 
-**What #115 should become: split.**
+1. W6, W10, W13 and the core half of W7. They are independent, and the bounds must exist before
+   apps rely on them.
+2. W1, W2 and W3.
+3. W4, W5 and W7, with W9 alongside.
+4. W12, then W8 and W11.
 
-- **(a) Forward as is**, retargeted at `main`: `removeController`, `completeKeyChanges`,
-  `restoreSlot`, `checkRemoval`, the `cosigners:` parameter, `HostDuties` additions and the
-  `removeFollowUp` entropy fix. These act on a live, admitted session and touch no pre-admission
-  state. The entropy fix should also go to `release/0.5` as a bug fix. Add the JS session parity
-  it lacks.
-- **(b) Rework on attempts**: `replaceController`'s staged path and the second passkey added on a
-  joining device. Registering a new key while the device is not yet admitted must be
-  attempt-scoped (§4.6), so it belongs in W7. On a live session, `replaceController` can stay as
-  #115 wrote it.
-- #115 notes that a one-transition replacement of the only slotted control key would need a
-  transition's `vault` component to carry a slot for a controller it adds. That is open question
-  Q7, and the staged path is enough without it.
+Nothing changes a wire object, a verifier verdict or a home route. The §4.9 rules land with W7 and
+W13.
 
----
+**What #115 should become.** Split it, and merge none of it unchanged.
 
-## 8. Open questions for the protocol owner
-
-- **Q1. Should "first passkey" have any protocol status?** *Recommendation: no.* The SDK selects
-  any current WebAuthn controller with `approve` (or control under `memberRule` `control`) and its
-  own slot (§4.1). Privileging seq-order would break after a replacement.
-- **Q2. Must the home confirm before promotion?** *Recommendation: yes for any account with a
-  home. Local verification is enough only for accounts with none.* Promoting on a grant the home
-  has not accepted risks a displaced entry (§8.6) after the switch.
-- **Q3. How long is a superseded generation kept?** *Recommendation: until the new generation is
-  `Ready` and the old one's unpublished writes are flushed or unflushable, and at most 30 days.*
-- **Q4. Revoke the superseded member automatically?** *Recommendation: offer it, signed by the
-  same controller right after promotion. Never sign it silently.*
-- **Q5. Let a passkey without a slot approve, using the approving member's epoch handles for
-  `shares`?** *Recommendation: not in 0.6.* It needs a new core surface. The approving member
-  must hold every historical epoch of every granted namespace (§9.2), and the default reference
-  passkey has a slot.
-- **Q6. Adopt the §4.8 clarifications?** *Recommendation: adopt both as editorial text in the 0.5
-  revision that 0.6 references. They state existing behaviour.*
-- **Q7. Let a transition's `vault` component carry a slot for a controller it adds?** (raised in
-  #115) *Recommendation: defer.* The staged replacement is correct, and the change touches §8.3's
-  slot-drop rule.
-- **Q8. Attempt limits.** *Recommendation: four live attempts per root, one passkey ceremony at a
-  time, and expiry of unsigned attempts after 24 hours (a code-path join after its invite's
-  lifetime).*
-- **Q9. Require UV for a passkey grant even when a controller lacks `verification`?**
-  *Recommendation: yes, as SDK policy (`PasskeyAuthenticator` already demands UV).* The protocol
-  stays as it is.
-- **Q10. Show immediate grants and `keyring` entries as notices on other devices?**
-  *Recommendation: yes, as a 0.6 SHOULD next to §17.5's activations.* Immediate entries are where
-  a thief acts without a delay.
-- **Q11. May the SDK delete a `legacy` generation's app-provided locations?** *Recommendation:
-  never automatically.* Report it as retained, and let the app remove its own legacy paths after
-  0.6 is adopted.
+- **Live removal and rotation:** `removeController`, `checkRemoval`, `completeKeyChanges`,
+  `restoreSlot`, cosigners and the `HostDuties` additions. Rebase them onto `main`. Audit them
+  separately: vault retirement and rotation, the planter rule and `keep`, owed rekeys, and
+  full-set cosigning. Add the missing JavaScript parity.
+- **The `removeFollowUp` entropy fix:** on its own, with a test, to `release/0.5` and `main`.
+- **Pre-admission passkey work:** the second passkey added on a joining device, and the staged
+  `replaceController` path when it starts on a device that is not yet admitted. These move onto
+  attempts (W8). `replaceController` on a live session stays with the live removal work.
+- #115's question, whether a transition's `vault` component may carry a slot for a controller the
+  transition adds, is deferred (§8.1).
 
 ---
 
-## Appendix: what was verified and what is inferred
+## 8. Decisions and open questions
+
+### 8.1 Decided, with reasons
+
+- **No special status for a "first passkey".** The SDK selects a passkey by its roles and slot
+  (§4.1). Selection by seq order would break after any replacement, and the protocol has no such
+  notion.
+- **Durable home state is required before promotion.** A grant the home has not accepted can be
+  displaced (§8.6) after the switch. Accounts without a home do not use attempts.
+- **Never revoke silently.** Every revoke of a superseded or withdrawn member is offered to the
+  person and signed only on their choice.
+- **Approval by a passkey without a slot is deferred.** It would need a new core surface that
+  builds `shares` from the approving member's epoch handles, and those handles would have to cover
+  every historical epoch (§9.2). The reference passkey has a slot.
+- **Both spec clarifications are adopted, as normative rules** (§4.9).
+- **The SDK never deletes app-provided legacy locations** (§3.11).
+- **No one-transition replacement of the sole slotted control key in 0.6** (raised in #115). The
+  staged path is correct, and a one-transition replacement would touch §8.3's slot-drop rule.
+
+### 8.2 For the owner
+
+- **Q1. How long is a replaced generation kept?** *Recommendation:* until the new generation is
+  `Ready`, the old outbox is flushed or found unflushable, and no lease remains. At most 30 days,
+  and never while repair is open.
+- **Q2. Attempt limits, with late approval now bounded.** *Recommendation:*
+  - four live attempts per root;
+  - one passkey ceremony at a time;
+  - attempts that were neither disclosed nor signed expire after 24 hours;
+  - disclosed attempts follow §3.9.
+- **Q3. Does the SDK always require UV?** *Recommendation:* yes, as SDK policy, for every grant,
+  `keyring` entry and slot unlock, even for a controller without `verification`.
+  `PasskeyAuthenticator` already requires it.
+- **Q4. What home state confirms a grant?** *Recommendation:* fresh heads covering the grant from
+  `headQuorum` distinct current homes, the quorum §12.3 uses for calls. A head from the primary
+  home alone is not enough.
+- **Q5. Which notices do other devices get?** *Recommendation:* every new grant, every immediate
+  `keyring` entry and every grant of a withdrawn request, shown at the next sync beside §17.5's
+  activations, with revoke one tap away, as a 0.6 SHOULD.
+
+---
+
+## Appendix A: verified and inferred
 
 **Verified in code at this revision:**
 
-- In both SDKs, `ColophonJoin` writes requests and history into `configuration.medium` and uses
-  `configuration.keys` (`OwnRequest.ensure`, `ColophonJoin.store`).
-- `KeystoreKeys.openOrCreate` and `materialize` create a missing alias pair. `KeychainKeys.withKey`
-  creates a missing item.
-- Device secrets are keyed by account ID only, in all three languages.
-- `SessionWorker.withOwner` and `unlockOwner` open the owner's slot and sign with the configured
-  `ownerController`. `approveOwnRequest` uses the scan path.
+- `ColophonJoin` writes into `configuration.medium` and uses `configuration.keys`
+  (`OwnRequest.ensure`, `ColophonJoin.store`), in both SDKs.
+- `KeystoreKeys.materialize` and `KeychainKeys.withKey` create missing keys.
+- Device secrets are keyed by account ID, in all three languages.
+- `withOwner` and `unlockOwner` sign with the configured `ownerController`.
+- `approveOwnRequest` uses the scan path.
 - `leave()` deletes nothing.
-- The genesis owner passkey has roles `approve`, `control`, `recover` with `verification`.
+- The genesis passkey has the roles `approve`, `control` and `recover`, with `verification`.
 - The JS session has no passkey join.
-- The pairing ledger lives in the private directory.
-- `FolderMedium` (Swift, Kotlin) and Node `FileMedium` commit batches through a journal record.
+- The pairing ledger is in the private directory.
+- The JVM `AtomicFile` falls back from `ATOMIC_MOVE` and ignores a failed directory sync.
+- `privateClaimStore` refuses `FilePrivateStore`.
 
 **Inferred, not verified:**
 
-- Behaviour of specific Android OEM Keystore implementations under process kill during deletion.
-- `rename(2)` atomicity on every volume an App Group can be placed on.
-- Whether existing conformance vectors already cover §6.4 items 1–3.
-- The exact app-side sequences in §1.3, which come from review findings on an app's code, not
-  from this repository.
+- That a confirmed `AccountPairing` lives only in memory and has no expiry after confirmation.
+- How Keystore behaves under a process kill during deletion on specific devices.
+- SQLite durability on every volume that can hold an App Group.
+- Whether existing conformance vectors cover §6.4.
+- The app-side sequences in §1.3. They come from review findings on an app's code, not from this
+  repository.
+
+## Appendix B: changes in revision 2
+
+- **Ownership.** Each generation has a permanent, MACed, immutable manifest, kept until its
+  deletion completes.
+- **Deletion targets.** They are derived, never read. Links and collisions are refused.
+- **Metadata.** It lives in a transactional admission store (SQLite or IndexedDB), MACed with a
+  per-platform root key, with a defined path when that key is lost.
+- **Promotion.** It requires a durability capability and the V1 to V5 validation, and it has a
+  repair state. It never switches back to a revoked member.
+- **Late approval (F9).** Two normative rules, retained disclosed keys, reconciliation and orphan
+  detection.
+- **Fencing.** An epoch fences processes and extensions, and every transition is a
+  compare-and-set.
+- **Spec and rules.** The spec clarifications are now normative. The rules, full sets and the
+  planter rule are stated exactly. Moving the seed needs a second pairing.
+- **Threat model.** The limits are stated, including the stale fork shown to a first verifier and
+  what pairing does not authenticate.
+- **Migration and API.** Bootstrap is defined, and the unsafe 0.5.7 forms are removed.
+- **#115.** Split, rebased and audited separately.
+- **Tests.** The plan now covers the attacks and boundaries.
+- **Open questions.** Each is either recorded as decided or left for the owner.
