@@ -47,3 +47,38 @@ extension PasskeyProvider {
         return try SecretBytes.random(count: 32).withUnsafeBytes { Data($0) }
     }
 }
+
+/// The passkeys of `rp` through AuthenticationServices, for a device that does not know their public keys yet
+/// (Colophon 0.5.7): a joining or recovering device reads the history with one
+/// (`ColophonJoin.readHistoryWithPasskey`). Every get requires user verification; with no credential it is
+/// discoverable (any passkey of `rp` the platform lists), otherwise it allows only that credential. Once the history
+/// names the passkey, restore it with `PasskeyProvider(descriptor: KeyDescriptor(passkey:))`.
+public struct DiscoverablePasskeys: PasskeyAuthenticator {
+    public let rp: String
+    private let ceremonies: any WebAuthnCeremonies
+
+    public init(rp: String, ceremonies: any WebAuthnCeremonies = SystemWebAuthnCeremonies()) {
+        self.rp = rp; self.ceremonies = ceremonies
+    }
+
+    public func get(challenge: String, credential: Data?) async throws -> PasskeyGet {
+        let encoded = challenge.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+        guard let bytes = Data(base64Encoded: encoded + String(repeating: "=", count: (4 - encoded.count % 4) % 4)) else {
+            throw KeyProviderError.unsupportedHere
+        }
+        let result: AssertionResult
+        do {
+            try Task.checkCancellation()
+            if let credential {
+                result = try await ceremonies.assert(kind: .passkey, rpID: rp, credential: credential, challenge: bytes, prfSalt: nil,
+                                                     requireVerification: true)
+            } else {
+                result = try await ceremonies.assertDiscoverable(rpID: rp, challenge: bytes, requireVerification: true)
+            }
+            try Task.checkCancellation()
+        } catch { throw KeyProviderError.map(error) }
+        if let credential, result.credentialID != credential { throw KeyProviderError.credentialMissing }
+        return PasskeyGet(credential: result.credentialID, signature: result.signature, authenticatorData: result.authenticatorData,
+                          clientData: result.clientData)
+    }
+}

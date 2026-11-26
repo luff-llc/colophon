@@ -518,6 +518,102 @@ fn union(into: &mut Objects, from: &Objects) -> bool {
     }
     grew
 }
+/// Held heads above which the account prunes them ([`prune_heads`]): half of what a view takes
+/// ([`crate::v05::calls::MAX_VIEW_HEADS`]), so pruning, and the replay it costs, is rare.
+pub const PRUNE_HEADS_AT: usize = 32;
+
+/// Drop held heads that other held heads of the same home and claim make redundant (§13.3,
+/// 0.5.7), once more than [`PRUNE_HEADS_AT`] are held.
+///
+/// A head claims that home `by` held entry `seq` with body digest `digest`, at `issued`. Heads
+/// are grouped by that claim. In a group, a head is **settled** when it is canonical, its
+/// protocol is `colophon/head/5`, it verifies under the signing key of the member `by` (a home of
+/// the account now or before, as `state` records it) and it is not ahead of the clock by more
+/// than 60 s. Of the settled heads of a group the account keeps the earliest `issued` (a home's
+/// expiry and equivocation are judged by when it signed), the latest `issued` (freshness, §12.3
+/// step 4) and the lowest body digest (the witness a `final` takes, §8.7); every other settled
+/// head of the group is dropped. Heads that are not settled (ahead of the clock, not verifiable
+/// with the held history, or not heads) are all kept, and no claim is ever dropped, so every
+/// head that covers an entry, witnesses an activation or is fork evidence (§8.6) is still held.
+///
+/// Before 0.5.7 every head envelope ever received was held, and each pass brings a new one over
+/// an unchanged history, so a device that synced for days held more than a view takes and could
+/// make no call. Head marks, which detect rollback, live in the persisted state and never in
+/// these objects. Returns whether any head was dropped.
+/// What a head claims: its home, the seq and the body digest it names.
+type HeadClaim = (String, u64, String);
+/// A settled head as [`prune_heads`] ranks it: `issued`, body digest, index among the held heads.
+type RankedHead<'a> = (i64, &'a str, usize);
+
+fn prune_heads(objects: &mut Objects, state: &crate::v05::history::State, now_ms: i64) -> bool {
+    use crate::v05::encoding::{bounds, digest, parse_date};
+    use crate::v05::signature::RawEnvelope;
+    if objects.heads.len() <= PRUNE_HEADS_AT {
+        return false;
+    }
+    // Settled: canonical, and accepted by the call verifier's own head check (shape, account,
+    // unknown fields, a current unexpired home's signature, the clock) with the held history
+    // reaching it and agreeing with it. Fork evidence and heads ahead of the history are not
+    // settled, so they are all kept.
+    let homes: Vec<(String, Vec<u8>)> = state
+        .current_homes()
+        .iter()
+        .filter(|m| m.expires_ms.is_none_or(|e| now_ms <= e))
+        .map(|m| (m.request.member_id(), m.request.signing.clone()))
+        .collect();
+    let ctx = crate::v05::heads::HeadContext {
+        account: state.account(),
+        history: state.history(),
+        homes: &homes,
+        now_ms,
+    };
+    let settled: Vec<Option<(HeadClaim, i64, String)>> = objects
+        .heads
+        .iter()
+        .map(|b| {
+            let raw = RawEnvelope::parse(b, bounds::HEAD_BODY, true).ok()?;
+            let h = crate::v05::heads::verify_head(b, ctx).ok()?;
+            let claim = (h.by().to_string(), h.seq(), h.digest().to_string());
+            let issued = parse_date(raw.value.get("issued")?.as_str()?)?;
+            Some((claim, issued, digest(&raw.body)))
+        })
+        .collect();
+    // Per claim, the indexes to keep: earliest, latest (ties by lowest body digest) and the
+    // lowest body digest.
+    let mut ends: BTreeMap<&HeadClaim, [RankedHead<'_>; 3]> = BTreeMap::new();
+    for (i, h) in settled.iter().enumerate() {
+        let Some((claim, issued, body)) = h else {
+            continue;
+        };
+        let here = (*issued, body.as_str(), i);
+        let e = ends.entry(claim).or_insert([here; 3]);
+        if (here.0, here.1) < (e[0].0, e[0].1) {
+            e[0] = here;
+        }
+        if (here.0, std::cmp::Reverse(here.1)) > (e[1].0, std::cmp::Reverse(e[1].1)) {
+            e[1] = here;
+        }
+        if here.1 < e[2].1 {
+            e[2] = here;
+        }
+    }
+    let keep: BTreeSet<usize> = ends.values().flat_map(|e| e.iter().map(|x| x.2)).collect();
+    let kept: Vec<Vec<u8>> = objects
+        .heads
+        .iter()
+        .enumerate()
+        .filter(|(i, b)| {
+            b.len() <= crate::v05::calls::MAX_HEAD_ENVELOPE && (settled[*i].is_none() || keep.contains(i))
+        })
+        .map(|(_, b)| b.clone())
+        .collect();
+    if kept.len() == objects.heads.len() {
+        return false;
+    }
+    objects.heads = kept;
+    true
+}
+
 /// Of several held byte strings at one path, drop those that are no record at all (they do not
 /// parse, or their signature, account or path is wrong) when another held string at that path is
 /// one. A keyless party's garbage twin of a real record then changes nothing, whichever arrived
@@ -662,6 +758,33 @@ impl Account {
             None,
         )?;
         let mut d = d;
+        // A device that held every head it ever received heals here (0.5.7): the heads it keeps
+        // are pruned over the verified state, and the account is derived again over them.
+        let mut persisted = persisted;
+        // Pruned at the earlier of this clock and the one the saved state was made at: a head is
+        // dropped only when one kept for its claim is usable at both, so a clock set back between
+        // two runs never leaves a claim with only heads that are ahead of it.
+        let prune_clock = persisted.checkpoint_clock().map_or(now_ms, |t| t.min(now_ms));
+        if prune_heads(&mut all, d.auth.state(), prune_clock) {
+            // Derived again from the exact retained objects, never from a checkpoint folded with
+            // the heads just dropped; the marks, the high-water mark and the floors are kept.
+            persisted = persisted.without_checkpoint();
+            d = Derived::build(
+                &Inputs {
+                    objects: &all,
+                    records: &held,
+                    live: &[],
+                    persisted: &persisted,
+                    now_ms,
+                    seeds: &seeds,
+                    me,
+                    scope: &scope,
+                    fold_seed: &BTreeMap::new(),
+                },
+                None,
+                None,
+            )?;
+        }
         if let Some(keep) = without_junk(&held, &d) {
             held = keep;
             d = Derived::build(
@@ -1245,7 +1368,7 @@ impl Account {
     /// after it has loaded, and it changes no verdict (the account tests show a resumed
     /// verifier and a replaying one agree).
     pub(crate) fn checkpoint_verifier(&mut self) {
-        self.persisted = Persisted::checkpoint(&self.objects, &self.persisted, self.now_ms);
+        self.persisted = Persisted::checkpoint_exact(&self.objects, &self.persisted, self.now_ms);
     }
     /// What this device may remember of the held records' crypto, for the engine's sealed
     /// checkpoint (crate-private: a caller could not tell it from verified state).
@@ -1978,18 +2101,28 @@ impl Account {
         let mut records = self.records.clone();
         union(&mut objects, &incoming.objects);
         union_records(&mut records, &incoming.records);
-        let mut d = self.candidate(&objects, &records, &self.persisted, now)?;
+        // Redundant heads are dropped over the state held before this merge (0.5.7): a head
+        // verifiable only with what this merge brings is not settled, so it is kept, and pruned by
+        // a later merge.
+        // When heads were dropped, the verdict is computed from the retained objects alone, never
+        // from a checkpoint folded with the dropped heads, and that state is what is committed.
+        let base = if prune_heads(&mut objects, self.d.auth.state(), now) {
+            self.persisted.without_checkpoint()
+        } else {
+            self.persisted.clone()
+        };
+        let mut d = self.candidate(&objects, &records, &base, now)?;
         // The authority in this merge stops the reader: the records that came with it arrived after
         // the stop was learnt, so they are not admitted either.
         if !held && !was_stopped && d.verdict.stopped.is_some() && !incoming.records.is_empty() {
             records = self.records.clone();
-            d = self.candidate(&objects, &records, &self.persisted, now)?;
+            d = self.candidate(&objects, &records, &base, now)?;
         }
         if let Some(keep) = without_junk(&records, &d) {
             records = keep;
-            d = self.candidate(&objects, &records, &self.persisted, now)?;
+            d = self.candidate(&objects, &records, &base, now)?;
         }
-        let mut persisted = self.persisted.clone();
+        let mut persisted = base;
         let mut heads = HeadChanges::default();
         {
             let state = d.auth.state();
@@ -2032,7 +2165,7 @@ impl Account {
     /// and the head marks; they are a cache, and [`Account::open`] replays without the key.
     /// The account resumes from the checkpoint it made from now on.
     pub fn export_persisted(&mut self, key: &[u8; 32], nonce_seed: [u8; 32]) -> Result<Vec<u8>> {
-        let mut p = Persisted::checkpoint(&self.objects, &self.persisted, self.now_ms);
+        let mut p = Persisted::checkpoint_exact(&self.objects, &self.persisted, self.now_ms);
         // A verified stop is persisted as a floor (§1 "A stop"): a relaunch whose store no longer
         // holds the raise stays stopped.
         if let Some(s) = self.stopped() {

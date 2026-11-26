@@ -1718,6 +1718,11 @@ void uniffi_colophon_ffi_fn_free_accounthistoryread(uint64_t handle, RustCallSta
 uint64_t uniffi_colophon_ffi_fn_constructor_accounthistoryread_prepare(RustBuffer spec, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_CONSTRUCTOR_ACCOUNTHISTORYREAD_PREPARE_PASSKEY
+#define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_CONSTRUCTOR_ACCOUNTHISTORYREAD_PREPARE_PASSKEY
+uint64_t uniffi_colophon_ffi_fn_constructor_accounthistoryread_prepare_passkey(RustBuffer spec, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_METHOD_ACCOUNTHISTORYREAD_FINISH
 #define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_METHOD_ACCOUNTHISTORYREAD_FINISH
 RustBuffer uniffi_colophon_ffi_fn_method_accounthistoryread_finish(uint64_t ptr, RustBuffer signature, RustCallStatus *_Nonnull out_status
@@ -2256,9 +2261,19 @@ RustBuffer uniffi_colophon_ffi_fn_func_account_history_page(RustBuffer body, Rus
 RustBuffer uniffi_colophon_ffi_fn_func_account_history_page_path(uint64_t after, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_FUNC_ACCOUNT_PASSKEY_POINTS
+#define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_FUNC_ACCOUNT_PASSKEY_POINTS
+RustBuffer uniffi_colophon_ffi_fn_func_account_passkey_points(RustBuffer body, RustBuffer rp, RustBuffer authenticator_data, RustBuffer client_data, RustBuffer signature, RustBuffer key_id, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_FUNC_ACCOUNT_VERIFY_AT_HEAD
 #define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_FUNC_ACCOUNT_VERIFY_AT_HEAD
 RustBuffer uniffi_colophon_ffi_fn_func_account_verify_at_head(RustBuffer account, uint64_t seq, RustBuffer head, RustBuffer member, RustBuffer request, RustBuffer base, RustBuffer signed_head, RustBuffer entries, int64_t now_ms, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_FUNC_ACCOUNT_VERIFY_WITH_PASSKEY
+#define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_FUNC_ACCOUNT_VERIFY_WITH_PASSKEY
+RustBuffer uniffi_colophon_ffi_fn_func_account_verify_with_passkey(RustBuffer account, uint64_t seq, RustBuffer head, RustBuffer signing, RustBuffer base, RustBuffer signed_head, RustBuffer entries, int64_t now_ms, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_FUNC_ACCOUNT_FORMAT_DATE
@@ -2674,9 +2689,21 @@ uint16_t uniffi_colophon_ffi_checksum_func_account_history_page_path(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_FUNC_ACCOUNT_PASSKEY_POINTS
+#define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_FUNC_ACCOUNT_PASSKEY_POINTS
+uint16_t uniffi_colophon_ffi_checksum_func_account_passkey_points(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_FUNC_ACCOUNT_VERIFY_AT_HEAD
 #define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_FUNC_ACCOUNT_VERIFY_AT_HEAD
 uint16_t uniffi_colophon_ffi_checksum_func_account_verify_at_head(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_FUNC_ACCOUNT_VERIFY_WITH_PASSKEY
+#define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_FUNC_ACCOUNT_VERIFY_WITH_PASSKEY
+uint16_t uniffi_colophon_ffi_checksum_func_account_verify_with_passkey(void
     
 );
 #endif
@@ -4411,6 +4438,12 @@ uint16_t uniffi_colophon_ffi_checksum_constructor_accountengine_open(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_CONSTRUCTOR_ACCOUNTHISTORYREAD_PREPARE
 #define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_CONSTRUCTOR_ACCOUNTHISTORYREAD_PREPARE
 uint16_t uniffi_colophon_ffi_checksum_constructor_accounthistoryread_prepare(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_CONSTRUCTOR_ACCOUNTHISTORYREAD_PREPARE_PASSKEY
+#define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_CONSTRUCTOR_ACCOUNTHISTORYREAD_PREPARE_PASSKEY
+uint16_t uniffi_colophon_ffi_checksum_constructor_accounthistoryread_prepare_passkey(void
     
 );
 #endif

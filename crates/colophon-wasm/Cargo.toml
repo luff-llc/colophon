@@ -17,7 +17,7 @@ native05 = []
 zero-on-free = []
 
 [dependencies]
-colophon-core = { path = "../colophon-core", version = "=0.5.6" }
+colophon-core = { path = "../colophon-core", version = "=0.5.7" }
 wasm-bindgen.workspace = true
 serde_json.workspace = true
 

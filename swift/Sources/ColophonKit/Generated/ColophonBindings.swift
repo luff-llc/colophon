@@ -3797,13 +3797,15 @@ public func FfiConverterTypeAccountEngine_lower(_ value: AccountEngine) -> UInt6
 public protocol AccountHistoryReadProtocol: AnyObject, Sendable {
     
     /**
-     * Finish with the member's signature: the envelope (parsed, possession checked), the URL it
-     * is bound to and the `Authorization` header value (`Colophon <base64url envelope>`).
+     * Finish with the signature (the member's raw signature, or the passkey's DER signature with
+     * its assertion): the envelope (parsed, possession checked), the URL it is bound to and the
+     * `Authorization` header value (`Colophon <base64url envelope>`).
      */
     func finish(signature: Signature) throws  -> HistoryReadCall
     
     /**
-     * The one step the member key signs (raw).
+     * The one step to sign: raw by the member key, or, for a passkey read, a WebAuthn get over
+     * its `challenge` by the passkey.
      */
     func step() throws  -> AccountSigningStep
     
@@ -3875,11 +3877,26 @@ public static func prepare(spec: HistoryReadSpec)throws  -> AccountHistoryRead  
 })
 }
     
+    /**
+     * Prepare a history read signed by a WebAuthn controller (0.5.7): `spec.signing` is the
+     * passkey's point, the signer is that controller, and the step asks for an assertion. With
+     * no entry given, `asOf` is `(1, account)`.
+     */
+public static func preparePasskey(spec: HistoryReadSpec)throws  -> AccountHistoryRead  {
+    return try  FfiConverterTypeAccountHistoryRead_lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_constructor_accounthistoryread_prepare_passkey(
+        FfiConverterTypeHistoryReadSpec_lower(spec),uniffiCallStatus
+    )
+})
+}
+    
 
     
     /**
-     * Finish with the member's signature: the envelope (parsed, possession checked), the URL it
-     * is bound to and the `Authorization` header value (`Colophon <base64url envelope>`).
+     * Finish with the signature (the member's raw signature, or the passkey's DER signature with
+     * its assertion): the envelope (parsed, possession checked), the URL it is bound to and the
+     * `Authorization` header value (`Colophon <base64url envelope>`).
      */
 open func finish(signature: Signature)throws  -> HistoryReadCall  {
     return try  FfiConverterTypeHistoryReadCall_lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
@@ -3892,7 +3909,8 @@ open func finish(signature: Signature)throws  -> HistoryReadCall  {
 }
     
     /**
-     * The one step the member key signs (raw).
+     * The one step to sign: raw by the member key, or, for a passkey read, a WebAuthn get over
+     * its `challenge` by the passkey.
      */
 open func step()throws  -> AccountSigningStep  {
     return try  FfiConverterTypeAccountSigningStep_lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
@@ -13821,6 +13839,148 @@ public func FfiConverterTypePairingReveal_lift(_ buf: RustBuffer) throws -> Pair
 #endif
 public func FfiConverterTypePairingReveal_lower(_ value: PairingReveal) -> RustBuffer {
     return FfiConverterTypePairingReveal.lower(value)
+}
+
+
+/**
+ * A current WebAuthn controller (present, final, not suspended) of a history read with a
+ * passkey before admission: its ID, label, roles, descriptor as the history names it, UV
+ * requirement, and whether a slot of the current vault is held by it alone.
+ */
+public struct PasskeyControllerView: Equatable, Hashable {
+    public let id: String
+    public let label: String
+    public let roles: [ControllerRole]
+    public let rolesRaw: [String]
+    public let key: KeyDescriptorView
+    public let verification: Bool
+    public let ownSlot: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: String, label: String, roles: [ControllerRole], rolesRaw: [String], key: KeyDescriptorView, verification: Bool, ownSlot: Bool) {
+        self.id = id
+        self.label = label
+        self.roles = roles
+        self.rolesRaw = rolesRaw
+        self.key = key
+        self.verification = verification
+        self.ownSlot = ownSlot
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension PasskeyControllerView: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePasskeyControllerView: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PasskeyControllerView {
+        return
+            try PasskeyControllerView(
+                id: FfiConverterString.read(from: &buf), 
+                label: FfiConverterString.read(from: &buf), 
+                roles: FfiConverterSequenceTypeControllerRole.read(from: &buf), 
+                rolesRaw: FfiConverterSequenceString.read(from: &buf), 
+                key: FfiConverterTypeKeyDescriptorView.read(from: &buf), 
+                verification: FfiConverterBool.read(from: &buf), 
+                ownSlot: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PasskeyControllerView, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterString.write(value.label, into: &buf)
+        FfiConverterSequenceTypeControllerRole.write(value.roles, into: &buf)
+        FfiConverterSequenceString.write(value.rolesRaw, into: &buf)
+        FfiConverterTypeKeyDescriptorView.write(value.key, into: &buf)
+        FfiConverterBool.write(value.verification, into: &buf)
+        FfiConverterBool.write(value.ownSlot, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePasskeyControllerView_lift(_ buf: RustBuffer) throws -> PasskeyControllerView {
+    return try FfiConverterTypePasskeyControllerView.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePasskeyControllerView_lower(_ value: PasskeyControllerView) -> RustBuffer {
+    return FfiConverterTypePasskeyControllerView.lower(value)
+}
+
+
+/**
+ * A history a device that is not a member yet read with a passkey (0.5.7): the entries to
+ * store, the controller whose passkey signed the reads, and every current WebAuthn
+ * controller at the tip (the signer included).
+ */
+public struct PasskeyHistoryView: Equatable, Hashable {
+    public let stores: [Store]
+    public let signer: PasskeyControllerView
+    public let controllers: [PasskeyControllerView]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(stores: [Store], signer: PasskeyControllerView, controllers: [PasskeyControllerView]) {
+        self.stores = stores
+        self.signer = signer
+        self.controllers = controllers
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension PasskeyHistoryView: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePasskeyHistoryView: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PasskeyHistoryView {
+        return
+            try PasskeyHistoryView(
+                stores: FfiConverterSequenceTypeStore.read(from: &buf), 
+                signer: FfiConverterTypePasskeyControllerView.read(from: &buf), 
+                controllers: FfiConverterSequenceTypePasskeyControllerView.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PasskeyHistoryView, into buf: inout [UInt8]) {
+        FfiConverterSequenceTypeStore.write(value.stores, into: &buf)
+        FfiConverterTypePasskeyControllerView.write(value.signer, into: &buf)
+        FfiConverterSequenceTypePasskeyControllerView.write(value.controllers, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePasskeyHistoryView_lift(_ buf: RustBuffer) throws -> PasskeyHistoryView {
+    return try FfiConverterTypePasskeyHistoryView.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePasskeyHistoryView_lower(_ value: PasskeyHistoryView) -> RustBuffer {
+    return FfiConverterTypePasskeyHistoryView.lower(value)
 }
 
 
@@ -25318,6 +25478,31 @@ fileprivate struct FfiConverterSequenceTypeOwed: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypePasskeyControllerView: FfiConverterRustBuffer {
+    typealias SwiftType = [PasskeyControllerView]
+
+    public static func write(_ value: [PasskeyControllerView], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypePasskeyControllerView.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [PasskeyControllerView] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [PasskeyControllerView]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypePasskeyControllerView.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypePending: FfiConverterRustBuffer {
     typealias SwiftType = [Pending]
 
@@ -26587,6 +26772,28 @@ public func accountHistoryPagePath(after: UInt64) -> String  {
 })
 }
 /**
+ * The signing points a passkey assertion over `body` could have been made by, for `rp`
+ * (core `v05::join::passkey_points`): the assertion must pass §4.3 steps 1 to 3 for `rp`
+ * (`webauthn.get`, the challenge of `body`, the relying-party hash, UP) and step 5's DER
+ * grammar, else `badSignature`. With `key_id`, exactly the one point with that key ID (an
+ * invite names the owner's passkey by key ID), else `badSignature`. A discoverable get
+ * returns no public key: a device learns the passkey's point this way before it signs a call
+ * naming it. A point is only a candidate until a verified history names it.
+ */
+public func accountPasskeyPoints(body: Data, rp: String, authenticatorData: Data, clientData: Data, signature: Data, keyId: String?)throws  -> [ByteString]  {
+    return try  FfiConverterSequenceTypeByteString.lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_func_account_passkey_points(
+        FfiConverterData.lower(body),
+        FfiConverterString.lower(rp),
+        FfiConverterData.lower(authenticatorData),
+        FfiConverterData.lower(clientData),
+        FfiConverterData.lower(signature),
+        FfiConverterOptionString.lower(keyId),uniffiCallStatus
+    )
+})
+}
+/**
  * Accept a fetched history at an invite's head (core `v05::join::verify_at_head`): `ok`
  * verdict, the history of `account`, every entry on the verified branch, the branch at least
  * `seq` long with entry `seq` of body digest `head`, `member` (the key ID that signed the reads)
@@ -26609,6 +26816,29 @@ public func accountVerifyAtHead(account: String, seq: UInt64, head: String, memb
         FfiConverterString.lower(head),
         FfiConverterString.lower(member),
         FfiConverterData.lower(request),
+        FfiConverterString.lower(base),
+        FfiConverterData.lower(signedHead),
+        FfiConverterSequenceTypeByteString.lower(entries),
+        FfiConverterInt64.lower(nowMs),uniffiCallStatus
+    )
+})
+}
+/**
+ * Accept a history a device that is not a member yet read with a passkey's
+ * `colophon.history.read` calls (core `v05::join::verify_with_passkey`, 0.5.7): every check of
+ * `account_verify_at_head` up to the home's fresh signed head at `base`, at `(seq, head)`
+ * (an invite's head, or `(1, account)`: the genesis), then the signer, a current WebAuthn
+ * controller at the tip whose signing point is `signing` (else `refused:revoked`). Returns
+ * the entries to store, the signer and every current WebAuthn controller.
+ */
+public func accountVerifyWithPasskey(account: String, seq: UInt64, head: String, signing: Data, base: String, signedHead: Data, entries: [ByteString], nowMs: Int64)throws  -> PasskeyHistoryView  {
+    return try  FfiConverterTypePasskeyHistoryView_lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_func_account_verify_with_passkey(
+        FfiConverterString.lower(account),
+        FfiConverterUInt64.lower(seq),
+        FfiConverterString.lower(head),
+        FfiConverterData.lower(signing),
         FfiConverterString.lower(base),
         FfiConverterData.lower(signedHead),
         FfiConverterSequenceTypeByteString.lower(entries),
@@ -26799,7 +27029,13 @@ private let initializationResult: InitializationResult = {
     if (uniffi_colophon_ffi_checksum_func_account_history_page_path() != 51785) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_colophon_ffi_checksum_func_account_passkey_points() != 34570) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_colophon_ffi_checksum_func_account_verify_at_head() != 18815) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_func_account_verify_with_passkey() != 25943) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_colophon_ffi_checksum_func_account_format_date() != 57652) {
@@ -27504,10 +27740,10 @@ private let initializationResult: InitializationResult = {
     if (uniffi_colophon_ffi_checksum_method_accountlivewrite_step() != 52482) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_colophon_ffi_checksum_method_accounthistoryread_finish() != 28928) {
+    if (uniffi_colophon_ffi_checksum_method_accounthistoryread_finish() != 33385) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_colophon_ffi_checksum_method_accounthistoryread_step() != 5970) {
+    if (uniffi_colophon_ffi_checksum_method_accounthistoryread_step() != 33827) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_colophon_ffi_checksum_method_accountmove_finish() != 60405) {
@@ -27667,6 +27903,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_colophon_ffi_checksum_constructor_accounthistoryread_prepare() != 18393) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_constructor_accounthistoryread_prepare_passkey() != 37138) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_colophon_ffi_checksum_constructor_accountmove_begin_upgrade() != 39020) {
