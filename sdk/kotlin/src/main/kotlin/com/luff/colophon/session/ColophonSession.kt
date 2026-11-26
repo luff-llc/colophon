@@ -229,6 +229,25 @@ class ColophonSession(configuration: SessionConfiguration) : AutoCloseable {
         owner { worker.approve(request, pairing, terms) }
     }
 
+    /**
+     * Approves this device's own request with the owner controller (Colophon 0.5.7): the request this session made
+     * (`exportRequest()`), read as the scan path reads it, and approved as requested. For a device whose owner controller
+     * is a key it holds (a passkey with a slot of its own) and that is not a member yet: a recovery, or a join approved
+     * without another device ([ColophonJoin.approveOwnJoinWithPasskey]). With [expected], only when the stored request is
+     * exactly those bytes. A session that is not waiting for approval, or a stored request that is not this device's (or
+     * not [expected]), is [SessionError.InvalidCommand], before any key is asked.
+     */
+    suspend fun approveOwnRequest(expected: ByteArray? = null) {
+        restore()
+        val member = memberId ?: throw SessionError.NotReady()
+        if (phase != SessionPhase.WaitingForApproval) throw SessionError.InvalidCommand()
+        val raw = exportRequest()
+        if (expected != null && !raw.contentEquals(expected)) throw SessionError.InvalidCommand()
+        val scanned = scanRequest(raw)
+        if (scanned.request.id != member) throw SessionError.InvalidCommand()
+        approve(scanned.request, scanned.pairing)
+    }
+
     // Calls for services (§12)
 
     /**

@@ -55,4 +55,13 @@ public protocol WebAuthnCeremonies: Sendable {
     /// Gets an assertion restricted to exactly one credential, optionally evaluating the exact salt.
     func assert(kind: CredentialKind, rpID: String, credential: Data, challenge: Data, prfSalt: Data?,
                 requireVerification: Bool) async throws -> AssertionResult
+    /// Gets an assertion from any passkey of `rpID` the platform lists (a discoverable get, no PRF), for a device that
+    /// does not know the passkey yet (0.5.7). The default implementation is `KeyProviderError.unsupportedHere`.
+    func assertDiscoverable(rpID: String, challenge: Data, requireVerification: Bool) async throws -> AssertionResult
+}
+
+extension WebAuthnCeremonies {
+    public func assertDiscoverable(rpID: String, challenge: Data, requireVerification: Bool) async throws -> AssertionResult {
+        throw KeyProviderError.unsupportedHere
+    }
 }

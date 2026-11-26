@@ -1038,6 +1038,16 @@ fn call_key(req: &Value) -> R<Value> {
     let Ok(call) = Call::parse(&bytes) else {
         return Ok(json!({"parsed": false}));
     };
+    // Nothing is looked up for a caller that does not hold the key it names (0.5.7): the call
+    // must prove possession, and a controller acts with its own key. Otherwise the host's work,
+    // and so its timing, would depend on the named controller's recent calls.
+    let bound = match &call.signer {
+        CallSigner::Controller(id) => *id == colophon_core::v05::ids::key_id(&call.key),
+        CallSigner::Member(_) => true,
+    };
+    if !bound || call.verify_possession().is_err() {
+        return Ok(json!({"parsed": false}));
+    }
     let k = call.replay_key();
     Ok(json!({
         "parsed": true,

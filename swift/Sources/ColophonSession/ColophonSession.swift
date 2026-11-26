@@ -287,6 +287,23 @@ import Observation
         } catch { if lease == context { handleCommandError(error) }; throw error }
     }
 
+    /// Approves this device's own request with the owner controller (Colophon 0.5.7): the request this session made
+    /// (`exportRequest()`), read as the scan path reads it, and approved as requested. For a device whose owner controller
+    /// is a key it holds (a passkey with a slot of its own) and that is not a member yet: a recovery, or a join approved
+    /// without another device (`ColophonJoin.approveOwnJoinWithPasskey`). With `expected`, only when the stored request is
+    /// exactly those bytes. A session that is not waiting for approval, or a stored request that is not this device's (or
+    /// not `expected`), is `SessionError.invalidCommand`, before any key is asked.
+    public func approveOwnRequest(expected: Data? = nil) async throws {
+        await restore()
+        guard let member = memberID else { throw SessionError.notReady }
+        guard phase == .waitingForApproval else { throw SessionError.invalidCommand }
+        let raw = try await exportRequest()
+        if let expected, raw != expected { throw SessionError.invalidCommand }
+        let scanned = try await scanRequest(raw)
+        guard scanned.request.id == member else { throw SessionError.invalidCommand }
+        try await approve(scanned.request, pairing: scanned.pairing)
+    }
+
     // MARK: Calls for services (§12)
 
     /// Signs a call (spec §12.2) for `audience` and `purpose` with `argsJSON` (a JSON object) by this device's member key

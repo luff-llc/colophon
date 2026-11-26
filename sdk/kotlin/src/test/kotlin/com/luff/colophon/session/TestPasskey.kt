@@ -24,12 +24,26 @@ class TestPasskey(val rp: String = "id.luff.works", val credential: ByteArray = 
     override suspend fun keyDescriptor() = KeyDescriptorView(SignForm.WEBAUTHN, signing.copyOf(), null, rp, credential.copyOf(), listOf(), listOf())
     private fun sha(b: ByteArray) = MessageDigest.getInstance("SHA-256").digest(b)
     private fun prfOutput(salt: ByteArray) = SecretBytes.adopt(sha("test-prf".toByteArray() + salt))
-    override suspend fun assert(challenge: String, prfSalt: ByteArray?): KeyAssertion {
+    override suspend fun assert(challenge: String, prfSalt: ByteArray?): KeyAssertion = assertFrom("https://$rp", challenge, prfSalt)
+    private fun assertFrom(origin: String, challenge: String, prfSalt: ByteArray?): KeyAssertion {
         assertions.incrementAndGet()
-        val clientData = "{\"challenge\":\"$challenge\",\"origin\":\"https://$rp\",\"type\":\"webauthn.get\"}".toByteArray()
+        val clientData = "{\"challenge\":\"$challenge\",\"origin\":\"$origin\",\"type\":\"webauthn.get\"}".toByteArray()
         val authData = sha(rp.toByteArray()) + byteArrayOf(0x05, 0, 0, 0, 0)
         val der = java.security.Signature.getInstance("SHA256withECDSA").run { initSign(key.private); update(authData + sha(clientData)); sign() }
         return KeyAssertion(der, authData, clientData, prfSalt?.let { prfOutput(it) })
     }
     override suspend fun prf(salt: ByteArray): SecretBytes? = prfOutput(salt)
+
+    /**
+     * This passkey as a device that does not know its public key sees it (a discoverable get): every get answers with
+     * this credential, made from [origin], for relying party [rp] as the authenticator claims it ([claimedRp]).
+     */
+    fun authenticator(origin: String = "https://$rp", claimedRp: String = rp): PasskeyAuthenticator = object : PasskeyAuthenticator {
+        override val rp: String get() = claimedRp
+        override suspend fun get(challenge: String, credential: ByteArray?): PasskeyGet {
+            if (credential != null && !credential.contentEquals(this@TestPasskey.credential)) throw KeyCustodyException.Unsupported()
+            val a = assertFrom(origin, challenge, null)
+            return PasskeyGet(this@TestPasskey.credential.copyOf(), a.signature, a.authenticatorData, a.clientData)
+        }
+    }
 }

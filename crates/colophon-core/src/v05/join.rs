@@ -174,7 +174,6 @@ pub fn verify_at_head(
     entries: Vec<Vec<u8>>,
     now_ms: i64,
 ) -> Result<AtHead> {
-    use crate::v05::heads::{verify_head, HeadContext};
     use crate::v05::history::{Claim, NotCurrent, Principal};
     require(seq >= 1, "the invite's seq is at least 1")?;
     require(is_digest(head), "the invite's head is 64 lowercase hex")?;
@@ -183,6 +182,68 @@ pub fn verify_at_head(
         &request.account == account,
         "the request names another account",
     )?;
+    let accepted = accept_at_head(account, seq, head, base, signed_head, entries, now_ms)?;
+    let state = accepted.state()?;
+    // This device, granted from exactly its request and current at the tip (§8.5).
+    let id = request.member_id();
+    if id != member {
+        return Err(Failure::Refused(Reason::Conflict));
+    }
+    match state.current_principal(&id, Claim::Member, now_ms) {
+        Ok(Principal::Member(m)) | Ok(Principal::Home(m)) => {
+            if m.request.body != request.body {
+                return Err(Failure::Refused(Reason::Conflict));
+            }
+        }
+        Ok(Principal::Controller(_)) => return Err(Failure::Refused(Reason::Conflict)),
+        Err(NotCurrent::Absent) => return Ok(AtHead::NotAdmitted),
+        Err(NotCurrent::Expired) => return Err(Failure::Refused(Reason::Expired)),
+        Err(_) => return Err(Failure::Refused(Reason::Revoked)),
+    }
+    accepted.files().map(AtHead::Admitted)
+}
+
+/// A fetched history that verifies completely, is the account's, holds `(seq, head)` and ends at
+/// the home's fresh signed head: the verdict, and each fetched entry at its place on the branch.
+struct AcceptedAtHead {
+    verdict: crate::v05::history::Verdict,
+    stored: Vec<Option<Vec<u8>>>,
+}
+impl AcceptedAtHead {
+    fn state(&self) -> Result<&crate::v05::history::State> {
+        self.verdict
+            .state
+            .as_ref()
+            .ok_or_else(|| malformed("the history has no verified genesis"))
+    }
+    /// Each entry to store at `authority/<seq, eight digits>.json`, in seq order.
+    fn files(self) -> Result<Vec<(String, Vec<u8>)>> {
+        self.stored
+            .into_iter()
+            .enumerate()
+            .map(|(i, e)| {
+                let e = e.ok_or_else(|| malformed("an entry on the branch was not fetched"))?;
+                Ok((format!("authority/{:08}.json", i + 1), e))
+            })
+            .collect()
+    }
+}
+
+/// The checks [`verify_at_head`] and [`verify_with_passkey`] share, in this order: the verdict is
+/// `ok`, the history is `account`'s, every entry is on the branch, the branch holds `head` at
+/// `seq`, and `signed_head` is a fresh head of a current home serving at `base` naming exactly the
+/// branch tip.
+#[allow(clippy::too_many_arguments)]
+fn accept_at_head(
+    account: &AccountId,
+    seq: u64,
+    head: &str,
+    base: &str,
+    signed_head: &[u8],
+    entries: Vec<Vec<u8>>,
+    now_ms: i64,
+) -> Result<AcceptedAtHead> {
+    use crate::v05::heads::{verify_head, HeadContext};
     let (verdict, objects) = verified(entries, now_ms)?;
     let state = verdict
         .state
@@ -257,31 +318,172 @@ pub fn verify_at_head(
             "the home's signed head is behind the history it served".into(),
         ));
     }
-    // This device, granted from exactly its request and current at the tip (§8.5).
-    let id = request.member_id();
-    if id != member {
-        return Err(Failure::Refused(Reason::Conflict));
-    }
-    match state.current_principal(&id, Claim::Member, now_ms) {
-        Ok(Principal::Member(m)) | Ok(Principal::Home(m)) => {
-            if m.request.body != request.body {
-                return Err(Failure::Refused(Reason::Conflict));
+    Ok(AcceptedAtHead { verdict, stored })
+}
+
+// ---------------------------------------------------------------------------------------------
+// Reading the history with a passkey before admission (Colophon 0.5.7, §12.3, §13.4).
+
+/// A current WebAuthn controller of a history accepted by [`verify_with_passkey`]: present,
+/// final and not suspended at the tip (§8.5).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PasskeyController {
+    /// The controller ID (the key ID of its signing point).
+    pub id: String,
+    /// Its descriptor as the history names it (`rp`, credential, origins, authority origins).
+    pub key: crate::v05::descriptor::KeyDescriptor,
+    /// Its label.
+    pub label: String,
+    /// Its roles, as the protocol spells them.
+    pub roles: Vec<String>,
+    /// UV is required on its signatures.
+    pub verification: bool,
+    /// Some slot of the current vault is held by this controller alone (a PRF slot it opens).
+    pub own_slot: bool,
+}
+
+/// What [`verify_with_passkey`] accepted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PasskeyHistory {
+    /// Each entry to store at `authority/<seq, eight digits>.json`, in seq order.
+    pub files: Vec<(String, Vec<u8>)>,
+    /// The controller whose passkey signed the reads.
+    pub signer: PasskeyController,
+    /// Every current WebAuthn controller at the tip, the signer included, by ID.
+    pub controllers: Vec<PasskeyController>,
+}
+
+/// The points a passkey assertion over `body` could have been made by, for `rp`
+/// ([`crate::v05::signature::assertion_points`]). With `key_id`, exactly the one point with that
+/// key ID, else `badSignature`. A device that knows a passkey only from a discoverable get uses
+/// this to learn its signing point before it signs a call naming it; the point is a candidate
+/// only, until a history that verifies names it as a current controller.
+pub fn passkey_points(
+    body: &[u8],
+    rp: &str,
+    authenticator_data: &[u8],
+    client_data: &[u8],
+    signature: &[u8],
+    key_id: Option<&str>,
+) -> Result<Vec<Vec<u8>>> {
+    use crate::v05::signature::{assertion_points, AssertionBytes, SigFailure};
+    let points = assertion_points(
+        body,
+        rp,
+        AssertionBytes {
+            authenticator_data,
+            client_data,
+        },
+        signature,
+    )
+    .map_err(|e| match e {
+        SigFailure::ClientDataBound => malformed("clientData exceeds 8,192 bytes"),
+        e => Failure::BadSignature(format!("passkey assertion: {e}")),
+    })?;
+    match key_id {
+        None => Ok(points),
+        Some(id) => {
+            let found: Vec<Vec<u8>> = points
+                .into_iter()
+                .filter(|p| crate::v05::ids::key_id(p) == id)
+                .collect();
+            if found.is_empty() {
+                return Err(Failure::BadSignature(
+                    "the assertion was not made by the passkey with that key ID".into(),
+                ));
             }
+            Ok(found)
         }
-        Ok(Principal::Controller(_)) => return Err(Failure::Refused(Reason::Conflict)),
-        Err(NotCurrent::Absent) => return Ok(AtHead::NotAdmitted),
-        Err(NotCurrent::Expired) => return Err(Failure::Refused(Reason::Expired)),
-        Err(_) => return Err(Failure::Refused(Reason::Revoked)),
     }
-    stored
-        .into_iter()
-        .enumerate()
-        .map(|(i, e)| {
-            let e = e.ok_or_else(|| malformed("an entry on the branch was not fetched"))?;
-            Ok((format!("authority/{:08}.json", i + 1), e))
+}
+
+/// Accept a history read with a passkey's `colophon.history.read` calls (signed by `signing`):
+/// every check of [`verify_at_head`] up to and including the home's fresh signed head, at
+/// `(seq, head)` (an invite's head, or `(1, account ID)`: the genesis, which every history of the
+/// account holds), and then the signer: a current WebAuthn controller at the tip whose signing
+/// point is `signing` (anything else, a removed, provisional or suspended controller included, is
+/// `refused:revoked`). Nothing about any member is judged: the device is not one yet.
+#[allow(clippy::too_many_arguments)]
+pub fn verify_with_passkey(
+    account: &AccountId,
+    seq: u64,
+    head: &str,
+    signing: &[u8],
+    base: &str,
+    signed_head: &[u8],
+    entries: Vec<Vec<u8>>,
+    now_ms: i64,
+) -> Result<PasskeyHistory> {
+    require(seq >= 1, "the given seq is at least 1")?;
+    require(is_digest(head), "the given head is 64 lowercase hex")?;
+    require(
+        signing.len() == 65 && signing[0] == 4,
+        "the passkey's signing point is an uncompressed P-256 point",
+    )?;
+    let accepted = accept_at_head(account, seq, head, base, signed_head, entries, now_ms)?;
+    let controllers = current_passkeys(accepted.state()?, now_ms);
+    let id = crate::v05::ids::key_id(signing);
+    let signer = controllers
+        .iter()
+        .find(|c| c.id == id && c.key.signing() == signing)
+        .cloned()
+        .ok_or(Failure::Refused(Reason::Revoked))?;
+    Ok(PasskeyHistory {
+        files: accepted.files()?,
+        signer,
+        controllers,
+    })
+}
+
+/// Every current WebAuthn controller of `state` at `now_ms`, by ID.
+fn current_passkeys(state: &crate::v05::history::State, now_ms: i64) -> Vec<PasskeyController> {
+    use crate::v05::descriptor::Role;
+    use crate::v05::history::{Claim, Principal};
+    use crate::v05::slots::Slot;
+    let keyring = state.keyring();
+    let own: std::collections::BTreeSet<String> = keyring
+        .slots
+        .iter()
+        .filter_map(|v| Slot::from_value(v).ok())
+        .filter(|s| s.controllers().len() == 1)
+        .flat_map(|s| s.controllers().to_vec())
+        .collect();
+    keyring
+        .controllers
+        .values()
+        .filter(|c| c.key().webauthn().is_some())
+        .filter(|c| {
+            matches!(
+                state.current_principal(
+                    &c.id(),
+                    Claim::Controller {
+                        roles: &[],
+                        suspended_ok: false,
+                    },
+                    now_ms,
+                ),
+                Ok(Principal::Controller(_))
+            )
         })
-        .collect::<Result<Vec<_>>>()
-        .map(AtHead::Admitted)
+        .map(|c| PasskeyController {
+            id: c.id(),
+            key: c.key().clone(),
+            label: c.label().to_string(),
+            roles: c
+                .roles()
+                .iter()
+                .map(|r| match r {
+                    Role::Approve => "approve".to_string(),
+                    Role::Control => "control".into(),
+                    Role::Recover => "recover".into(),
+                    Role::Sign => "sign".into(),
+                    Role::Unknown(s) => s.clone(),
+                })
+                .collect(),
+            verification: c.verification(),
+            own_slot: own.contains(&c.id()),
+        })
+        .collect()
 }
 
 /// The descriptor of controller `id` in a verified history, when it is a current WebAuthn
@@ -379,5 +581,118 @@ mod tests {
         assert_eq!(body["args"]["body"], EMPTY_BODY_SHA256);
         assert!(prepare_history_read(&spec("/changes")).is_err());
         assert!(prepare_history_read(&spec("/records/notes/x")).is_err());
+    }
+
+    fn passkey() -> (crate::keys::testing::SyntheticAuthenticator, Vec<u8>) {
+        let a = crate::keys::testing::SyntheticAuthenticator::new().expect("an authenticator");
+        let point = p256::ecdsa::SigningKey::from_slice(&[1; 32])
+            .expect("a scalar")
+            .verifying_key()
+            .to_encoded_point(false)
+            .as_bytes()
+            .to_vec();
+        (a, point)
+    }
+
+    #[test]
+    fn passkey_points_recover_the_signing_point() {
+        let (a, point) = passkey();
+        let body = [9u8; 32];
+        for high_s in [false, true] {
+            let s = a
+                .assertion(&body, "id.luff.works", "https://id.luff.works", 0x05, high_s)
+                .expect("an assertion");
+            let ad = &s.assertion.authenticator_data;
+            let cd = &s.assertion.client_data;
+            let all = passkey_points(&body, "id.luff.works", ad, cd, &s.signature, None).expect("points");
+            assert!(all.contains(&point), "the passkey's point is a candidate");
+            assert!(all.len() <= 4);
+            let id = crate::v05::ids::key_id(&point);
+            let one = passkey_points(&body, "id.luff.works", ad, cd, &s.signature, Some(&id)).expect("the point");
+            assert_eq!(one, vec![point.clone()]);
+            let other = "00".repeat(16);
+            let code = passkey_points(&body, "id.luff.works", ad, cd, &s.signature, Some(&other))
+                .err()
+                .map(|e| e.code());
+            assert_eq!(code.as_deref(), Some("badSignature"));
+        }
+    }
+
+    #[test]
+    fn passkey_points_check_the_assertion_first() {
+        let (a, _) = passkey();
+        let body = [9u8; 32];
+        let s = a
+            .assertion(&body, "id.luff.works", "https://id.luff.works", 0x05, false)
+            .expect("an assertion");
+        let (ad, cd) = (&s.assertion.authenticator_data, &s.assertion.client_data);
+        let code = |r: Result<Vec<Vec<u8>>>| r.err().map(|e| e.code());
+        // Another relying party, another challenge, no user presence, a broken signature.
+        assert_eq!(code(passkey_points(&body, "evil.example", ad, cd, &s.signature, None)).as_deref(), Some("badSignature"));
+        assert_eq!(code(passkey_points(&[8u8; 32], "id.luff.works", ad, cd, &s.signature, None)).as_deref(), Some("badSignature"));
+        let absent = a
+            .assertion(&body, "id.luff.works", "https://id.luff.works", 0x04, false)
+            .expect("an assertion");
+        assert_eq!(
+            code(passkey_points(&body, "id.luff.works", &absent.assertion.authenticator_data, &absent.assertion.client_data, &absent.signature, None)).as_deref(),
+            Some("badSignature")
+        );
+        let mut der = s.signature.clone();
+        der.push(0);
+        assert_eq!(code(passkey_points(&body, "id.luff.works", ad, cd, &der, None)).as_deref(), Some("badSignature"));
+        // A registration's clientData is not a get.
+        let create = crate::v05::encoding::canonical(&serde_json::json!({
+            "type": "webauthn.create",
+            "challenge": crate::v05::signature::challenge(&body),
+            "origin": "https://id.luff.works",
+        }))
+        .expect("json");
+        let c = a.sign_bytes(ad.clone(), create.clone(), false).expect("bytes");
+        assert_eq!(code(passkey_points(&body, "id.luff.works", ad, &create, &c.signature, None)).as_deref(), Some("badSignature"));
+    }
+
+    #[test]
+    fn passkey_history_read_is_a_controller_call() {
+        use crate::v05::write::calls::{finish_history_read, prepare_passkey_history_read};
+        use crate::v05::write::SignatureResult;
+        let (a, point) = passkey();
+        let account = AccountId::parse(&"ab".repeat(32)).expect("an ID");
+        let spec = HistoryReadSpec {
+            account: &account,
+            as_of: (1, account.as_str()),
+            signing: &point,
+            audience: "https://home.test/v1/x/",
+            path: "/authority?after=0&limit=64",
+            request_id: [7; 32],
+            created: "2026-11-20T00:00:00Z",
+        };
+        let p = prepare_passkey_history_read(&spec).expect("a passkey history read");
+        let body: serde_json::Value = serde_json::from_slice(p.step().body()).expect("json");
+        assert_eq!(body["signer"]["controller"], crate::v05::ids::key_id(&point));
+        assert_eq!(body["purpose"], "colophon.history.read");
+        assert_eq!(body["asOf"]["digest"], account.as_str());
+        assert!(p.step().challenge().is_some(), "the step asks for an assertion");
+        let s = a
+            .assertion(p.step().body(), "id.luff.works", "https://id.luff.works", 0x05, false)
+            .expect("an assertion");
+        let raw = SignatureResult { signature: s.signature.clone(), assertion: None };
+        assert!(finish_history_read(&p, &raw).is_err(), "a passkey read needs its assertion");
+        let sig = SignatureResult {
+            signature: s.signature,
+            assertion: Some((s.assertion.authenticator_data, s.assertion.client_data)),
+        };
+        let env = finish_history_read(&p, &sig).expect("an envelope");
+        let call = crate::v05::calls::Call::parse(&env).expect("a call");
+        assert!(matches!(call.signer, crate::v05::calls::CallSigner::Controller(_)));
+        // Possession is checked: an assertion by another key is refused.
+        let other = crate::keys::testing::SyntheticAuthenticator::from_scalar(&[2; 32]).expect("another");
+        let o = other
+            .assertion(p.step().body(), "id.luff.works", "https://id.luff.works", 0x05, false)
+            .expect("an assertion");
+        let wrong = SignatureResult {
+            signature: o.signature,
+            assertion: Some((o.assertion.authenticator_data, o.assertion.client_data)),
+        };
+        assert_eq!(finish_history_read(&p, &wrong).err().map(|e| e.code()).as_deref(), Some("badSignature"));
     }
 }

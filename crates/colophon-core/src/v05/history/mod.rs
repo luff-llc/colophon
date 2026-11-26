@@ -302,6 +302,47 @@ impl Persisted {
         }
     }
 
+    /// [`Persisted::checkpoint`] whose retained heads are exactly `objects.heads` (0.5.7). When
+    /// `previous` retained a head `objects` no longer holds (the account pruned it), the verdict
+    /// is computed again from `objects` alone, never from a folded state that saw the dropped
+    /// head, so the saved verdict is the one a replay of the retained objects gives. Otherwise it
+    /// is [`Persisted::checkpoint`]. The head marks, the high-water mark, the succession flag and
+    /// the stop floor are kept either way.
+    pub fn checkpoint_exact(objects: &Objects, previous: &Self, now_ms: i64) -> Self {
+        let dropped = previous
+            .objects()
+            .is_some_and(|o| o.heads.iter().any(|h| !objects.heads.contains(h)));
+        if dropped {
+            Self::checkpoint(objects, &previous.without_checkpoint(), now_ms)
+        } else {
+            Self::checkpoint(objects, previous, now_ms)
+        }
+    }
+
+    /// The verifier clock the folded checkpoint was made at, when there is one (0.5.7).
+    pub fn checkpoint_clock(&self) -> Option<i64> {
+        self.checkpoint.as_ref().map(|cp| cp.now_ms)
+    }
+
+    /// This state without its folded checkpoint (0.5.7): the head marks, the high-water mark and
+    /// the succession flag are kept, and a stop the checkpoint recorded becomes the stop floor,
+    /// so nothing a replay cannot recompute is lost. A verifier given it replays the history.
+    pub fn without_checkpoint(&self) -> Self {
+        let mut p = Self {
+            high_water: self.high_water.clone(),
+            head_marks: self.head_marks.clone(),
+            succession_verified: self.succession_verified,
+            stop_floor: self.stop_floor,
+            // No fold is carried, so there is none this process could vouch for.
+            folded_here: false,
+            checkpoint: None,
+        };
+        if let Some(seq) = self.stopped() {
+            p = p.with_stop_floor(seq, None);
+        }
+        p
+    }
+
     /// Serialize a locally trusted checkpoint, including its format version.
     pub fn to_bytes(&self) -> crate::v05::Result<Vec<u8>> {
         let cp = self
