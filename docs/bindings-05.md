@@ -202,6 +202,17 @@ a fetched history only when it verifies `ok`, is the account's, holds the head a
 head and grants the member of `request`, which must be `member` (the reading key), from exactly that request; `admitted` false when it names no such member) and
 `account_current_webauthn_controller(entries, id, now_ms)`. The SDKs wrap them as `ColophonJoin`.
 
+Reading the history with a passkey before admission (0.5.7, spec §13.4 "A device with a passkey"):
+`account_passkey_points(body, rp, authenticator_data, client_data, signature, key_id)` (the signing points a WebAuthn
+get over `body` could have been made by, after §4.3 steps 1 to 3 for `rp`; exactly the one with `key_id` when given),
+`AccountHistoryRead.prepare_passkey(spec)` (the same history read as `prepare`, signed by the WebAuthn controller whose
+point is `spec.signing`: the step carries a challenge and `finish` takes the assertion) and
+`account_verify_with_passkey(account, seq, head, signing, base, signed_head, entries, now_ms)` (every check of
+`account_verify_at_head` through the fresh signed head, then the signer a current WebAuthn controller whose point is
+`signing`; returns the files, the signer and every current WebAuthn controller as `PasskeyControllerView`). A device
+with no entry names the genesis, `(1, account)`. The SDKs wrap them as `ColophonJoin.readHistoryWithPasskey`,
+`approveOwnJoinWithPasskey` and `recoverWithPasskey`.
+
 ### A stopped account
 
 When an activation raising the account's layout above 2 becomes final in the history this engine verified (spec §1

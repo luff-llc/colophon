@@ -125,6 +125,20 @@ public struct SystemWebAuthnCeremonies: WebAuthnCeremonies {
     }
   }
 
+  /// Gets any passkey of `rpID` the platform lists (no allowed credentials, no PRF) and passes signed bytes through
+  /// unchanged.
+  public func assertDiscoverable(rpID: String, challenge: Data, requireVerification: Bool) async throws -> AssertionResult {
+    let provider = ASAuthorizationPlatformPublicKeyCredentialProvider(relyingPartyIdentifier: rpID)
+    let request = provider.createCredentialAssertionRequest(challenge: challenge)
+    request.userVerificationPreference = requireVerification ? .required : .preferred
+    let authorization = try await Self.authorize(request)
+    guard let credential = authorization.credential as? ASAuthorizationPlatformPublicKeyCredentialAssertion else {
+      throw KeyProviderError.credentialMissing
+    }
+    return AssertionResult(credentialID: credential.credentialID, signature: credential.signature,
+      authenticatorData: credential.rawAuthenticatorData, clientData: credential.rawClientDataJSON, prfOutput: nil)
+  }
+
   /// Takes the PRF output into `SecretBytes` straight from the platform's `SymmetricKey` (one copy, inside its own
   /// `withUnsafeBytes`); the caller drops the credential object at once. Copies the SDK cannot reach: the
   /// `SymmetricKey`'s storage (CryptoKit zeroes it on release) and whatever AuthenticationServices keeps inside the

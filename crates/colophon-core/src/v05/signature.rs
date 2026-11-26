@@ -411,6 +411,80 @@ pub fn verify_assertion_possession(
     Ok(client.origin)
 }
 
+/// The P-256 points that could have made a WebAuthn assertion over `body` for `rp`: ECDSA public
+/// key recovery (SEC 1 §4.1.6) over `authenticatorData ‖ SHA-256(clientData)`, for a device that
+/// knows a passkey only by an assertion (a discoverable get returns no public key). Before any
+/// recovery the assertion must pass §4.3 steps 1 to 3 for `rp` (strict `clientData` with `type`
+/// `webauthn.get`, this `challenge` and `crossOrigin` absent or `false`; the relying-party hash;
+/// UP set) and step 5's DER grammar. Every point returned verifies the assertion; there are at
+/// most four, almost always two. Which one is the passkey's is decided by its key ID or by a
+/// second signature, never by this function.
+pub fn assertion_points(
+    body: &[u8],
+    rp: &str,
+    assertion: AssertionBytes<'_>,
+    der_signature: &[u8],
+) -> Result<Vec<Vec<u8>>, SigFailure> {
+    use p256::elliptic_curve::ops::Reduce;
+    use p256::elliptic_curve::point::DecompressPoint;
+    use p256::elliptic_curve::sec1::ToEncodedPoint;
+    use p256::elliptic_curve::subtle::Choice;
+    use p256::elliptic_curve::PrimeField;
+    use p256::{AffinePoint, FieldBytes, ProjectivePoint, Scalar, U256};
+    check_client(body, assertion.client_data)?;
+    let ad = assertion.authenticator_data;
+    if ad.len() < 37 || ad[..32] != Sha256::digest(rp.as_bytes())[..] {
+        return Err(SigFailure::RelyingParty);
+    }
+    if ad[32] & 0x01 == 0 {
+        return Err(SigFailure::UserPresence);
+    }
+    let sig = parse_der(der_signature)?;
+    // High-S is valid (§4.3 step 5); recovery runs on the normalized form, which has the same
+    // candidate points.
+    let sig = sig.normalize_s().unwrap_or(sig);
+    let mut message = Vec::with_capacity(ad.len() + 32);
+    message.extend_from_slice(ad);
+    message.extend_from_slice(&Sha256::digest(assertion.client_data));
+    let prehash = Sha256::digest(&message);
+    // Q = r⁻¹(sR − zG) for each R whose x-coordinate is r, or r + n when that is below p (the
+    // field rejects it otherwise), with either parity.
+    let (r, s) = sig.split_scalars();
+    let z = <Scalar as Reduce<U256>>::reduce_bytes(&FieldBytes::clone_from_slice(&prehash));
+    let r_inv = Option::<Scalar>::from(r.invert()).ok_or(SigFailure::Scalar)?;
+    let r_bytes = r.to_repr();
+    let mut xs = vec![r_bytes];
+    {
+        use p256::elliptic_curve::bigint::{ArrayEncoding, Limb};
+        use p256::elliptic_curve::Curve;
+        let (lifted, carry) = U256::from_be_slice(&r_bytes).adc(&p256::NistP256::ORDER, Limb::ZERO);
+        if carry == Limb::ZERO {
+            xs.push(lifted.to_be_byte_array());
+        }
+    }
+    let mut points: Vec<Vec<u8>> = Vec::new();
+    for (x, odd) in xs.iter().flat_map(|x| [(x, 0u8), (x, 1u8)]) {
+        let candidate = AffinePoint::decompress(x, Choice::from(odd));
+        if bool::from(candidate.is_none()) {
+            continue;
+        }
+        let big_r = ProjectivePoint::from(candidate.unwrap());
+        let q = (big_r * (r_inv * *s) - ProjectivePoint::GENERATOR * (r_inv * z)).to_affine();
+        let point = q.to_encoded_point(false).as_bytes().to_vec();
+        if point.len() != 65 {
+            continue;
+        }
+        if !points.contains(&point) && check_der_signature(&point, assertion, der_signature).is_ok()
+        {
+            points.push(point);
+        }
+    }
+    if points.is_empty() {
+        return Err(SigFailure::Verify);
+    }
+    Ok(points)
+}
+
 /// How the standalone WebAuthn check (§17.2) judges an assertion. Authority signatures take
 /// their origin rule and UV requirement from the [`AuthorityRule`]; there is no public way to
 /// check an authority signature under a weaker origin rule or without its UV.

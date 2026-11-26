@@ -76,6 +76,26 @@ class PasskeyProvider private constructor(descriptor: ByteArray, private val cre
     }
 }
 
+/**
+ * The passkeys of [rp] through Credential Manager, for a device that does not know their public keys yet (Colophon
+ * 0.5.7): a joining or recovering device reads the history with one ([com.luff.colophon.session.ColophonJoin.readHistoryWithPasskey]).
+ * Every get requires user verification; with no credential it is discoverable (any passkey of [rp] the provider lists),
+ * otherwise it allows only that credential. Once the history names the passkey, restore it with
+ * [PasskeyProvider.restore] from [com.luff.colophon.session.OwnerPasskey.registrationDescriptor].
+ */
+class CredentialManagerPasskeys(override val rp: String, private val credentials: CredentialClient) : com.luff.colophon.session.PasskeyAuthenticator {
+    override suspend fun get(challenge: String, credential: ByteArray?): com.luff.colophon.session.PasskeyGet {
+        val allow = credential?.let { ",\"allowCredentials\":[{\"type\":\"public-key\",\"id\":\"${url(it)}\"}]" }.orEmpty()
+        val request = """{"challenge":${keyQuote(challenge)},"rpId":${keyQuote(rp)}$allow,"userVerification":"required"}"""
+        val result = keyObject(keyCall { credentials.get(request) }.toByteArray())
+        val raw = decode(required(result, "rawId"))
+        if (credential != null && !raw.contentEquals(credential)) keyFailure(KeyOutcome.CREDENTIAL_MISSING, "Unexpected credential")
+        val response = obj(result, "response")
+        return com.luff.colophon.session.PasskeyGet(raw, decode(required(response, "signature")),
+            decode(required(response, "authenticatorData")), decode(required(response, "clientDataJSON")))
+    }
+}
+
 /** SHA-256 of the DER APK signing certificate, encoded as the exact Android WebAuthn origin. */
 fun apkKeyHashOrigin(signingCertificate: ByteArray): String =
     "android:apk-key-hash:" + url(MessageDigest.getInstance("SHA-256").digest(signingCertificate))

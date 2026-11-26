@@ -1566,6 +1566,12 @@ fn verify(
     // standing (an approval it has not fetched yet): it may still ask a home it is behind to read
     // with its own key, and the home, which holds the history, decides (§12.3 step 5 there).
     let mut standing_unknown = false;
+    // A controller acts with its own key, so a call whose controller ID is not its key's ID can
+    // never pass. It is refused as an absent controller is, before the ID is looked up: a caller
+    // that does not hold a controller's key learns nothing about that controller (0.5.7).
+    if let CallSigner::Controller(id) = &call.signer {
+        require_refused(id == &key_id(&call.key), Reason::Revoked)?;
+    }
     match &call.signer {
         CallSigner::Controller(id) => {
             let vc = v
@@ -1629,11 +1635,23 @@ fn verify(
                 }
             }
             if let (Some(origin), Some(w)) = (origin, latest.key().webauthn()) {
-                let allowed = cfg
+                let configured = cfg
                     .call_origins
                     .get(w.rp())
                     .is_some_and(|list| list.iter().any(|o| o == &origin));
-                require_refused(allowed, Reason::Origin)?;
+                // A home's own history read (§4.3 "Call origins", §13.4, 0.5.7): an origin the
+                // controller's descriptor allows for authority signatures, at S and latest, is a
+                // call-ceremony origin of every home for `colophon.history.read` at its own
+                // endpoints. Such an origin can already sign the entries that add a member, so
+                // reading the history from it grants nothing new.
+                let authority = at_home
+                    && call.purpose == HISTORY_READ
+                    && [at_s, latest].iter().all(|c| {
+                        c.key()
+                            .webauthn()
+                            .is_some_and(|w| w.authority_origin_allowed(&origin))
+                    });
+                require_refused(configured || authority, Reason::Origin)?;
             }
         }
         CallSigner::Member(id) => match member_at_s(view, id, s, cfg.now_ms) {
