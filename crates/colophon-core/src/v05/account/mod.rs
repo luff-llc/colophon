@@ -540,6 +540,11 @@ pub const PRUNE_HEADS_AT: usize = 32;
 /// an unchanged history, so a device that synced for days held more than a view takes and could
 /// make no call. Head marks, which detect rollback, live in the persisted state and never in
 /// these objects. Returns whether any head was dropped.
+/// What a head claims: its home, the seq and the body digest it names.
+type HeadClaim = (String, u64, String);
+/// A settled head as [`prune_heads`] ranks it: `issued`, body digest, index among the held heads.
+type RankedHead<'a> = (i64, &'a str, usize);
+
 fn prune_heads(objects: &mut Objects, state: &crate::v05::history::State, now_ms: i64) -> bool {
     use crate::v05::encoding::{bounds, digest, parse_date};
     use crate::v05::signature::RawEnvelope;
@@ -562,7 +567,7 @@ fn prune_heads(objects: &mut Objects, state: &crate::v05::history::State, now_ms
         homes: &homes,
         now_ms,
     };
-    let settled: Vec<Option<((String, u64, String), i64, String)>> = objects
+    let settled: Vec<Option<(HeadClaim, i64, String)>> = objects
         .heads
         .iter()
         .map(|b| {
@@ -575,7 +580,7 @@ fn prune_heads(objects: &mut Objects, state: &crate::v05::history::State, now_ms
         .collect();
     // Per claim, the indexes to keep: earliest, latest (ties by lowest body digest) and the
     // lowest body digest.
-    let mut ends: BTreeMap<&(String, u64, String), [(i64, &str, usize); 3]> = BTreeMap::new();
+    let mut ends: BTreeMap<&HeadClaim, [RankedHead<'_>; 3]> = BTreeMap::new();
     for (i, h) in settled.iter().enumerate() {
         let Some((claim, issued, body)) = h else {
             continue;

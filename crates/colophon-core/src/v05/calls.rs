@@ -264,6 +264,9 @@ pub const MAX_VIEW_HEADS: usize = 64;
 /// The largest head envelope a view takes: twice the head body bound and 4 KiB.
 pub const MAX_HEAD_ENVELOPE: usize = bounds::HEAD_BODY * 2 + 4_096;
 
+/// A head as [`view_heads`] ranks it: class, fresh, seq, `issued`, home, envelope.
+type ViewHead<'a> = (u8, bool, u64, i64, String, &'a Vec<u8>);
+
 /// The heads a view is built from (0.5.7). An envelope over [`MAX_HEAD_ENVELOPE`] is no head
 /// and is left out (it used to fail the whole view). When the rest fit in [`MAX_VIEW_HEADS`]
 /// they are all taken; the account keeps its held heads well below it (`prune_heads`).
@@ -297,7 +300,7 @@ fn view_heads(heads: &[Vec<u8>], st: &State, now_ms: i64) -> Vec<Vec<u8>> {
     // envelope is judged first; of several envelopes over one signed body only the best judged
     // one is kept, so an invalid re-encoding never stands in for a genuine head.
     let max_age = st.keyring().policy.head_max_age();
-    let mut order: Vec<(u8, bool, u64, i64, String, &Vec<u8>)> = Vec::new();
+    let mut order: Vec<ViewHead<'_>> = Vec::new();
     for b in sized {
         let Ok(raw) = RawEnvelope::parse(b, bounds::HEAD_BODY, false) else {
             order.push((3, false, 0, i64::MIN, String::new(), b));
@@ -324,7 +327,7 @@ fn view_heads(heads: &[Vec<u8>], st: &State, now_ms: i64) -> Vec<Vec<u8>> {
         order.push((class, fresh, seq, issued, by, b));
     }
     // One envelope per signed body: the best judged.
-    order.sort_by(|a, b| (a.0, std::cmp::Reverse(a.1)).cmp(&(b.0, std::cmp::Reverse(b.1))));
+    order.sort_by_key(|o| (o.0, std::cmp::Reverse(o.1)));
     let mut bodies: BTreeSet<Vec<u8>> = BTreeSet::new();
     order.retain(|o| {
         RawEnvelope::parse(o.5, bounds::HEAD_BODY, false).map_or(true, |raw| bodies.insert(raw.body))
@@ -353,9 +356,7 @@ fn view_heads(heads: &[Vec<u8>], st: &State, now_ms: i64) -> Vec<Vec<u8>> {
             o.0 = 2;
         }
     }
-    order.sort_by(|a, b| {
-        (a.0, std::cmp::Reverse((a.1, a.2, a.3, a.5))).cmp(&(b.0, std::cmp::Reverse((b.1, b.2, b.3, b.5))))
-    });
+    order.sort_by_key(|o| (o.0, std::cmp::Reverse((o.1, o.2, o.3, o.5))));
     let mut chosen: Vec<Vec<u8>> = order.into_iter().take(MAX_VIEW_HEADS).map(|o| o.5.clone()).collect();
     chosen.sort();
     chosen
