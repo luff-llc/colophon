@@ -86,6 +86,14 @@ class ColophonEngine private constructor(val account: String, val identity: Acco
 
     val isLocked: Boolean get() = engine == null
 
+    /**
+     * The engine itself, for the 0.6 hosts' stream and endpoint calls, which take it as an argument from their own
+     * serial context (`AccountEngine` serializes its calls; an endpoint reads its gate, never its lock). Read again for
+     * every call: a locked or discarded engine is `AccountException.Locked`.
+     */
+    @JvmSynthetic internal fun current(): AccountEngine =
+        engine ?: throw AccountException.Locked("locked", "this engine was locked or discarded; open a new one")
+
     /** Overwrites the engine's keys and opened plaintext and releases it. Further calls are `Locked`. */
     suspend fun lock() = withContext(lane + NonCancellable) {
         val e = engine ?: return@withContext

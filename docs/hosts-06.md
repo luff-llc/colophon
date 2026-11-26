@@ -1,10 +1,10 @@
-# 0.6 hosts: the home stream and session cells (JavaScript and Swift)
+# 0.6 hosts: the home stream and session cells (JavaScript, Swift and Kotlin)
 
 **Status:** stage 2 of Colophon 0.6 for JavaScript. Stage 1 is the binding surface of
 [bindings-05.md](bindings-05.md) §10 (`HomeStream`, `SessionEndpoint` and the engine's stream and
 session calls). This stage adds the host layer that drives that surface over a real WebSocket, in
-`js/src/hosts` (`@colophon/core/hosts`), and proves the flagship behaviour end to end. The Swift host (§6) follows the same shape; the Kotlin host
-is built separately.
+`js/src/hosts` (`@colophon/core/hosts`), and proves the flagship behaviour end to end. The Swift host (§6) follows the same shape,
+and so does the Kotlin host (§7, JVM only for now).
 
 The rule is the one stage 1 states: the core decides, the host carries. The host owns the socket,
 the ticket request, the timers and the durable store. It adds no retry timing, cap or backoff of its
@@ -242,7 +242,7 @@ account with two members A and B entitled to write `listening.podcasts`, each wi
    when A asks: B's `pass` is sent only after its write completes (about 502 ms), A's `ack` only
    after A's; frames and a tick arriving meanwhile are kept and run after, a command B issued during
    its write is held and run after it, and nothing is lost (`queueFull` never occurs).
-5. **Revocation mid-session**, with nothing injected. B revokes A by an authority change on its own
+5. **Revocation mid-session**, with no frame or authority change forged. B revokes A by an authority change on its own
    device (both devices hold the person's owner key) and installs the new head before the home has
    it. A, still on the old head, publishes over its socket; the home still carries the frame, and
    B's endpoint drops it on arrival (`delegation`), changing nothing. Once B's pass gives the home
@@ -466,3 +466,137 @@ several connections in one process, which take the same file locks), durability 
 loss (it rests on SQLite's documented WAL and `F_FULLFSYNC` behaviour, not on a test), reads on a
 locked device, and the protection class set and read back on a device: that code is compiled only for the device
 platforms, which the macOS suites do not run.
+
+## 7. Kotlin (JVM)
+
+`com.luff.colophon.hosts` in `sdk/kotlin` is the same host layer for Kotlin, over the generated `HomeStream` and
+`SessionEndpoint` of `colophon_ffi.kt`, for the JVM only in this release: the Android library, which compiles the rest
+of `src/main`, excludes `com.luff.colophon.hosts` from its build and its sources jar (§7.4). The `java.net.http` socket
+is in `src/jvm`, which only the JVM module compiles. No dependency was added: the JVM module still has JNA and
+kotlinx-coroutines only.
+
+### 7.1 The API
+
+| Object | What it is |
+| --- | --- |
+| `HostAccess.of(session)`, `transportOf(session, home)` | An opaque access to a restored `ColophonSession` (only `account` and `member` are readable). Inside, the hosts use what §1's `HostAccount` names (the engine, read again for every call; the ticket call; an exchange pass, the session's own `syncNow`; the member key's raw signature), all `internal`: no public declaration hands out the engine, an endpoint, the stream client, an account view or a signer (`ApiSurfaceTest` pins this, §7.1 "The boundary"). Two session additions back it: `SessionWorker.streamCall` and `transportOf` (the application's own configured transport). |
+| `HomeStreamHost(StreamHostOptions)` | `start`, `stop`, `status`, `polling`, `cursor`, `live`, `retryNow`, `historyChanged`, `attach`/`detach`, `sendSession(frame, lost)`, `on(listener)`, `onPass(listener)`; `carrier()` adapts it to `CellCarrier`. Options: access, home, `socket` (a `SocketFactory`, required), `transport` (default `HttpHomeTransport`), `clock`, `configure`, `cursor`, `saveCursor`, `dispatcher`. |
+| `SessionCellHost.open(CellHostOptions, listener)` | `command(name, json): Deferred<Unit>`, `deliver`, `linkUp`, `linkDown`, `accountChanged`, `leave`, `close`, `phase`, `storedClaim`, `writePending`, `stats`. Options as in §1 (`persistRetryMs`, `persistTimeoutMs`, `persistAttempts`, `fenceCheckMisses`, `maxCommands`, `delegationMs`, `random`, `state`), plus `dispatcher`. Events are the `CellHostEvent` sealed class; failures are `CellHostError` with a `Code`. |
+| `CellSession.join(options)` | `state: CellState` (`joined`, `holder`, `isHolder`, `gated`, `claim`, `state`, `seq`, `entitled`, `canWrite`), `subscribe`, `events` (`CellEvent`, bytes decoded); `take`, `ask`, `pass`, `decline`, `release`, `publish`, `submit`, `presence`, `ping` (each returns a `Deferred`), `leave`, `close`. Show the role as held only when `isHolder && !gated`. |
+| `ClaimStore`, `Fence`, `StoredClaim`, `SaveResult`, `compareAndSet`, `MemoryClaimStore` | §3's contract with `suspend` calls; a fence is two integers in 0..2^53 − 1. |
+| `Frames.sessionFrameText`, `frameCell`, `frameBytes`, `frameText` | §3's frame extraction, with the same adversarial matrix (`FramesTest`). |
+| `HostClock`, `SystemHostClock` | Monotonic and wall milliseconds and a timer. |
+| `SocketFactory`, `HostSocket`, `SocketHandlers`, `JdkWebSocketFactory` (JVM) | The transport, §7.3. |
+
+**The boundary.** The hosts keep the engine, the endpoints, the stream client, the account views and the member key's
+signer to themselves, so that nothing acts on them outside a host's serial context or out of order, and so that the
+member key is not offered as a general signer by mistake. Kotlin's `internal` compiles to public bytecode, so the
+members that carry those objects are also synthetic, which Java cannot call either; `ApiSurfaceTest` checks every
+member of every public class of the module, mangled names included. It exempts the generated bindings as one
+package entry and otherwise only named members, each with its reason (the 0.5 `ColophonEngine.run`, `execute`,
+`open` and `openCreated`, the 0.5 `KeyCustody`, and the application's own key providers read back from its
+configuration); a new member that carries such a type fails it, and so does a listed member that no longer exists.
+It also checks that Java code reaching for an internal accessor does not compile. This guards against misuse, not against a hostile embedder: the embedding application is the member's own and is trusted
+with its key, and reflection on the JVM can always reach a library's internals, which is outside what the SDK can
+prevent.
+
+**One serial context per host.** Each host runs every job and every one of its coroutines on one serial dispatcher (by
+default its own lane of `Dispatchers.Default`; a test passes a dispatcher it drives). A job is ordinary,
+non-suspending code: it calls the endpoint and carries out the step, and nothing can run between two of its lines. The
+work that suspends (a store save, a signature, a ticket request, a pass) runs as a coroutine on the same context and
+comes back as a new job, so a suspension never lets another job interleave with endpoint state. Socket reports,
+timers and calls from other threads only enqueue. Listeners are called on the host's context, between jobs; whatever
+they call is a later job. A command is admitted (takes its place among frames, ticks and link changes) when `command`
+is called, from any thread, and its `Deferred` completes after the events of the step that ran it reached the
+listeners. A `ClaimStore` must not block its caller: the shipped SQLite store moves its I/O to `Dispatchers.IO`.
+
+Everything else is §2 and §3 as written: the same steps, effects in order, the acknowledgement only after the durable
+write, single-flight fenced saves with a write deadline and bounded attempts, the reservation on open and rebuild, the
+beat-by-beat fence check with three misses failing closed (and a stale save whose held fence cannot be read is a
+failed attempt with the backoff; every stale save is charged, so a store that keeps answering stale ends in
+`fail(store)` rather than saving without bound), the bounded command hold, `staleAccount`, `clockBackwards`,
+`wrongView`, a new session number, `gated`, and `ask` answered by `pass` between live devices.
+
+### 7.2 The JVM stores
+
+The JVM module ships `MemoryClaimStore` (one record behind a lock; the compare and the write are one step for every
+client sharing the object) and the `ClaimStore` interface. It ships no durable JVM store: the JDK has no embedded
+database, a file-and-lock or file-and-rename design does not meet §3a (a lock can be stolen; a commit can be visible
+before it is irrevocable), and a SQLite driver would be a new dependency. A desktop or server host supplies its own
+store over storage that gives a linearizable compare-and-set.
+
+### 7.3 The transport
+
+The host owns the socket's lifecycle through `SocketFactory.open(url, handlers): HostSocket` (`send(text, done)`,
+`close(code)`; `done` reports, once, whether the message reached the connection) and `SocketHandlers` (`open`, `message`, `refused(answer)`, `closed(code?)`), reported from any thread. The stream client is only ever called on the stream
+host's own queue: `status`, `polling`, `cursor` and `live` are what the host published after its last job, and a
+cell's `sendSession(frame, lost)` puts the frame on the stream host's queue (frames keep their order) and returns
+false at once when the stream is not live or `MAX_PENDING_FRAMES` (64) frames are already taken and not yet carried or
+lost. A frame refused then is `Unsent(carrier)`, as in the JavaScript host; one
+taken and then not carried (the socket ended first, or its send failed after it was queued) is reported afterwards as
+`Unsent(carrierLost)`: every frame taken ends exactly once, carried or lost. Either is loss the endpoint is never told
+of, as in the reference loop. The core's verified head is given to the stream (`on_history`) one read at a time on the
+host's queue, and never below the last one given.
+The host owns a socket before any listener hears of it, ignores reports from a socket it replaced, and `stop()` closes
+the current socket at once from any thread, including one whose upgrade is still outstanding.
+
+**JVM: `JdkWebSocketFactory`** (`java.net.http.WebSocket`, Java 11; the module targets 17). Fragments are joined and a
+message is bounded (64 KiB, the core's own bound). A refused upgrade is reported with its status and headers through
+`refused`; the JDK discards the refused answer's body, so a `403 {"result":"refused:revoked"}` reaches the core as a 403
+without a result, which backs off and mints again within the budget and the breaker rather than ending access at once
+(a revoked member still learns it from its next pass, and close 1008 still ends a live stream). A close code the JDK
+will not send from a client (1002) is sent as 1000 and the core is told its own code. Closing a socket still opening
+drops the connection when the upgrade completes.
+
+### 7.4 Android: what is not shipped yet
+
+The Android library does not carry the hosts in this release: they have not been built or run on Android, so the
+module excludes the package. They arrive on Android in a later change, built and run on devices, together with what an
+Android app also needs and does not have yet:
+
+- **A WebSocket transport.** Android has neither `java.net.http` nor a WebSocket client in its SDK, and the stream (and
+  with it every session frame) needs one: an HTTP long-poll fallback carries no session frames, so it would not give
+  handoff. The choice is between a minimal RFC 6455 client in the SDK over the platform's TLS sockets and a
+  dependency, which the SDK and its first Android apps do not take; until it is made, an Android app can only supply
+  its own `SocketFactory`.
+- **A durable claim store.** A store over the platform's SQLite that meets §3a is being built, but it has not yet been
+  built against the Android platform SDK or run on a device or emulator, so it is not part of this release.
+  `MemoryClaimStore` keeps no claim across a restart.
+- **A clock that counts deep sleep.** `SystemHostClock` uses `System.nanoTime()`, which on Android stops while the
+  device sleeps; an Android host should give the hosts a `HostClock` over `SystemClock.elapsedRealtime()`.
+
+Android's power management (Doze, App Standby) and its storage encryption (Direct Boot) shape both, and will be
+documented when they ship.
+
+### 7.5 What was run
+
+`scripts/test-kotlin.sh` builds the release library, checks the committed bindings, builds the conformance library
+and checks its committed test-only bindings (`sdk/kotlin/src/conformance`), builds the home module, pins those three
+files in `sdk/kotlin/build/native` (another checkout sharing the cargo target cannot replace them mid-run), and runs
+every Kotlin test. The 0.6 host tests are `com.luff.colophon.hosts.*`:
+
+- `ApiSurfaceTest` (4: no member reachable from Java in the module exposes a core object, the account adapter or a
+  signer, outside the allow-list; Java reaching for the internal accessors does not compile; a Java application,
+  `JavaHostUse`, opens a host; the Android library excludes the hosts),
+  `JdkSocketTest` (1: each send over the JDK socket ends exactly once when the peer drops the connection),
+  `StreamHostTest` (17), `StreamConcurrencyTest` (1: eight threads sending 300 frames each while the home sends 500,
+  five rounds; every client call is on the stream host's own thread and each sender's frames are carried once, in
+  order), `CellHostTest` (25), `ClaimFenceTest` (5: two clients opening in all six interleavings, a
+  rebuild racing an open in all three, eight threads racing the memory store from one fence over 20 rounds, a
+  superseded holder stopping within one beat, fences out of range), `FramesTest` (4), on the core's real objects with
+  a manual clock, a driven dispatcher and fake sockets, transports and stores, as the JavaScript tests do.
+- `ConformanceTest` (3): the 26 machine transcripts, the 9 `offset.json` cases and `wire/vectors.json` (frames,
+  scenario steps and negative frames), strict decoding, and that no shipped source names the conformance surface.
+- `HandoffTest` and `ScenariosTest`: the five journeys of §4 through the Kotlin hosts. Real: the reference relay
+  (`relay/server.js` on Bun with the Rust home module built from this tree, bound on a port of its own choosing, its
+  standard error kept and shown when a test fails), the JDK's WebSocket client over loopback, both members'
+  `ColophonSession`s and engines, their real exchange passes, ticket calls, delegations and revocation. Not real: a
+  wrapper that rewrites the account's `https` name to the loopback address and can cut a member's network (it closes
+  the sockets and fails requests), in-memory record media, `TestStore` (an in-memory claim store whose writes can be
+  delayed), the relay's test clock, and, in `ScenariosTest`, a shortened policy (beat 400 ms, holder timeout 1.5 s,
+  ask timeout 300 ms). All five journeys pass. In journey 4 each write takes 200 ms, below the fast policy's
+  `askTimeoutMs` (300 ms): a holder sends nothing while its write is outstanding, and an asker that hears no holder
+  frame for `askTimeoutMs` after asking may take (§S5), so with a 500 ms write the asker sometimes, correctly, takes
+  instead of being passed to.
+
+Nothing was built or run on Android; the Android library excludes the hosts.

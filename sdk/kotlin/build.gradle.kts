@@ -9,10 +9,18 @@ dependencies {
     testImplementation(kotlin("test-junit"))
 }
 kotlin { jvmToolchain(17) }
+// `src/jvm`: JVM-only pieces (the `java.net.http` socket). The Android library compiles `src/main` alone, so nothing
+// there may use an API Android lacks. `src/conformance`: the generated conformance bindings, test-only, never shipped.
+sourceSets {
+    main { kotlin.srcDir("src/jvm/kotlin") }
+    test { kotlin.srcDir("src/conformance/kotlin") }
+}
 // The native library and the relay home module follow CARGO_TARGET_DIR, as the scripts do.
 val cargoTarget = System.getenv("CARGO_TARGET_DIR")?.let { file(it) } ?: rootDir.resolve("../../target")
 tasks.test {
-    systemProperty("jna.library.path", cargoTarget.resolve("release").canonicalPath)
+    // COLOPHON_NATIVE_DIR: a folder holding this tree's host libraries, pinned so another checkout sharing the cargo
+    // target cannot replace them mid-run.
+    systemProperty("jna.library.path", System.getenv("COLOPHON_NATIVE_DIR") ?: cargoTarget.resolve("release").canonicalPath)
     systemProperty("colophon.fixture", cargoTarget.resolve("ffi-bench").canonicalPath)
     systemProperty("colophon.repo", rootDir.resolve("../..").canonicalPath)
     systemProperty("colophon.homeWasm", System.getenv("COLOPHON_HOME_WASM")

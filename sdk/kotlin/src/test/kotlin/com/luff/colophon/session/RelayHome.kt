@@ -26,7 +26,9 @@ import java.util.concurrent.TimeUnit
  * killed by [stop], and by a shutdown hook if a test dies first; its data directory names
  * `colophon-kotlin-relay` so `scripts/test-kotlin.sh` can check that none is left behind.
  */
-class RelayHome(val base: String, val port: Int = freePort(),
+class RelayHome(val base: String,
+                /** 0: the relay binds a port of its own choosing and reports it (no window between choosing and binding). */
+                port: Int = freePort(),
                 /** With a clock, the relay runs on it (set before every request and pass) with no scheduler timer: heads
                  *  are published only by [tick], so nothing waits on real time. */
                 private val clockSource: (() -> Long)? = null) {
@@ -36,6 +38,12 @@ class RelayHome(val base: String, val port: Int = freePort(),
     private val dir: File = Files.createTempDirectory("colophon-kotlin-relay-${ProcessHandle.current().pid()}-").toFile()
     private val clock = File(dir, "clock")
     @Volatile private var process: Process? = null
+    /** The port the relay listens on (known once it started when it was made with port 0). */
+    @Volatile var port: Int = port; private set
+    /** The relay's standard error, kept in its directory so a failing test can show it. */
+    private val stderr = File(dir, "stderr.log")
+    /** The last `lines` lines the relay wrote to standard error. */
+    fun errors(lines: Int = 40): String = try { stderr.readLines().takeLast(lines).joinToString("\n") } catch (_: Exception) { "" }
 
     val id: String get() = accountKeyId(P256.point(key.public as ECPublicKey))
 
@@ -86,13 +94,14 @@ class RelayHome(val base: String, val port: Int = freePort(),
             put("COLOPHON_RELAY_CLOCK_FILE", clock.path)
             put("COLOPHON_RELAY_TICK_MS", if (clockSource == null) "50" else "0")
         }
-        builder.redirectError(ProcessBuilder.Redirect.DISCARD)
+        builder.redirectError(ProcessBuilder.Redirect.appendTo(stderr))
         val p = builder.start()
         process = p; running.add(p)
         // The first stdout line is machine-readable: {"listening":{...}}.
         val reader = BufferedReader(InputStreamReader(p.inputStream))
         val line = reader.readLine() ?: ""
-        check(line.contains("\"listening\"")) { "the relay did not start: $line" }
+        check(line.contains("\"listening\"")) { "the relay did not start: $line\n${errors()}" }
+        if (port == 0) port = (Json.obj(line)?.obj("listening")?.long("port") ?: error("no port in $line")).toInt()
         // Keep draining stdout so the relay never blocks on a full pipe; each {"ticked":true} answers a [tick].
         Thread { try { while (true) { val l = reader.readLine() ?: break; if (l.contains("\"ticked\"")) ticks.put(Unit) } } catch (_: Exception) {} }.apply { isDaemon = true }.start()
     }
