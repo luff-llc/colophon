@@ -1,0 +1,133 @@
+swift.class NowPlayingSession: @MainActor final class NowPlayingSession
+swift.enum NowPlayingAvailability: enum NowPlayingAvailability
+swift.enum NowPlayingCodingError: enum NowPlayingCodingError
+swift.enum NowPlayingEvent: enum NowPlayingEvent
+swift.enum NowPlayingHandoffPolicy: enum NowPlayingHandoffPolicy
+swift.enum NowPlayingPauseReason: enum NowPlayingPauseReason
+swift.enum NowPlayingRequestOutcome: enum NowPlayingRequestOutcome
+swift.enum NowPlayingStart.Source: enum Source
+swift.enum NowPlayingUnavailable: enum NowPlayingUnavailable
+swift.enum.case NowPlayingAvailability.available: case available
+swift.enum.case NowPlayingAvailability.unavailable(_:): case unavailable(NowPlayingUnavailable)
+swift.enum.case NowPlayingCodingError.badText: case badText
+swift.enum.case NowPlayingCodingError.duplicateField: case duplicateField
+swift.enum.case NowPlayingCodingError.missingField: case missingField
+swift.enum.case NowPlayingCodingError.notCanonical: case notCanonical
+swift.enum.case NowPlayingCodingError.notObject: case notObject
+swift.enum.case NowPlayingCodingError.outOfRange: case outOfRange
+swift.enum.case NowPlayingCodingError.syntax: case syntax
+swift.enum.case NowPlayingCodingError.tooLarge: case tooLarge
+swift.enum.case NowPlayingCodingError.unknownField: case unknownField
+swift.enum.case NowPlayingCodingError.wrongType: case wrongType
+swift.enum.case NowPlayingEvent.askReceived(_:): case askReceived(NowPlayingMember)
+swift.enum.case NowPlayingEvent.availabilityChanged(_:): case availabilityChanged(NowPlayingAvailability)
+swift.enum.case NowPlayingEvent.otherState(_:from:): case otherState(NowPlayingAnchor?, from: NowPlayingMember)
+swift.enum.case NowPlayingEvent.passFailed(to:reason:): case passFailed(to: NowPlayingMember, reason: String)
+swift.enum.case NowPlayingEvent.pause(_:): case pause(NowPlayingPauseReason)
+swift.enum.case NowPlayingHandoffPolicy.automatic: case automatic
+swift.enum.case NowPlayingHandoffPolicy.never: case never
+swift.enum.case NowPlayingHandoffPolicy.prompt: case prompt
+swift.enum.case NowPlayingPauseReason.displaced(by:): case displaced(by: NowPlayingMember?)
+swift.enum.case NowPlayingPauseReason.ended: case ended
+swift.enum.case NowPlayingPauseReason.failed(_:): case failed(String)
+swift.enum.case NowPlayingPauseReason.passed(to:): case passed(to: NowPlayingMember)
+swift.enum.case NowPlayingPauseReason.superseded: case superseded
+swift.enum.case NowPlayingRequestOutcome.cancelled: case cancelled
+swift.enum.case NowPlayingRequestOutcome.declined(by:): case declined(by: NowPlayingMember)
+swift.enum.case NowPlayingRequestOutcome.play(_:): case play(NowPlayingStart?)
+swift.enum.case NowPlayingRequestOutcome.playLocally(_:_:): case playLocally(NowPlayingUnavailable, NowPlayingStart?)
+swift.enum.case NowPlayingStart.Source.held: case held
+swift.enum.case NowPlayingStart.Source.local: case local
+swift.enum.case NowPlayingStart.Source.passed(from:): case passed(from: String)
+swift.enum.case NowPlayingStart.Source.taken(from:): case taken(from: String?)
+swift.enum.case NowPlayingUnavailable.cellFailed(_:): case cellFailed(String)
+swift.enum.case NowPlayingUnavailable.closed: case closed
+swift.enum.case NowPlayingUnavailable.couldNotJoin(_:): case couldNotJoin(String)
+swift.enum.case NowPlayingUnavailable.noAnswer: case noAnswer
+swift.enum.case NowPlayingUnavailable.notEntitled: case notEntitled
+swift.enum.case NowPlayingUnavailable.readOnly: case readOnly
+swift.enum.case NowPlayingUnavailable.starting: case starting
+swift.enum.case NowPlayingUnavailable.streamDown: case streamDown
+swift.init NowPlayingAnchor.init(decoding:): init(decoding data: Data) throws(NowPlayingCodingError)
+swift.init NowPlayingAnchor.init(episode:show:positionMs:ratePermille:playing:at:): init(episode: String, show: String, positionMs: Int64, ratePermille: Int64, playing: Bool, at: Int64) throws(NowPlayingCodingError)
+swift.init NowPlayingClockOffset.init(offsetMs:errorMs:sampleAgeMs:): init(offsetMs: Int64, errorMs: Int64, sampleAgeMs: Int64)
+swift.init NowPlayingCodingError.init(rawValue:): init?(rawValue: String)
+swift.init NowPlayingHandoffPolicy.init(rawValue:): init?(rawValue: String)
+swift.init NowPlayingOptions.init(label:handoffPolicy:restoredAnchor:): init(label: String, handoffPolicy: NowPlayingHandoffPolicy = .automatic, restoredAnchor: NowPlayingAnchor? = nil)
+swift.init NowPlayingPresence.init(decoding:): init(decoding data: Data) throws(NowPlayingCodingError)
+swift.init NowPlayingPresence.init(label:playing:): init(label: String, playing: Bool) throws(NowPlayingCodingError)
+swift.method NowPlayingAnchor.paused(nowMs:maximumProjectionMs:): func paused(nowMs: Int64, maximumProjectionMs: Int64) -> NowPlayingAnchor
+swift.method NowPlayingAnchor.projected(nowMs:clock:maximumProjectionMs:): func projected(nowMs: Int64, clock: NowPlayingClockOffset = .local, maximumProjectionMs: Int64) -> NowPlayingProjection
+swift.method NowPlayingAnchor.restamped(nowMs:clock:maximumProjectionMs:): func restamped(nowMs: Int64, clock: NowPlayingClockOffset = .local, maximumProjectionMs: Int64) -> NowPlayingAnchor
+swift.method NowPlayingSession.cancelRequest(): @MainActor func cancelRequest()
+swift.method NowPlayingSession.close(): @MainActor func close()
+swift.method NowPlayingSession.decline(_:): @MainActor func decline(_ member: String)
+swift.method NowPlayingSession.leave(): @MainActor func leave() async
+swift.method NowPlayingSession.pass(to:): @discardableResult @MainActor func pass(to member: String) -> Bool
+swift.method NowPlayingSession.requestPlayback(): @MainActor func requestPlayback() async -> NowPlayingRequestOutcome
+swift.method NowPlayingSession.retry(): @MainActor func retry() async
+swift.method NowPlayingSession.update(episode:show:positionMs:ratePermille:playing:): @MainActor func update(episode: String, show: String, positionMs: Int64, ratePermille: Int64 = 1_000, playing: Bool) throws(NowPlayingCodingError)
+swift.property NowPlayingAnchor.at: let at: Int64
+swift.property NowPlayingAnchor.encoded: var encoded: Data { get }
+swift.property NowPlayingAnchor.episode: let episode: String
+swift.property NowPlayingAnchor.playing: let playing: Bool
+swift.property NowPlayingAnchor.positionMs: let positionMs: Int64
+swift.property NowPlayingAnchor.ratePermille: let ratePermille: Int64
+swift.property NowPlayingAnchor.show: let show: String
+swift.property NowPlayingClockOffset.errorMs: var errorMs: Int64
+swift.property NowPlayingClockOffset.offsetMs: var offsetMs: Int64
+swift.property NowPlayingClockOffset.sampleAgeMs: var sampleAgeMs: Int64
+swift.property NowPlayingMember.id: let id: String
+swift.property NowPlayingMember.isThisDevice: let isThisDevice: Bool
+swift.property NowPlayingMember.label: let label: String?
+swift.property NowPlayingOptions.handoffPolicy: var handoffPolicy: NowPlayingHandoffPolicy
+swift.property NowPlayingOptions.label: var label: String
+swift.property NowPlayingOptions.maximumProjectionMs: var maximumProjectionMs: Int64?
+swift.property NowPlayingOptions.pingMs: var pingMs: Int64
+swift.property NowPlayingOptions.republishMs: var republishMs: Int64
+swift.property NowPlayingOptions.requestTimeoutMs: var requestTimeoutMs: Int64?
+swift.property NowPlayingOptions.restoredAnchor: var restoredAnchor: NowPlayingAnchor?
+swift.property NowPlayingPresence.encoded: var encoded: Data { get }
+swift.property NowPlayingPresence.label: let label: String
+swift.property NowPlayingPresence.playing: let playing: Bool
+swift.property NowPlayingProjection.ageMs: let ageMs: Int64
+swift.property NowPlayingProjection.capped: let capped: Bool
+swift.property NowPlayingProjection.elapsedMs: let elapsedMs: Int64
+swift.property NowPlayingProjection.errorBoundMs: let errorBoundMs: Int64
+swift.property NowPlayingProjection.positionMs: let positionMs: Int64
+swift.property NowPlayingSession.handoffPolicy: @MainActor var handoffPolicy: NowPlayingHandoffPolicy
+swift.property NowPlayingSession.member: nonisolated let member: String
+swift.property NowPlayingSession.onEvent: @MainActor var onEvent: (@MainActor (NowPlayingEvent) -> Void)? { get set }
+swift.property NowPlayingSession.state: @MainActor var state: NowPlayingState { get set }
+swift.property NowPlayingStart.anchor: let anchor: NowPlayingAnchor
+swift.property NowPlayingStart.positionMs: var positionMs: Int64 { get }
+swift.property NowPlayingStart.projection: let projection: NowPlayingProjection?
+swift.property NowPlayingStart.publisher: let publisher: String?
+swift.property NowPlayingStart.source: let source: Source
+swift.property NowPlayingState.asks: var asks: [NowPlayingMember]
+swift.property NowPlayingState.availability: var availability: NowPlayingAvailability
+swift.property NowPlayingState.gated: var gated: Bool
+swift.property NowPlayingState.holder: var holder: NowPlayingMember?
+swift.property NowPlayingState.holderLapsed: var holderLapsed: Bool
+swift.property NowPlayingState.isHolder: var isHolder: Bool
+swift.property NowPlayingState.lastAnchor: var lastAnchor: NowPlayingAnchor?
+swift.property NowPlayingState.localAnchor: var localAnchor: NowPlayingAnchor?
+swift.property NowPlayingState.requesting: var requesting: Bool
+swift.property NowPlayingState.writesPassiveProgress: var writesPassiveProgress: Bool { get }
+swift.struct NowPlayingAnchor: struct NowPlayingAnchor
+swift.struct NowPlayingClockOffset: struct NowPlayingClockOffset
+swift.struct NowPlayingMember: struct NowPlayingMember
+swift.struct NowPlayingOptions: struct NowPlayingOptions
+swift.struct NowPlayingPresence: struct NowPlayingPresence
+swift.struct NowPlayingProjection: struct NowPlayingProjection
+swift.struct NowPlayingStart: struct NowPlayingStart
+swift.struct NowPlayingState: struct NowPlayingState
+swift.type.method NowPlayingAnchor.defaultMaximumProjectionMs(holderTimeoutMs:): static func defaultMaximumProjectionMs(holderTimeoutMs: Int64 = 15_000) -> Int64
+swift.type.method NowPlayingSession.open(account:stream:claimsDatabase:options:): @MainActor static func open(account: ColophonHostAccount, stream: HomeStreamHost, claimsDatabase: URL, options: NowPlayingOptions) async -> NowPlayingSession
+swift.type.method NowPlayingSession.open(session:stream:claimsDatabase:options:): @MainActor static func open(session: ColophonSession, stream: HomeStreamHost, claimsDatabase: URL, options: NowPlayingOptions) async -> NowPlayingSession
+swift.type.property NowPlayingAnchor.maximumBytes: static let maximumBytes: Int
+swift.type.property NowPlayingAnchor.maximumInteger: static let maximumInteger: Int64
+swift.type.property NowPlayingClockOffset.local: static let local: NowPlayingClockOffset
+swift.type.property NowPlayingSession.cellName: nonisolated static let cellName: String
+swift.type.property NowPlayingSession.namespace: nonisolated static let namespace: String
+swift.type.property NowPlayingSession.storeName: nonisolated static let storeName: String
