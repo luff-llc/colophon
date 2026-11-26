@@ -1,10 +1,10 @@
 # Colophon 0.6 device admission: attempts, promotion and passkey-authorised adding
 
-**Status:** design draft, revision 2, 2026-11-26, for review. Proposed for Colophon 0.6. It
+**Status:** design draft, revision 3, 2026-11-26, for review. Proposed for Colophon 0.6. It
 changes no 0.5 wire object, verifier verdict, home route or path. It adds an SDK layer (admission
 attempts and account generations) to the Swift, Kotlin and JavaScript sessions, and it makes
-**two normative changes to the 0.5 host and core rules** (§4.9). Revision 2 follows a security
-design review. Its changes are listed in Appendix B.
+**two normative changes to the 0.5 host and core rules** (§4.9). Revisions 2 and 3 follow two
+security design reviews. Their changes are listed in Appendices B and C.
 
 **Goal.** Any device can add another device if a controller passkey of the account signs the
 approval. The new device can then register a passkey of its own. This removes two failures. A
@@ -36,6 +36,32 @@ rotated from any device, without that device sharing storage with a live account
      transaction, shows is not live and was never admitted.
 4. **Split the pending key-change work (#115)** (§7). Its pre-admission passkey parts move onto
    attempts. Its live removal and rotation parts are rebased and audited separately.
+
+### Scope: what this delivers for the goal
+
+**Admitting this device without another device.** This works when all of these hold:
+
+- the person holds a current, non-suspended WebAuthn controller passkey with `approve`;
+- that passkey has a vault slot of its own;
+- its signature comes from an origin its descriptor allows for authority signatures (§4.3);
+- the hosts are updated to 0.6;
+- the account's `memberRule` is `single`.
+
+That is sufficient. The same passkey admits a device from any other member device too (flow A).
+
+**Limits.**
+
+- Under `memberRule` `control`, the grant needs `threshold` control units, so cosigners may be
+  required.
+- A passkey that holds `approve` but not `control` cannot add a second passkey at once (§4.5). It
+  can admit the device, and a control key adds the passkey later.
+- Accounts are not covered when the first passkey lacks `approve`, lacks a slot of its own, or is
+  registered without the app's platform origin in `authorityOrigins`. Such an account first needs
+  a transition, signed by its existing control keys:
+  - to add or grant a suitable passkey with a slot;
+  - or to update the passkey's `authorityOrigins` (§8.4, the descriptor row).
+
+  If the account has only recovery keys, it first needs a recovery transition (§4.8).
 
 ---
 
@@ -150,13 +176,17 @@ logic found one class of fault each time:
   generation is kept. There is no automatic switch back, and never a switch to a generation whose
   member is revoked in the latest verified history.
 - **R6. Durable attempts; non-cancellable signing.** Cancellation never causes cleanup. Signing a
-  grant and recording `granted` form one non-cancellable unit. A signed grant is never discarded
-  without the person's action.
-- **R7. Fencing.** Every mutation of admission state is a versioned compare-and-set. Every process
-  using a generation holds a lease checked against the store's epoch. A stale process cannot
-  promote, delete or sign.
-- **R8. Late approval is bounded and reconciled.** Approvals are signed within a bounded time of
-  pairing. A joining device keeps a disclosed request's keys until the request is reconciled.
+  grant and recording `granted` form one non-cancellable unit. A grant for the attempt's own
+  member, signed on this device, is never discarded without the person's action. §4.9's delivery
+  bound applies only to grants of another device's request.
+- **R7. Fencing.** Every mutation of admission state is a versioned compare-and-set. No signature
+  is stored or sent until a compare-and-set made after signing confirms that the epoch is
+  unchanged (§3.6). Leases are judged by observation on monotonic clocks, never by wall-clock
+  expiry.
+- **R8. Late approval is bounded, then tombstoned.** Approvals are signed within a bounded time of
+  pairing. A joining device keeps a disclosed request's keys for exactly 24 hours and 600 s after
+  it last disclosed it, then deletes them and keeps a permanent tombstone. Withdrawal is advisory
+  to conforming hosts. A late grant is detected, and a controller revokes it (§3.9).
 - **R9. Bound inputs.** An attempt binds its account, home, invite checkpoint `(seq, head)`,
   member key and exact request bytes at creation. Nothing regenerates them.
 - **R10. No destructive API for apps.** No call takes a path, an alias or a generation to delete.
@@ -206,6 +236,32 @@ row that fails its MAC or cannot be parsed is **damaged**. Every operation on it
 fails with `storageDamaged`, and nothing is deleted. What the MAC does and does not protect is in
 §5.
 
+**Creating the root key when several processes race.** Creation must never replace a key another
+process made.
+
+- **Apple.** `SecItemAdd` is atomic: a duplicate fails, and the loser reads the winner's item.
+- **Browser.** `add` fails with `ConstraintError`, and the loser reads the existing key.
+- **Android.** Keystore key generation **replaces** an existing alias silently. Two processes that
+  both see "absent" and generate under one alias would each believe they hold the key. So the
+  root key is never generated under a fixed alias:
+  1. Each contender generates its own candidate `<N>.root.<c>`, where `c` is 128 random bits in
+     hex.
+  2. It then tries to insert the `root` row naming `c` in one store transaction. The row is MACed
+     under that candidate key.
+  3. The insert that commits wins. A loser deletes only its own candidate alias, by its own `c`,
+     and adopts the winner's.
+
+  The alias is derived from the validated `c` in the `root` row, under the same regex rule as
+  generation IDs. The sweeper deletes a `<N>.root.*` alias only if it is one this process created
+  and lost with.
+
+**Host-supplied root keys (JVM and Node).** The guarantee here rests entirely on the host. A
+host-supplied `RootKey` MUST be held where code that can write the store's files cannot read it.
+For example: an operating-system key store, a hardware token, or a key file under another user
+or another protection domain. It MUST NOT be a file beside the store or under the account root.
+Without that isolation, the MAC detects corruption only. **On these platforms the SDK then gives
+no protection against local tampering**, and the document claims none.
+
 ### 3.3 Derived names
 
 Given the root `R` (its canonical, link-free path or database name), the app namespace `N` and the
@@ -235,8 +291,9 @@ row holds a path, alias or item name.
 | `manifest` | `g` | account, origin (`join`, `recovery`, `selfApproval`, `legacy`), created, member ID | **immutable** after insert, except that the member ID is set once; kept until the generation's deletion completes (D7) |
 | `attempt` | `g` | state (§3.5), version, home, checkpoint, request digest, disclosed-at, grant `(seq, digest)`, signer key ID, passkeys added, expires | versioned compare-and-set |
 | `pointer` | account | live `g`, previous `[g]`, **epoch** (raised by every promotion, retirement and repair), high-water `(seq, digest)` | versioned compare-and-set |
-| `lease` | (`g`, holder) | epoch seen, expires | renewed by its holder; an expired lease is ignored |
-| `withdrawn` | (account, member ID) | request digest, disclosed-at, withdrawn-at, keys deleted, reconciled (`granted`, `revoked`, `none`) | versioned; outlives the generation |
+| `lease` | (`g`, holder) | boot ID, incarnation, heartbeat counter, epoch seen | the holder increments the counter; observers judge expiry (§3.6) |
+| `outbox` | (`g`, digest) | kind, epoch, delivered | inserted only by the post-sign compare-and-set (§3.6); removed once its effect is stored and, if it is to be published, receipted |
+| `withdrawn` | (account, member ID) | request digest, disclosed-at, withdrawn-at, keys-deleted-at, late grant seen `(seq, digest)`, revoked | versioned; a **permanent tombstone**, removed only with the account root |
 
 ### 3.5 Attempt lifecycle
 
@@ -250,7 +307,7 @@ row holds a path, alias or item name.
 | `granted` | a grant of this member from its exact request is in the generation's verified history | P0 (§3.7): `admitted`; displaced (§8.6): `verified` |
 | `admitted` | P0 holds | the promotion transaction removes the row; the manifest stays |
 | `superseded` | another generation was promoted for this account | the person revokes the member (§3.10), then `discarding`; or keeps it |
-| `withdrawn` | a disclosed request was abandoned; its keys are kept until reconciled (§3.9) | reconciled, then `discarding` |
+| `withdrawn` | a disclosed request was abandoned; files deleted; keys kept for the bound in §3.9 | a grant seen within the bound: the person chooses between reviving it as `granted` and revoking it; the bound passes: keys deleted, then `discarding`. The `withdrawn` tombstone row stays. |
 | `awaitingActivation` | a recovery transition is pending (W11) | final: `verified`; vetoed: `requested` |
 | `discarding` | tombstone: deletion under way (§3.8) | rows removed |
 
@@ -260,16 +317,48 @@ under the epoch the caller holds.
 
 ### 3.6 Leases and fencing
 
-- A process (the app, an extension, a background task) that opens a session on a generation takes
-  a lease, recording the epoch. It renews the lease while open; a lease lasts 60 s.
-- Before each durable step, the session reads the epoch, which is one indexed read. The durable
-  steps are signing an authority entry or record, a medium batch commit, and a saved-state write.
-  If the epoch has moved and its generation is no longer live, the session stops with
-  `superseded` and writes nothing more.
-- A write already past its check when the epoch moves lands in the now-previous generation. That
-  generation is not deleted while any lease on it is unexpired, nor until its outbox is flushed
-  or found unflushable (§3.10). Such a write is lost only if its process stayed suspended past
-  the lease and the write was never published. It is reported, never silent.
+A check made before signing cannot fence a signature. A process can read the epoch, be
+suspended, and resume after a promotion has committed, still holding an open Keychain or Keystore
+key. So the fence sits **after** signing, at the one point where a signature can take effect.
+
+- **The outbox commit.** A signature can take effect in three ways: stored in a medium, sent to a
+  home, or handed to another device. Before any of these, the session commits one store
+  transaction that:
+  1. compares the `pointer` epoch with the epoch it opened under;
+  2. compares the generation's `attempt` or session version;
+  3. inserts an `outbox` row: generation, digest, kind, epoch.
+
+  This covers authority entries, transitions, vetoes, `suspend`, record headers and live values,
+  seed transfers, and links. If the compare fails, the signature is **discarded**, its bytes are
+  wiped, and nothing is stored or sent.
+- **The commit is the point of effect.** A medium write and a publish happen only for a committed
+  `outbox` row, and roll forward from it. Promotion is a transaction on the same store, so the two
+  are totally ordered:
+  - an outbox row committed before promotion is the old generation's work, done while it was
+    live, and is kept (§3.10);
+  - one attempted after promotion fails its compare.
+- **Calls are exempt.** Calls carry their own window and replay protection (§12.3), and they
+  authenticate reads. They need no outbox row.
+- **Leases.** A lease holder is identified by a boot ID, a process incarnation and a random value:
+  `kern.bootsessionuuid` on Apple, `/proc/sys/kernel/random/boot_id` on Android and Linux, and a
+  value in session storage per page or worker in browsers.
+  - The holder increments a heartbeat counter in its `lease` row every 15 s of its own monotonic
+    time.
+  - An observer treats a lease as expired only after 60 s of the **observer's own monotonic
+    clock** with no change to the counter, or when the boot ID differs from its own.
+  - Wall-clock time is never compared.
+  - Leases only delay deletion. The outbox commit, not the lease, fences signing.
+- **App extensions.** An extension is an ordinary lease holder, and it makes the same outbox commit
+  in the shared App Group store. The system can suspend an extension indefinitely. While it is
+  suspended its heartbeat stops, its lease expires by observation, and the previous generation may
+  be retired. When it resumes, it opens with the old epoch:
+  - its next outbox compare fails, so any signature it made is discarded;
+  - its medium writes are refused, because every write needs a committed outbox row;
+  - deletion renames the directory before removing it, so any open handle reaches only unlinked
+    files.
+- **What is still lost.** Nothing signed is ever lost unnoticed. Only local work that never
+  reached an outbox commit is lost, such as an edit typed in a suspended extension, and the
+  session reports it as `superseded`.
 - Promotion and deletion are single store transactions that compare the pointer and attempt
   versions. There is no lock for another process to steal.
 
@@ -279,7 +368,7 @@ under the epoch the caller holds.
 
 - the generation's own store verifies, from seq 1, a history holding a current grant of its member
   from its exact request;
-- durable home state confirms the grant: fresh heads covering it from the homes Q4 settles, read
+- durable home state confirms the grant: fresh heads covering it from the homes Q3 settles, read
   with the member's own key (the `fetchHistory` acceptance);
 - if a generation is already live for the account, the attempt's verified tip is not behind
   `pointer.high-water`, or promotion fails with `refused:rollback`.
@@ -295,8 +384,9 @@ fall back from `ATOMIC_MOVE`, and they fail on a failed directory sync.
 | --- | --- |
 | V1 | Close the attempt's own sessions. Complete committed medium batches. Sync the generation's tree. |
 | V2 | Open a fresh engine on the generation from storage alone, with the member identity. Verify the history again: `ok`, and the grant current. |
-| V3 | Open the member keys by derived name with an **open-only** call. Sign a fresh challenge and verify it against the member signing point in the grant. ECDH with the agreement key, and open one epoch share sealed to it when the grant has `records`. |
-| V4 | Open the device secret. Save and reload sealed state (§17.2) once. |
+| V3 | Open the member keys by derived name with an **open-only** call, through **the exact key factory the live session will use**: the same Keychain access group, `kSecAttrAccessible` class and access-control flags; on Android, the same `KeystorePresence`/user-authentication and StrongBox settings. Sign a fresh challenge and verify it against the member signing point in the grant. ECDH with the agreement key, and open one epoch share sealed to it when the grant has `records`. |
+| V4 | Open the device secret through the live factory. Save and reload sealed state (§17.2) once. |
+| V4a | **Check the live access path, not only this foreground process.** Read back each key's and secret's attributes (Apple: access group, accessibility class, access control; Android: `KeyInfo` user-authentication requirement, validity window, StrongBox) and compare them with what `SessionTemplate` declares: background sync, and, where the app has an extension, the extension's access group. Refuse promotion (`unsupported`) when a declared path cannot open the keys without the person, for example `WhenUnlocked` items for a background sync, or an item outside the extension's group. Where the platform lets the SDK run the extension's or the background task's open (a test hook, an app-declared probe), run it. A prompt shown during validation never counts as proof for a path that cannot show one. |
 | V5 | Shared medium only (iCloud or shared-folder locations): write the generation's request and history there with write-if-absent and a same-bytes check (as `ColophonJoin.store`), then sync. These files are immutable and belong to this member, so writing them before the commit is safe. |
 | **C** | **One store transaction:** compare the pointer and attempt versions; set `pointer.live = g`; append the old live generation to `previous`; raise `epoch` by 1; set `high-water`; remove the attempt row; mark the account's other attempts `superseded`. It reports success only when durable. |
 | P1 | Open the session on the new generation under the new epoch. |
@@ -311,7 +401,7 @@ three choices:
 - start a recovery into a new attempt;
 - switch back to the previous generation. This is offered only when its member is current in the
   latest verified history any of this account's generations holds, and only by the person's
-  choice. Switching back is itself a promotion, through V1 to V4.
+  choice. Switching back is itself a promotion, through V1 to V4a.
 
 **Crash table.**
 
@@ -327,7 +417,7 @@ three choices:
 
 | Step | Action | Crash after it |
 | --- | --- | --- |
-| D1 | In one transaction: the `manifest` and `attempt` rows of `g` authenticate; `g` is neither `pointer.live` nor in `previous` (except for retirement, §3.10); no unexpired lease on `g`; its state is eligible (§3.5). Set it to `discarding`, version + 1. | nothing deleted; resumes |
+| D1 | In one transaction: the `manifest` and `attempt` rows of `g` authenticate; `g` is neither `pointer.live` nor in `previous` (except for retirement, §3.10); no unexpired lease on `g` (judged as §3.6 says); no undelivered `outbox` row of `g` (for a retirement: or its member can no longer sign, or the retention has passed, §3.10); its state is eligible (§3.5). Set it to `discarding`, version + 1. | nothing deleted; resumes |
 | D2 | **Content check.** Open `g`'s medium read-only. If it holds a grant of the manifest's member, stop with `storageDamaged`, unless this is a retirement or a `superseded` or `withdrawn` attempt whose reconciliation is recorded. A store rolled back to an older copy therefore cannot get an admitted generation deleted (§5). | resumes at D2 |
 | D3 | Delete the derived member keys (a missing one is a no-op). | resumes |
 | D4 | Delete the derived device-secret entry. | resumes |
@@ -352,32 +442,79 @@ finds without a manifest is reported by `diagnostics()` and left alone.
 - A home serves no withdrawal, and a non-member cannot sign one.
 - Any `approve` controller can revoke a member (§9.5, single rule).
 
+**Discarding is not cancelling.** Nothing in 0.5 lets a joining device cancel its request. A
+grant of it remains valid authority whenever it is published, and every verifier accepts it.
+Withdrawal is therefore **advisory**. Conforming hosts honour it, by the two rules below. A buggy
+or dishonest approver can still publish a grant weeks later. The design bounds what conforming
+hosts do, then detects and repairs what others do.
+
 **Design.**
 
 1. **Bound when an approval is signed** (core rule, normative, §4.9). The core refuses to finish a
-   grant, or a `grant` component, that consumes a confirmed pairing more than 600 s after its
-   confirmation (on the scan path, after the scan). The pairing is never persisted.
-2. **Bound when an approval is delivered** (host rule, normative, §4.9). A host whose signed grant
-   no home has accepted 24 hours after its `issued` does not publish it. It discards the grant,
-   which as an unpublished local entry no home holds, and tells the person.
-3. **The joining device keeps disclosed keys.** Abandoning a `disclosed` attempt makes it
-   `withdrawn`. Its records and private files are deleted. Its member keys and its `withdrawn` row
-   are kept.
-   - The device reconciles in the background with the member key, without a passkey prompt: it
-     reads the history at the home with `colophon.history.read`, which the home answers
-     `refused:revoked` until a grant names the key (§13.4).
-   - If a grant appears, the person is told and offered "open it" (the attempt is revived as
-     `granted`) or "remove it" (one controller signature revokes the member).
-   - After 24 hours plus 600 s from the last disclosure with no grant, both bounds have passed for
-     honest approvers. The keys are then deleted, and the row is kept with `keys deleted`.
-4. **Later orphans are detected.** Any later generation of the account on this device checks the
-   `withdrawn` rows against every history it verifies. A grant of a withdrawn member, which only a
-   non-conforming approver can produce, is shown with a one-tap revoke.
+   grant, or a `grant` component, that consumes a confirmed pairing more than 600 s after the
+   pairing was confirmed (on the scan path, after the scan). The pairing is never persisted.
+2. **Bound when an approval is delivered** (host rule, normative, §4.9). An approving host does not
+   publish a grant **of another device's request** that no home has accepted 24 hours after its
+   `issued`. It discards the grant, which as an unpublished local entry no home holds, and tells the
+   person. A device's grant of its own request is exempt (R6): its keys exist, so no orphan can
+   arise.
+3. **Bounded key retention, then a tombstone.** Abandoning a `disclosed` attempt makes it
+   `withdrawn`. Its records and private files are deleted at once. Its member keys are kept for
+   **exactly 24 hours and 600 s after the last disclosure**, the longest a conforming approver can
+   take under rules 1 and 2.
+   - **During that time**, the device checks in the background with the member key, with no passkey
+     prompt. It reads the history at the home with `colophon.history.read`, which the home answers
+     `refused:revoked` until a grant names the key (§13.4). If a grant appears, the person chooses
+     between "Open it", which revives the attempt as `granted`, and "Remove it", which revokes the
+     member (item 5).
+   - **When the bound passes**, the keys are deleted (§3.8 D3) and the generation is discarded. The
+     `withdrawn` row stays as a **permanent tombstone**: member ID, request digest, the times, and
+     `keys-deleted-at`.
+4. **A late grant after the tombstone.** Only a non-conforming approver can produce one.
+   - **Effect.** The device does not become a member in practice. Nothing holds the member's private
+     keys, so no one can sign as it or open the shares sealed to it. On the reference platforms
+     those keys were non-exportable. A software key copied before deletion is the exception, and
+     the rest of this item still applies to it.
+   - **Detection.** Any device that verifies the account's history detects the grant:
+     - a later generation of this account on this device, against its tombstones;
+     - every member and controller device, through the new-grant notice (Q4).
+   - **Shown as.** "A device that withdrew its request was added later", with the approver's key
+     ID and label.
+5. **Revoking the orphan member.** A revocation (§9.5) by any current controller holding `approve`
+   (single rule), or `control` units meeting `threshold` when `memberRule` is `control` (control
+   rule), with UV when the controller has `verification`. The member cannot revoke itself.
+   - **Its own key.** It signs only its own `endSessions` (§9.7), and a deleted key cannot sign even
+     that.
+   - **What the SDK does.** On every device that holds such a controller, it shows a one-tap
+     "Remove" that builds the `revoke` with `kept` covering everything. Where the approver key
+     belongs to the person, the revocation counts as the §17.5 removal follow-up.
 
-**Verdict.** Two normative host and core rules fix this. No verifier, wire or home change is
-needed. An expiry that every verifier enforces would be a verifier rule: 0.5 and 0.6 readers would
-disagree unless the rule were gated by a layout raise (§8.2). It also gains nothing against a key
-holder, who could grant any key anyway. It is not proposed.
+**Option not adopted: a binding withdrawal.** This is an owner decision (Q5). Withdrawal could be
+made binding on every verifier, so that a deliberate discard is cryptographically final. There
+are two ways:
+
+- an expiry inside the request (for example `notAfter`), with verifiers refusing a grant whose
+  `issued` is later;
+- a withdrawal object signed by the request's member key, which homes store and serve, and which
+  verifiers apply by refusing a later grant of that request.
+
+Either one costs all of the following:
+
+- **A format change.** Requests have closed field sets (§2.3), and a new object kind is unknown to
+  0.5 readers, so either is `malformed` there.
+- **A layout raise per account.** Authority must agree across readers, so either needs a raise
+  (§8.2): a pending transition with consent that stops every 0.5 reader of the account once it is
+  final (§1). Every device of the account must upgrade first.
+- **Home work.** For the withdrawal object, a new home route and storage, with history-read rules
+  for it.
+- **Verification and tests.** A new verifier rule and conformance vectors.
+- **Clock judgement.** With `notAfter`, each verifier judges `issued` against the request's
+  `notAfter`. Approvers can backdate `issued` only within §8.1's ordering, so the bound is
+  approximate.
+
+Against that cost, the option removes only the residual of items 4 and 5: an approver that ignores
+the rules. Such an approver controls `approve` and can admit any key it likes anyway.
+**Recommendation:** do not adopt it for 0.6; reconsider at the next layout raise.
 
 ### 3.10 An attempt over a live account, and retirement
 
@@ -397,13 +534,32 @@ approved the new member. It never revokes silently.
 
 ### 3.11 Migration and bootstrap
 
-| Store | Root key | Meaning | Action |
-| --- | --- | --- | --- |
-| absent | absent | never migrated | bootstrap when the app asks |
-| absent | present, or a store with no `root` row | interrupted bootstrap, or a lost store | `storageDamaged`; nothing deleted; `repair()` |
-| present, rows authenticate | present | normal | – |
-| present, a row fails its MAC | present | damaged | `storageDamaged` for that account |
-| present | absent or unusable | root key lost | see "Root key lost" below |
+**Bootstrap order.** Bootstrap runs in a fixed order, so every interrupted state can be told apart:
+
+1. Create the store, with a single unauthenticated `bootstrap` row, `{"state":"creating"}`. This
+   row authorises nothing.
+2. Create the root key, by the race rules in §3.2.
+3. Insert the MACed `root` row, in one transaction. Once it commits, the store is bootstrapped.
+
+**Generation storage** means any of these:
+
+- a `R/generations/` or `R/trash/` entry;
+- a Keystore alias `<N>.g.*`;
+- a Keychain item `g.*` under service `N`;
+- an IndexedDB database `<R>.*`.
+
+The SDK probes for each of them before treating a root as new.
+
+| Store | Root key | Generation storage | Meaning | Action |
+| --- | --- | --- | --- | --- |
+| absent | absent | none | **first run, never migrated** | bootstrap when the app asks |
+| absent | absent | present | a reset or deletion that left generations behind | **`storageDamaged`, never treated as a fresh install**; nothing deleted; `repair()` |
+| absent | present | any | the store was lost | `storageDamaged`; `repair()` |
+| `bootstrap` row only | absent, or one candidate | none | interrupted at step 2 or 3 | resume the bootstrap |
+| `bootstrap` row only | any | present | inconsistent | `storageDamaged`; `repair()` |
+| `root` row, rows authenticate | present | any | normal | – |
+| a row fails its MAC | present | any | damaged | `storageDamaged` for that account |
+| `root` row | absent or unusable | any | root key lost | see "Root key lost" below |
 
 **Bootstrapping a 0.5.x install.** `ColophonAccounts.adoptLegacy(configuration)` adopts it, since
 only the app can say a configuration is a live account. It is one store transaction that creates
@@ -414,8 +570,9 @@ three rows:
 - a `pointer` naming that manifest.
 
 A `legacy` generation's locations are the app's own. The SDK records a fingerprint of them, and it
-**never deletes, moves or writes outside them**. If the root key exists but the transaction did not
-commit, the next `adoptLegacy` runs again.
+**never deletes, moves or writes outside them**. `adoptLegacy` runs after the bootstrap, as its own
+transaction. If it did not commit, the app calls it again. An app-provided legacy location never
+counts as generation storage, because only the app can vouch for it.
 
 **Upgrading with a 0.5.7 attempt in flight.** The SDK cannot see attempts the app built itself.
 The app adopts only the configuration it holds as live, and a grant that its earlier flow stored
@@ -545,7 +702,7 @@ deprecated wrappers.
 | F6 | Approval takes an attempt handle with bound request bytes. Nothing regenerates a request. |
 | F7 | No marker grants deletion. Deletion needs an authenticated manifest, a never-live check in one transaction, and the content check. |
 | F8 | Expiry discards the derived names of one non-live generation. No inventory is needed. |
-| F9 | The pairing and delivery bounds (§3.9 items 1 and 2), retained disclosed keys (item 3) and orphan detection (item 4). Until the §4.9 rules ship, it is fixed only for grants signed on this device. |
+| F9 | Bounded for conforming approvers by the pairing and delivery rules (§3.9 items 1 and 2). A grant arriving within the key-retention bound can be used (item 3). After that, a permanent tombstone, notices and a controller's revocation handle it (items 4 and 5). It is **not prevented** for a non-conforming approver; only the binding option (Q5) would prevent that. Until the §4.9 rules ship, the bounds hold only for grants signed by updated hosts. |
 
 ---
 
@@ -693,11 +850,13 @@ rules, proposed for the 0.5 revision that 0.6 references.
  - **Submitting.** Hosts MUST submit every transition, veto and `suspend` to every current home
    directly, and retry until each has receipted it or 300 s have passed; and publish entries to the
    primary home and then every home.
-+- **Late approvals.** A host holding a signed `grant` that no home has accepted 24 hours after its
-+  `issued` MUST NOT publish it; it discards it and tells the person the device was not added.
-+  A joining host keeps the keys of a request it has shown or paired until 24 hours and 600 s after
-+  it last did, or until it has seen a grant of it, and offers to revoke a grant of a request it
-+  withdrew.
++- **Late approvals.** A host holding a signed `grant` of a request made by **another** device,
++  that no home has accepted 24 hours after its `issued`, MUST NOT publish it; it discards it and
++  tells the person the device was not added. A joining host that withdraws a request it has
++  shown or paired SHOULD keep its member keys for 24 hours and 600 s after it last did so, and
++  offer the person a grant of it seen in that time; it then deletes them and keeps a record of the
++  withdrawal. Withdrawal does not bind other hosts or verifiers: a grant of a withdrawn request
++  stays valid, and a host that sees one MUST show it with the offer to revoke the member (§9.5).
 ```
 
 ---
@@ -709,7 +868,7 @@ UV, the thief can sign grants, which are immediate under `single`. With a `contr
 can also add an `approve` passkey. That is 0.5's existing exposure for any device holding such a
 passkey. Flow A additionally needs a confirmed pairing within 600 s. `control` additions stay
 pending and can be vetoed, unless the thief holds every control unit. Other devices should be
-notified of new grants and immediate `keyring` entries (Q5).
+notified of new grants and immediate `keyring` entries (Q4).
 
 **A buggy app or tampered files.** No SDK call takes a deletion target, targets are derived, and
 links are refused. A record therefore cannot steer deletion onto live names, or onto anything
@@ -739,9 +898,10 @@ unchanged. After C the new one is live and has already been validated, and the p
 kept for repair.
 
 **Stale processes and extensions.** An old epoch cannot promote or delete, because both are
-compare-and-set operations. Once the session has checked the epoch, it cannot sign (§3.6). What
-remains is a write that passed its check from a process suspended past its lease. It lands in the
-retained previous generation, and it is lost only if never published.
+compare-and-set operations. A process can still produce a signature after C, using a key it already
+had open. That signature takes effect only through an outbox commit, which compares the epoch and
+fails, so it is discarded (§3.6). Unsigned local work in a suspended process can be lost; it is
+reported as `superseded`.
 
 **A replayed or stale attempt.**
 
@@ -859,16 +1019,52 @@ The states in §3.11 hold, and so does the D2 check.
 **Key loss after C.** Keys deleted between C and P1. The account enters repair, the previous
 generation is kept, and there is no switch back to a revoked member.
 
-**Stale writers.** A second process and an app extension each hold leases on the previous
-generation and write after C. Signing is refused after the epoch check. A write that slipped
-through is retained and reported.
+**Stale signers.** In each of these, no signature made under the old epoch is ever stored, sent
+or handed over. Only signatures that reached an outbox commit before C exist.
+
+- A process and an app extension each read the epoch, open the member key, and are paused by a
+  hook just before signing. C commits, then they resume and sign. The post-sign compare fails and
+  the signature is discarded.
+- The same pause placed between signing and the outbox commit, between the outbox commit and the
+  medium write, and between the medium write and publishing.
+- An extension suspended past its lease while its generation is retired, then resumed.
+
+**Lease timing.**
+
+- Clocks are stepped forward and back by hours, without a reboot. No lease expires early and none
+  lives for ever.
+- A reboot is simulated by a new boot ID, which expires every lease from before it.
+- A frozen holder's lease expires after 60 s of the observer's monotonic clock.
+
+**Root key races.**
+
+- Two or more processes bootstrap one root at once, on Android, Apple and in a browser. Exactly one
+  `root` row and one root key survive. On Android, the losing candidate aliases are deleted and no
+  winner's alias is ever replaced.
+- Generation storage present while the store and key are absent: `storageDamaged`, never a fresh
+  install.
+- On the JVM and Node, a host `RootKey` that lives beside the store is reported by
+  `diagnostics()`, and the documentation says what protection is lost.
+
+**Live access path.** Promotion is followed by a background task open and, where the app has
+one, an extension open, both with the screen locked.
+
+- Keys made with `WhenUnlocked`, outside the extension's access group, or with a user-presence
+  gate the background path cannot satisfy must be refused at V4a, before C.
+- Android user-authentication keys, and a lock screen added or removed between V3 and P1. If this
+  invalidates the keys, the account enters repair.
 
 **Late approval.**
 
 - Sign at 599 s, and at 601 s, which is refused.
-- Publish at 23 h, and at 25 h, which is dropped.
-- A withdrawn request granted, then resolved by "open" and by "revoke".
-- An orphan found by a later generation.
+- Publish another device's grant at 23 h, and at 25 h, which is dropped. A self-approval grant
+  unpublished at 25 h is still kept.
+- A withdrawn request granted within the retention bound, then resolved by "Open it" and by
+  "Remove it".
+- Keys deleted at exactly 24 h + 600 s.
+- A grant published a week after the tombstone. It is detected by a later generation on this
+  device and by other devices' notices, and revoked by a controller under `single`. Under
+  `control` it needs `threshold` units.
 
 **Migration.**
 
@@ -974,23 +1170,27 @@ W13.
 
 ### 8.2 For the owner
 
-- **Q1. How long is a replaced generation kept?** *Recommendation:* until the new generation is
-  `Ready`, the old outbox is flushed or found unflushable, and no lease remains. At most 30 days,
-  and never while repair is open.
-- **Q2. Attempt limits, with late approval now bounded.** *Recommendation:*
-  - four live attempts per root;
-  - one passkey ceremony at a time;
-  - attempts that were neither disclosed nor signed expire after 24 hours;
-  - disclosed attempts follow §3.9.
-- **Q3. Does the SDK always require UV?** *Recommendation:* yes, as SDK policy, for every grant,
-  `keyring` entry and slot unlock, even for a controller without `verification`.
+- **Q1. Retention and resource limits.** *Recommendation:*
+  - A replaced generation is kept until the new one is `Ready`, its outbox is delivered or
+    unflushable, and no lease remains. It is kept at most 30 days, and never while repair is open.
+  - Four live attempts per root, and one passkey ceremony at a time.
+  - Attempts that were neither disclosed nor signed expire after 24 hours.
+  - A withdrawn request's keys are kept for exactly 24 hours and 600 s.
+  - Tombstones are permanent. They take about 200 bytes each, and the SDK warns once more than 1,000
+    exist.
+- **Q2. Is user verification always required?** *Recommendation:* yes, as SDK policy, for every
+  grant, `keyring` entry and slot unlock, even for a controller without `verification`.
   `PasskeyAuthenticator` already requires it.
-- **Q4. What home state confirms a grant?** *Recommendation:* fresh heads covering the grant from
+- **Q3. The home confirmation quorum.** *Recommendation:* fresh heads covering the grant from
   `headQuorum` distinct current homes, the quorum §12.3 uses for calls. A head from the primary
   home alone is not enough.
-- **Q5. Which notices do other devices get?** *Recommendation:* every new grant, every immediate
-  `keyring` entry and every grant of a withdrawn request, shown at the next sync beside §17.5's
-  activations, with revoke one tap away, as a 0.6 SHOULD.
+- **Q4. Notices to other devices.** *Recommendation:* every new grant, every immediate `keyring`
+  entry and every grant of a tombstoned request, shown at the next sync beside §17.5's
+  activations, with revoke one tap away. Make it a 0.6 SHOULD.
+- **Q5. Is a cryptographically binding discard worth a layout raise?** (§3.9, "Option not
+  adopted") *Recommendation:* not for 0.6. It costs a format change, a per-account layout raise that
+  stops 0.5 readers, home storage and new vectors. It only removes the risk from approvers that
+  ignore conforming rules, and those already hold `approve`.
 
 ---
 
@@ -1030,7 +1230,8 @@ W13.
 - **Promotion.** It requires a durability capability and the V1 to V5 validation, and it has a
   repair state. It never switches back to a revoked member.
 - **Late approval (F9).** Two normative rules, retained disclosed keys, reconciliation and orphan
-  detection.
+  detection. Revision 3 corrects this: key retention is bounded and followed by a tombstone, and
+  withdrawal is advisory (Appendix C).
 - **Fencing.** An epoch fences processes and extensions, and every transition is a
   compare-and-set.
 - **Spec and rules.** The spec clarifications are now normative. The rules, full sets and the
@@ -1041,3 +1242,30 @@ W13.
 - **#115.** Split, rebased and audited separately.
 - **Tests.** The plan now covers the attacks and boundaries.
 - **Open questions.** Each is either recorded as decided or left for the owner.
+
+## Appendix C: changes in revision 3
+
+- **Scope.** A section near the top states what is sufficient to admit a device without another
+  device, and what is not covered.
+- **Signing is fenced after signing (§3.6).** A post-sign compare-and-set in the store commits an
+  `outbox` row. A signature made under a stale epoch is discarded and never stored, sent or handed
+  over. Leases are judged on the observer's monotonic clock, with a boot ID and process
+  incarnation. App extensions are covered explicitly.
+- **Late approval made consistent (§3.9, §4.9, R6, R8).**
+  - Withdrawal is advisory.
+  - Key retention is bounded at exactly 24 h + 600 s, followed by a permanent tombstone.
+  - It is stated what a late grant does and who revokes it, under which rule.
+  - The delivery bound applies only to grants of another device's request.
+  - A binding withdrawal is described as an option not adopted, with its cost.
+- **Root key (§3.2, §3.11).**
+  - Android creation uses a candidate alias per contender, so no process ever replaces a winner's
+    key.
+  - Bootstrap has a fixed order, and surviving generation storage is never treated as a fresh
+    install.
+  - Host-supplied keys on the JVM and Node carry a mandatory isolation requirement, and without it
+    the SDK claims no tamper protection there.
+- **Validation of the live access path (V3, V4, V4a).** It uses the same factories, access groups,
+  accessibility classes and authentication gates as the live session, including background and
+  extension paths.
+- **Tests.** New tests cover all of the above.
+- **Owner questions.** Restated as five.
