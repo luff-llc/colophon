@@ -1916,7 +1916,13 @@ verified as §8.7 says (the home's key in the state before the activation, fresh
   that drafts a home's head calls the home's guard first and signs only what it passes (in the
   reference core `HomeState::guard_head` returns a token that `prepare_head` requires, so a head
   cannot be prepared for signing without it). A home keeps only what the guard needs: the latest
-  `issued` and the digests at seqs not yet settled by a final activation.
+  `issued` and the digests at seqs not yet settled by a final activation. A reader need not
+  keep every envelope of one claim: of several heads by one home over one `(seq, digest)` that
+  verify under that home's key and are not ahead of its clock, it MAY keep only the one with the
+  earliest `issued`, the one with the latest and the one with the lowest body digest, and drop the
+  others. It keeps every other head and drops no claim, so coverage, the witnesses of `final`
+  (§8.7), the evidence of forks and equivocation (§8.6) and freshness (§12.3 step 4) are judged as
+  before; its head marks, which detect rollback, are kept apart from the heads it holds (§17.2).
 
 ### 13.4 Who may read the history
 

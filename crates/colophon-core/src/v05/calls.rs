@@ -261,6 +261,106 @@ pub struct AccountView {
 /// Most head envelopes a view holds (more homes than §13.1's 8 can't be current).
 pub const MAX_VIEW_HEADS: usize = 64;
 
+/// The largest head envelope a view takes: twice the head body bound and 4 KiB.
+pub const MAX_HEAD_ENVELOPE: usize = bounds::HEAD_BODY * 2 + 4_096;
+
+/// The heads a view is built from (0.5.7). An envelope over [`MAX_HEAD_ENVELOPE`] is no head
+/// and is left out (it used to fail the whole view). When the rest fit in [`MAX_VIEW_HEADS`]
+/// they are all taken; the account keeps its held heads well below it (`prune_heads`).
+/// Otherwise each is judged as §12.3 step 4 judges it ([`verify_head`] over the held history,
+/// the current unexpired homes and the clock), one envelope per signed body, and they are taken
+/// in this order until the bound: the newest head that contradicts the held history (one fork
+/// head is enough for `refused:fork`); for each current home its best head, accepted or ahead of the held history
+/// (fresh first, then the highest seq, the newest: the coverage step 4 counts); then the other
+/// accepted, ahead or fork heads, fresh first, by seq and `issued`, newest first; then
+/// everything else. The bound is applied only to the view built from held objects, never to
+/// what a home sends.
+fn view_heads(heads: &[Vec<u8>], st: &State, now_ms: i64) -> Vec<Vec<u8>> {
+    let sized: Vec<&Vec<u8>> = heads.iter().filter(|h| h.len() <= MAX_HEAD_ENVELOPE).collect();
+    if sized.len() <= MAX_VIEW_HEADS {
+        return sized.into_iter().cloned().collect();
+    }
+    let homes: Vec<(String, Vec<u8>)> = st
+        .current_homes()
+        .iter()
+        .filter(|m| m.expires_ms.is_none_or(|e| now_ms <= e))
+        .map(|m| (m.request.member_id(), m.request.signing.clone()))
+        .collect();
+    let ctx = HeadContext {
+        account: st.account(),
+        history: st.history(),
+        homes: &homes,
+        now_ms,
+    };
+    // (class, fresh, seq, issued, by, bytes): 0 fork, 2 accepted or ahead, 3 the rest; each
+    // current home's best of class 2 becomes class 1. Each
+    // envelope is judged first; of several envelopes over one signed body only the best judged
+    // one is kept, so an invalid re-encoding never stands in for a genuine head.
+    let max_age = st.keyring().policy.head_max_age();
+    let mut order: Vec<(u8, bool, u64, i64, String, &Vec<u8>)> = Vec::new();
+    for b in sized {
+        let Ok(raw) = RawEnvelope::parse(b, bounds::HEAD_BODY, false) else {
+            order.push((3, false, 0, i64::MIN, String::new(), b));
+            continue;
+        };
+        let v = &raw.value;
+        let by = v.get("by").and_then(Value::as_str).unwrap_or_default().to_string();
+        let seq = v.get("authority").and_then(|a| a.get("seq")).and_then(Value::as_u64).unwrap_or(0);
+        let issued = v
+            .get("issued")
+            .and_then(Value::as_str)
+            .and_then(super::encoding::parse_date)
+            .unwrap_or(i64::MIN);
+        let (class, fresh) = match verify_head(b, ctx) {
+            Err(Failure::Refused(Reason::Fork)) => (0, false),
+            Err(Failure::Unavailable(why)) if why == "history not held up to the head" => {
+                // Ahead of the held history: judged as a signer judges it, fresh or not.
+                let fresh = verify_head_ahead(b, ctx).is_ok_and(|h| h.fresh(now_ms, max_age));
+                (2, fresh)
+            }
+            Ok(h) => (2, h.fresh(now_ms, max_age)),
+            Err(_) => (3, false),
+        };
+        order.push((class, fresh, seq, issued, by, b));
+    }
+    // One envelope per signed body: the best judged.
+    order.sort_by(|a, b| (a.0, std::cmp::Reverse(a.1)).cmp(&(b.0, std::cmp::Reverse(b.1))));
+    let mut bodies: BTreeSet<Vec<u8>> = BTreeSet::new();
+    order.retain(|o| {
+        RawEnvelope::parse(o.5, bounds::HEAD_BODY, false).map_or(true, |raw| bodies.insert(raw.body))
+    });
+    // Each current home's best head, accepted or ahead (fresh first, then the highest seq, the
+    // newest), comes right after the fork evidence, so no home can crowd out another's.
+    let mut best: BTreeMap<String, (bool, u64, i64, usize)> = BTreeMap::new();
+    for (i, (class, fresh, seq, issued, by, _)) in order.iter().enumerate() {
+        if *class == 2 && best.get(by).is_none_or(|(f, s, t, _)| (*fresh, *seq, *issued) > (*f, *s, *t)) {
+            best.insert(by.clone(), (*fresh, *seq, *issued, i));
+        }
+    }
+    for (_, _, _, i) in best.values() {
+        order[*i].0 = 1;
+    }
+    // One fork head is enough for step 4 to refuse: the newest stays first, the others compete
+    // with the accepted heads, so no home can crowd out the others with fork heads either.
+    let newest_fork = order
+        .iter()
+        .enumerate()
+        .filter(|(_, o)| o.0 == 0)
+        .max_by_key(|(_, o)| (o.3, o.5))
+        .map(|(i, _)| i);
+    for (i, o) in order.iter_mut().enumerate() {
+        if o.0 == 0 && Some(i) != newest_fork {
+            o.0 = 2;
+        }
+    }
+    order.sort_by(|a, b| {
+        (a.0, std::cmp::Reverse((a.1, a.2, a.3, a.5))).cmp(&(b.0, std::cmp::Reverse((b.1, b.2, b.3, b.5))))
+    });
+    let mut chosen: Vec<Vec<u8>> = order.into_iter().take(MAX_VIEW_HEADS).map(|o| o.5.clone()).collect();
+    chosen.sort();
+    chosen
+}
+
 impl AccountView {
     /// Build a view from the history verifier's verdict over `objects` (§8, §17.2), at the
     /// verifier's clock. Statuses come from the verdict: controllers added by an activation with
@@ -373,7 +473,7 @@ impl AccountView {
             policies: st.policies.clone(),
             controllers,
             members,
-            heads: objects.heads.clone(),
+            heads: view_heads(&objects.heads, st, now_ms),
             vouched_fork: matches!(verdict.stop, Some(Stop::Fork { .. })),
             principal_points: st
                 .points
@@ -426,9 +526,7 @@ impl AccountView {
         }
         require(v.heads.len() <= MAX_VIEW_HEADS, "too many head envelopes")?;
         require(
-            v.heads
-                .iter()
-                .all(|h| h.len() <= bounds::HEAD_BODY * 2 + 4_096),
+            v.heads.iter().all(|h| h.len() <= MAX_HEAD_ENVELOPE),
             "head envelope exceeds its bound",
         )?;
         Ok(Self {

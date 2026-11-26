@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.7 — 2026-11-25
+
+No format change. The spec stays Colophon 0.5, revision 18; §13.3 now states which heads a reader keeps (changes §A.15, row 242). The fix is in the SDKs alone; no Home change is needed.
+
+- **Fixed: a device that synced for days stopped syncing** with `malformed: too many head envelopes`. Every pass fetches the home's head, and a head over an unchanged history is a new envelope (a later `issued`). The account held every head envelope it was ever given, in memory and in its saved verifier state, so after about 64 passes it could build no call view and every exchange failed. iOS and Android devices were both affected. Once it holds more than 32 heads, the account now keeps at most three per claim (spec §13.3). A claim is one home over one `(seq, digest)`. Of the heads of a claim that are canonical, verify under that home's key and are no more than 60 s ahead of the clock, it keeps the earliest `issued`, the latest, and the lowest body digest (the witness a `final` takes). Every other head is kept, and no claim is dropped, so coverage, `final` witnesses, fork and equivocation evidence, and freshness are judged as before. Head marks, which detect rollback, are stored apart and are unchanged. When heads are dropped, the verdict and the saved checkpoint are computed again from the retained objects. A view built from more than 64 held heads takes, in order: fork evidence; each current home's highest verified head; the other verified heads, newest first. **A device that already holds too many heads heals when its account opens**, from its saved state or its store: no rejoin, and no Home change needed. Its next saved state holds only the kept heads.
+
 ## 0.5.6 — 2026-11-25
 
 No format or reader-rule change. The spec stays Colophon 0.5, revision 18.
