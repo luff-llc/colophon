@@ -294,3 +294,28 @@ steps = [
 overrides = [
   "in-flight #115 allowed for v0.5.7",
 ]
+
+[[entry]]
+id = "2026-11-26T05:31:51Z/open-pr/97ef88f260/732e3a58"
+at = "2026-11-26T05:31:51Z"
+by = "Xinchen Liu"
+action = "open-pr"
+product = "colophon"
+ref = "release/0.5"
+commit = "97ef88f260c96d0a4bd6db42377339fb8e324760"
+tree = "cb191510a346a26a9529e6516fcda3d59de20304"
+result = "ok"
+prev = "4dc7819973e47b6bedc50fb91eed03a636f679cab94a191ee638a20e22361208"
+receipt = "732e3a58e361b964cd25f446091e0c15"
+note = "forward merge of release/0.5 into main"
+command = [
+  "open a pull request merging release/0.5 into main: gh pr create --repo github.com/luff-llc/colophon --base main --head release/0.5 --title Merge release/0.5 forward into main --body Brings the commits shipped on release/0.5 into main, as of 97ef88f260c96d0a4bd6db42377339fb8e324760. Release lines merge forward only; main is never merged into release/0.5.\n\nOpened by edition.",
+]
+steps = [
+  "tag 97ef88f260 as v0.5.7: exit 0",
+  "publish v0.5.7: exit 0",
+  "open a pull request merging release/0.5 into main: exit 0",
+]
+overrides = [
+  "in-flight #115 allowed for v0.5.7",
+]
