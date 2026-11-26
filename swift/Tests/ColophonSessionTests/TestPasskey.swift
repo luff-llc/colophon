@@ -19,8 +19,11 @@ final class TestPasskey: AsyncKeyProvider, @unchecked Sendable {
     var supportsPRF: Bool { true }
     static func prfOutput(_ salt: Data) -> SecretBytes { SecretBytes(copying: SHA256.hash(data: Data("test-prf".utf8) + salt)) }
     func assert(challenge: String, prfSalt: Data?) async throws -> KeyAssertion? {
+        try assert(from: "https://\(rp)", challenge: challenge, prfSalt: prfSalt)
+    }
+    func assert(from origin: String, challenge: String, prfSalt: Data?) throws -> KeyAssertion {
         lock.withLock { assertions += 1; if prfSalt != nil { prfRequests += 1 } }
-        let clientData = Data("{\"challenge\":\"\(challenge)\",\"origin\":\"https://\(rp)\",\"type\":\"webauthn.get\"}".utf8)
+        let clientData = Data("{\"challenge\":\"\(challenge)\",\"origin\":\"\(origin)\",\"type\":\"webauthn.get\"}".utf8)
         var authData = Data(SHA256.hash(data: Data(rp.utf8)))
         authData.append(contentsOf: [0x05, 0, 0, 0, 0])
         let signature = try key.signature(for: authData + Data(SHA256.hash(data: clientData))).derRepresentation
@@ -33,5 +36,19 @@ final class TestPasskey: AsyncKeyProvider, @unchecked Sendable {
     func keyDescriptor() async throws -> KeyDescriptorView {
         KeyDescriptorView(form: .webauthn, signing: key.publicKey.x963Representation, agreement: nil, rp: rp, credential: credential,
                           origins: [], authorityOrigins: [])
+    }
+}
+
+/// A `TestPasskey` as a device that does not know its public key sees it (a discoverable get): every get answers with
+/// the passkey's credential, made from `origin`, for the relying party the authenticator claims (`claimedRP`).
+struct TestPasskeyAuthenticator: PasskeyAuthenticator {
+    let passkey: TestPasskey
+    var origin: String? = nil
+    var claimedRP: String? = nil
+    var rp: String { claimedRP ?? passkey.rp }
+    func get(challenge: String, credential: Data?) async throws -> PasskeyGet {
+        if let credential, credential != passkey.credential { throw KeyProviderError.credentialMissing }
+        let a = try passkey.assert(from: origin ?? "https://\(passkey.rp)", challenge: challenge, prfSalt: nil)
+        return PasskeyGet(credential: passkey.credential, signature: a.signature, authenticatorData: a.authenticatorData, clientData: a.clientData)
     }
 }

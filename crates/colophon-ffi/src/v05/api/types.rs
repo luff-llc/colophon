@@ -808,6 +808,30 @@ record! {
     }
 }
 record! {
+    /// A current WebAuthn controller (present, final, not suspended) of a history read with a
+    /// passkey before admission: its ID, label, roles, descriptor as the history names it, UV
+    /// requirement, and whether a slot of the current vault is held by it alone.
+    pub struct PasskeyControllerView {
+        pub id: String,
+        pub label: String,
+        pub roles: Vec<ControllerRole>,
+        pub roles_raw: Vec<String>,
+        pub key: KeyDescriptorView,
+        pub verification: bool,
+        pub own_slot: bool,
+    }
+}
+record! {
+    /// A history a device that is not a member yet read with a passkey (0.5.7): the entries to
+    /// store, the controller whose passkey signed the reads, and every current WebAuthn
+    /// controller at the tip (the signer included).
+    pub struct PasskeyHistoryView {
+        pub stores: Vec<Store>,
+        pub signer: PasskeyControllerView,
+        pub controllers: Vec<PasskeyControllerView>,
+    }
+}
+record! {
     /// One page of a home's history: entries as canonical bytes, and whether more follow.
     pub struct HistoryPage {
         pub entries: Vec<ByteString>,

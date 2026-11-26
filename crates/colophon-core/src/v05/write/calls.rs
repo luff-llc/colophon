@@ -491,8 +491,30 @@ impl PreparedHistoryRead {
 /// checks (§14). The same body the account's `begin_home_call` builds for that request, with the
 /// `asOf` given instead of read from a held history.
 pub fn prepare_history_read(spec: &HistoryReadSpec<'_>) -> Result<PreparedHistoryRead> {
+    history_read(spec, false)
+}
+
+/// The same history read signed by a WebAuthn controller instead (Colophon 0.5.7): `signing` is
+/// the passkey's signing point, the signer is `Controller(key_id(signing))`, and the step carries
+/// the WebAuthn challenge, so [`finish_history_read`] needs an assertion. For a device that is not
+/// a member yet and holds only the account ID and a home's base (§12.3 "asking first", §13.4): a
+/// home serves the history to a current controller holding `approve`, `control` or `recover`.
+/// With no entry given out of band, `asOf` is the genesis, `(1, account ID)` (§5.1: the account ID
+/// is the genesis body's digest).
+pub fn prepare_passkey_history_read(spec: &HistoryReadSpec<'_>) -> Result<PreparedHistoryRead> {
+    history_read(spec, true)
+}
+
+fn history_read(spec: &HistoryReadSpec<'_>, controller: bool) -> Result<PreparedHistoryRead> {
     use crate::v05::calls::{home_call_args, home_path_serves_history, HISTORY_READ};
-    point(spec.signing, "member.signing")?;
+    point(
+        spec.signing,
+        if controller {
+            "controller.signing"
+        } else {
+            "member.signing"
+        },
+    )?;
     let base = spec.audience.trim_end_matches('/');
     require(
         base.starts_with("https://") || base.starts_with("http://"),
@@ -509,7 +531,11 @@ pub fn prepare_history_read(spec: &HistoryReadSpec<'_>) -> Result<PreparedHistor
     let call = prepare_call(&CallSpec {
         account: spec.account,
         as_of: spec.as_of,
-        signer: CallSignerSpec::Member(key_id(spec.signing)),
+        signer: if controller {
+            CallSignerSpec::Controller(key_id(spec.signing))
+        } else {
+            CallSignerSpec::Member(key_id(spec.signing))
+        },
         key: spec.signing,
         links: &[],
         audience: base,
@@ -517,7 +543,7 @@ pub fn prepare_history_read(spec: &HistoryReadSpec<'_>) -> Result<PreparedHistor
         args: home_call_args("GET", spec.path, EMPTY_BODY_SHA256),
         request_id: spec.request_id,
         created: spec.created,
-        webauthn: false,
+        webauthn: controller,
     })?;
     Ok(PreparedHistoryRead {
         call,

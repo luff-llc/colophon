@@ -891,7 +891,11 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_colophon_ffi_checksum_func_account_history_page_path(
     ): Int
+    external fun uniffi_colophon_ffi_checksum_func_account_passkey_points(
+    ): Int
     external fun uniffi_colophon_ffi_checksum_func_account_verify_at_head(
+    ): Int
+    external fun uniffi_colophon_ffi_checksum_func_account_verify_with_passkey(
     ): Int
     external fun uniffi_colophon_ffi_checksum_func_session_clock_sample(
     ): Int
@@ -1583,6 +1587,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_colophon_ffi_checksum_constructor_accounthistoryread_prepare(
     ): Int
+    external fun uniffi_colophon_ffi_checksum_constructor_accounthistoryread_prepare_passkey(
+    ): Int
     external fun uniffi_colophon_ffi_checksum_constructor_accountmove_begin_upgrade(
     ): Int
     external fun uniffi_colophon_ffi_checksum_constructor_accountpairing_existing_receive_commitment(
@@ -2201,6 +2207,8 @@ internal object UniffiLib {
     ): Unit
     external fun uniffi_colophon_ffi_fn_constructor_accounthistoryread_prepare(`spec`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
+    external fun uniffi_colophon_ffi_fn_constructor_accounthistoryread_prepare_passkey(`spec`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
     external fun uniffi_colophon_ffi_fn_method_accounthistoryread_finish(`ptr`: Long,`signature`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_colophon_ffi_fn_method_accounthistoryread_step(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -2527,7 +2535,11 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_colophon_ffi_fn_func_account_history_page_path(`after`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_colophon_ffi_fn_func_account_passkey_points(`body`: RustBuffer.ByValue,`rp`: RustBuffer.ByValue,`authenticatorData`: RustBuffer.ByValue,`clientData`: RustBuffer.ByValue,`signature`: RustBuffer.ByValue,`keyId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_colophon_ffi_fn_func_account_verify_at_head(`account`: RustBuffer.ByValue,`seq`: Long,`head`: RustBuffer.ByValue,`member`: RustBuffer.ByValue,`request`: RustBuffer.ByValue,`base`: RustBuffer.ByValue,`signedHead`: RustBuffer.ByValue,`entries`: RustBuffer.ByValue,`nowMs`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_colophon_ffi_fn_func_account_verify_with_passkey(`account`: RustBuffer.ByValue,`seq`: Long,`head`: RustBuffer.ByValue,`signing`: RustBuffer.ByValue,`base`: RustBuffer.ByValue,`signedHead`: RustBuffer.ByValue,`entries`: RustBuffer.ByValue,`nowMs`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_colophon_ffi_fn_func_session_clock_sample(`now`: Long,`t`: Long,`echo`: Long,`hold`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -2730,7 +2742,13 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_colophon_ffi_checksum_func_account_history_page_path() and 0xFFFF) != 51785) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_colophon_ffi_checksum_func_account_passkey_points() and 0xFFFF) != 34570) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_colophon_ffi_checksum_func_account_verify_at_head() and 0xFFFF) != 18815) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_colophon_ffi_checksum_func_account_verify_with_passkey() and 0xFFFF) != 25943) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_colophon_ffi_checksum_func_session_clock_sample() and 0xFFFF) != 26025) {
@@ -3459,10 +3477,10 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_colophon_ffi_checksum_method_accountlivewrite_step() and 0xFFFF) != 52482) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_colophon_ffi_checksum_method_accounthistoryread_finish() and 0xFFFF) != 28928) {
+    if ((lib.uniffi_colophon_ffi_checksum_method_accounthistoryread_finish() and 0xFFFF) != 33385) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_colophon_ffi_checksum_method_accounthistoryread_step() and 0xFFFF) != 5970) {
+    if ((lib.uniffi_colophon_ffi_checksum_method_accounthistoryread_step() and 0xFFFF) != 33827) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_colophon_ffi_checksum_method_accountmove_finish() and 0xFFFF) != 60405) {
@@ -3766,6 +3784,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_colophon_ffi_checksum_constructor_accounthistoryread_prepare() and 0xFFFF) != 18393) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_colophon_ffi_checksum_constructor_accounthistoryread_prepare_passkey() and 0xFFFF) != 37138) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_colophon_ffi_checksum_constructor_accountmove_begin_upgrade() and 0xFFFF) != 39020) {
@@ -8924,13 +8945,15 @@ public object FfiConverterTypeAccountEngine: FfiConverter<AccountEngine, Long> {
 public interface AccountHistoryReadInterface {
     
     /**
-     * Finish with the member's signature: the envelope (parsed, possession checked), the URL it
-     * is bound to and the `Authorization` header value (`Colophon <base64url envelope>`).
+     * Finish with the signature (the member's raw signature, or the passkey's DER signature with
+     * its assertion): the envelope (parsed, possession checked), the URL it is bound to and the
+     * `Authorization` header value (`Colophon <base64url envelope>`).
      */
     fun `finish`(`signature`: Signature): HistoryReadCall
     
     /**
-     * The one step the member key signs (raw).
+     * The one step to sign: raw by the member key, or, for a passkey read, a WebAuthn get over
+     * its `challenge` by the passkey.
      */
     fun `step`(): AccountSigningStep
     
@@ -9044,8 +9067,9 @@ open class AccountHistoryRead: Disposable, AutoCloseable, AccountHistoryReadInte
 
     
     /**
-     * Finish with the member's signature: the envelope (parsed, possession checked), the URL it
-     * is bound to and the `Authorization` header value (`Colophon <base64url envelope>`).
+     * Finish with the signature (the member's raw signature, or the passkey's DER signature with
+     * its assertion): the envelope (parsed, possession checked), the URL it is bound to and the
+     * `Authorization` header value (`Colophon <base64url envelope>`).
      */
     @Throws(AccountException::class)override fun `finish`(`signature`: Signature): HistoryReadCall {
             return FfiConverterTypeHistoryReadCall.lift(
@@ -9063,7 +9087,8 @@ open class AccountHistoryRead: Disposable, AutoCloseable, AccountHistoryReadInte
 
     
     /**
-     * The one step the member key signs (raw).
+     * The one step to sign: raw by the member key, or, for a passkey read, a WebAuthn get over
+     * its `challenge` by the passkey.
      */
     @Throws(AccountException::class)override fun `step`(): AccountSigningStep {
             return FfiConverterTypeAccountSigningStep.lift(
@@ -9093,6 +9118,24 @@ open class AccountHistoryRead: Disposable, AutoCloseable, AccountHistoryReadInte
             return FfiConverterTypeAccountHistoryRead.lift(
     uniffiRustCallWithError(AccountException) { _status ->
     UniffiLib.uniffi_colophon_ffi_fn_constructor_accounthistoryread_prepare(
+    
+        
+        FfiConverterTypeHistoryReadSpec.lower(`spec`),_status)
+}
+    )
+    }
+    
+
+        
+    /**
+     * Prepare a history read signed by a WebAuthn controller (0.5.7): `spec.signing` is the
+     * passkey's point, the signer is that controller, and the step asks for an assertion. With
+     * no entry given, `asOf` is `(1, account)`.
+     */
+    @Throws(AccountException::class) fun `preparePasskey`(`spec`: HistoryReadSpec): AccountHistoryRead {
+            return FfiConverterTypeAccountHistoryRead.lift(
+    uniffiRustCallWithError(AccountException) { _status ->
+    UniffiLib.uniffi_colophon_ffi_fn_constructor_accounthistoryread_prepare_passkey(
     
         
         FfiConverterTypeHistoryReadSpec.lower(`spec`),_status)
@@ -23370,6 +23413,122 @@ public object FfiConverterTypePairingReveal: FfiConverterRustBuffer<PairingRevea
 
 
 /**
+ * A current WebAuthn controller (present, final, not suspended) of a history read with a
+ * passkey before admission: its ID, label, roles, descriptor as the history names it, UV
+ * requirement, and whether a slot of the current vault is held by it alone.
+ */
+data class PasskeyControllerView (
+    val `id`: kotlin.String
+    , 
+    val `label`: kotlin.String
+    , 
+    val `roles`: List<ControllerRole>
+    , 
+    val `rolesRaw`: List<kotlin.String>
+    , 
+    val `key`: KeyDescriptorView
+    , 
+    val `verification`: kotlin.Boolean
+    , 
+    val `ownSlot`: kotlin.Boolean
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypePasskeyControllerView: FfiConverterRustBuffer<PasskeyControllerView> {
+    override fun read(buf: ByteBuffer): PasskeyControllerView {
+        return PasskeyControllerView(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterSequenceTypeControllerRole.read(buf),
+            FfiConverterSequenceString.read(buf),
+            FfiConverterTypeKeyDescriptorView.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: PasskeyControllerView) = (
+            FfiConverterString.allocationSize(value.`id`) +
+            FfiConverterString.allocationSize(value.`label`) +
+            FfiConverterSequenceTypeControllerRole.allocationSize(value.`roles`) +
+            FfiConverterSequenceString.allocationSize(value.`rolesRaw`) +
+            FfiConverterTypeKeyDescriptorView.allocationSize(value.`key`) +
+            FfiConverterBoolean.allocationSize(value.`verification`) +
+            FfiConverterBoolean.allocationSize(value.`ownSlot`)
+    )
+
+    override fun write(value: PasskeyControllerView, buf: ByteBuffer) {
+            FfiConverterString.write(value.`id`, buf)
+            FfiConverterString.write(value.`label`, buf)
+            FfiConverterSequenceTypeControllerRole.write(value.`roles`, buf)
+            FfiConverterSequenceString.write(value.`rolesRaw`, buf)
+            FfiConverterTypeKeyDescriptorView.write(value.`key`, buf)
+            FfiConverterBoolean.write(value.`verification`, buf)
+            FfiConverterBoolean.write(value.`ownSlot`, buf)
+    }
+}
+
+
+
+/**
+ * A history a device that is not a member yet read with a passkey (0.5.7): the entries to
+ * store, the controller whose passkey signed the reads, and every current WebAuthn
+ * controller at the tip (the signer included).
+ */
+data class PasskeyHistoryView (
+    val `stores`: List<Store>
+    , 
+    val `signer`: PasskeyControllerView
+    , 
+    val `controllers`: List<PasskeyControllerView>
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypePasskeyHistoryView: FfiConverterRustBuffer<PasskeyHistoryView> {
+    override fun read(buf: ByteBuffer): PasskeyHistoryView {
+        return PasskeyHistoryView(
+            FfiConverterSequenceTypeStore.read(buf),
+            FfiConverterTypePasskeyControllerView.read(buf),
+            FfiConverterSequenceTypePasskeyControllerView.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: PasskeyHistoryView) = (
+            FfiConverterSequenceTypeStore.allocationSize(value.`stores`) +
+            FfiConverterTypePasskeyControllerView.allocationSize(value.`signer`) +
+            FfiConverterSequenceTypePasskeyControllerView.allocationSize(value.`controllers`)
+    )
+
+    override fun write(value: PasskeyHistoryView, buf: ByteBuffer) {
+            FfiConverterSequenceTypeStore.write(value.`stores`, buf)
+            FfiConverterTypePasskeyControllerView.write(value.`signer`, buf)
+            FfiConverterSequenceTypePasskeyControllerView.write(value.`controllers`, buf)
+    }
+}
+
+
+
+/**
  * A pending transition, as §17.5 says it must be shown.
  */
 data class Pending (
@@ -33205,6 +33364,34 @@ public object FfiConverterSequenceTypeOwed: FfiConverterRustBuffer<List<Owed>> {
 /**
  * @suppress
  */
+public object FfiConverterSequenceTypePasskeyControllerView: FfiConverterRustBuffer<List<PasskeyControllerView>> {
+    override fun read(buf: ByteBuffer): List<PasskeyControllerView> {
+        val len = buf.getInt()
+        return List<PasskeyControllerView>(len) {
+            FfiConverterTypePasskeyControllerView.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<PasskeyControllerView>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypePasskeyControllerView.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<PasskeyControllerView>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypePasskeyControllerView.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterSequenceTypePending: FfiConverterRustBuffer<List<Pending>> {
     override fun read(buf: ByteBuffer): List<Pending> {
         val len = buf.getInt()
@@ -34781,6 +34968,32 @@ public object FfiConverterMapStringByteArray: FfiConverterRustBuffer<Map<kotlin.
     
 
         /**
+         * The signing points a passkey assertion over `body` could have been made by, for `rp`
+         * (core `v05::join::passkey_points`): the assertion must pass §4.3 steps 1 to 3 for `rp`
+         * (`webauthn.get`, the challenge of `body`, the relying-party hash, UP) and step 5's DER
+         * grammar, else `badSignature`. With `key_id`, exactly the one point with that key ID (an
+         * invite names the owner's passkey by key ID), else `badSignature`. A discoverable get
+         * returns no public key: a device learns the passkey's point this way before it signs a call
+         * naming it. A point is only a candidate until a verified history names it.
+         */
+    @Throws(AccountException::class) fun `accountPasskeyPoints`(`body`: kotlin.ByteArray, `rp`: kotlin.String, `authenticatorData`: kotlin.ByteArray, `clientData`: kotlin.ByteArray, `signature`: kotlin.ByteArray, `keyId`: kotlin.String?): List<ByteString> {
+            return FfiConverterSequenceTypeByteString.lift(
+    uniffiRustCallWithError(AccountException) { _status ->
+    UniffiLib.uniffi_colophon_ffi_fn_func_account_passkey_points(
+    
+        
+        FfiConverterByteArray.lower(`body`),
+        FfiConverterString.lower(`rp`),
+        FfiConverterByteArray.lower(`authenticatorData`),
+        FfiConverterByteArray.lower(`clientData`),
+        FfiConverterByteArray.lower(`signature`),
+        FfiConverterOptionalString.lower(`keyId`),_status)
+}
+    )
+    }
+    
+
+        /**
          * Accept a fetched history at an invite's head (core `v05::join::verify_at_head`): `ok`
          * verdict, the history of `account`, every entry on the verified branch, the branch at least
          * `seq` long with entry `seq` of body digest `head`, `member` (the key ID that signed the reads)
@@ -34805,6 +35018,33 @@ public object FfiConverterMapStringByteArray: FfiConverterRustBuffer<Map<kotlin.
         FfiConverterString.lower(`head`),
         FfiConverterString.lower(`member`),
         FfiConverterByteArray.lower(`request`),
+        FfiConverterString.lower(`base`),
+        FfiConverterByteArray.lower(`signedHead`),
+        FfiConverterSequenceTypeByteString.lower(`entries`),
+        FfiConverterLong.lower(`nowMs`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Accept a history a device that is not a member yet read with a passkey's
+         * `colophon.history.read` calls (core `v05::join::verify_with_passkey`, 0.5.7): every check of
+         * `account_verify_at_head` up to the home's fresh signed head at `base`, at `(seq, head)`
+         * (an invite's head, or `(1, account)`: the genesis), then the signer, a current WebAuthn
+         * controller at the tip whose signing point is `signing` (else `refused:revoked`). Returns
+         * the entries to store, the signer and every current WebAuthn controller.
+         */
+    @Throws(AccountException::class) fun `accountVerifyWithPasskey`(`account`: kotlin.String, `seq`: kotlin.ULong, `head`: kotlin.String, `signing`: kotlin.ByteArray, `base`: kotlin.String, `signedHead`: kotlin.ByteArray, `entries`: List<ByteString>, `nowMs`: kotlin.Long): PasskeyHistoryView {
+            return FfiConverterTypePasskeyHistoryView.lift(
+    uniffiRustCallWithError(AccountException) { _status ->
+    UniffiLib.uniffi_colophon_ffi_fn_func_account_verify_with_passkey(
+    
+        
+        FfiConverterString.lower(`account`),
+        FfiConverterULong.lower(`seq`),
+        FfiConverterString.lower(`head`),
+        FfiConverterByteArray.lower(`signing`),
         FfiConverterString.lower(`base`),
         FfiConverterByteArray.lower(`signedHead`),
         FfiConverterSequenceTypeByteString.lower(`entries`),

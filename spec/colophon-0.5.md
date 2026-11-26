@@ -390,7 +390,10 @@ follow §18 set `authorityOrigins` at registration to their authority-ceremony o
 
 **Call origins.** A verifier of a **call** signed by a WebAuthn controller MUST also refuse it
 unless the origin is one of the call-ceremony origins it has configured for that controller's
-`rp` (§12.3 step 5).
+`rp` (§12.3 step 5). A home's call-ceremony origins for `colophon.history.read` at its own
+endpoints include, without configuration, every origin the controller's descriptor allows for
+authority signatures (above), under its state at S and its latest held state alike: an origin
+that can sign the entries that add a member grants nothing new by reading the history.
 
 **Where the verifier is does not matter.** A verifier MUST NOT compare `origin`, `rp` or
 anything else with its own origin, host or deployment. A service MAY refuse a call for local
@@ -1668,6 +1671,9 @@ an entry beyond its own history (the signer is behind that home):
 - A member that holds no history of the account (§13.4, asking first) may sign
   `colophon.history.read`, and nothing else, with its own key and no links, naming as `asOf` the
   entry it was given. The home, which holds the history, decides.
+- Likewise a host that holds no history and asks with a WebAuthn controller's key (§13.4, "A
+  device with a passkey") may sign `colophon.history.read`, and nothing else, as that
+  controller, naming as `asOf` the entry it was given or the genesis `(1, account ID)`.
 
 A signer that holds its own revocation, expiry, ended session or removal builds nothing. A
 verifier, and so a home, never applies this leniency: it fetches first (step 4).
@@ -1916,7 +1922,13 @@ verified as §8.7 says (the home's key in the state before the activation, fresh
   that drafts a home's head calls the home's guard first and signs only what it passes (in the
   reference core `HomeState::guard_head` returns a token that `prepare_head` requires, so a head
   cannot be prepared for signing without it). A home keeps only what the guard needs: the latest
-  `issued` and the digests at seqs not yet settled by a final activation.
+  `issued` and the digests at seqs not yet settled by a final activation. A reader need not
+  keep every envelope of one claim: of several heads by one home over one `(seq, digest)` that
+  verify under that home's key and are not ahead of its clock, it MAY keep only the one with the
+  earliest `issued`, the one with the latest and the one with the lowest body digest, and drop the
+  others. It keeps every other head and drops no claim, so coverage, the witnesses of `final`
+  (§8.7), the evidence of forks and equivocation (§8.6) and freshness (§12.3 step 4) are judged as
+  before; its head marks, which detect rollback, are kept apart from the heads it holds (§17.2).
 
 ### 13.4 Who may read the history
 
@@ -1954,6 +1966,26 @@ current home whose endpoints name that base. Until then it treats nothing that h
 account's. Before a grant names its key the home answers `refused:revoked`, as it does after a
 revocation; the device waits on that answer and treats it as final only when a history it has
 verified revokes it.
+
+**A device with a passkey** that is a controller of the account MAY read the history before it
+is a member, with `colophon.history.read` calls signed by that controller (§12.3): to recover the
+account from a home, or to approve its own request (§9.1). It holds out of band only the account
+ID, a home's base and, when it has one, an entry of the history; with none it names the genesis,
+`(1, account ID)`, which every history of the account holds (§5.1). A WebAuthn get returns no
+public key, so the device may learn the controller's signing point from an assertion over a
+challenge it chose (ECDSA public key recovery; a key ID given out of band, as an invite gives the
+owner's, picks one point, and otherwise the next assertion does). Such a point is a candidate
+only. The device MUST verify what it fetches from seq 1 against the account ID, and MUST accept it
+only if it contains the entry it named, ends at a fresh head signed by a current home whose
+endpoints name that base, and names that point as a current controller (present, final, not
+suspended, §8.5). A home answers a key that is no current controller `refused:revoked`, as it
+answers a member no grant names, so the answer does not tell a stranger whether a key is or was a
+controller. Each page is its own call: the person is asked once per page. Such a device holds no
+earlier state, so, as for any device asking first, one home that signs fresh heads over a history
+it cut short can show it a controller that a later entry removed; an entry it then signs on that
+tip is a fork other readers refuse (§8.6). At `headQuorum` above 1 it SHOULD also verify a fresh
+head of each other current home, fetched from that home's own base, before it signs anything on
+the history.
 
 ### 13.5 Receipt
 

@@ -9,10 +9,12 @@ use colophon_core::v05::encoding::{encode_base64url, is_digest};
 use colophon_core::v05::ids::AccountId;
 use colophon_core::v05::join::{
     check_history_size, current_webauthn_controller, history_page_path, parse_history_page,
-    verify_at_head, AtHead, MAX_ENTRY_BYTES,
+    passkey_points, verify_at_head, verify_with_passkey, AtHead, PasskeyController,
+    MAX_ENTRY_BYTES,
 };
 use colophon_core::v05::write::calls::{
-    finish_history_read, prepare_history_read, HistoryReadSpec as CoreSpec, PreparedHistoryRead,
+    finish_history_read, prepare_history_read, prepare_passkey_history_read,
+    HistoryReadSpec as CoreSpec, PreparedHistoryRead,
 };
 
 type R<T> = Result<T, AccountError>;
@@ -101,6 +103,62 @@ free_fn! {
     }
 }
 
+free_fn! {
+    /// The signing points a passkey assertion over `body` could have been made by, for `rp`
+    /// (core `v05::join::passkey_points`): the assertion must pass §4.3 steps 1 to 3 for `rp`
+    /// (`webauthn.get`, the challenge of `body`, the relying-party hash, UP) and step 5's DER
+    /// grammar, else `badSignature`. With `key_id`, exactly the one point with that key ID (an
+    /// invite names the owner's passkey by key ID), else `badSignature`. A discoverable get
+    /// returns no public key: a device learns the passkey's point this way before it signs a call
+    /// naming it. A point is only a candidate until a verified history names it.
+    pub fn account_passkey_points(body: Vec<u8>, rp: String, authenticator_data: Vec<u8>, client_data: Vec<u8>, signature: Vec<u8>, key_id: Option<String>) -> Result<Vec<ByteString>, AccountError> {
+        guard(|| {
+            bytes_ok(&body, 4_096, "a challenge body")?;
+            bytes_ok(rp.as_bytes(), 253, "an rp")?;
+            bytes_ok(&authenticator_data, 1 << 16, "authenticator data")?;
+            bytes_ok(&client_data, 1 << 16, "client data")?;
+            bytes_ok(&signature, 80, "a DER signature")?;
+            Ok(passkey_points(&body, &rp, &authenticator_data, &client_data, &signature, key_id.as_deref())?
+                .into_iter()
+                .map(|bytes| ByteString { bytes })
+                .collect())
+        })
+    }
+}
+fn passkey_view(c: &PasskeyController) -> PasskeyControllerView {
+    PasskeyControllerView {
+        id: c.id.clone(),
+        label: c.label.clone(),
+        roles: c.roles.iter().map(|r| cv::controller_role(r)).collect(),
+        roles_raw: c.roles.clone(),
+        key: cv::descriptor_view(&c.key),
+        verification: c.verification,
+        own_slot: c.own_slot,
+    }
+}
+free_fn! {
+    /// Accept a history a device that is not a member yet read with a passkey's
+    /// `colophon.history.read` calls (core `v05::join::verify_with_passkey`, 0.5.7): every check of
+    /// `account_verify_at_head` up to the home's fresh signed head at `base`, at `(seq, head)`
+    /// (an invite's head, or `(1, account)`: the genesis), then the signer, a current WebAuthn
+    /// controller at the tip whose signing point is `signing` (else `refused:revoked`). Returns
+    /// the entries to store, the signer and every current WebAuthn controller.
+    pub fn account_verify_with_passkey(account: String, seq: u64, head: String, signing: Vec<u8>, base: String, signed_head: Vec<u8>, entries: Vec<ByteString>, now_ms: i64) -> Result<PasskeyHistoryView, AccountError> {
+        guard(|| {
+            let account = AccountId::parse(&account)?;
+            bytes_ok(&signing, 65, "a point")?;
+            bytes_ok(&signed_head, 1 << 16, "a head")?;
+            let entries = entry_bytes(entries)?;
+            let h = verify_with_passkey(&account, seq, &head, &signing, &base, &signed_head, entries, now_ms)?;
+            Ok(PasskeyHistoryView {
+                stores: h.files.into_iter().map(|(path, bytes)| Store { path, bytes }).collect(),
+                signer: passkey_view(&h.signer),
+                controllers: h.controllers.iter().map(passkey_view).collect(),
+            })
+        })
+    }
+}
+
 /// A `colophon.history.read` call being prepared and signed by a member that holds no history:
 /// one `GET` at a home path that serves the history, `asOf` the entry the device was given.
 #[cfg_attr(feature = "native05", derive(uniffi::Object))]
@@ -109,7 +167,7 @@ pub struct AccountHistoryRead {
     p: Cell<Option<PreparedHistoryRead>>,
 }
 impl AccountHistoryRead {
-    fn prepare_inner(spec: HistoryReadSpec) -> R<Self> {
+    fn prepare_inner(spec: HistoryReadSpec, passkey: bool) -> R<Self> {
         guard(|| {
             let account = AccountId::parse(&spec.account)?;
             bytes_ok(&spec.signing, 65, "a point")?;
@@ -118,7 +176,7 @@ impl AccountHistoryRead {
             }
             bytes_ok(spec.audience.as_bytes(), 4_096, "the audience")?;
             let request_id = fixed::<32>(&spec.request_id, "a request ID")?;
-            let prepared = prepare_history_read(&CoreSpec {
+            let core = CoreSpec {
                 account: &account,
                 as_of: (spec.as_of_seq, &spec.as_of_digest),
                 signing: &spec.signing,
@@ -126,7 +184,12 @@ impl AccountHistoryRead {
                 path: &spec.path,
                 request_id,
                 created: &spec.created,
-            })?;
+            };
+            let prepared = if passkey {
+                prepare_passkey_history_read(&core)?
+            } else {
+                prepare_history_read(&core)?
+            };
             Ok(Self {
                 p: Cell::new(Some(prepared)),
             })
@@ -136,7 +199,8 @@ impl AccountHistoryRead {
 #[cfg_attr(feature = "native05", uniffi::export)]
 #[cfg_attr(feature = "web05", wasm_bindgen::prelude::wasm_bindgen)]
 impl AccountHistoryRead {
-    /// The one step the member key signs (raw).
+    /// The one step to sign: raw by the member key, or, for a passkey read, a WebAuthn get over
+    /// its `challenge` by the passkey.
     pub fn step(&self) -> Result<AccountSigningStep, AccountError> {
         guard(|| {
             let g = self.p.lock()?;
@@ -146,8 +210,9 @@ impl AccountHistoryRead {
             Ok(cv::step(p.step()))
         })
     }
-    /// Finish with the member's signature: the envelope (parsed, possession checked), the URL it
-    /// is bound to and the `Authorization` header value (`Colophon <base64url envelope>`).
+    /// Finish with the signature (the member's raw signature, or the passkey's DER signature with
+    /// its assertion): the envelope (parsed, possession checked), the URL it is bound to and the
+    /// `Authorization` header value (`Colophon <base64url envelope>`).
     pub fn finish(&self, signature: Signature) -> Result<HistoryReadCall, AccountError> {
         guard(|| {
             let [sig] =
@@ -175,7 +240,14 @@ impl AccountHistoryRead {
     /// Prepare a history read.
     #[uniffi::constructor]
     pub fn prepare(spec: HistoryReadSpec) -> Result<std::sync::Arc<Self>, AccountError> {
-        Self::prepare_inner(spec).map(std::sync::Arc::new)
+        Self::prepare_inner(spec, false).map(std::sync::Arc::new)
+    }
+    /// Prepare a history read signed by a WebAuthn controller (0.5.7): `spec.signing` is the
+    /// passkey's point, the signer is that controller, and the step asks for an assertion. With
+    /// no entry given, `asOf` is `(1, account)`.
+    #[uniffi::constructor]
+    pub fn prepare_passkey(spec: HistoryReadSpec) -> Result<std::sync::Arc<Self>, AccountError> {
+        Self::prepare_inner(spec, true).map(std::sync::Arc::new)
     }
 }
 #[cfg(feature = "web05")]
@@ -183,6 +255,10 @@ impl AccountHistoryRead {
 impl AccountHistoryRead {
     /// Prepare a history read.
     pub fn prepare(spec: HistoryReadSpec) -> Result<AccountHistoryRead, AccountError> {
-        Self::prepare_inner(spec)
+        Self::prepare_inner(spec, false)
+    }
+    /// Prepare a history read signed by a WebAuthn controller (0.5.7).
+    pub fn prepare_passkey(spec: HistoryReadSpec) -> Result<AccountHistoryRead, AccountError> {
+        Self::prepare_inner(spec, true)
     }
 }
