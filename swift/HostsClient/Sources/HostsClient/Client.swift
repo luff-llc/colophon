@@ -1,5 +1,6 @@
 import Foundation
 import ColophonHosts
+import ColophonListeningKit
 import ColophonSession
 
 /// A carrier that carries nothing: enough to open a cell with no home.
@@ -23,3 +24,10 @@ public struct Nowhere: CellCarrier {
     stream.start()
     return stream
 }
+
+/// The `now-playing` cell as a player sets it up, from the public API only: its session, its stream host and one SQLite
+/// file for the claim (compiled, not run: it needs a home).
+@MainActor public func openNowPlaying(session: ColophonSession, stream: HomeStreamHost, database: URL) async -> NowPlayingSession {
+    await NowPlayingSession.open(session: session, stream: stream, claimsDatabase: database, options: NowPlayingOptions(label: "Kitchen iPad"))
+}
+

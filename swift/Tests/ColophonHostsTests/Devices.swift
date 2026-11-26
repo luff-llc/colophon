@@ -14,10 +14,10 @@ let nowPlaying = "now-playing"
     let session: ColophonSession
     private let home: URL
     init(medium: MemoryMedium = MemoryMedium(), owner: SoftwareKeys = SoftwareKeys(), homes: [HomeConfiguration] = [], createWithoutHome: Bool = true,
-         history: HistoryAccess? = nil) {
+         history: HistoryAccess? = nil, namespaces: [String] = [listening]) {
         self.medium = medium; self.owner = owner
         home = FileManager.default.temporaryDirectory.appendingPathComponent("colophon-hosts-\(UUID().uuidString)")
-        session = ColophonSession(configuration: SessionConfiguration(memberLabel: "Test device", namespaces: [listening], location: .memory(medium),
+        session = ColophonSession(configuration: SessionConfiguration(memberLabel: "Test device", namespaces: namespaces, location: .memory(medium),
             privateContainer: home, keys: SoftwareKeys(), ownerController: owner, homes: homes, createWithoutHome: createWithoutHome,
             deviceSecrets: MemoryDeviceSecrets(), history: history))
     }

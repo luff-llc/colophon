@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The Swift 0.6 hosts' tests (docs/hosts-06.md section 6): ColophonHostsTests (the unit suites and the end-to-end
-# journeys against the real relay), the conformance replay in swift/Conformance06, which links the conformance
+# journeys against the real relay, and the listening kit's now-playing cell over them), the conformance replay in swift/Conformance06, which links the conformance
 # crate's artifact, the public-API check over the compiler's symbol graphs, and the outside client swift/HostsClient. Builds a macOS slice only. Each library is built here unless given:
 #   COLOPHON_FFI_LIB            libcolophon_ffi.a (release)
 #   COLOPHON_CONFORMANCE_LIB    libcolophon_conformance.a (release; its .dylib beside it is read for the bindings)
@@ -54,6 +54,8 @@ export CLANG_MODULE_CACHE_PATH="$PWD/.build/module-cache"
 export SWIFTPM_MODULECACHE_OVERRIDE="$PWD/.build/module-cache"
 export COLOPHON_SOFTWARE_KEYS=1
 export COLOPHON_HOME_WASM="$work/colophon_home_wasm.wasm"
+# The now-playing vectors are what the generator writes (docs/now-playing.md §3.1); the suites replay them.
+python3 scripts/generate-now-playing-vectors.py --check
 swift test --disable-sandbox --filter ColophonHostsTests "$@"
 swift test --disable-sandbox --package-path swift/Conformance06
 

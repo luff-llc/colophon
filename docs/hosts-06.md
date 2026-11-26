@@ -282,13 +282,17 @@ for Apple platforms, on the generated `HomeStream` and `SessionEndpoint` of `Col
 | --- | --- |
 | `ColophonHostAccount` | The account a host acts for: `ColophonHostAccount(session:)` from a ready `ColophonSession` (on the main actor). It is opaque: the engine, the member key and the exchange (the session's own `syncNow`) stay inside the hosts, which reach them only from their serial queues. The session hands them to the hosts with `package` access (`SessionHostAccess`, `hostAccess`): only targets of this SwiftPM package can name it, never an app, which depends on the products. |
 | `HomeStreamHost` | An actor, one per home. `init(account:home:transport:socket:clock:configure:cursor:saveCursor:client:)`; `start()`, `stop()`, `retryNow()`, `historyChanged()` and `on(_:)` are `nonisolated` and may be called from anywhere, listeners included; `status`, `polling`, `cursor`, `live`, `attach(_:)`, `detach(_:)`, `sendSession(_:)`, `onPass(_:)`. |
-| `SessionCellHost` | An actor, one member of one cell: `SessionCellHost.open(_:listener:)` with `CellHostOptions` (the same options as §1). `submit(_:json:)` admits a command synchronously and returns a `CellCommand` whose `value()` waits for it; `command(_:json:)` does both. `deliver`, `linkUp`, `linkDown`, `accountChanged`, `close` are `nonisolated`; `leave()`, `state`, `writePending`, `stats`; `snapshot` (a `CellState` value) and `storedClaim` are readable without entering the actor. |
+| `SessionCellHost` | An actor, one member of one cell: `SessionCellHost.open(_:listener:)` with `CellHostOptions` (the same options as §1). `submit(_:json:)` admits a command synchronously and returns a `CellCommand` whose `value()` waits for it; `command(_:json:)` does both. `deliver`, `linkUp`, `linkDown`, `accountChanged`, `close` are `nonisolated`; `leave()` (it closes only once a holder's released claim is stored and its `bye` sent, and returns when the host has ended), `state`, `writePending`, `stats`; `snapshot` (a `CellState` value) and `storedClaim` are readable without entering the actor. |
 | `CellSession` | The typed API: `CellSession.join(_:)`; `state` (`CellState`: `joined`, `holder`, `isHolder`, `gated`, `claim`, `state`, `seq`, `entitled`, `canWrite`), `subscribe(_:)`, `events(_:)` (`CellEvent`, bytes decoded); `take`, `ask`, `pass(to:snapshot:)`, `decline`, `release`, `publish`, `submit`, `presence`, `ping`, `leave`, `close`. |
 | `ClaimStore`, `Fence`, `StoredClaim`, `compareAndSet(held:record:expected:)` | The contract of §3. A fence is two integers in 0 … 2^53 − 1 (the range every host stores exactly); anything else is `ClaimStoreError.badFence`. |
 | `MemoryClaimStore`, `SQLiteClaimStore` | The stores that provide it (below). |
 | `SessionFrames.frameText(ofMessage:)` | `sessionFrameText` of §1, over the message's UTF-8 bytes. |
 | `URLSessionSocketFactory`, `SocketFactory`, `HostSocket`, `SocketHandlers` | The socket behind a small interface; tests inject a fake. |
 | `HostClock`, `SystemClock` | Monotonic and wall milliseconds and a timer. `SystemClock` reads `CLOCK_MONOTONIC`, which keeps counting while the device sleeps, and sleeps on the continuous clock. |
+
+For a player, `ColophonListeningKit` builds the `listening.podcasts/now-playing` cell (§S12) on these hosts:
+`NowPlayingSession` (the anchor, its translation, handoff by ask and pass, and one pause event per loss of the role)
+over a `CellSession`, a `HomeStreamHost` and a `SQLiteClaimStore`. See [now-playing.md](now-playing.md).
 
 **One serial queue per host.** Each host is an actor whose inputs arrive through one ordered stream
 (`AsyncStream`) and run one at a time, in arrival order. A stream host's job never suspends. A cell

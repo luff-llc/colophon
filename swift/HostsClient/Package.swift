@@ -9,6 +9,7 @@ let package = Package(name: "HostsClient", platforms: [.macOS(.v14), .iOS(.v17)]
 ], targets: [
   .target(name: "HostsClient", dependencies: [
     .product(name: "ColophonHosts", package: "ColophonSDK"), .product(name: "ColophonSession", package: "ColophonSDK"),
+    .product(name: "ColophonListeningKit", package: "ColophonSDK"),
   ], path: "Sources/HostsClient"),
   .testTarget(name: "HostsClientTests", dependencies: ["HostsClient"], path: "Tests/HostsClientTests"),
 ], swiftLanguageModes: [.v6])

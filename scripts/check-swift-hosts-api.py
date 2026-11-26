@@ -10,6 +10,10 @@ Reads the symbol graphs `swift package dump-symbol-graph --minimum-access-level 
   the engine or the endpoint by name;
 - no symbol ColophonSession itself declares is SPI or is its host access (that is `package`, reachable only from this
   package's targets), and none of its own symbols returns the engine, an endpoint, the stream client or a view;
+- no symbol ColophonListeningKit itself declares is SPI, or names, takes, returns or relates to the engine, an endpoint,
+  the stream client, a view, the host access or the cell host its `now-playing` session runs (`SessionCellHost`), and
+  the public surface of its now-playing types is exactly the pinned one
+  (swift/Tests/ColophonHostsTests/ColophonListeningKit-NowPlaying.public-api);
 - the public surface of ColophonHosts is exactly the pinned one (swift/Tests/ColophonHostsTests/ColophonHosts.public-api;
   `--update` rewrites it from the graph).
 """
@@ -95,6 +99,46 @@ def main():
         if hit:
             problems.append(f"ColophonSession.{where} returns {sorted(hit)}: {declaration(s)}")
 
+    listening = [graphs / "ColophonListeningKit.symbols.json"] + sorted(graphs.glob("ColophonListeningKit@*.symbols.json"))
+    if not listening[0].exists():
+        problems.append(f"no symbol graph for ColophonListeningKit in {graphs}")
+        listening = []
+    kit_forbidden = FORBIDDEN_TYPES | {"SessionCellHost"}
+    now_playing = []
+    kit_ids = {}
+    for path in listening:
+        graph = load(path)
+        for s in graph["symbols"]:
+            # Its own symbols only: the graph also carries what it re-exports (ColophonSession, ColophonKit).
+            if not s["identifier"]["precise"].startswith("s:20ColophonListeningKit"):
+                continue
+            where = ".".join(s["pathComponents"])
+            kit_ids[s["identifier"]["precise"]] = where
+            if s.get("spi"):
+                problems.append(f"SPI symbol in ColophonListeningKit: {where}")
+            hit = types_named(s) & kit_forbidden
+            if hit:
+                problems.append(f"ColophonListeningKit.{where} exposes {sorted(hit)}: {declaration(s)}")
+            if "NowPlaying" in where:
+                now_playing.append(f"{s['kind']['identifier']} {where}: {declaration(s)}")
+        for r in graph.get("relationships", []):
+            if r["source"] not in kit_ids and not r["source"].startswith("s:20ColophonListeningKit"):
+                continue
+            target = kit_ids.get(r["target"]) or r.get("targetFallback") or r["target"]
+            if target.split(".")[-1] in kit_forbidden:
+                problems.append(f"ColophonListeningKit relationship {r['kind']} {kit_ids.get(r['source'], r['source'])} -> {target}")
+    now_playing = sorted(set(now_playing))
+    kit_pinned_path = root / "swift/Tests/ColophonHostsTests/ColophonListeningKit-NowPlaying.public-api"
+    if update:
+        kit_pinned_path.write_text("\n".join(now_playing) + "\n")
+    kit_pinned = [line for line in kit_pinned_path.read_text().splitlines() if line] if kit_pinned_path.exists() else []
+    for line in now_playing:
+        if line not in kit_pinned:
+            problems.append(f"not pinned (listening kit): {line}")
+    for line in kit_pinned:
+        if line not in now_playing:
+            problems.append(f"pinned but gone (listening kit): {line}")
+
     surface = sorted(set(surface))
     if update:
         pinned_path.write_text("\n".join(surface) + "\n")
@@ -108,7 +152,7 @@ def main():
     if problems:
         print("\n".join(problems))
         sys.exit(1)
-    print(f"public API: ColophonHosts {len(surface)} symbols, as pinned; no SPI; nothing exposes the engine, a signer, an endpoint, the stream client or a view")
+    print(f"public API: ColophonHosts {len(surface)} symbols, as pinned; no SPI; nothing exposes the engine, a signer, an endpoint, the stream client or a view; ColophonListeningKit exposes none of them nor its cell host, and its now-playing surface ({len(now_playing)} symbols) is as pinned")
 
 
 main()
