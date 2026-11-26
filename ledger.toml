@@ -269,3 +269,28 @@ steps = [
   "publish v0.5.6: exit 0",
   "open a pull request merging release/0.5 into main: exit 0",
 ]
+
+[[entry]]
+id = "2026-11-26T05:31:51Z/push-tag/97ef88f260/732e3a58"
+at = "2026-11-26T05:31:51Z"
+by = "Xinchen Liu"
+action = "push-tag"
+product = "colophon"
+ref = "v0.5.7"
+commit = "97ef88f260c96d0a4bd6db42377339fb8e324760"
+tree = "cb191510a346a26a9529e6516fcda3d59de20304"
+result = "ok"
+prev = "5acb86d70fff745a14882360da07d28a26b78370fc2fbe578cdca9fb52c89e76"
+receipt = "732e3a58e361b964cd25f446091e0c15"
+note = "#115 (key remove/replace) is planned for the next minor; not part of 0.5.7"
+command = [
+  "publish v0.5.7: git -c core.hooksPath=/dev/null -c core.fsmonitor=false -c protocol.ext.allow=never push --atomic --force-with-lease=refs/tags/v0.5.7: https://github.com/luff-llc/colophon.git refs/tags/v0.5.7",
+]
+steps = [
+  "tag 97ef88f260 as v0.5.7: exit 0",
+  "publish v0.5.7: exit 0",
+  "open a pull request merging release/0.5 into main: exit 0",
+]
+overrides = [
+  "in-flight #115 allowed for v0.5.7",
+]
