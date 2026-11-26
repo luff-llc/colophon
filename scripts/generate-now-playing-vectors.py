@@ -15,6 +15,7 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 OUT = ROOT / "conformance/0.6-sessions/now-playing-anchor.json"
 MAX = (1 << 53) - 1
+I64_MAX, I64_MIN = (1 << 63) - 1, -(1 << 63)
 MAX_BYTES = 8192
 ANCHOR_FIELDS = ["at", "episode", "playing", "positionMs", "ratePermille", "show"]
 PRESENCE_FIELDS = ["label", "playing"]
@@ -175,6 +176,11 @@ def decode_presence(data):
     return p
 
 
+def wide(v):
+    """A translation input: a JSON number within ±(2^53 - 1), else its decimal string (every language reads it exactly)."""
+    return v if -MAX <= v <= MAX else str(v)
+
+
 def clamp(v, lo, hi):
     return min(max(v, lo), hi)
 
@@ -191,7 +197,7 @@ def translate(anchor, now, offset, error, sample_age, limit):
     limit = clamp(limit, 0, MAX)
     elapsed = clamp(age, 0, limit)
     position = min(MAX, anchor["positionMs"] + anchor["ratePermille"] * elapsed // 1000)
-    drift = ceil_div(clamp(sample_age, 0, MAX), 1000)
+    drift = ceil_div(2 * clamp(sample_age, 0, MAX), 1999)
     bound = min(MAX, ceil_div(anchor["ratePermille"] * (clamp(error, 0, MAX) + drift), 1000))
     return {"ageMs": age, "capped": age > limit, "elapsedMs": elapsed, "errorBoundMs": bound, "positionMs": position}
 
@@ -312,7 +318,7 @@ def build():
         ("exactly at the limit: not capped", anchor(positionMs=0, ratePermille=1000, at=T), T + 75_000, 0, 0, 0, 75_000),
         ("a limit of 0 never projects", anchor(positionMs=7, ratePermille=1000, at=T), T + 9_000, 0, 0, 0, 0),
         ("rate 0 while playing does not move", anchor(positionMs=7, ratePermille=0, at=T), T + 9_000, 0, 5, 0, 75_000),
-        ("the error bound: ceil(1250 x (3 + ceil(2500 / 1000)) / 1000) = 8", anchor(positionMs=0, ratePermille=1250, at=T), T + 10, 0, 3, 2_500, 75_000),
+        ("the error bound: ceil(1250 x (3 + ceil(2 x 2500 / 1999)) / 1000) = 8", anchor(positionMs=0, ratePermille=1250, at=T), T + 10, 0, 3, 2_500, 75_000),
         ("the error bound with a fresh sample: ceil(1000 x 20 / 1000) = 20", anchor(positionMs=0, ratePermille=1000, at=T), T + 10, 0, 20, 0, 75_000),
         ("the error bound rounds 1 ms of drift up", anchor(positionMs=0, ratePermille=1000, at=T), T + 10, 0, 0, 1, 75_000),
         ("saturates at 2^53 - 1", anchor(positionMs=MAX - 10, ratePermille=1000, at=T), T + 11, 0, 0, 0, 75_000),
@@ -321,12 +327,25 @@ def build():
         ("a product above 2^53 whose result fits: exact integers needed", anchor(positionMs=3, ratePermille=1250, at=0), 7_000_000_000_000_001, 0, 0, 0, MAX),
         ("the most negative offset clamps the age", anchor(positionMs=1, ratePermille=1000, at=MAX), 0, -MAX, 0, 0, 75_000),
         ("the most positive offset clamps the age", anchor(positionMs=1, ratePermille=1000, at=0), MAX, MAX, 0, 0, MAX),
+        ("drift: 1,000 ms since the sample is 2 ms, not 1 (2 / 1999 > 1 / 1000)", anchor(positionMs=0, ratePermille=1000, at=T), T + 10, 0, 0, 1_000, 75_000),
+        ("drift: 1,999 ms since the sample is exactly 2 ms", anchor(positionMs=0, ratePermille=1000, at=T), T + 10, 0, 0, 1_999, 75_000),
+        ("drift: 2,000 ms since the sample rounds up to 3 ms", anchor(positionMs=0, ratePermille=1000, at=T), T + 10, 0, 0, 2_000, 75_000),
+        ("drift: one day since the sample, at 1.25x", anchor(positionMs=0, ratePermille=1250, at=T), T + 10, 0, 1, 86_400_000, 75_000),
+        ("drift: the largest sample age", anchor(positionMs=0, ratePermille=1000, at=T), T + 10, 0, 0, MAX, 75_000),
+        ("drift and error at the largest rate saturate", anchor(positionMs=0, ratePermille=MAX, at=T), T, 0, MAX, MAX, 75_000),
+        ("capped, with an offset error and drift: the bound is still reported", anchor(positionMs=0, ratePermille=1500, at=T), T + 500_000, 0, 7, 5_000, 75_000),
+        ("a negative now counts as 0", anchor(positionMs=100, ratePermille=1000, at=0), -5, 40, 0, 0, 75_000),
+        ("a negative offset error and sample age count as 0", anchor(positionMs=100, ratePermille=1000, at=T), T + 10, 0, -3, -1_000, 75_000),
+        ("a negative limit counts as 0: capped, not projected", anchor(positionMs=100, ratePermille=1000, at=T), T + 10, 0, 0, 0, -1),
+        ("signed 64-bit extremes: largest now and error, smallest offset and sample age", anchor(positionMs=5, ratePermille=1000, at=T), I64_MAX, I64_MIN, I64_MAX, I64_MIN, I64_MAX),
+        ("signed 64-bit extremes: smallest now, largest offset and sample age", anchor(positionMs=5, ratePermille=1000, at=0), I64_MIN, I64_MAX, 0, I64_MAX, I64_MAX),
+        ("signed 64-bit extremes: a limit of 2^63 - 1 and the largest offset", anchor(positionMs=0, ratePermille=1, at=0), 0, I64_MAX, 0, 0, I64_MAX),
         ("a long-running anchor within the limit", anchor(positionMs=3_600_000, ratePermille=1100, at=T), T + 59_999, -17, 2, 30_000, 75_000),
     ]
     translate_cases = []
     for name, a, now, offset, error, age, limit in translate_in:
-        translate_cases.append({"name": name, "anchor": a, "nowMs": now, "offsetMs": offset, "offsetErrorMs": error,
-                                "sampleAgeMs": age, "maximumProjectionMs": limit,
+        translate_cases.append({"name": name, "anchor": a, "nowMs": wide(now), "offsetMs": wide(offset), "offsetErrorMs": wide(error),
+                                "sampleAgeMs": wide(age), "maximumProjectionMs": wide(limit),
                                 "expect": translate(a, now, offset, error, age, limit)})
     return {
         "format": "colophon/now-playing-anchor-vectors/6",
@@ -342,7 +361,9 @@ def build():
             "translate": "ageMs = clamp(now + clamp(offset, ±(2^53-1)) - at, ±(2^53-1)); paused: positionMs, elapsed 0, bound 0; "
                          "playing: elapsedMs = clamp(ageMs, 0, maximumProjectionMs), capped = ageMs > maximumProjectionMs, "
                          "positionMs + floor(ratePermille × elapsedMs / 1000) saturating at 2^53-1; errorBoundMs = "
-                         "ceil(ratePermille × (offsetErrorMs + ceil(sampleAgeMs / 1000)) / 1000) saturating at 2^53-1",
+                         "ceil(ratePermille × (offsetErrorMs + ceil(2 × sampleAgeMs / 1999)) / 1000) saturating at 2^53-1; "
+                         "negative nowMs, offsetErrorMs, sampleAgeMs and maximumProjectionMs count as 0",
+            "wideInputs": "translation inputs are signed 64-bit; one beyond ±(2^53 - 1) is written as a decimal string",
         },
         "encode": encode_cases,
         "presence": presence_cases,

@@ -27,7 +27,8 @@ public struct NowPlayingProjection: Sendable, Hashable {
     /// The anchor was playing and older than `maximumProjectionMs`: the projection stopped there.
     public let capped: Bool
     /// How far `positionMs` can be from the publisher's own projection at this instant, from the offset's error and
-    /// the clocks' drift since it was measured (0 for a paused anchor). Not meaningful when `capped`.
+    /// the clocks' drift since it was measured (0 for a paused anchor). When `capped` it bounds only the error of
+    /// the offset, not how far the publisher may have played past the cap.
     public let errorBoundMs: Int64
 }
 
@@ -43,8 +44,9 @@ extension NowPlayingAnchor {
     /// - paused: `positionMs`, with `elapsedMs` 0 and `errorBoundMs` 0;
     /// - playing: `elapsedMs = clamp(ageMs, 0, maximumProjectionMs)`, `capped = ageMs > maximumProjectionMs`, and
     ///   `positionMs + floor(ratePermille × elapsedMs / 1000)`, saturating at 2^53 − 1;
-    /// - `errorBoundMs = ceil(ratePermille × (errorMs + ceil(sampleAgeMs / 1000)) / 1000)`, saturating at 2^53 − 1:
-    ///   §S7's `ceil(rtt / 2)` plus 1 ms per second since the sample for two clocks each within 500 ppm (§S0).
+    /// - `errorBoundMs = ceil(ratePermille × (errorMs + ceil(2 × sampleAgeMs / 1999)) / 1000)`, saturating at
+    ///   2^53 − 1: §S7's `ceil(rtt / 2)` plus the drift since the sample of two clocks each within 500 ppm of real time
+    ///   (§S0), measured on one of them: at most `2 / 1999` of the elapsed time (about 1,000.5 ppm).
     ///
     /// Negative `nowMs`, `errorMs`, `sampleAgeMs` or `maximumProjectionMs` count as 0. Clamping the elapsed time at 0
     /// departs from the formula only where the formula would put playback behind the anchor, which it never is.
@@ -59,7 +61,8 @@ extension NowPlayingAnchor {
         let elapsed = clamp(age, 0, limit)
         let advance = Self.mulDiv(UInt64(ratePermille), UInt64(elapsed), roundUp: false)
         let position = advance >= UInt64(max - positionMs) ? max : positionMs + Int64(advance)
-        let drift = Self.ceilDiv(clamp(clock.sampleAgeMs, 0, max), 1_000)
+        // 2 × (2^53 − 1) and the sum below fit in 64 bits.
+        let drift = Self.ceilDiv(2 * clamp(clock.sampleAgeMs, 0, max), 1_999)
         let error = clamp(clock.errorMs, 0, max) + drift
         let bound = Self.mulDiv(UInt64(ratePermille), UInt64(error), roundUp: true)
         return NowPlayingProjection(positionMs: position, ageMs: age, elapsedMs: elapsed, capped: age > limit,

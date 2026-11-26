@@ -19,7 +19,8 @@
       "badText",
       "notCanonical"
     ],
-    "translate": "ageMs = clamp(now + clamp(offset, ±(2^53-1)) - at, ±(2^53-1)); paused: positionMs, elapsed 0, bound 0; playing: elapsedMs = clamp(ageMs, 0, maximumProjectionMs), capped = ageMs > maximumProjectionMs, positionMs + floor(ratePermille × elapsedMs / 1000) saturating at 2^53-1; errorBoundMs = ceil(ratePermille × (offsetErrorMs + ceil(sampleAgeMs / 1000)) / 1000) saturating at 2^53-1"
+    "translate": "ageMs = clamp(now + clamp(offset, ±(2^53-1)) - at, ±(2^53-1)); paused: positionMs, elapsed 0, bound 0; playing: elapsedMs = clamp(ageMs, 0, maximumProjectionMs), capped = ageMs > maximumProjectionMs, positionMs + floor(ratePermille × elapsedMs / 1000) saturating at 2^53-1; errorBoundMs = ceil(ratePermille × (offsetErrorMs + ceil(2 × sampleAgeMs / 1999)) / 1000) saturating at 2^53-1; negative nowMs, offsetErrorMs, sampleAgeMs and maximumProjectionMs count as 0",
+    "wideInputs": "translation inputs are signed 64-bit; one beyond ±(2^53 - 1) is written as a decimal string"
   },
   "encode": [
     {
@@ -954,7 +955,7 @@
       }
     },
     {
-      "name": "the error bound: ceil(1250 x (3 + ceil(2500 / 1000)) / 1000) = 8",
+      "name": "the error bound: ceil(1250 x (3 + ceil(2 x 2500 / 1999)) / 1000) = 8",
       "anchor": {
         "at": 1000000,
         "episode": "ep-1",
@@ -1161,6 +1162,305 @@
       }
     },
     {
+      "name": "drift: 1,000 ms since the sample is 2 ms, not 1 (2 / 1999 > 1 / 1000)",
+      "anchor": {
+        "at": 1000000,
+        "episode": "ep-1",
+        "playing": true,
+        "positionMs": 0,
+        "ratePermille": 1000,
+        "show": "show-1"
+      },
+      "nowMs": 1000010,
+      "offsetMs": 0,
+      "offsetErrorMs": 0,
+      "sampleAgeMs": 1000,
+      "maximumProjectionMs": 75000,
+      "expect": {
+        "ageMs": 10,
+        "capped": false,
+        "elapsedMs": 10,
+        "errorBoundMs": 2,
+        "positionMs": 10
+      }
+    },
+    {
+      "name": "drift: 1,999 ms since the sample is exactly 2 ms",
+      "anchor": {
+        "at": 1000000,
+        "episode": "ep-1",
+        "playing": true,
+        "positionMs": 0,
+        "ratePermille": 1000,
+        "show": "show-1"
+      },
+      "nowMs": 1000010,
+      "offsetMs": 0,
+      "offsetErrorMs": 0,
+      "sampleAgeMs": 1999,
+      "maximumProjectionMs": 75000,
+      "expect": {
+        "ageMs": 10,
+        "capped": false,
+        "elapsedMs": 10,
+        "errorBoundMs": 2,
+        "positionMs": 10
+      }
+    },
+    {
+      "name": "drift: 2,000 ms since the sample rounds up to 3 ms",
+      "anchor": {
+        "at": 1000000,
+        "episode": "ep-1",
+        "playing": true,
+        "positionMs": 0,
+        "ratePermille": 1000,
+        "show": "show-1"
+      },
+      "nowMs": 1000010,
+      "offsetMs": 0,
+      "offsetErrorMs": 0,
+      "sampleAgeMs": 2000,
+      "maximumProjectionMs": 75000,
+      "expect": {
+        "ageMs": 10,
+        "capped": false,
+        "elapsedMs": 10,
+        "errorBoundMs": 3,
+        "positionMs": 10
+      }
+    },
+    {
+      "name": "drift: one day since the sample, at 1.25x",
+      "anchor": {
+        "at": 1000000,
+        "episode": "ep-1",
+        "playing": true,
+        "positionMs": 0,
+        "ratePermille": 1250,
+        "show": "show-1"
+      },
+      "nowMs": 1000010,
+      "offsetMs": 0,
+      "offsetErrorMs": 1,
+      "sampleAgeMs": 86400000,
+      "maximumProjectionMs": 75000,
+      "expect": {
+        "ageMs": 10,
+        "capped": false,
+        "elapsedMs": 10,
+        "errorBoundMs": 108057,
+        "positionMs": 12
+      }
+    },
+    {
+      "name": "drift: the largest sample age",
+      "anchor": {
+        "at": 1000000,
+        "episode": "ep-1",
+        "playing": true,
+        "positionMs": 0,
+        "ratePermille": 1000,
+        "show": "show-1"
+      },
+      "nowMs": 1000010,
+      "offsetMs": 0,
+      "offsetErrorMs": 0,
+      "sampleAgeMs": 9007199254740991,
+      "maximumProjectionMs": 75000,
+      "expect": {
+        "ageMs": 10,
+        "capped": false,
+        "elapsedMs": 10,
+        "errorBoundMs": 9011705107295,
+        "positionMs": 10
+      }
+    },
+    {
+      "name": "drift and error at the largest rate saturate",
+      "anchor": {
+        "at": 1000000,
+        "episode": "ep-1",
+        "playing": true,
+        "positionMs": 0,
+        "ratePermille": 9007199254740991,
+        "show": "show-1"
+      },
+      "nowMs": 1000000,
+      "offsetMs": 0,
+      "offsetErrorMs": 9007199254740991,
+      "sampleAgeMs": 9007199254740991,
+      "maximumProjectionMs": 75000,
+      "expect": {
+        "ageMs": 0,
+        "capped": false,
+        "elapsedMs": 0,
+        "errorBoundMs": 9007199254740991,
+        "positionMs": 0
+      }
+    },
+    {
+      "name": "capped, with an offset error and drift: the bound is still reported",
+      "anchor": {
+        "at": 1000000,
+        "episode": "ep-1",
+        "playing": true,
+        "positionMs": 0,
+        "ratePermille": 1500,
+        "show": "show-1"
+      },
+      "nowMs": 1500000,
+      "offsetMs": 0,
+      "offsetErrorMs": 7,
+      "sampleAgeMs": 5000,
+      "maximumProjectionMs": 75000,
+      "expect": {
+        "ageMs": 500000,
+        "capped": true,
+        "elapsedMs": 75000,
+        "errorBoundMs": 20,
+        "positionMs": 112500
+      }
+    },
+    {
+      "name": "a negative now counts as 0",
+      "anchor": {
+        "at": 0,
+        "episode": "ep-1",
+        "playing": true,
+        "positionMs": 100,
+        "ratePermille": 1000,
+        "show": "show-1"
+      },
+      "nowMs": -5,
+      "offsetMs": 40,
+      "offsetErrorMs": 0,
+      "sampleAgeMs": 0,
+      "maximumProjectionMs": 75000,
+      "expect": {
+        "ageMs": 40,
+        "capped": false,
+        "elapsedMs": 40,
+        "errorBoundMs": 0,
+        "positionMs": 140
+      }
+    },
+    {
+      "name": "a negative offset error and sample age count as 0",
+      "anchor": {
+        "at": 1000000,
+        "episode": "ep-1",
+        "playing": true,
+        "positionMs": 100,
+        "ratePermille": 1000,
+        "show": "show-1"
+      },
+      "nowMs": 1000010,
+      "offsetMs": 0,
+      "offsetErrorMs": -3,
+      "sampleAgeMs": -1000,
+      "maximumProjectionMs": 75000,
+      "expect": {
+        "ageMs": 10,
+        "capped": false,
+        "elapsedMs": 10,
+        "errorBoundMs": 0,
+        "positionMs": 110
+      }
+    },
+    {
+      "name": "a negative limit counts as 0: capped, not projected",
+      "anchor": {
+        "at": 1000000,
+        "episode": "ep-1",
+        "playing": true,
+        "positionMs": 100,
+        "ratePermille": 1000,
+        "show": "show-1"
+      },
+      "nowMs": 1000010,
+      "offsetMs": 0,
+      "offsetErrorMs": 0,
+      "sampleAgeMs": 0,
+      "maximumProjectionMs": -1,
+      "expect": {
+        "ageMs": 10,
+        "capped": true,
+        "elapsedMs": 0,
+        "errorBoundMs": 0,
+        "positionMs": 100
+      }
+    },
+    {
+      "name": "signed 64-bit extremes: largest now and error, smallest offset and sample age",
+      "anchor": {
+        "at": 1000000,
+        "episode": "ep-1",
+        "playing": true,
+        "positionMs": 5,
+        "ratePermille": 1000,
+        "show": "show-1"
+      },
+      "nowMs": "9223372036854775807",
+      "offsetMs": "-9223372036854775808",
+      "offsetErrorMs": "9223372036854775807",
+      "sampleAgeMs": "-9223372036854775808",
+      "maximumProjectionMs": "9223372036854775807",
+      "expect": {
+        "ageMs": -1000000,
+        "capped": false,
+        "elapsedMs": 0,
+        "errorBoundMs": 9007199254740991,
+        "positionMs": 5
+      }
+    },
+    {
+      "name": "signed 64-bit extremes: smallest now, largest offset and sample age",
+      "anchor": {
+        "at": 0,
+        "episode": "ep-1",
+        "playing": true,
+        "positionMs": 5,
+        "ratePermille": 1000,
+        "show": "show-1"
+      },
+      "nowMs": "-9223372036854775808",
+      "offsetMs": "9223372036854775807",
+      "offsetErrorMs": 0,
+      "sampleAgeMs": "9223372036854775807",
+      "maximumProjectionMs": "9223372036854775807",
+      "expect": {
+        "ageMs": 9007199254740991,
+        "capped": false,
+        "elapsedMs": 9007199254740991,
+        "errorBoundMs": 9011705107295,
+        "positionMs": 9007199254740991
+      }
+    },
+    {
+      "name": "signed 64-bit extremes: a limit of 2^63 - 1 and the largest offset",
+      "anchor": {
+        "at": 0,
+        "episode": "ep-1",
+        "playing": true,
+        "positionMs": 0,
+        "ratePermille": 1,
+        "show": "show-1"
+      },
+      "nowMs": 0,
+      "offsetMs": "9223372036854775807",
+      "offsetErrorMs": 0,
+      "sampleAgeMs": 0,
+      "maximumProjectionMs": "9223372036854775807",
+      "expect": {
+        "ageMs": 9007199254740991,
+        "capped": false,
+        "elapsedMs": 9007199254740991,
+        "errorBoundMs": 0,
+        "positionMs": 9007199254740
+      }
+    },
+    {
       "name": "a long-running anchor within the limit",
       "anchor": {
         "at": 1000000,
@@ -1179,7 +1479,7 @@
         "ageMs": 59982,
         "capped": false,
         "elapsedMs": 59982,
-        "errorBoundMs": 36,
+        "errorBoundMs": 37,
         "positionMs": 3665980
       }
     }

@@ -21,9 +21,21 @@ import ColophonListeningKit
             let name: String, kind: String, text: String?, base64: String?, valid: Bool, error: String?, anchor: A?, presence: P?
             var bytes: Data { base64.flatMap { Data(base64Encoded: $0) } ?? Data((text ?? "").utf8) }
         }
+        /// A signed 64-bit input: a JSON number, or a decimal string beyond ±(2^53 − 1).
+        struct Wide: Decodable {
+            let value: Int64
+            init(from decoder: any Decoder) throws {
+                let c = try decoder.singleValueContainer()
+                if let n = try? c.decode(Int64.self) { value = n; return }
+                guard let v = Int64(try c.decode(String.self)) else {
+                    throw DecodingError.dataCorruptedError(in: c, debugDescription: "not a signed 64-bit integer")
+                }
+                value = v
+            }
+        }
         struct Translate: Decodable {
             struct Expect: Decodable { let ageMs: Int64, capped: Bool, elapsedMs: Int64, errorBoundMs: Int64, positionMs: Int64 }
-            let name: String, anchor: A, nowMs: Int64, offsetMs: Int64, offsetErrorMs: Int64, sampleAgeMs: Int64, maximumProjectionMs: Int64
+            let name: String, anchor: A, nowMs: Wide, offsetMs: Wide, offsetErrorMs: Wide, sampleAgeMs: Wide, maximumProjectionMs: Wide
             let expect: Expect
         }
         struct Rules: Decodable { let errorOrder: [String]; let maximumBytes: Int }
@@ -42,7 +54,7 @@ import ColophonListeningKit
         let order = NowPlayingCodingError.allCases.map(\.rawValue)
         #expect(v.rules.errorOrder == order)
         #expect(v.rules.maximumBytes == NowPlayingAnchor.maximumBytes)
-        #expect(v.encode.count == 8 && v.presence.count == 2 && v.decode.count == 65 && v.translate.count == 23)
+        #expect(v.encode.count == 8 && v.presence.count == 2 && v.decode.count == 65 && v.translate.count == 36)
     }
 
     @Test func everyAnchorEncodesToItsCanonicalText() throws {
@@ -84,9 +96,8 @@ import ColophonListeningKit
 
     @Test func everyTranslationIsExact() throws {
         for c in try Self.vectors().translate {
-            let p = try c.anchor.value().projected(nowMs: c.nowMs,
-                                                   clock: NowPlayingClockOffset(offsetMs: c.offsetMs, errorMs: c.offsetErrorMs, sampleAgeMs: c.sampleAgeMs),
-                                                   maximumProjectionMs: c.maximumProjectionMs)
+            let clock = NowPlayingClockOffset(offsetMs: c.offsetMs.value, errorMs: c.offsetErrorMs.value, sampleAgeMs: c.sampleAgeMs.value)
+            let p = try c.anchor.value().projected(nowMs: c.nowMs.value, clock: clock, maximumProjectionMs: c.maximumProjectionMs.value)
             let got: [Int64] = [p.ageMs, p.elapsedMs, p.positionMs, p.errorBoundMs, p.capped ? 1 : 0]
             let want: [Int64] = [c.expect.ageMs, c.expect.elapsedMs, c.expect.positionMs, c.expect.errorBoundMs, c.expect.capped ? 1 : 0]
             #expect(got == want, "\(c.name)")
